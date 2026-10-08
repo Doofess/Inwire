@@ -421,13 +421,30 @@ if (top !== null) {
   });
 }
 
+/**
+ * What the status bar says, and the frames it says the live view skipped
+ * (ADR 0053). A skipped frame is never shown, so "behind" is what was sent,
+ * less what is shown, less what was skipped - or a phase that shed would wait
+ * for ever for a count that cannot catch up.
+ */
+async function statusText(): Promise<string> {
+  return page.locator('footer[aria-label="Status"]').innerText({ timeout: 5000 }).catch(() => '');
+}
+async function skipped(): Promise<number> {
+  const match = /([\d,]+) skipped/.exec(await statusText());
+  return match ? Number(match[1].replace(/,/g, '')) : 0;
+}
+async function behindLive(): Promise<number> {
+  return agent.sent() - await shown() - await skipped();
+}
+
 for (const phase of phases) {
   // Level with live before it starts: the agent stops sending until the count
   // has caught up, so a phase measures its own rate and not the last one's
   // backlog. Bounded, and said when it ran out.
   agent.setRate(0);
-  let behind = agent.sent() - await shown();
-  for (let i = 0; i < 90 && behind > 2000; i++) { await sleep(1000); behind = agent.sent() - await shown(); }
+  let behind = await behindLive();
+  for (let i = 0; i < 90 && behind > 2000; i++) { await sleep(1000); behind = await behindLive(); }
   if (behind > 2000) say(`  (starting ${behind.toLocaleString()} frames behind live: the backlog had not drained in 90 s)`);
   await phase.before?.();
   agent.setRate(phase.rate);
@@ -440,10 +457,17 @@ for (const phase of phases) {
   if (raw && workerSession) await raw.send('Profiler.start', {}, workerSession).catch(() => {});
   const t0 = Date.now();
   const lagSamples: number[] = [];
+  const workerHeapSamples: number[] = [];
+  const statusSamples: string[] = [];
+  const skippedStart = await skipped();
   const sampler = (async () => {
     while (Date.now() - t0 < SECONDS * 1000) {
       await sleep(2000);
-      lagSamples.push(agent.sent() - await shown());
+      lagSamples.push(await behindLive());
+      workerHeapSamples.push((await heap()).worker);
+      const text = (await statusText()).replace(/\s+/g, ' ').trim();
+      const live = /(behind live [^·]*|[\d,]+ skipped)/g;
+      statusSamples.push((text.match(live) ?? []).join(' · ') || 'live');
     }
   })();
   if (phase.during) await phase.during(); else await sleep(SECONDS * 1000);
@@ -467,7 +491,10 @@ for (const phase of phases) {
   say('');
   say(`=== ${phase.label} (${elapsed.toFixed(0)} s) ===`);
   say(`  sent ${Math.round(sent / elapsed).toLocaleString()} f/s; count advanced ${Math.round(displayed / elapsed).toLocaleString()} f/s`);
-  say(`  lag behind live (sent - shown), every 2 s: ${lagSamples.map((n) => n.toLocaleString()).join(', ')}`);
+  say(`  lag behind live (sent - shown - skipped), every 2 s: ${lagSamples.map((n) => n.toLocaleString()).join(', ')}`);
+  say(`  skipped by the live view this phase: ${((await skipped()) - skippedStart).toLocaleString()} frames`);
+  say(`  Worker heap every 2 s: ${workerHeapSamples.map((n) => n.toFixed(0)).join(', ')} MB`);
+  say(`  status bar every 2 s: ${statusSamples.join(' | ')}`);
   say(`  animation frames: ${(b.frames / elapsed).toFixed(1)} fps`);
   say(`  long tasks: ${(long.length / elapsed).toFixed(1)}/s, ${(longMs / elapsed / 10).toFixed(0)}% of wall time; `
     + `p50 ${long[Math.floor(long.length / 2)]?.toFixed(0) ?? '-'} ms, max ${long[0]?.toFixed(0) ?? '-'} ms`);
