@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { MinimapBands } from '../../lib/minimapBands';
 import { Packet } from '../../types/packet';
 import { ColorRulesEngine } from '../../services/colorRules';
 import {
@@ -216,13 +217,21 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   // affordance pointing at the selected row, not packet data. Mixing the two
   // sources in one canvas is deliberate.
   // The strip is repainted from a 2 Hz snapshot of the buffer, not the live
-  // 10 Hz one. Every repaint touches every packet - the downsampling branch
-  // below visits all of them to average a colour per pixel row - and at the
-  // 50,000 cap that is ~6-7 ms, ten times a second, for a strip whose bands
-  // are a fraction of a pixel tall and cannot show a single packet's arrival
-  // anyway. The viewport indicator and the selection marker stay live: they
-  // are the two things on this strip a person actually watches move.
+  // 10 Hz one. A repaint used to touch every packet - the downsampling branch
+  // visited all of them to average a colour per pixel row - and it still does
+  // on the repaints after a rule edit, until the progressive fill has decided
+  // them; every other repaint reads the colour index (`bandsRef`), which costs
+  // the strip's height rather than the buffer's size. Its bands are a fraction
+  // of a pixel tall and cannot show a single packet's arrival anyway. The
+  // viewport indicator and the selection marker stay live: they are the two
+  // things on this strip a person actually watches move.
   const paintedPackets = useThrottledValue(packets, MINIMAP_REPAINT_MS);
+  /**
+   * Every buffered frame's colour, kept between repaints so a row's average
+   * is lookups rather than a walk of its band (`lib/minimapBands.ts`), and
+   * what it was built against: a new chain or theme starts it again.
+   */
+  const bandsRef = useRef<{ bands: MinimapBands; engine: unknown; theme: unknown; key: unknown } | null>(null);
 
   const accent = useThemeToken('--primary', '#f97316');
 
@@ -356,7 +365,46 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
      */
     const rowCount = total <= size.height ? total : size.height;
     undecided = 0;
-    paintRows(0, rowCount, false);
+
+    // The downsampled strip, from the colour index when every buffered frame's
+    // colour is decided - which is every repaint but the ones after a rule
+    // edit, and those take the progressive path below until the fill is done.
+    let held = bandsRef.current;
+    if (held === null || held.engine !== colorEngine || held.theme !== packetTheme || held.key !== themeKey) {
+      held = { bands: new MinimapBands(), engine: colorEngine, theme: packetTheme, key: themeKey };
+      bandsRef.current = held;
+    }
+    const indexed = total > size.height && held.bands.sync(paintedPackets, (packet, decide) => {
+      const background = colorEngine.backgroundIfKnown(packet, packetTheme, decide);
+      if (background === undefined) return undefined;
+      const [r, g, b, a] = resolveColorBytes(background || fallback);
+      return ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
+    });
+    if (indexed) {
+      const bands = held.bands;
+      const sums = new Float64Array(4);
+      const [fr, fg, fb, fa] = resolveColorBytes(fallback);
+      const packetsPerRow = total / size.height;
+      for (let row = 0; row < rowCount; row++) {
+        const startIdx = Math.floor(row * packetsPerRow);
+        const endIdx = Math.min(total, Math.max(startIdx + 1, Math.floor((row + 1) * packetsPerRow)));
+        // Rows only on disk are the theme's ground, as `paintRows` paints them.
+        const onDisk = Math.max(0, Math.min(endIdx, leadingRows) - startIdx);
+        const from = Math.max(startIdx, leadingRows) - leadingRows;
+        const to = endIdx - leadingRows;
+        if (to > from) bands.sum(from, to, sums); else sums.fill(0);
+        const count = onDisk + Math.max(0, to - from);
+        if (count === 0) continue;
+        const r = (sums[0] + fr * onDisk) / count;
+        const g = (sums[1] + fg * onDisk) / count;
+        const b = (sums[2] + fb * onDisk) / count;
+        const a = (sums[3] + fa * onDisk) / count;
+        ctx.fillStyle = `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${(a / 255).toFixed(3)})`;
+        ctx.fillRect(0, row, size.width, 1);
+      }
+    } else {
+      paintRows(0, rowCount, false);
+    }
 
     // Redrawn after every pass rather than once at the end: the slices below
     // repaint rows, and a row repainted over the marker would erase it.
