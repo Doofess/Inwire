@@ -46,6 +46,14 @@ scripts/brand/.raster.html
 test/fixtures/*
 !test/fixtures/README.md
 !test/fixtures/acceptance.json
+# Loose real captures and the app's own exports of them, kept beside the fixtures for
+# testing by hand - the same personal traffic, so the same rule.
+/test/*.pcap
+/test/*.pcapng
+/test/*.xlsx
+/test/*.csv
+/test/*.json
+/test/*.pdf
 *.tmp
 
 # The Rust agent's build output, and the stamped exe the installer ships
