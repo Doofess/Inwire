@@ -153,10 +153,28 @@ export function toHex(bytes: Uint8Array): string {
   return out;
 }
 
+/** `00`..`ff`, built once: a MAC is formatted twice a frame. */
+const HEX_BYTE: readonly string[] = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+
+/**
+ * Bytes as colon-separated lowercase hex - `aa:bb:cc:dd:ee:ff` for a MAC.
+ *
+ * A table and a concatenation. It was `Array.from(...).map(toString(16)
+ * .padStart).join(':')`, which `docs/decisions/0044` left alone because the
+ * fixtures put it at 7-13 ms; on a 36,000 frame-a-second download it was 3.2%
+ * of dissection with an array allocated per call, twice a frame.
+ */
 export function formatMac(bytes: Uint8Array): string {
-  return pooled(Array.from(bytes)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join(':'));
+  if (bytes.length === 0) return pooled('');
+  let out = HEX_BYTE[bytes[0]];
+  for (let i = 1; i < bytes.length; i++) out += ':' + HEX_BYTE[bytes[i]];
+  return pooled(out);
+}
+
+/** The six bytes at `at` as a MAC, read in place rather than from a copy. */
+export function formatMacAt(bytes: Uint8Array, at: number): string {
+  return pooled(HEX_BYTE[bytes[at]] + ':' + HEX_BYTE[bytes[at + 1]] + ':' + HEX_BYTE[bytes[at + 2]]
+    + ':' + HEX_BYTE[bytes[at + 3]] + ':' + HEX_BYTE[bytes[at + 4]] + ':' + HEX_BYTE[bytes[at + 5]]);
 }
 
 /** Formats 4 bytes at `offset` as dotted-quad IPv4. */

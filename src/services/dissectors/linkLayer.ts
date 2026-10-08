@@ -27,7 +27,7 @@
  * needs to know which of the five it was.
  */
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
-import { formatMac } from '../addressFormat';
+import { formatMac, formatMacAt } from '../addressFormat';
 import { resolveMacVendor } from '../macVendors';
 import { LINKTYPE } from '../dissect/types';
 import { ieee1905MessageEnd } from './ieee1905';
@@ -343,8 +343,8 @@ function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayer
   if (rawBytes.length < 14) {
     return { layers: [], fields: {}, l3Offset: rawBytes.length, etherType: 0, encapsulation, truncated: true };
   }
-  const dstMac = formatMac(rawBytes.slice(0, 6));
-  const srcMac = formatMac(rawBytes.slice(6, 12));
+  const dstMac = formatMacAt(rawBytes, 0);
+  const srcMac = formatMacAt(rawBytes, 6);
   const etherType = (rawBytes[12] << 8) | rawBytes[13];
 
   const layers: ProtocolLayer[] = [{
