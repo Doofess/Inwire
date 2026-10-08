@@ -57,6 +57,7 @@ import type {
 import type { Packet, ProtocolLayer } from '../types/packet';
 import { Coordinator, WatchedTcpOrder, type Merged } from '../services/pipeline/coordinator';
 import { shardEnv } from '../services/pipeline/shard';
+import { FifoMap } from '../services/pipeline/fifoMap';
 import type { FromShard, ToShard } from '../services/pipeline/shardProtocol';
 import { LIVE_ENV } from '../services/dissect/dissectEnv';
 import { settleTreeTls } from '../services/dissect/shardNumbering';
@@ -234,19 +235,15 @@ let pendingRecords: { id: number; record: Uint8Array }[] = [];
 const derivedStore = new DerivedStore();
 
 /**
- * Recently dissected trees, oldest first, so the detail pane can be answered
- * without re-dissecting anything. A plain Map relies on JS insertion order,
- * which is what makes the oldest key the first one `keys()` yields.
+ * Recently dissected trees, so the detail pane can be answered without
+ * re-dissecting anything. The newest `DETAIL_CACHE_FRAMES` are kept, in a
+ * `FifoMap` rather than a Map evicted from its front - which walks every hole
+ * its deletes left on each eviction (`pipeline/fifoMap.ts`).
  */
-const treeCache = new Map<number, ProtocolLayer[]>();
+const treeCache = new FifoMap<ProtocolLayer[]>(DETAIL_CACHE_FRAMES);
 
 function cacheTree(id: number, layers: ProtocolLayer[]) {
   treeCache.set(id, layers);
-  while (treeCache.size > DETAIL_CACHE_FRAMES) {
-    const oldest = treeCache.keys().next();
-    if (oldest.done) break;
-    treeCache.delete(oldest.value);
-  }
 }
 
 // --- dissection on several cores (ADR 0053 phase 3) -------------------------
@@ -349,20 +346,18 @@ function shardDown(shard: number, reason: string): void {
 
 function receiveFromShard(shard: number, message: FromShard): void {
   if (parallel === null) return;
-  switch (message.type) {
-    case 'results':
-      parallel.coordinator.receive(shard, message);
-      afterMerge();
-      return;
-    case 'detail': {
-      const answer = shardDetails.get(message.requestId);
-      shardDetails.delete(message.requestId);
-      answer?.(message.layers);
-      return;
-    }
-    case 'failure':
-      shardDown(shard, message.message);
-      return;
+  // Not a `switch`: `scripts/tls/key-log.ts` reads the app's command cases out
+  // of this file's source by their labels, and a second case labelled with the
+  // detail message above them would be the one it found.
+  if (message.type === 'results') {
+    parallel.coordinator.receive(shard, message);
+    afterMerge();
+  } else if (message.type === 'detail') {
+    const answer = shardDetails.get(message.requestId);
+    shardDetails.delete(message.requestId);
+    answer?.(message.layers);
+  } else {
+    shardDown(shard, message.message);
   }
 }
 

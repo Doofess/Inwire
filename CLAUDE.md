@@ -171,6 +171,10 @@ beside `electron/agentService.ts`.
   renderer (sandboxed Chromium)                      pipeline Worker
     React UI ── pipelineClient ──────────────────────  dissection
     ferries both ports across, then sees no frame      trackers
+                                                       │ Dissection threads: auto
+                                                       ▼
+                                                     TCP shards (nested Workers,
+                                                     the same script, ADR 0053)
 ```
 
 ### The agent — `agent-rs/` on Windows, `local-agent/agent.py` elsewhere
@@ -371,6 +375,15 @@ agent → pipe → main (deframe) → MessagePortMain → pipeline Worker
                                                    └─→ dissect → 100 ms flush
                                                        → renderer main thread → React state
 ```
+
+**With Dissection threads on `auto` the Worker is a coordinator** (ADR 0053
+phase 3, `services/pipeline/coordinator.ts`): it numbers every frame in order
+through the one `Sequencer`, sends plain TCP segments to N shard Workers by
+connection, dissects everything else itself, and merges the results back into
+id order before anything above sees them. A shard is the same script started
+by its own URL (`workers/shardRole.ts`); its trees stay in its cache and a
+click on a recent one is asked of it. `1` is the single Worker exactly as it
+was, and `scripts/pipeline/parallel.ts` holds the two to the same output.
 
 **The Worker writes the bytes itself, before it dissects anything** (ADR 0038).
 Ids are assigned and the bytes posted for a whole released group ahead of the
