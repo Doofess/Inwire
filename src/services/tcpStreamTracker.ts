@@ -27,6 +27,7 @@ import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectio
 import type { TlsDecryptionKeys } from './tls/decrypt';
 import type { AppDirection } from './dissectors/appStream';
 import { releaseHttp1Body } from './dissectors/http1';
+import { Sequencer, tcpConnectionKey, type TcpOrder } from './dissect/sequencer';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { freshSmb2Conversation, type Smb2ConversationState } from './dissectors/smb2';
 import { freshSshConversation, type SshConversationState } from './dissectors/ssh';
@@ -352,29 +353,38 @@ function freshTcpConnection(): TcpConnection {
  * NEW stream index and a fresh relative-sequence base. That is the same thing
  * the tracker already does for a capture started mid-connection, and it is
  * counted (`evictedConnections`) rather than being silent.
+ *
+ * **The cap and the order live in the `Sequencer` now** (`MAX_TCP_CONNECTIONS`
+ * and `TcpOrder` in `dissect/sequencer.ts`, ADR 0053), with `tcp.stream` and
+ * `tls.stream`: which connection is forgotten, and what a connection is
+ * numbered, both depend on the order of frames from every connection, and
+ * once connections are dissected on several cores only one stage sees that
+ * order. This tracker keeps each connection's state and asks the order at the
+ * points it used to reorder its own map.
  */
-const MAX_CONNECTIONS = 16384;
+
+/** One lookup's answer: the connection, the sender's half, and the key both directions share. */
+interface Found {
+  conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean; key: string;
+}
 
 export class TcpStreamTracker {
-  /** One record per conversation, in least-recently-used order. */
+  /** One record per conversation, by key. Their order is the `TcpOrder`'s. */
   private connections = new Map<string, TcpConnection>();
   /** The same records by stream index, for the callers that hold only that. */
   private byStreamId = new Map<number, TcpConnection>();
-  private nextStreamId = 0;
-  private nextTlsStreamId = 0;
-  /**
-   * The connection the last lookup found. Every call made while dissecting one
-   * frame asks about the same connection, so this is what keeps the
-   * least-recently-used bookkeeping to one delete-and-reinsert per frame
-   * rather than one per call.
-   */
-  private lastKey: string | undefined;
+  private readonly order: TcpOrder;
+
+  constructor(sequencer: Pick<Sequencer, 'tcp'> = new Sequencer()) {
+    this.order = sequencer.tcp;
+  }
   /**
    * The whole result of the last lookup, keyed by the four values that produced
    * it.
    *
-   * `lastKey` above saved the delete-and-reinsert; it did not save **building
-   * the strings to find out**. Each call makes three - `srcIp:srcPort`,
+   * The order's own last-key check saves the delete-and-reinsert (`TcpOrder`);
+   * it does not save **building the strings to find out**. Each call makes
+   * three - `srcIp:srcPort`,
    * `dstIp:dstPort` and the key joining them - which for a pair of IPv6
    * addresses is around 135 characters allocated and hashed, and one TCP frame
    * makes several such calls (the sequence analysis, the TLS cursor, the TLS
@@ -393,9 +403,8 @@ export class TcpStreamTracker {
    */
   private lastLookup: {
     srcIp: string; srcPort: number; dstIp: string; dstPort: number;
-    found: { conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean };
+    found: Found;
   } | undefined;
-  private evicted = 0;
 
   /** True when the memo describes exactly this direction of this connection. */
   private memoHit(srcIp: string, srcPort: number, dstIp: string, dstPort: number): boolean {
@@ -413,59 +422,48 @@ export class TcpStreamTracker {
    * peer's half. The previous shape built the same strings twice over, once for
    * the connection key and again for the direction key.
    */
-  private locate(srcIp: string, srcPort: number, dstIp: string, dstPort: number): {
-    conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean;
-  } {
+  private locate(srcIp: string, srcPort: number, dstIp: string, dstPort: number): Found {
     if (this.memoHit(srcIp, srcPort, dstIp, dstPort)) {
-      // Nothing is skipped by returning here. The LRU reinsert below is already
-      // guarded on `key !== this.lastKey`, and a memo hit is by construction
-      // the key that set it - so the slow path would find the connection,
-      // decide it is already at the back of the queue, and return this.
+      // Nothing is skipped by returning here. The order's move-to-back is
+      // already guarded on the key not being the last one it found, and a memo
+      // hit is by construction the key that set it - so the slow path would
+      // find the connection, leave it where it is, and return this.
       return this.lastLookup!.found;
     }
-    const from = `${srcIp}:${srcPort}`;
-    const to = `${dstIp}:${dstPort}`;
-    const senderIsA = from <= to;
-    const key = senderIsA ? `${from}|${to}` : `${to}|${from}`;
+    const { key, senderIsA } = tcpConnectionKey(srcIp, srcPort, dstIp, dstPort);
 
+    // The order decides which connection is forgotten past the cap, and it is
+    // asked at exactly the point this map used to move the connection to the
+    // back of its own queue - so the same connection goes (`TcpOrder`).
+    for (const gone of this.order.locate(key)) this.forget(gone);
     let conn = this.connections.get(key);
     if (conn === undefined) {
       conn = freshTcpConnection();
       this.connections.set(key, conn);
-      this.evictPastCap();
-    } else if (key !== this.lastKey) {
-      // Deleted and re-set rather than left alone: a Map iterates in insertion
-      // order, so this is what moves the connection to the back of the
-      // eviction queue.
-      this.connections.delete(key);
-      this.connections.set(key, conn);
     }
-    this.lastKey = key;
 
-    const found = {
+    const found: Found = {
       conn,
       dir: senderIsA ? conn.a : conn.b,
       peer: senderIsA ? conn.b : conn.a,
       senderIsA,
+      key,
     };
     this.lastLookup = { srcIp, srcPort, dstIp, dstPort, found };
     return found;
   }
 
   /** The same lookup, without creating anything. */
-  private peek(srcIp: string, srcPort: number, dstIp: string, dstPort: number): {
-    conn: TcpConnection; dir: TcpDirection; peer: TcpDirection; senderIsA: boolean;
-  } | undefined {
+  private peek(srcIp: string, srcPort: number, dstIp: string, dstPort: number): Found | undefined {
     if (this.memoHit(srcIp, srcPort, dstIp, dstPort)) return this.lastLookup!.found;
-    const from = `${srcIp}:${srcPort}`;
-    const to = `${dstIp}:${dstPort}`;
-    const senderIsA = from <= to;
-    const conn = this.connections.get(senderIsA ? `${from}|${to}` : `${to}|${from}`);
+    const { key, senderIsA } = tcpConnectionKey(srcIp, srcPort, dstIp, dstPort);
+    const conn = this.connections.get(key);
     // A miss is NOT memoised: this call creates nothing, so storing "absent"
     // would let the next `locate` return it instead of creating the connection.
     if (conn === undefined) return undefined;
-    const found = {
+    const found: Found = {
       conn,
+      key,
       dir: senderIsA ? conn.a : conn.b,
       peer: senderIsA ? conn.b : conn.a,
       senderIsA,
@@ -474,40 +472,37 @@ export class TcpStreamTracker {
     return found;
   }
 
-  /** Forgets the least recently seen connections once the cap is exceeded. */
-  private evictPastCap(): void {
-    while (this.connections.size > MAX_CONNECTIONS) {
-      const oldest = this.connections.keys().next();
-      if (oldest.done) break;
-      const conn = this.connections.get(oldest.value);
-      this.connections.delete(oldest.value);
-      // A half-collected HTTP body's bytes are charged against a budget
-      // shared by every connection, and this is the one path where collecting
-      // stops without the body finishing. Forgetting the connection without
-      // giving them back would spend a slice of that budget permanently - and
-      // enough evictions would stop body reassembly for the rest of the
-      // capture with nothing saying why. See `liveBodyBytes` in
-      // `dissectors/http1.ts`.
-      // Both the TLS-decrypted and the cleartext HTTP paths hang their
-      // `AppDirection` off `tls`, which is why one lookup covers both.
-      if (conn?.tls?.appClient !== undefined) releaseHttp1Body(conn.tls.appClient.http1);
-      if (conn?.tls?.appServer !== undefined) releaseHttp1Body(conn.tls.appServer.http1);
-      // The stream index goes with it, or `byStreamId` becomes the leak this
-      // eviction exists to stop. Indexes are never reused - `nextStreamId`
-      // only ever counts up - so nothing can collide with the one just freed.
-      if (conn?.streamId !== undefined) this.byStreamId.delete(conn.streamId);
-      if (this.lastKey === oldest.value) this.lastKey = undefined;
-      // Defensive, and knowingly so: this runs inside `locate`, after the new
-      // connection is created and BEFORE the memo is assigned at the end of
-      // that same call, so the memo cannot presently be holding a connection
-      // this loop just dropped. Removing this line fails no test, which was
-      // checked. It is here for the caller that one day evicts from somewhere
-      // else, where the failure would be a frame served another connection's
-      // state - silent, and not the kind of thing to leave to a future reader
-      // noticing the ordering.
-      this.lastLookup = undefined;
-      this.evicted += 1;
-    }
+  /**
+   * Drops a connection the order forgot to stay inside the cap
+   * (`TcpOrder.locate`, which decides which one).
+   */
+  private forget(key: string): void {
+    const conn = this.connections.get(key);
+    this.connections.delete(key);
+    // A half-collected HTTP body's bytes are charged against a budget
+    // shared by every connection, and this is the one path where collecting
+    // stops without the body finishing. Forgetting the connection without
+    // giving them back would spend a slice of that budget permanently - and
+    // enough evictions would stop body reassembly for the rest of the
+    // capture with nothing saying why. See `liveBodyBytes` in
+    // `dissectors/http1.ts`.
+    // Both the TLS-decrypted and the cleartext HTTP paths hang their
+    // `AppDirection` off `tls`, which is why one lookup covers both.
+    if (conn?.tls?.appClient !== undefined) releaseHttp1Body(conn.tls.appClient.http1);
+    if (conn?.tls?.appServer !== undefined) releaseHttp1Body(conn.tls.appServer.http1);
+    // The stream index goes with it, or `byStreamId` becomes the leak this
+    // eviction exists to stop. Indexes are never reused - the order only
+    // ever counts up - so nothing can collide with the one just freed.
+    if (conn?.streamId !== undefined) this.byStreamId.delete(conn.streamId);
+    // Defensive, and knowingly so: this runs inside `locate`, before the new
+    // connection's memo is assigned at the end of that same call, so the
+    // memo cannot presently be holding a connection this just dropped.
+    // Removing this line fails no test, which was checked. It is here for
+    // the caller that one day evicts from somewhere else - a shard told by
+    // the coordinator to forget a connection (ADR 0053) - where the failure
+    // would be a frame served another connection's state: silent, and not
+    // the kind of thing to leave to a future reader noticing the ordering.
+    this.lastLookup = undefined;
   }
 
   /**
@@ -518,7 +513,7 @@ export class TcpStreamTracker {
    * conversation, which is a thing to be able to say rather than to hide.
    */
   public get evictedConnections(): number {
-    return this.evicted;
+    return this.order.evicted;
   }
 
   /** How many connections currently hold state. */
@@ -537,17 +532,19 @@ export class TcpStreamTracker {
    * is how it tells a fresh tracker.
    */
   public seedNextStreamId(id: number): void {
-    this.nextStreamId = id;
+    this.order.seedNextStreamId(id);
   }
 
   /**
    * Returns a stable, zero-based ID shared by both directions of a TCP
    * conversation, assigning a new one the first time a connection is seen.
+   * The number is the order's (`TcpOrder.streamId`), because it is numbered
+   * across every connection.
    */
   public getStreamId(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
-    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    const { conn, key } = this.locate(srcIp, srcPort, dstIp, dstPort);
     if (conn.streamId === undefined) {
-      conn.streamId = this.nextStreamId++;
+      conn.streamId = this.order.streamId(key);
       this.byStreamId.set(conn.streamId, conn);
     }
     return conn.streamId;
@@ -690,14 +687,14 @@ export class TcpStreamTracker {
    * connection that never speaks TLS must not consume a number.
    */
   public getTlsStreamId(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
-    const { conn } = this.locate(srcIp, srcPort, dstIp, dstPort);
-    conn.tlsStreamId ??= this.nextTlsStreamId++;
+    const { conn, key } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    conn.tlsStreamId ??= this.order.tlsStreamId(key);
     return conn.tlsStreamId;
   }
 
   /** As `seedNextStreamId`, for the TLS sequence. See `L3Tracker.seedNextIndices`. */
   public seedNextTlsStreamId(next: number): void {
-    if (this.nextTlsStreamId === 0) this.nextTlsStreamId = next;
+    this.order.seedNextTlsStreamId(next);
   }
 
   /** LDAP's per-connection counters, created on first use. */
@@ -836,10 +833,7 @@ export class TcpStreamTracker {
   public reset(): void {
     this.connections.clear();
     this.byStreamId.clear();
-    this.nextStreamId = 0;
-    this.nextTlsStreamId = 0;
-this.lastKey = undefined;
+    this.order.reset();
     this.lastLookup = undefined;
-    this.evicted = 0;
   }
 }

@@ -23,133 +23,9 @@ import { freshLdapConversation, type LdapConversationState } from './dissectors/
 import { MemoryTemplateStore, type FlowTemplate, type StoredFlowTemplate } from './flow/flowExport';
 import { RtpStreams, type RtpStreamFacts } from './rtpStreams';
 import type { SdpMedia } from './dissectors/sdp';
-
-/**
- * How many conversations each per-layer index remembers.
- *
- * Matches `tcpStreamTracker.ts`'s `MAX_CONNECTIONS` deliberately: these are the
- * same kind of object bounded for the same reason (docs/decisions/0014), and
- * two different caps would only invite the question of which was right.
- */
-const MAX_CONVERSATIONS = 16384;
-
-/** What a conversation index knows about one conversation. */
-interface ConversationFacts {
-  /** Assigned in order of first appearance, and never reused. */
-  index: number;
-  /** This frame's position in the conversation, counting from 1. */
-  pnum: number;
-  /** Seconds since the conversation's first frame. */
-  sinceFirst: number;
-  /** Seconds since the conversation's previous frame. */
-  sincePrev: number;
-}
-
-interface ConversationRecord {
-  index: number;
-  packets: number;
-  firstTsUs: number;
-  lastTsUs: number;
-}
-
-/**
- * A conversation index: the thing that turns an endpoint pair into the small
- * integer the reference analyzer calls `eth.stream`, `ip.stream`, `ipv6.stream`
- * or `udp.stream`.
- *
- * ## Why this is an arrival-order counter and not a hash
- *
- * A hash of the tuple would be tempting: it needs no state, it is stable
- * across a replay with no seeding, and it would pass every assertion in this
- * repository. It is also wrong in the one way that matters. These numbers are
- * the reference's numbers - somebody reads `ip.stream == 3` off Wireshark and
- * types it here - so an index that is internally consistent but disagrees with
- * Wireshark answers a different question while looking like the same one.
- * Arrival order is not an implementation detail of this field; it IS the
- * field.
- *
- * That choice is what forces `seedNext`, and through it the five stream
- * indices into `Packet.fields`: a replay rebuilds one conversation from a
- * five-tuple bundle and would otherwise call it 0. See `seedNextIndices`.
- *
- * Bounded like every other tracker here. An index is never reused: evicting a
- * conversation forgets it, and if it comes back it is a new one with a new
- * number, which is what `tcpStreamTracker.ts`'s `evictPastCap` does and for
- * the same reason - the alternative is two conversations answering to one id.
- */
-class ConversationIndex {
-  private readonly seen = new Map<string, ConversationRecord>();
-  private next = 0;
-  private evictedCount = 0;
-  /**
-   * The last conversation looked up, remembered by its ENDPOINTS rather than
-   * by its key.
-   *
-   * Consecutive frames share a conversation almost always - overwhelmingly so
-   * for the MAC pair, which is consulted on every frame. Both orders are
-   * checked because a conversation's two directions arrive interleaved, and
-   * they are the same conversation.
-   *
-   * **Comparing the endpoints rather than a composed key was an optimisation
-   * that did not work, and saying so is the point.** The reasoning was that a
-   * hit should not have to build the key string at all; three runs each side
-   * measured 27,315 f/s against 27,499 for the composed-key version, which is
-   * no better and inside the noise. So the ~2.8% these indices cost is not the
-   * concatenation, and whoever tries to buy it back should look at the Map
-   * probe, the per-conversation record, or the four extra tree rows - not
-   * here. This form is kept only because it allocates less for the same
-   * speed; it is not the reason anything got faster, because nothing did.
-   */
-  private lastA?: string;
-  private lastB?: string;
-  private lastRecord?: ConversationRecord;
-
-  observe(a: string, b: string, tsUs: number): ConversationFacts {
-    let record: ConversationRecord | undefined;
-    if (this.lastRecord !== undefined
-      && ((this.lastA === a && this.lastB === b) || (this.lastA === b && this.lastB === a))) {
-      record = this.lastRecord;
-    } else {
-      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
-      record = this.seen.get(key);
-      if (record === undefined) {
-        if (this.seen.size >= MAX_CONVERSATIONS) {
-          const oldest = this.seen.keys().next();
-          if (!oldest.done) { this.seen.delete(oldest.value); this.evictedCount++; }
-        }
-        record = { index: this.next++, packets: 0, firstTsUs: tsUs, lastTsUs: tsUs };
-        this.seen.set(key, record);
-      }
-      this.lastA = a;
-      this.lastB = b;
-      this.lastRecord = record;
-    }
-
-    record.packets++;
-    const sinceFirst = (tsUs - record.firstTsUs) / 1_000_000;
-    // The first frame of a conversation has no previous one, and the reference
-    // prints 0 rather than omitting the row.
-    const sincePrev = record.packets === 1 ? 0 : (tsUs - record.lastTsUs) / 1_000_000;
-    record.lastTsUs = tsUs;
-    return { index: record.index, pnum: record.packets, sinceFirst, sincePrev };
-  }
-
-  /** See `L3Tracker.seedNextIndices`. */
-  seedNext(index: number): void {
-    if (this.next === 0) this.next = index;
-  }
-
-  get evicted(): number { return this.evictedCount; }
-
-  reset(): void {
-    this.seen.clear();
-    this.next = 0;
-    this.evictedCount = 0;
-    this.lastA = undefined;
-    this.lastB = undefined;
-    this.lastRecord = undefined;
-  }
-}
+import {
+  Sequencer, type ConversationFacts, type ConversationIndex, type ConversationIndexes,
+} from './dissect/sequencer';
 
 /** How many datagrams' worth of fragments are remembered at once. */
 const MAX_TRACKED_DATAGRAMS = 2048;
@@ -249,10 +125,26 @@ export interface ArpConflict {
 }
 
 export class L3Tracker {
-  private readonly ethIndex = new ConversationIndex();
-  private readonly ipIndex = new ConversationIndex();
-  private readonly ipv6Index = new ConversationIndex();
-  private readonly udpIndex = new ConversationIndex();
+  /**
+   * The four conversation indexes are numbered across every conversation, so
+   * they belong to the `Sequencer` rather than to this tracker
+   * (`dissect/sequencer.ts`, ADR 0053). One built without a sequencer makes its
+   * own, which is the same thing while one Worker sees every frame.
+   */
+  private readonly ethIndex: ConversationIndex;
+  private readonly ipIndex: ConversationIndex;
+  private readonly ipv6Index: ConversationIndex;
+  private readonly udpIndex: ConversationIndex;
+  private readonly conversations: ConversationIndexes;
+
+  constructor(sequencer: Pick<Sequencer, 'conversations'> = new Sequencer()) {
+    this.conversations = sequencer.conversations;
+    this.ethIndex = this.conversations.eth;
+    this.ipIndex = this.conversations.ip;
+    this.ipv6Index = this.conversations.ipv6;
+    this.udpIndex = this.conversations.udp;
+  }
+
   private fragments = new Map<string, FragmentInfo>();
   private parts = new Map<string, FragmentPart[]>();
   private retainedBytes = 0;
@@ -581,10 +473,7 @@ export class L3Tracker {
     this.parts.clear();
     this.retainedBytes = 0;
     this.arpBindings.clear();
-    this.ethIndex.reset();
-    this.ipIndex.reset();
-    this.ipv6Index.reset();
-    this.udpIndex.reset();
+    this.conversations.reset();
   }
 }
 
