@@ -171,6 +171,10 @@ beside `electron/agentService.ts`.
   renderer (sandboxed Chromium)                      pipeline Worker
     React UI ── pipelineClient ──────────────────────  dissection
     ferries both ports across, then sees no frame      trackers
+                                                       │ Dissection threads: auto
+                                                       ▼
+                                                     TCP shards (nested Workers,
+                                                     the same script, ADR 0053)
 ```
 
 ### The agent — `agent-rs/` on Windows, `local-agent/agent.py` elsewhere
@@ -371,6 +375,15 @@ agent → pipe → main (deframe) → MessagePortMain → pipeline Worker
                                                    └─→ dissect → 100 ms flush
                                                        → renderer main thread → React state
 ```
+
+**With Dissection threads on `auto` the Worker is a coordinator** (ADR 0053
+phase 3, `services/pipeline/coordinator.ts`): it numbers every frame in order
+through the one `Sequencer`, sends plain TCP segments to N shard Workers by
+connection, dissects everything else itself, and merges the results back into
+id order before anything above sees them. A shard is the same script started
+by its own URL (`workers/shardRole.ts`); its trees stay in its cache and a
+click on a recent one is asked of it. `1` is the single Worker exactly as it
+was, and `scripts/pipeline/parallel.ts` holds the two to the same output.
 
 **The Worker writes the bytes itself, before it dissects anything** (ADR 0038).
 Ids are assigned and the bytes posted for a whole released group ahead of the
@@ -1244,10 +1257,13 @@ which is the trigger this entry named in other words. The pool lives in the
 **renderer** as nested Workers, not in the store's `utilityProcess` this entry
 used to propose - every shard parses hostile bytes, and that process has Node
 and the filesystem. A Sequencer on the coordinator owns everything numbered
-across conversations; TCP shards by IP pair; frames merge in id order. Before
-any of it, every app-side queue gets a budget and the agent's pcapng carries
-the rest, so the live view falls behind on disk and says so. 0053 has the
-phases and the equality test.
+across conversations; TCP shards by connection (the ADR said pair; one pair
+was more than half the burst); frames merge in id order. Every app-side queue
+has a budget and the agent's pcapng carries the rest, so the live view falls
+behind on disk and says so. **Phases 1-3 have landed**: at 40,000 frames a
+second the live view now keeps up on this machine, and past ~45,000 the
+renderer's main thread is the limit, not dissection. 0053 has the phases and
+the numbers; `scripts/pipeline/parallel.ts` is the equality test.
 
 **The boundary is measured and it is not the trigger.** The hop is 5.21 µs a
 frame against the writer's 9.71 (see **What the store actually costs**). ADR 0038 took the *write* off the dissector's critical path,

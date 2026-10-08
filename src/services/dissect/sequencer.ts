@@ -173,8 +173,25 @@ export class ConversationIndex {
   }
 }
 
+/**
+ * What a tracker asks of a conversation index. The class above is the real
+ * one; a shard's stand-in (`shardNumbering.ts`) answers with what the
+ * coordinator numbered for the frame (ADR 0053 phase 3).
+ */
+export type ConversationIndexApi = Pick<ConversationIndex, 'observe' | 'seedNext' | 'evicted' | 'reset'>;
+
+/** The four conversation indexes, as a tracker holds them. */
+export interface ConversationIndexesApi {
+  readonly eth: ConversationIndexApi;
+  readonly ip: ConversationIndexApi;
+  readonly ipv6: ConversationIndexApi;
+  readonly udp: ConversationIndexApi;
+  readonly evicted: { eth: number; ip: number; ipv6: number; udp: number };
+  reset(): void;
+}
+
 /** The four conversation indexes, each numbered across the whole capture. */
-export class ConversationIndexes {
+export class ConversationIndexes implements ConversationIndexesApi {
   readonly eth = new ConversationIndex();
   readonly ip = new ConversationIndex();
   readonly ipv6 = new ConversationIndex();
@@ -206,7 +223,77 @@ interface TcpSlot {
   tlsStreamId?: number;
 }
 
-const NO_KEYS: readonly string[] = [];
+export const NO_KEYS: readonly string[] = [];
+
+/**
+ * `tls.stream` numbered late, in the order frames are merged (ADR 0053 phase
+ * 3).
+ *
+ * A connection takes its `tls.stream` on its first TLS record, which only
+ * dissecting its payload finds - so once connections are dissected on several
+ * cores no stage can hand the number out ahead, the way `tcp.stream` is. Each
+ * lane instead hands its connection a **placeholder**, a negative number that
+ * no real stream index can be, and says which frame took it; the coordinator
+ * assigns the real numbers in frame-id order as it merges, and tells the lane.
+ * From then on the lane answers with the real number. A frame that was
+ * dissected before the answer came back is corrected at the merge - its field,
+ * its record's answer, and its cached tree - which is why the placeholder
+ * must be unmistakable.
+ */
+export class DeferredTlsNumbers {
+  private next = 0;
+  private readonly resolved = new Map<number, number>();
+  /** Placeholders handed out during the frame being dissected now. */
+  private fresh: number[] = [];
+
+  /** A placeholder for a connection's first TLS record. */
+  assign(): number {
+    const placeholder = -(++this.next);
+    this.fresh.push(placeholder);
+    return placeholder;
+  }
+
+  /** The real number a placeholder stands for, once known; the placeholder until then. */
+  resolve(id: number): number {
+    return id < 0 ? this.resolved.get(id) ?? id : id;
+  }
+
+  /** The coordinator's answer for one placeholder. */
+  settle(placeholder: number, real: number): void {
+    this.resolved.set(placeholder, real);
+  }
+
+  /** The placeholders handed out since the last call - the frame just dissected. */
+  takeFresh(): number[] {
+    if (this.fresh.length === 0) return NO_PLACEHOLDERS;
+    const out = this.fresh;
+    this.fresh = [];
+    return out;
+  }
+
+  reset(): void {
+    this.next = 0;
+    this.resolved.clear();
+    this.fresh = [];
+  }
+}
+
+const NO_PLACEHOLDERS: number[] = [];
+
+/**
+ * What a tracker asks of the TCP order. `TcpOrder` below is the real one; a
+ * shard's stand-in answers with what the coordinator numbered for the frame.
+ */
+export interface TcpOrderApi {
+  locate(key: string): readonly string[];
+  streamId(key: string): number;
+  tlsStreamId(key: string): number;
+  seedNextStreamId(id: number): void;
+  seedNextTlsStreamId(next: number): void;
+  readonly evicted: number;
+  readonly size: number;
+  reset(): void;
+}
 
 /**
  * The global half of TCP: which connections are remembered, in what order they
@@ -220,7 +307,7 @@ const NO_KEYS: readonly string[] = [];
  * Keys are the tracker's own (`tcpConnectionKey`), so the two can never
  * disagree about which connection a frame belongs to.
  */
-export class TcpOrder {
+export class TcpOrder implements TcpOrderApi {
   /** Connection keys in least-recently-used order: a Map iterates in insertion order. */
   private readonly slots = new Map<string, TcpSlot>();
   private nextStreamId = 0;
@@ -228,6 +315,11 @@ export class TcpOrder {
   /** The key the last lookup found, which a repeat need not move again. */
   private lastKey: string | undefined;
   private evictedCount = 0;
+  /**
+   * Set when connections are dissected on several cores: `tls.stream` is then
+   * a placeholder here and numbered at the merge (`DeferredTlsNumbers`).
+   */
+  deferredTls: DeferredTlsNumbers | null = null;
 
   /**
    * Finds a connection's place - created at the back on first sight, moved
@@ -280,8 +372,33 @@ export class TcpOrder {
    */
   tlsStreamId(key: string): number {
     const slot = this.slots.get(key)!;
+    if (this.deferredTls !== null) {
+      slot.tlsStreamId ??= this.deferredTls.assign();
+      return this.deferredTls.resolve(slot.tlsStreamId);
+    }
     slot.tlsStreamId ??= this.nextTlsStreamId++;
     return slot.tlsStreamId;
+  }
+
+  /** Whether a connection is remembered. */
+  has(key: string): boolean {
+    return this.slots.has(key);
+  }
+
+  /** The `tcp.stream` the next new connection to ask will take. */
+  get nextStream(): number {
+    return this.nextStreamId;
+  }
+
+  /**
+   * The connection a lookup that CREATES one would forget now, or null when
+   * there is room - what a shard is told ahead of a frame the coordinator
+   * cannot number from its headers (an IP fragment, ADR 0053).
+   */
+  wouldForget(): string | null {
+    if (this.slots.size < MAX_TCP_CONNECTIONS) return null;
+    const oldest = this.slots.keys().next();
+    return oldest.done ? null : oldest.value;
   }
 
   /** A replay's tracker meets one connection and must number it as the capture did. */
@@ -309,6 +426,7 @@ export class TcpOrder {
     this.nextTlsStreamId = 0;
     this.lastKey = undefined;
     this.evictedCount = 0;
+    this.deferredTls?.reset();
   }
 }
 
@@ -417,7 +535,9 @@ export class FrameClock {
 export class Sequencer {
   readonly clock = new FrameClock();
   readonly conversations = new ConversationIndexes();
-  readonly tcp = new TcpOrder();
+
+  /** `tcp` is given by the coordinator, which watches the lookups its own lane makes. */
+  constructor(readonly tcp: TcpOrder = new TcpOrder()) {}
 
   reset(): void {
     this.clock.reset();

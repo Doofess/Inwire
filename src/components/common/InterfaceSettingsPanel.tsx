@@ -16,6 +16,7 @@ import {
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import { Section, SettingRow } from './settingsLayout';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
+import { shardsFor } from '../../services/pipeline/threads';
 
 /**
  * Settings -> Interface: how the app looks and behaves as a UI.
@@ -89,6 +90,15 @@ const BUFFER_OPTIONS = [
   { value: String(2048 * 1024 * 1024), label: '2 GB' },
 ];
 
+
+/** Dissection threads (ADR 0053 phase 3): auto first, for the reason the buffer's is. */
+const THREAD_OPTIONS = [
+  { value: 'auto' as const, label: 'Auto' },
+  { value: '1' as const, label: '1' },
+];
+
+/** The TCP shards `auto` resolves to on this machine; 0 is one core. */
+const THREAD_CORES = shardsFor('auto', typeof navigator === 'undefined' ? 1 : navigator.hardwareConcurrency ?? 1);
 
 /**
  * Animations live in the Accessibility tab now, not here.
@@ -212,6 +222,25 @@ export const InterfaceSettingsPanel: React.FC = () => {
               packetBufferBytes: v === 'auto' ? 'auto' : Number(v),
             })}
             options={BUFFER_OPTIONS}
+          />
+        </SettingRow>
+
+        <SettingRow
+          label="Dissection threads"
+          description={
+            THREAD_CORES > 0
+              ? `Auto dissects a live capture's TCP on ${THREAD_CORES} cores beside the one that merges it, `
+                + `which is what keeps the list live through a download faster than one core can read. `
+                + `1 dissects on one core, as before. Takes effect when the next capture starts.`
+              : 'This machine has too few cores to spare, so Auto dissects on one, as 1 does. '
+                + 'Takes effect when the next capture starts.'
+          }
+        >
+          <Segmented
+            ariaLabel="Dissection threads"
+            value={String(perf.dissectionThreads) as 'auto' | '1'}
+            onValueChange={(v) => patchPerf({ dissectionThreads: v === '1' ? 1 : 'auto' })}
+            options={THREAD_OPTIONS}
           />
         </SettingRow>
       </Section>

@@ -162,7 +162,15 @@ for (const [name, fn] of [
   check('an unoffered refresh rate defaults while the budget survives', out, {
     dashboardRefreshMs: PERFORMANCE_DEFAULTS.dashboardRefreshMs,
     packetBufferBytes: 256 * 1024 * 1024,
+    dissectionThreads: PERFORMANCE_DEFAULTS.dissectionThreads,
   });
+}
+
+{
+  // Dissection threads (ADR 0053 phase 3): one core survives a load, anything
+  // else is the default - a stored 4 is not a choice this setting offers.
+  check('dissection threads: 1 survives a load', normalizePerformance({ dissectionThreads: 1 })?.dissectionThreads, 1);
+  check('...and an unoffered count is the default', normalizePerformance({ dissectionThreads: 4 })?.dissectionThreads, 'auto');
 }
 
 // --- Clamping, not rejecting -----------------------------------------------

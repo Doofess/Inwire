@@ -144,6 +144,47 @@ const DERIVED = NAMES.length;
 NAMES.push('(decrypted content)');
 KINDS.push(undefined);
 if (NAMES.length > 255) throw new Error('frameRecord: more methods than one byte can name');
+/** The one answer a record may be written with a placeholder for (`deferredAnswers`). */
+const TLS_STREAM = IDS.get('tcp:getTlsStreamId')!;
+const NO_OFFSETS: number[] = [];
+
+/**
+ * A record with its placeholder answers replaced by the numbers they stand for
+ * (ADR 0053 phase 3). `at` is `FrameRecorder.deferredAnswers` for this record;
+ * each is the offset of one encoded integer, rewritten through `resolve`. The
+ * call log has no lengths or offsets of its own, so a value that encodes to a
+ * different length splices in cleanly.
+ */
+export function settleDeferredAnswers(
+  record: Uint8Array, at: readonly number[], resolve: (placeholder: number) => number,
+): Uint8Array {
+  if (at.length === 0) return record;
+  const parts: Uint8Array[] = [];
+  let from = 0;
+  let length = 0;
+  for (const offset of at) {
+    const reader = new ValueReader(record, offset);
+    const placeholder = reader.value() as number;
+    const end = record.length - reader.remaining;
+    const writer = new ValueWriter();
+    writer.value(resolve(placeholder));
+    const before = record.subarray(from, offset);
+    const value = writer.bytes();
+    parts.push(before, value);
+    length += before.length + value.length;
+    from = end;
+  }
+  const tail = record.subarray(from);
+  parts.push(tail);
+  length += tail.length;
+  const out = new Uint8Array(length);
+  let i = 0;
+  for (const part of parts) {
+    out.set(part, i);
+    i += part.length;
+  }
+  return out;
+}
 
 export { FRAME_RECORD_VERSION, recordRefs };
 
@@ -282,6 +323,13 @@ export class FrameRecorder {
    * is snapshotted 45 times, and hashing its pieces every time was quadratic.
    */
   private readonly pieceHashes = new WeakMap<Uint8Array, number>();
+  /**
+   * Where in this frame's call log a `tls.stream` answer was a placeholder
+   * (`DeferredTlsNumbers`, ADR 0053) - for the merge to put the real number
+   * in with `settleDeferredAnswers`. Empty unless dissecting on several cores.
+   */
+  private deferredAt: number[] = [];
+  private deferredOut: number[] = [];
 
   constructor(real: Omit<FrameSources, 'env'> & { env?: DissectEnv }) {
     const all = { ...real, env: real.env ?? LIVE_ENV } as unknown as Record<Group, Record<string, AnyFn>>;
@@ -337,6 +385,7 @@ export class FrameRecorder {
         return (...args) => {
           const answer = fn(...args);
           out.byte(id);
+          if (id === TLS_STREAM && (answer as number) < 0) this.deferredAt.push(out.length);
           out.value(answer);
           return answer;
         };
@@ -417,6 +466,7 @@ export class FrameRecorder {
     this.derived = 0;
     this.derivedLost = false;
     this.refs.clear();
+    if (this.deferredAt.length > 0) this.deferredAt = [];
   }
 
   /**
@@ -452,7 +502,16 @@ export class FrameRecorder {
     const record = new Uint8Array(head.length + log.length);
     record.set(head);
     record.set(log, head.length);
+    this.deferredOut = this.deferredAt.length === 0 ? NO_OFFSETS : this.deferredAt.map((at) => at + head.length);
     return record;
+  }
+
+  /**
+   * Where the record `end` just returned holds a placeholder answer, as offsets
+   * into it - empty for nearly every frame. Read after `end`.
+   */
+  get deferredAnswers(): readonly number[] {
+    return this.deferredOut;
   }
 
   /** How many answers the frame just recorded carried decrypted content. */

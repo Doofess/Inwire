@@ -2,7 +2,7 @@
  * What a high-rate live capture costs the window: frames per second, long
  * tasks, where the main thread's time goes, how far the list falls behind.
  *
- *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25]
+ *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25] [--threads auto|1]
  *       [--app <dir>] [--out report.txt]
  *
  * `--app` launches another app directory: `package.json`, `dist-electron/`, a
@@ -48,6 +48,8 @@ const RATES = arg('rates', '10000,20000,40000').split(',').map(Number);
 const SECONDS = Number(arg('seconds', '25'));
 const OUT = arg('out', '');
 const APP = arg('app', '');
+/** Dissection threads: `auto`, the default, or `1`. */
+const THREADS = arg('threads', 'auto');
 const DEVTOOLS_PORT = 9339;
 if (!PCAP) { console.log('usage: --pcap file.pcapng'); process.exit(2); }
 
@@ -301,6 +303,17 @@ page.setDefaultTimeout(30_000);
 // page does not have; a string evaluate goes through CDP and defines it.
 await page.evaluate('window.__name = (f) => f');
 await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
+// Dissection threads (ADR 0053 phase 3): the profile is fresh, so the setting
+// is its default, `auto`, unless this asks for one core - written where the
+// app keeps it, and read by a reload before any capture.
+if (THREADS === '1') {
+  await page.evaluate(() => localStorage.setItem('inwire.performance',
+    JSON.stringify({ dashboardRefreshMs: 500, packetBufferBytes: 'auto', dissectionThreads: 1 })));
+  await page.reload();
+  await page.evaluate('window.__name = (f) => f');
+  await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
+}
+say(`dissection threads: ${THREADS}`);
 const cdp = await page.context().newCDPSession(page);
 await cdp.send('Performance.enable');
 await cdp.send('Profiler.enable');
@@ -316,8 +329,11 @@ try {
 
 async function attachWorker(): Promise<void> {
   if (raw === null || workerSession !== undefined) return;
-  const { targetInfos } = await raw.send<{ targetInfos: { targetId: string; type: string; url: string }[] }>('Target.getTargets');
-  const w = targetInfos.find((t) => t.type === 'worker' && /pipeline/.test(t.url)) ?? targetInfos.find((t) => t.type === 'worker');
+  const { targetInfos } = await raw.send<{ targetInfos: { targetId: string; type: string; url: string; title?: string }[] }>('Target.getTargets');
+  // The pipeline Worker by its name: its shards are the same script (`shardRole.ts`).
+  const w = targetInfos.find((t) => t.type === 'worker' && t.title === 'inwire-pipeline')
+    ?? targetInfos.find((t) => t.type === 'worker' && /pipeline/.test(t.url) && !/inwire-shard/.test(t.title ?? ''))
+    ?? targetInfos.find((t) => t.type === 'worker');
   if (!w) return;
   ({ sessionId: workerSession } = await raw.send<{ sessionId: string }>('Target.attachToTarget', { targetId: w.targetId, flatten: true }));
   await raw.send('Profiler.enable', {}, workerSession);

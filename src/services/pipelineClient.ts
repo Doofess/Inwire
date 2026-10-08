@@ -17,6 +17,7 @@ import type { HostIdentity } from './direction';
 import type { NetworkFacts } from './networkFacts';
 import type { AgentServiceFacts } from './agentLink';
 import { publishLiveLag } from './liveLag';
+import type { DissectionThreads } from './pipeline/threads';
 import type {
   FromPipeline, PipelineInterface, PipelineStatus, ReplayFrame, ToPipeline,
 } from './pipeline/protocol';
@@ -323,6 +324,16 @@ export class PipelineClient {
 
   setCapturing(capturing: boolean) {
     this.send({ type: 'capturing', capturing });
+  }
+
+  /** Rows from `onFrames` the buffer has committed - the window's answer (ADR 0053). */
+  rowsTaken(count: number) {
+    if (count > 0) this.send({ type: 'rowsTaken', count });
+  }
+
+  /** Dissection threads (ADR 0053 phase 3); the Worker applies it at the next `reset`. */
+  setThreads(threads: DissectionThreads) {
+    this.send({ type: 'threads', threads });
   }
 
   setInterfaces(interfaces: PipelineInterface[]) {

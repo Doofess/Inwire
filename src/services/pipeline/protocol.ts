@@ -24,6 +24,7 @@ import type { Packet } from '../../types/packet';
 import type { NetworkFacts } from '../networkFacts';
 import type { StreamSeeds } from './replay';
 import type { InfoPatch } from '../pcapParser';
+import type { DissectionThreads } from './threads';
 
 /** Where a connection stands, in the terms `agentHealth.ts` diagnoses from. */
 export type PipelineStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -139,6 +140,16 @@ export type ToPipeline =
    * lost them.
    */
   | { type: 'drain'; requestId: number }
+  /**
+   * Settings > Capture > Dissection threads (ADR 0053 phase 3): `auto` shards
+   * TCP across cores, 1 is the single Worker. Takes effect at the next `reset`.
+   */
+  | { type: 'threads'; threads: DissectionThreads }
+  /**
+   * The app committed `count` rows of the flushes it was posted. What the
+   * Worker owes the window is bounded by these (`LiveFlow.rendererBehind`).
+   */
+  | { type: 'rowsTaken'; count: number }
   /** How many bytes of decrypted answers to keep (`derivedBudgetFor`). */
   | { type: 'derivedBudget'; bytes: number }
   /**

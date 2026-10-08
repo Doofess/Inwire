@@ -99,6 +99,7 @@ const NOT_TESTS: Record<string, string> = {
   'perf/fields-split-cost.ts': 'measurement; needs the fixtures and --expose-gc (docs/decisions/0017)',
   'perf/store-boundary.ts': 'measurement; there is no right answer to hold it to (the ADR 0028 number)',
   'perf/ui-burst-drive.ts': 'measurement and driver; launches the built app against a replay of a real burst and prints fps, long tasks and profiles, with no pass mark',
+  'perf/parallel-threads.ts': 'measurement; dissects a capture on worker_threads shards and prints frames a second against one core, with no pass mark (ADR 0053 phase 3)',
   'perf/xlsx-cost.ts':
     'measurement; sizes the Excel export budget (XLSX_BYTES_PER_CELL) on the real captures, '
     + 'needs the fixtures and --expose-gc, and has no pass mark',

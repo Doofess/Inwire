@@ -13,7 +13,7 @@
  * skipped, every hole is marked on a frame, and when the burst ends
  * everything drains with nothing left owed.
  */
-import { HOLE_MIN_FRAMES, LiveFlow, STORE_BACKLOG_FRAMES } from '../../src/services/pipeline/liveFlow';
+import { HOLE_MIN_FRAMES, LiveFlow, RENDERER_BACKLOG_FRAMES, STORE_BACKLOG_FRAMES } from '../../src/services/pipeline/liveFlow';
 import { PipeCredit } from '../../electron/pipeCredit';
 import { addLiveGapRow, markLiveGap } from '../../src/services/dissect/liveGapFields';
 import { liveLagLabel, NO_LAG } from '../../src/services/liveLag';
@@ -72,6 +72,19 @@ console.log('--- the ledgers ---\n');
   check('once it answers, a backlog past the budget does', flow.storeBehind);
   flow.storeTaken(ack);
   check('...until it is answered', !flow.storeBehind && flow.storeOwedFrames === 0);
+}
+{
+  // The window, bounded the same way (ADR 0053 phase 3).
+  const flow = new LiveFlow();
+  flow.rowsPosted(RENDERER_BACKLOG_FRAMES + 10);
+  check('a window that has never answered never holds the Worker back', !flow.rendererBehind);
+  flow.rowsTaken(5);
+  check('once it answers, rows owed past the budget do', flow.rendererBehind);
+  flow.rowsTaken(10);
+  check('...until it commits enough of them', !flow.rendererBehind);
+  flow.rowsPosted(RENDERER_BACKLOG_FRAMES * 2);
+  flow.forgetRenderer();
+  check('a cleared buffer owes nothing', !flow.rendererBehind);
 }
 
 console.log('\n--- the note on the frame ---\n');

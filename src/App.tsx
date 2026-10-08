@@ -286,7 +286,11 @@ export default function App() {
   // `performance.now()` in this scope and gets a confusing type error.
   const [perf] = usePreferenceStore(performanceStore);
   usePreferenceSync(performanceStore.key, performanceStore.normalize, performanceStore.accept);
-  const { packetBufferBytes: bufferSetting, dashboardRefreshMs } = perf;
+  const { packetBufferBytes: bufferSetting, dashboardRefreshMs, dissectionThreads } = perf;
+  // The Worker holds it until the next capture starts (ADR 0053 phase 3).
+  useEffect(() => {
+    pipeline.setThreads(dissectionThreads);
+  }, [dissectionThreads]);
   /**
    * The setting resolved to a number of bytes.
    *
@@ -396,6 +400,7 @@ export default function App() {
       autoPauseRef.current();
     },
   }), []);
+  const pipelineRowsTaken = useCallback((rows: number) => pipeline.rowsTaken(rows), []);
   const onFramesQueued = useCallback((firstTsUs: number, lastTsUs: number) => {
     if (captureStartRef.current === null) captureStartRef.current = firstTsUs;
     lastPacketTimeRef.current = lastTsUs;
@@ -405,7 +410,9 @@ export default function App() {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
     queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
     dropBelow,
-  } = usePacketBuffer({ packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued });
+  } = usePacketBuffer({
+    packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued, onRowsTaken: pipelineRowsTaken,
+  });
 
 
   const [selectedPacket, setSelectedPacket] = useState<Packet | null>(null);

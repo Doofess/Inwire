@@ -55,6 +55,11 @@ export interface PacketBufferOptions {
    * capture clock rather than to the buffer.
    */
   onFramesQueued: (firstTsUs: number, lastTsUs: number) => void;
+  /**
+   * How many queued rows a flush just committed - the window's answer to the
+   * Worker, which stops releasing frames when too many are owed (ADR 0053).
+   */
+  onRowsTaken?: (rows: number) => void;
 }
 
 export interface PacketBuffer {
@@ -94,8 +99,10 @@ export interface PacketBuffer {
 }
 
 export function usePacketBuffer({
-  packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued,
+  packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued, onRowsTaken,
 }: PacketBufferOptions): PacketBuffer {
+  const onRowsTakenRef = useRef(onRowsTaken);
+  onRowsTakenRef.current = onRowsTaken;
   const [packets, setPackets] = useState<Packet[]>([]);
   const packetBufferBytesRef = useRef(packetBufferBytes);
   useEffect(() => {
@@ -251,6 +258,9 @@ export function usePacketBuffer({
           },
         },
       ));
+      // After the commit, not on arrival: it is the commit that costs the main
+      // thread, and a count of arrivals would let rows pile up behind it.
+      onRowsTakenRef.current?.(incoming.length);
     };
     flushRef.current = flush;
     const timer = window.setInterval(flush, PACKET_FLUSH_MS);

@@ -21,8 +21,18 @@ frames, each numbered by the dissection exactly as its headers said
 (`scripts/pipeline/sequencer.ts`). One thing phase 2 found that the design did
 not list: **`tls.stream` cannot be read ahead** - a connection takes it on its
 first TLS record, which only dissecting the payload finds - so phase 3 needs
-it numbered late, in merge order (see **Phases**). The rest of the phases are
-still to come. The fixes
+it numbered late, in merge order (see **Phases**). **Phase 3 landed
+2026-10-08**, behind **Settings > Interface > Performance > Dissection
+threads**, default `auto`: the pipeline Worker coordinates N shard Workers
+(`auto` is cores - 2, at most 6; 6 on the owner's machine) and the output is
+frame for frame the single Worker's - `scripts/pipeline/parallel.ts` holds
+every fixture, a 20,000-connection capture that evicts, a capture of TCP in IP
+fragments, and the 300,000-frame burst to it, at seven arrangements including
+two adversarial ones. On the burst, live: at 40,000 frames a second the view
+kept up (40,750 advanced against 37,400 on one core, its lag flat at ~11,000
+frames instead of growing past 75,000); at 60,000 the dissection is no longer
+the limit - the app's main thread is - see **Phases** for the numbers and what
+changed from the design. The rest of the phases are still to come. The fixes
 that measured the problem landed the same day and are listed under **What came
 first**. Narrows **[0038](0038-the-worker-writes-the-bytes.md)**: the
 Worker still writes the bytes before it dissects, and now also stops when the
@@ -74,7 +84,11 @@ gets a budget:
   Worker stops releasing from its ordering window. The flush also dissects in
   50 ms slices now, so a Worker that is behind still answers the detail pane
   and main's report between them.
-- **Worker -> shards:** at most two flushes in flight per shard.
+- **Worker -> shards:** at most two flushes in flight per shard. *Built as
+  three batches of at most 384 frames, and the coordinator holds at most
+  65,536 frames it has not merged.*
+- **Worker -> window** (added in phase 3): rows the app has not committed,
+  60,000 (`LiveFlow.rendererBehind`).
 
 The heap guards stay, as backstops that should never fire again.
 
@@ -106,6 +120,8 @@ becomes a coordinator and spawns N shard Workers:
 - **Sharded by the IP address pair**, so every fragment, every connection of a
   pair and an echo with its reply land together. TCP first; everything else
   stays on lane 0, the coordinator's own path, which is today's code.
+  *Phase 3 shards by connection instead - one pair was more than half of the
+  burst; see **Phase 3, as built**.*
 - **A Sequencer on the coordinator owns everything numbered across
   conversations**: frame ids and times, the `eth`/`ip`/`ipv6`/`udp` stream
   indexes, and `tcp.stream` with its 16,384-connection eviction. Shards get
@@ -124,7 +140,12 @@ between Workers costs nothing. Each Worker is also its own heap.
 
 **One accepted difference:** HTTP/1's shared 32 MB body budget becomes 32/N per
 shard. It only shows when more than 32 MB of bodies are being collected at
-once, and it is recorded, so a revisit agrees with arrival.
+once, and it is recorded, so a revisit agrees with arrival. *As built, a frame
+records the room only up to one message's 1 MB, so its record is the single
+Worker's until a shard's share actually binds.* Two more, both counted rather
+than silent: a sharded connection that lane 0 later meets (`crossLane`), and
+an out-of-order fragment whose first fragment is more than 4,096 frames behind
+it, which can reassemble on a different shard from its connection's.
 
 ## Phases
 
@@ -133,22 +154,114 @@ once, and it is recorded, so a revisit agrees with arrival.
 2. **The Sequencer, with one Worker** - stream numbering and the TCP eviction
    moved behind `trackerApi`, no behaviour change, every gate green.
    *Landed.*
-3. **TCP shards**, behind the setting. The first speed-up: roughly 3-4x at
-   four shards on a bulk-TCP burst. What it needs from phase 2, and what is
-   still open:
-   - The coordinator runs `frameLane` and, for a TCP-lane frame, asks the
-     Sequencer in frame order: `eth`, then `ip`/`ipv6` (`ConversationIndex.
-     observe`), then `TcpOrder.locate` and `streamId`. The shard's trackers
-     answer those same calls from what it was sent, the way `FrameRevisit`
-     answers from a record, and drop the state for any key the order evicted
-     (`TcpStreamTracker.forget` is already the one place that does).
-   - **`tls.stream` must be numbered at the merge.** A shard reports that a
-     frame was its connection's first TLS record; the coordinator assigns the
-     number in id order and the merge writes it into the row, the field and
-     the record's answer. Until that exists, a capture with TLS keeps its TCP
-     on the sequential lane, or `tls.stream` comes out in shard order.
-   - A frame marked `fragmentOf: 'tcp'` holds back later frames of its address
-     pair until the shard reports the reassembled datagram's connection.
+3. **TCP shards**, behind the setting. *Landed* - see below.
+
+### Phase 3, as built
+
+`services/pipeline/coordinator.ts` (the coordinator), `shard.ts` (a shard),
+`shardProtocol.ts` (what they say), `frameDissector.ts` (the dissection both
+share), `dissect/shardNumbering.ts` (a shard's stand-in Sequencer),
+`workers/shardRole.ts` (a shard Worker is the pipeline's own script, started by
+its own URL - no second bundle, same origin, same COEP and CSP).
+
+- **The coordinator numbers every frame in id order** through the one
+  Sequencer: for a plain TCP segment `eth.stream`, `ip`/`ipv6.stream`,
+  `TcpOrder.locate` and `streamId`, sent with the frame; a connection the order
+  forgets is forgotten on whichever lane holds it, placed in that lane's queue
+  where the single Worker forgot it. Everything else - UDP, QUIC, tunnels,
+  anything `frameLane` leaves sequential - is dissected on the coordinator
+  itself, as it is dispatched, by today's code with the real trackers.
+- **`tls.stream` is numbered at the merge** (`DeferredTlsNumbers`): every lane,
+  the coordinator's included, hands out negative placeholders and the merge
+  numbers them in id order, then corrects the field, the record's answer
+  (`settleDeferredAnswers` splices it - the call log has no lengths) and the
+  cached tree of any frame dissected before the number came back.
+- **A fragment of a TCP datagram goes to the shard of the connection its first
+  fragment names** (or the first fragment found ahead, or its pair), every
+  fragment of a datagram to one shard, as a barrier: nothing after it is
+  numbered until the shard reports what reassembly did to the TCP order, and
+  the shard was told in advance what a new connection would be numbered and
+  would forget.
+- **A connection lane 0 meets first stays on lane 0** (`keyHome`), so its
+  state is never split. The reverse - a sharded connection lane 0 later meets,
+  through a tunnel or an IPv6 extension header - is counted (`crossLane`) and
+  is the one way this build can differ from one core. None of the fixtures or
+  the burst does it.
+- **Trees stay with the lane that built them**: lane 0's in the Worker's
+  cache, a shard's in its own (2,000 each). A click on a recent frame is asked
+  of its shard; anything older is rebuilt from its record, as before. The rows
+  the merge adds - the process, a live gap, a fingerprint, links from later
+  frames - are sent to whichever lane holds the tree.
+- **Revisit is unchanged**: it needs no trackers, so the coordinator does it
+  from the record exactly as the single Worker does.
+
+**Changed from the design, each measured:**
+
+- **Sharded by connection, not by address pair.** On the burst one address
+  pair carried 54% of the frames (161,631 of 300,000), which caps pair
+  sharding at 1.86x however many cores; one connection carried 22%. Every
+  property the pair was chosen for holds by connection too - fragments go by
+  their datagram's connection, ICMP and UDP stay on lane 0 - and
+  `parallel.ts` runs both, and adversarial assignments, to the same output.
+  `route: 'pair'` in `pipeline.worker.ts` puts the ADR's routing back.
+- **A new connection goes to the shard least recently loaded**, not by hash:
+  a hash put the two heaviest connections of the burst on one shard of seven
+  (44% of it). Which shard is never an answer anyone reads.
+- **Batches of at most 384 frames, three in flight per shard**, rather than
+  two flushes: a shard answers once a batch, and one batch of everything
+  queued left the merge waiting on its slowest frame while the shard idled.
+  A batch is packed - one `Float64Array` of numbers and a string table
+  (`OpWriter`) - because a list of objects cost the shard 6 us a frame to
+  read.
+- **The window is bounded too.** Phase 1 bounded main -> Worker and Worker ->
+  store; with shards the Worker outran the renderer's main thread, which at
+  60,000 a second fell 400,000 rows behind in 16 s with nothing shed. The app
+  now answers each flush (`rowsTaken`) and the Worker stops releasing past
+  60,000 rows owed (`LiveFlow.rendererBehind`), so main sheds and says so.
+- **HTTP/1's body budget is asked for at most one message's worth**
+  (`sharedBodyRoom(atMost)`), so the recorded answer is the same on any number
+  of shards until the budget binds; each shard and lane 0 get 32/N MB.
+- **An eviction's body release is no longer recorded** into the frame that
+  caused it. It sat between two answers a revisit asks for, so on one core
+  every frame that pushed out a connection with HTTP state missed on revisit;
+  on several it is not that frame's question at all.
+- **Two tree caches stopped evicting from a Map's front**, which walks every
+  hole earlier deletes left - 11 us a frame at the coordinator's size
+  (`FifoMap`, `IdRing`).
+
+**Measured.** `scripts/perf/parallel-threads.ts` (dissection alone, real
+threads, second pass): one core 50,000 frames a second; 6 shards 81,000 to
+95,000 (1.6-1.9x), the coordinator 63-82% busy. Two things hold it below the
+3-4x this phase was sized at: one connection is 22% of the burst, and a
+shard dissects a frame in 33-40 us against 20 on the main thread, most of it
+the machine (one shard alone is 26 us plus 4 us posting; six together are
+slower each).
+
+`ui-burst-drive.ts`, the burst replayed into the built app, three runs each:
+
+| offered | one core | `auto` (6 shards) |
+|---|---|---|
+| 20,000/s | keeps up | keeps up, Worker heap 15-35 MB against 50-250 |
+| 40,000/s | 36,957 / 37,633 / 37,703 advanced, lag growing past 75,000 | 40,734 / 40,755 / 40,774, lag flat ~11,000 |
+| 60,000/s | ~37,500 advanced, ~200,000 shed and counted | see the next paragraph |
+
+At 60,000 the main thread is the limit now: before the window was bounded it
+committed 40,700-54,400 rows a second with 52-54% of its time in long tasks,
+and the queue in front of it grew without limit. With it bounded, three
+more runs: 47,218 / 47,128 / 56,121 committed a second against ~37,500 on
+one core, 49-53% of the main thread in long tasks, nothing shed inside the
+16 s phase (one core shed ~200,000), and the backlog (sent - counted -
+skipped) at 270,000-333,000 by its end against one core's ~270,000 plus what
+it shed. Inside 16 s the window's own bound cannot be told apart from
+phase 1's, which it sits behind; it is there so a longer burst ends in a
+counted shed rather than in the renderer's heap. The next limit is the main
+thread's per-row work - unpacking each flush, learning names from each
+frame, the field writer - and that is not dissection.
+
+**What phase 3 leaves for later.** Imports still dissect on the main thread
+(they never used the Worker). Shards post rows through the coordinator,
+which deserializes and re-serializes each - its next limit near 100,000 a
+second; phase 6 is that. QUIC and UDP stay on lane 0 until phase 5.
 4. **Catch-up from the agent's file.**
 5. **QUIC and UDP sharding** - the CID-to-connection map into the Sequencer,
    QUIC sharded by server; SDP handed out in frame order.

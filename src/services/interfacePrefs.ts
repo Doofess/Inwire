@@ -11,6 +11,7 @@ import {
 } from '../lib/packetColumns';
 import { FIELD_BY_ABBREV } from './dissect/fieldRegistry';
 import { BUDGET_CHOICES, type BufferBudgetSetting } from './bufferBudget';
+import type { DissectionThreads } from './pipeline/threads';
 
 const TIME_FORMATS: readonly TimeFormat[] = ['relative', 'clock', 'date', 'utc', 'delta'];
 
@@ -226,6 +227,12 @@ export interface PerformancePrefs {
    * deliberately does not.
    */
   packetBufferBytes: BufferBudgetSetting;
+  /**
+   * How many cores dissect a live capture (ADR 0053 phase 3): `auto` shards
+   * TCP across them, 1 is the single pipeline Worker exactly as it was. Takes
+   * effect when the next capture starts.
+   */
+  dissectionThreads: DissectionThreads;
 }
 
 export const PERFORMANCE_DEFAULTS: PerformancePrefs = {
@@ -237,6 +244,9 @@ export const PERFORMANCE_DEFAULTS: PerformancePrefs = {
   // this number" are different intentions and only the first follows the
   // machine when the app moves to another one.
   packetBufferBytes: 'auto',
+  // **'auto', a word, for the reason the buffer's is**: it follows the machine.
+  // On a machine with too few cores to spare it resolves to the single Worker.
+  dissectionThreads: 'auto',
 };
 
 export function normalizePerformance(raw: unknown): PerformancePrefs | null {
@@ -262,6 +272,7 @@ export function normalizePerformance(raw: unknown): PerformancePrefs | null {
           (BUDGET_CHOICES as readonly number[]).includes(v.packetBufferBytes)
           ? v.packetBufferBytes
           : PERFORMANCE_DEFAULTS.packetBufferBytes,
+    dissectionThreads: v.dissectionThreads === 1 ? 1 : PERFORMANCE_DEFAULTS.dissectionThreads,
   };
 }
 

@@ -24,7 +24,7 @@ import { MemoryTemplateStore, type FlowTemplate, type StoredFlowTemplate } from 
 import { RtpStreams, type RtpStreamFacts } from './rtpStreams';
 import type { SdpMedia } from './dissectors/sdp';
 import {
-  Sequencer, type ConversationFacts, type ConversationIndex, type ConversationIndexes,
+  Sequencer, type ConversationFacts, type ConversationIndexApi, type ConversationIndexesApi,
 } from './dissect/sequencer';
 
 /** How many datagrams' worth of fragments are remembered at once. */
@@ -131,13 +131,13 @@ export class L3Tracker {
    * (`dissect/sequencer.ts`, ADR 0053). One built without a sequencer makes its
    * own, which is the same thing while one Worker sees every frame.
    */
-  private readonly ethIndex: ConversationIndex;
-  private readonly ipIndex: ConversationIndex;
-  private readonly ipv6Index: ConversationIndex;
-  private readonly udpIndex: ConversationIndex;
-  private readonly conversations: ConversationIndexes;
+  private readonly ethIndex: ConversationIndexApi;
+  private readonly ipIndex: ConversationIndexApi;
+  private readonly ipv6Index: ConversationIndexApi;
+  private readonly udpIndex: ConversationIndexApi;
+  private readonly conversations: ConversationIndexesApi;
 
-  constructor(sequencer: Pick<Sequencer, 'conversations'> = new Sequencer()) {
+  constructor(sequencer: { conversations: ConversationIndexesApi } = new Sequencer()) {
     this.conversations = sequencer.conversations;
     this.ethIndex = this.conversations.eth;
     this.ipIndex = this.conversations.ip;
