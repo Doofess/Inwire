@@ -500,8 +500,9 @@ html[data-platform="win32"] {
    A signed step fixes both halves with one number each, and the sign is where
    the room is. Day's list ground is 0.024 of L below white, so there is no
    lighter line to be had than a whisper and +0.02 is very nearly all of it;
-   Night's is 0.200 above black, so -0.05 is a groove rather than a cage
-   (#161616 -> #0b0b0b, where the old rule gave #696969). `oklch(from ...)`
+   Night's ground is black, so there is no darker line to draw and its step
+   is positive (+0.18: a hairline, where the old 40% mix gave #696969 on the
+   #161616 ground it had then). `oklch(from ...)`
    rather than a second `color-mix` because the thing being said IS "this
    colour, moved in lightness" - a mix toward a fixed endpoint can only say it
    by accident. */
@@ -626,15 +627,18 @@ html[data-platform="win32"] {
    native scrollbars, text selection and form controls stayed on the light side
    of the divide for the theme most people are on. They follow now.
 
-   The ground is a neutral #161616. It carried a blue cast while it had a warm
-   dark to be told apart from; with one dark theme there is nothing to
-   distinguish it from, and neutral is the better ground on its own. */
+   The ground is pure black, #000000 - the owner's call, for an industrial
+   feel: an instrument panel rather than an editor. It was a neutral #161616
+   before that, and a blue-cast one before that while it had a warm dark to
+   be told apart from. */
 .dark {
-  /* See the note in `:root`. **Negative, which is the whole per-theme part of
-     this token**: a separator lighter than a dark row is a cage drawn over the
-     data, and the ground has 0.200 of lightness beneath it to spend where it
-     has 0.800 above. -0.05 is a groove. */
-  --packet-gridline-step: -0.05;
+  /* See the note in `:root`. **Positive, and it was negative**: on a #161616
+     ground a groove (-0.05) was the quiet line and a lighter one a cage, but a
+     black ground has no lightness beneath it at all, so a darker line is no
+     line. +0.18 on black is a hairline of about #111111 - a scored line on a
+     black panel, which is the look the ground was chosen for. (+0.12 reads as
+     more than it is: oklch L 0.12 is #060606, which is no line at all.) */
+  --packet-gridline-step: 0.18;
   /* Neutral grey, not the blue-black this used to be.
 
      It was `#0d1219` with a `#dbe3ec` foreground - a cool cast on every surface,
@@ -643,9 +647,11 @@ html[data-platform="win32"] {
      is why `--card` is ABOVE `--background` here. Nothing else in the app assumes
      a direction; the rail and the title row just take `--card`.
 
-     The ground is a step below Dark+'s own `#1e1e1e`, and the whole neutral
-     ladder came down with it by the same 8/255 - ground, card, secondary, muted,
-     accent, border. Moving one rung alone would have been the visible change:
+     The ground is pure black, and the ladder came down with it - ground,
+     card, secondary, muted and accent by the same 22/255. The border came down
+     less (#343434 to #262626): on black the hairlines carry the structure, so
+     they keep more of their contrast than the surfaces. Moving one rung alone
+     would have been the visible change:
      `--card` over `--background` is a 4/255 delta on purpose, because `<main>` is
      a notch cut out of the ground and its 1px border is the only thing the eye
      follows round the corner (see `App.tsx`). Widen that delta and the pane draws
@@ -665,28 +671,28 @@ html[data-platform="win32"] {
      Only the surfaces went neutral. `--primary`, `--destructive`, `--ring` and
      the protocol hues in `themePalettes.ts` carry meaning rather than taste, and
      a blue accent on a grey ground is the point of an accent. */
-  --background: #161616;
+  --background: #000000;
   --foreground: #e4e4e4;
-  --card: #1a1a1a;
+  --card: #040404;
   --card-foreground: #e4e4e4;
-  --popover: #1a1a1a;
+  --popover: #040404;
   --popover-foreground: #e4e4e4;
   --primary: #38bdf8;
-  --primary-foreground: #161616;
-  --secondary: #232323;
+  --primary-foreground: #000000;
+  --secondary: #0d0d0d;
   --secondary-foreground: #e4e4e4;
-  --muted: #232323;
+  --muted: #0d0d0d;
   --muted-foreground: #a1a1a1;
   /* One step above `--secondary`, which is what the rail and the title row sit
      on - so the rail's hover is visible against its own ground. It used to be
      phrased against `--card`, which is where that chrome used to be; the
      relationship is the same one and the ground under it moved. */
-  --accent: #2b2b2b;
+  --accent: #151515;
   --accent-foreground: #e4e4e4;
   --destructive: #fb7185;
-  --destructive-foreground: #161616;
-  --border: #343434;
-  --input: #343434;
+  --destructive-foreground: #000000;
+  --border: #262626;
+  --input: #262626;
   --ring: #7dd3fc;
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.

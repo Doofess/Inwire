@@ -106,7 +106,7 @@ const PALETTES: Record<string, ThemePalette> = {
       cyan: '#22d3ee', blue: '#818cf8', violet: '#c084fc', magenta: '#e879f9',
       neutral: '#a1a1a1',
     },
-    surface: { background: '#161616', card: '#1a1a1a', foreground: '#e4e4e4', border: '#343434' },
+    surface: { background: '#000000', card: '#040404', foreground: '#e4e4e4', border: '#262626' },
   },
 };
 
