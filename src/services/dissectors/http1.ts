@@ -201,7 +201,10 @@ function appendBody(direction: Http1Direction, piece: Uint8Array): void {
   if (direction.body.length >= MAX_BODY_PIECES) { direction.bodyTruncated = 'pieces'; return; }
 
   const perMessage = MAX_BODY_BYTES - direction.bodyLength;
-  const shared = dissectEnv().sharedBodyRoom();
+  // Asked for no more than one message may hold: past that the answer changes
+  // nothing here, and asking for less keeps it independent of how many other
+  // connections are collecting (`DissectEnv.sharedBodyRoom`).
+  const shared = dissectEnv().sharedBodyRoom(MAX_BODY_BYTES);
   const room = Math.min(perMessage, shared);
   if (room <= 0) {
     direction.bodyTruncated = perMessage <= 0 ? 'message' : 'total';

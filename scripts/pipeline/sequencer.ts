@@ -36,12 +36,13 @@ import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
 import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
 import { FrameClock, MAX_TCP_CONNECTIONS, Sequencer, tcpConnectionKey } from '../../src/services/dissect/sequencer';
-import { frameLane } from '../../src/services/dissect/frameLane';
+import { frameLane, isTcpFragment, type TcpFragmentLane } from '../../src/services/dissect/frameLane';
 import type { FrameSources } from '../../src/services/dissect/frameRecord';
 import type { Packet } from '../../src/types/packet';
 import { FIXTURES } from './arrival';
 import { digestCapture, type Trackers } from './frameDigest';
 import { EVICTION_CONNECTIONS, evictionCapture } from './evictionCapture';
+import { fragmentCapture } from './fragmentCapture';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -103,6 +104,7 @@ function spying(log: Call[]): (sources: FrameSources) => FrameSources {
 /** What a frame on the TCP lane must have asked, and nothing else; null when it did. */
 function disagreement(calls: Call[], packet: Packet, bytes: Uint8Array, linktype: number): string | null {
   const lane = frameLane(bytes, linktype);
+  if (isTcpFragment(lane)) return fragmentDisagreement(calls, packet, lane);
   if (lane.lane !== 'tcp') return null;
   const l3 = calls.filter((c) => c.group === 'l3');
   const want = [
@@ -119,6 +121,23 @@ function disagreement(calls: Call[], packet: Packet, bytes: Uint8Array, linktype
     if (key !== lane.key) return `frame ${packet.id}: ${c.method} on ${key}, read ${lane.key}`;
   }
   return null;
+}
+
+/**
+ * A fragment of a TCP datagram is numbered in two halves (ADR 0053 phase 3):
+ * its MAC and address pairs from its headers, like any segment, and the TCP
+ * order only by the dissection that reassembles it - which must then touch one
+ * connection and no other.
+ */
+function fragmentDisagreement(calls: Call[], packet: Packet, lane: TcpFragmentLane): string | null {
+  const l3 = calls.filter((c) => c.group === 'l3').map((c) => `${c.method} ${c.args[0]} ${c.args[1]}`);
+  const want = [`ethStream ${lane.srcMac} ${lane.dstMac}`, `${lane.family === 'ip' ? 'ipStream' : 'ipv6Stream'} ${lane.src} ${lane.dst}`];
+  if (l3.join('|') !== want.join('|')) return `fragment ${packet.id}: L3 numbering ${JSON.stringify(l3)}, read ${JSON.stringify(want)}`;
+  const keys = new Set(calls.filter((c) => c.group === 'tcp' && TUPLE_CALLS.has(c.method)).map((c) => {
+    const [srcIp, srcPort, dstIp, dstPort] = c.args as [string, number, string, number];
+    return tcpConnectionKey(srcIp, srcPort, dstIp, dstPort).key;
+  }));
+  return keys.size > 1 ? `fragment ${packet.id}: looked up ${[...keys].join(' and ')}` : null;
 }
 
 async function headerParse(name: string, path: string): Promise<void> {
@@ -231,8 +250,21 @@ function clock(): void {
     && c.liveStartUs === 1_000_000);
 }
 
+/** TCP in IP fragments, which none of the fixtures holds (`fragmentCapture.ts`). */
+async function fragments(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-fragments-'));
+  try {
+    const path = join(dir, 'fragments.pcap');
+    writeFileSync(path, fragmentCapture());
+    await headerParse('fragments', path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   for (const { name, path } of captures) await headerParse(name, path);
+  await fragments();
   for (const { name, path } of captures) await sharedAgrees(name, path);
   await eviction();
   clock();

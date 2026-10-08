@@ -1,0 +1,225 @@
+/**
+ * A TCP shard: one core's share of the capture's TCP connections, dissected in
+ * frame order with trackers of its own (ADR 0053 phase 3).
+ *
+ * Everything numbered across connections arrives with each frame, already
+ * decided by the coordinator, and is handed to these trackers through
+ * `ShardSequencer` - so the dissector code is the single Worker's, unchanged,
+ * and a frame's row, record and tree are what one core would have built.
+ * `scripts/pipeline/parallel.ts` holds that, frame for frame.
+ *
+ * Plain TypeScript with no Worker API in it: the nested Worker
+ * (`workers/pipeline.worker.ts`, in its shard role) is a thin adapter, and the
+ * equality test drives this class directly.
+ *
+ * **The trees stay here.** A tree is ten times a frame's row, so the cache a
+ * click on a recent frame is answered from is kept by the shard that built it,
+ * and the coordinator asks for one tree when one is wanted (`detail`).
+ */
+import { TcpStreamTracker } from '../tcpStreamTracker';
+import { IcmpEchoTracker } from '../icmpEchoTracker';
+import { QuicFlowTracker } from '../quicFlowTracker';
+import { DnsTracker } from '../dnsTracker';
+import { L3Tracker } from '../l3Tracker';
+import { LIVE_ENV, MAX_TOTAL_BODY_BYTES, type DissectEnv } from '../dissect/dissectEnv';
+import { ShardSequencer, settleTreeTls } from '../dissect/shardNumbering';
+import { applyInfoPatch } from '../dissect/infoPatch';
+import { keyLog } from '../tls/keyLog';
+import { FrameDissector } from './frameDissector';
+import { FifoMap } from './fifoMap';
+import {
+  OP_FORGET, OP_FRAGMENT, OP_TCP, readOps,
+  type FromShard, type ShardInterface, type ShardResult, type ToShard, type WireFrame,
+} from './shardProtocol';
+import type { Packet, ProtocolLayer } from '../../types/packet';
+
+export interface ShardOptions {
+  /** How many shards share the capture: HTTP/1's body budget is split between them. */
+  shards: number;
+  /** Trees kept for the detail pane. */
+  cacheFrames: number;
+  /** The environment arrival reads; the live one when absent. */
+  env?: DissectEnv;
+  /** Send each frame's tree back with its row - the equality test only. */
+  withTrees?: boolean;
+}
+
+/**
+ * HTTP/1's shared body budget, split between the shards. ADR 0053 accepts it:
+ * the budget only binds when more than 32 MB of bodies are being collected at
+ * once, and each shard's share is recorded with its frames like the whole one
+ * was, so a revisit agrees with arrival.
+ */
+export function shardEnv(base: DissectEnv, shards: number): DissectEnv {
+  if (shards <= 1) return base;
+  const withheld = MAX_TOTAL_BODY_BYTES - Math.floor(MAX_TOTAL_BODY_BYTES / shards);
+  return {
+    ...base,
+    sharedBodyRoom: (atMost) => Math.min(atMost, base.sharedBodyRoom(MAX_TOTAL_BODY_BYTES) - withheld),
+  };
+}
+
+export class Shard {
+  private sequencer = new ShardSequencer();
+  private dissector: FrameDissector;
+  private epoch = 0;
+  private readonly trees: FifoMap<ProtocolLayer[]>;
+  private interfaces = new Map<number, ShardInterface>();
+  private readonly env: DissectEnv;
+
+  constructor(
+    private readonly post: (message: FromShard, transfer: Transferable[]) => void,
+    private readonly options: ShardOptions,
+  ) {
+    this.env = shardEnv(options.env ?? LIVE_ENV, options.shards);
+    this.trees = new FifoMap(Math.max(1, options.cacheFrames));
+    this.dissector = this.build();
+  }
+
+  private build(): FrameDissector {
+    const sequencer = this.sequencer;
+    return new FrameDissector({
+      tcp: new TcpStreamTracker(sequencer),
+      icmp: new IcmpEchoTracker(),
+      quic: new QuicFlowTracker(),
+      dns: new DnsTracker(),
+      l3: new L3Tracker(sequencer),
+    }, this.env, sequencer.tcp.tls);
+  }
+
+  handle(message: ToShard): void {
+    switch (message.type) {
+      case 'init':
+        return;
+      case 'batch':
+        if (message.epoch !== this.epoch) {
+          // Work for a capture since cleared: answered, so the coordinator's
+          // count of what is in flight still comes back to zero.
+          this.post({ type: 'results', epoch: message.epoch, results: [] }, []);
+          return;
+        }
+        this.batch(message);
+        return;
+      case 'reset': {
+        this.epoch = message.epoch;
+        this.sequencer = new ShardSequencer();
+        const host = this.dissector.host;
+        this.dissector = this.build();
+        this.dissector.host = host;
+        this.trees.clear();
+        return;
+      }
+      case 'host':
+        this.dissector.host = {
+          macs: new Set(message.macs), addresses: new Set(message.addresses),
+          inferred: message.inferred, confidence: message.confidence, basis: message.basis,
+        };
+        return;
+      case 'interfaces':
+        this.interfaces = new Map(message.interfaces);
+        return;
+      case 'keylog':
+        keyLog.add(message.text);
+        return;
+      case 'keylogClear':
+        keyLog.clear();
+        // A cached tree can hold what the key log opened.
+        this.trees.clear();
+        return;
+      case 'detail': {
+        const tree = this.trees.get(message.id) ?? null;
+        if (tree !== null) settleTreeTls(tree, (p) => this.sequencer.tcp.tls.resolve(p));
+        this.post({ type: 'detail', requestId: message.requestId, layers: tree }, []);
+        return;
+      }
+    }
+  }
+
+  private batch(message: Extract<ToShard, { type: 'batch' }>): void {
+    const tls = this.sequencer.tcp.tls;
+    for (const [placeholder, real] of message.settle ?? []) tls.settle(placeholder, real);
+    for (const [id, rows] of message.rows ?? []) {
+      const frame = this.trees.get(id)?.find((layer) => layer.name === 'Frame');
+      if (frame) frame.fields.push(...rows);
+    }
+    for (const patch of message.patches ?? []) this.patchTree(patch);
+
+    const results: ShardResult[] = [];
+    const transfer = new Set<ArrayBuffer>();
+    for (const op of message.ops === null ? [] : readOps(message.ops)) {
+      if (op.kind === OP_FORGET) {
+        this.sequencer.tcp.drop(op.key!);
+        this.dissector.trackers.tcp.forget(op.key!);
+        continue;
+      }
+      const conversations = this.sequencer.conversations;
+      conversations.eth.give(op.eth!.a, op.eth!.b, op.eth!.facts);
+      conversations[op.family!].give(op.ip!.a, op.ip!.b, op.ip!.facts);
+      if (op.kind === OP_TCP) this.sequencer.tcp.numbered(op.key!, op.streamId!);
+      else this.sequencer.tcp.fragment(op.hint!);
+      const result = this.dissect(op.frame!);
+      const report = this.sequencer.tcp.done();
+      if (op.kind === OP_FRAGMENT) result.barrier = report ?? { created: false, streamAsked: false };
+      conversations.clear();
+      results.push(result);
+      collect(result, transfer);
+    }
+    this.post({ type: 'results', epoch: this.epoch, results }, [...transfer]);
+  }
+
+  private dissect(frame: WireFrame): ShardResult {
+    const id = frame.id;
+    let result: ShardResult;
+    try {
+      const d = this.dissector.dissect({
+        id, bytes: frame.bytes, tsUs: frame.tsUs, relativeTime: frame.relativeTime, timeDelta: frame.timeDelta,
+        origLen: frame.origLen, linktype: frame.linktype,
+        iface: frame.iface === undefined ? undefined : this.interfaces.get(frame.iface),
+        facts: frame.facts,
+      });
+      const packet = d.packet;
+      const layers = packet.layers;
+      result = {
+        id, packet, record: d.record, derived: d.derived,
+        ...(d.deferredAt.length > 0 ? { deferredAt: d.deferredAt } : {}),
+        ...(d.icmpMatchedRequestFrameId !== undefined ? { icmpMatchedRequestFrameId: d.icmpMatchedRequestFrameId } : {}),
+        ...(d.infoPatches ? { infoPatches: d.infoPatches } : {}),
+        ...(this.options.withTrees ? { layers: structuredClone(layers) } : {}),
+      };
+      this.cache(id, layers);
+      packet.layers = [];
+      // A tree still cached here gains the links this frame wrote, as the
+      // single Worker's cache does.
+      for (const patch of d.infoPatches ?? []) this.patchTree(patch);
+    } catch (err) {
+      result = { id, error: `failed to dissect a captured frame: ${String(err)}` };
+    }
+    const tls = this.dissector.takeTls();
+    if (tls.length > 0) result.tls = tls;
+    return result;
+  }
+
+  private patchTree(patch: { frameId: number; links?: Record<string, number>; responseInFrame?: number }): void {
+    const cached = this.trees.get(patch.frameId);
+    if (cached !== undefined && (patch.links !== undefined || patch.responseInFrame !== undefined)) {
+      applyInfoPatch({ layers: cached, info: '', fields: {} } as unknown as Packet, { ...patch, suffix: undefined });
+    }
+  }
+
+  private cache(id: number, layers: ProtocolLayer[]): void {
+    this.trees.set(id, layers);
+  }
+}
+
+/** A result's buffers, for the transfer list: never one twice, never a view into a bigger one. */
+export function collect(
+  result: { packet?: Packet; record?: Uint8Array; derived?: Uint8Array | null },
+  transfer: Set<ArrayBuffer>,
+): void {
+  for (const bytes of [result.packet?.rawBytes, result.record, result.derived]) {
+    if (!bytes || bytes.byteLength === 0) continue;
+    const buffer = bytes.buffer as ArrayBuffer;
+    if (bytes.byteOffset !== 0 || bytes.byteLength !== buffer.byteLength) continue;
+    transfer.add(buffer);
+  }
+}

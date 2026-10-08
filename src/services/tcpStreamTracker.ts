@@ -27,7 +27,8 @@ import { analyzeTcpSegment, freshConnection, type TcpAnalysis, type TcpConnectio
 import type { TlsDecryptionKeys } from './tls/decrypt';
 import type { AppDirection } from './dissectors/appStream';
 import { releaseHttp1Body } from './dissectors/http1';
-import { Sequencer, tcpConnectionKey, type TcpOrder } from './dissect/sequencer';
+import { LIVE_ENV, withDissectEnv } from './dissect/dissectEnv';
+import { Sequencer, tcpConnectionKey, type TcpOrderApi } from './dissect/sequencer';
 import { freshLdapConversation, type LdapConversationState } from './dissectors/ldap';
 import { freshSmb2Conversation, type Smb2ConversationState } from './dissectors/smb2';
 import { freshSshConversation, type SshConversationState } from './dissectors/ssh';
@@ -254,14 +255,6 @@ interface TcpDirection {
 interface TcpConnection {
   /** Assigned by `getStreamId` in order of first appearance, not on creation. */
   streamId?: number;
-  /**
-   * `tls.stream`, assigned the first time this connection produces a TLS
-   * record - which is why it is not `streamId`. The reference numbers TLS
-   * conversations in their own sequence: on this repo's fixture `tcp.stream`
-   * 1, 2, 3 carry `tls.stream` 0, 1, 2, because the connections in between
-   * never spoke TLS.
-   */
-  tlsStreamId?: number;
   /** Frames seen on this connection, which is `recordStreamPacket`'s answer. */
   packets: number;
   /**
@@ -373,9 +366,9 @@ export class TcpStreamTracker {
   private connections = new Map<string, TcpConnection>();
   /** The same records by stream index, for the callers that hold only that. */
   private byStreamId = new Map<number, TcpConnection>();
-  private readonly order: TcpOrder;
+  private readonly order: TcpOrderApi;
 
-  constructor(sequencer: Pick<Sequencer, 'tcp'> = new Sequencer()) {
+  constructor(sequencer: { tcp: TcpOrderApi } = new Sequencer()) {
     this.order = sequencer.tcp;
   }
   /**
@@ -474,9 +467,10 @@ export class TcpStreamTracker {
 
   /**
    * Drops a connection the order forgot to stay inside the cap
-   * (`TcpOrder.locate`, which decides which one).
+   * (`TcpOrder.locate`, which decides which one) - from inside a lookup, or,
+   * on a shard, because the coordinator's order forgot it (ADR 0053).
    */
-  private forget(key: string): void {
+  public forget(key: string): void {
     const conn = this.connections.get(key);
     this.connections.delete(key);
     // A half-collected HTTP body's bytes are charged against a budget
@@ -488,8 +482,20 @@ export class TcpStreamTracker {
     // `dissectors/http1.ts`.
     // Both the TLS-decrypted and the cleartext HTTP paths hang their
     // `AppDirection` off `tls`, which is why one lookup covers both.
-    if (conn?.tls?.appClient !== undefined) releaseHttp1Body(conn.tls.appClient.http1);
-    if (conn?.tls?.appServer !== undefined) releaseHttp1Body(conn.tls.appServer.http1);
+    //
+    // Given back to the live budget directly, not through the environment the
+    // frame being dissected reads: an eviction is a side effect of a lookup,
+    // not an answer that frame asked for, and recorded into its record it sat
+    // between two answers a revisit does ask for - so every frame that pushed
+    // out a connection with HTTP state missed when rebuilt. It is also what
+    // keeps that frame's record the same when the connection lived on another
+    // core and was forgotten there (ADR 0053).
+    if (conn?.tls?.appClient !== undefined || conn?.tls?.appServer !== undefined) {
+      withDissectEnv(LIVE_ENV, () => {
+        if (conn.tls?.appClient !== undefined) releaseHttp1Body(conn.tls.appClient.http1);
+        if (conn.tls?.appServer !== undefined) releaseHttp1Body(conn.tls.appServer.http1);
+      });
+    }
     // The stream index goes with it, or `byStreamId` becomes the leak this
     // eviction exists to stop. Indexes are never reused - the order only
     // ever counts up - so nothing can collide with the one just freed.
@@ -684,12 +690,19 @@ export class TcpStreamTracker {
   /**
    * `tls.stream`: this connection's place in the sequence of TLS conversations,
    * assigned on first use like `getStreamId` and for the same reason - a
-   * connection that never speaks TLS must not consume a number.
+   * connection that never speaks TLS must not consume a number. The reference
+   * numbers TLS conversations in their own sequence: on this repo's fixture
+   * `tcp.stream` 1, 2, 3 carry `tls.stream` 0, 1, 2, because the connections in
+   * between never spoke TLS.
+   *
+   * Asked of the order on every call rather than cached on the connection: the
+   * order keeps it per connection already, and when connections are dissected
+   * on several cores its first answer is a placeholder that a later one
+   * replaces (`DeferredTlsNumbers`, ADR 0053).
    */
   public getTlsStreamId(srcIp: string, srcPort: number, dstIp: string, dstPort: number): number {
-    const { conn, key } = this.locate(srcIp, srcPort, dstIp, dstPort);
-    conn.tlsStreamId ??= this.order.tlsStreamId(key);
-    return conn.tlsStreamId;
+    const { key } = this.locate(srcIp, srcPort, dstIp, dstPort);
+    return this.order.tlsStreamId(key);
   }
 
   /** As `seedNextStreamId`, for the TLS sequence. See `L3Tracker.seedNextIndices`. */

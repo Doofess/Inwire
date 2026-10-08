@@ -286,7 +286,11 @@ export default function App() {
   // `performance.now()` in this scope and gets a confusing type error.
   const [perf] = usePreferenceStore(performanceStore);
   usePreferenceSync(performanceStore.key, performanceStore.normalize, performanceStore.accept);
-  const { packetBufferBytes: bufferSetting, dashboardRefreshMs } = perf;
+  const { packetBufferBytes: bufferSetting, dashboardRefreshMs, dissectionThreads } = perf;
+  // The Worker holds it until the next capture starts (ADR 0053 phase 3).
+  useEffect(() => {
+    pipeline.setThreads(dissectionThreads);
+  }, [dissectionThreads]);
   /**
    * The setting resolved to a number of bytes.
    *

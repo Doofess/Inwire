@@ -55,6 +55,13 @@ import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
+import { Coordinator, WatchedTcpOrder, type Merged } from '../services/pipeline/coordinator';
+import { shardEnv } from '../services/pipeline/shard';
+import type { FromShard, ToShard } from '../services/pipeline/shardProtocol';
+import { LIVE_ENV } from '../services/dissect/dissectEnv';
+import { settleTreeTls } from '../services/dissect/shardNumbering';
+import { shardsFor, type DissectionThreads } from '../services/pipeline/threads';
+import { isShardRole, runShard, SHARD_NAME } from './shardRole';
 
 /** Matches the main thread's old flush cadence, which the packet list is tuned to. */
 const FLUSH_MS = 100;
@@ -242,7 +249,212 @@ function cacheTree(id: number, layers: ProtocolLayer[]) {
   }
 }
 
+// --- dissection on several cores (ADR 0053 phase 3) -------------------------
+
+/**
+ * The setting, and the shards it was last applied as. Applied when a capture
+ * is cleared - which is how a fresh one begins - so a capture is never split
+ * between two arrangements.
+ */
+let threadsWanted: DissectionThreads = 1;
+/**
+ * The coordinator and its shard Workers, or null for the single Worker - in
+ * which case everything below this block is exactly what it always was.
+ */
+let parallel: {
+  coordinator: Coordinator;
+  workers: Worker[];
+} | null = null;
+/** Every key log text loaded, for a shard started after it arrived. */
+const keyLogTexts: string[] = [];
+/** Detail requests a shard is answering, by request id. */
+const shardDetails = new Map<number, (layers: ProtocolLayer[] | null) => void>();
+let nextShardDetail = 1;
+/** Frames in flight past which the flush stops handing the coordinator more. */
+const PARALLEL_BACKLOG = 32_768;
+/** Trees each shard keeps for the detail pane: lane 0 keeps its own `DETAIL_CACHE_FRAMES`. */
+const SHARD_CACHE_FRAMES = 2_000;
+
+/** Lane 0's trackers for a new capture, numbering through a watched TCP order. */
+function laneZero(): { trackers: { tcp: TcpStreamTracker; icmp: IcmpEchoTracker; quic: QuicFlowTracker; dns: DnsTracker; l3: L3Tracker }; sequencer: Sequencer } {
+  const fresh = new Sequencer(new WatchedTcpOrder());
+  return {
+    sequencer: fresh,
+    trackers: {
+      tcp: new TcpStreamTracker(fresh), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(),
+      dns: new DnsTracker(), l3: new L3Tracker(fresh),
+    },
+  };
+}
+
+function hostMessage(): ToShard {
+  return {
+    type: 'host', macs: [...host.macs], addresses: [...host.addresses],
+    inferred: host.inferred, confidence: host.confidence, basis: host.basis,
+  };
+}
+
+function interfacesMessage(): ToShard {
+  return { type: 'interfaces', interfaces: [...interfaceById.entries()] };
+}
+
+function stopParallel(): void {
+  if (parallel === null) return;
+  for (const worker of parallel.workers) worker.terminate();
+  for (const answer of shardDetails.values()) answer(null);
+  shardDetails.clear();
+  parallel = null;
+}
+
+/** The shards the setting asks for, started - or none, and the single Worker. */
+function startParallel(shards: number): void {
+  stopParallel();
+  if (shards < 1) return;
+  const workers: Worker[] = [];
+  const lane = laneZero();
+  const coordinator = new Coordinator({
+    shards,
+    route: 'connection',
+    trackers: lane.trackers,
+    sequencer: lane.sequencer,
+    env: shardEnv(LIVE_ENV, shards),
+    ifaceOf: (iface) => (iface === undefined ? undefined : interfaceFor(iface)),
+    send: (shard, message, transfer) => workers[shard]?.postMessage(message, transfer),
+    emit: (merged) => emitMerged(merged),
+  });
+  coordinator.lane0.host = host;
+  for (let s = 0; s < shards; s++) {
+    // The same script, in its shard role (`shardRole.ts`).
+    const worker = new Worker(self.location.href, { type: 'module', name: `${SHARD_NAME}${s}` });
+    worker.onmessage = (event: MessageEvent<FromShard>) => receiveFromShard(s, event.data);
+    worker.onerror = (event) => {
+      event.preventDefault();
+      shardDown(s, event.message || 'it stopped');
+    };
+    worker.postMessage({ type: 'init', shards, cacheFrames: SHARD_CACHE_FRAMES } satisfies ToShard);
+    workers.push(worker);
+  }
+  parallel = { coordinator, workers };
+  coordinator.broadcast(hostMessage());
+  coordinator.broadcast(interfacesMessage());
+  for (const text of keyLogTexts) coordinator.broadcast({ type: 'keylog', text });
+}
+
+function shardDown(shard: number, reason: string): void {
+  post({ type: 'failure', message: `dissection shard ${shard + 1} stopped: ${reason}` });
+  parallel?.coordinator.shardFailed(shard, reason);
+  afterMerge();
+}
+
+function receiveFromShard(shard: number, message: FromShard): void {
+  if (parallel === null) return;
+  switch (message.type) {
+    case 'results':
+      parallel.coordinator.receive(shard, message);
+      afterMerge();
+      return;
+    case 'detail': {
+      const answer = shardDetails.get(message.requestId);
+      shardDetails.delete(message.requestId);
+      answer?.(message.layers);
+      return;
+    }
+    case 'failure':
+      shardDown(shard, message.message);
+      return;
+  }
+}
+
+/** A recent frame's tree from the shard that dissected it, or null when it has gone. */
+function treeFromShard(shard: number, id: number): Promise<ProtocolLayer[] | null> {
+  const current = parallel;
+  if (current === null) return Promise.resolve(null);
+  const requestId = nextShardDetail++;
+  return new Promise((resolve) => {
+    shardDetails.set(requestId, resolve);
+    // What the merge owes the shard - rows, links - first, so the tree is whole.
+    current.coordinator.flushSide(shard);
+    current.workers[shard].postMessage({ type: 'detail', requestId, id } satisfies ToShard);
+  });
+}
+
+/**
+ * One frame merged back into order - what `ingest` does after its dissection,
+ * for a frame any lane dissected. The rows the process, a live gap and a
+ * fingerprint add go to the Frame layer of whichever tree the frame has: here
+ * for lane 0, on the shard for the others.
+ */
+function emitMerged(merged: Merged): void {
+  const frame = merged.meta as LiveFrame;
+  flow.frameDone(frame.batch);
+  if (merged.error !== undefined || merged.packet === undefined) {
+    post({ type: 'failure', message: merged.error ?? 'failed to dissect a captured frame' });
+    return;
+  }
+  const id = merged.id;
+  const packet = merged.packet;
+  const precision = tsPrecisionById.get(frame.iface) ?? 6;
+  packet.tsPrecision = precision;
+  if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.tsNsRem);
+  if (merged.record !== undefined) pendingRecords.push({ id, record: merged.record });
+  if (merged.derived) derivedStore.set(id, merged.derived);
+
+  const tree = merged.lane === 0 ? packet.layers : null;
+  const stub: ProtocolLayer = { name: 'Frame', summary: '', fields: [] };
+  packet.layers = tree ?? [stub];
+  annotatePacket(packet, flowAnnotations);
+  if (frame.holeBefore !== undefined) markLiveGap(packet, frame.holeBefore);
+  learnOrLabelFingerprint(packet.fields, clientFingerprints, packet.layers);
+  networkFacts.observe(packet, host);
+  if (tree !== null) cacheTree(id, tree);
+  else parallel?.coordinator.frameRows(merged.lane, id, stub.fields);
+  packet.layers = [];
+
+  pendingPackets.push(packet);
+  if (merged.icmpMatchedRequestFrameId !== undefined) {
+    pendingIcmpReplies.push({ requestFrameId: merged.icmpMatchedRequestFrameId, replyId: id });
+  }
+  if (merged.infoPatches) {
+    pendingInfoPatches.push(...merged.infoPatches);
+    parallel?.coordinator.routePatches(merged.lane, merged.infoPatches, (patch) => {
+      const cached = treeCache.get(patch.frameId);
+      if (cached !== undefined) {
+        applyInfoPatch({ layers: cached, info: '', fields: {} } as unknown as Packet, { ...patch, suffix: undefined });
+      }
+    });
+  }
+}
+
+/** After the coordinator merged something: post it, and let the flush take more. */
+function afterMerge(): void {
+  postFlushed();
+  if (released.length > releasedFrom && !flushSoon && !flow.storeBehind
+    && parallel !== null && parallel.coordinator.backlog < PARALLEL_BACKLOG / 2) {
+    flushSoon = true;
+    setTimeout(flush, 0);
+  }
+}
+
+/** The clock frames are numbered by: the coordinator's when there is one. */
+function frameClock(): Sequencer['clock'] {
+  return parallel !== null ? parallel.coordinator.clock : sequencer.clock;
+}
+
+/** The last reset's arguments, for a setting applied before anything followed it. */
+let resetAt: { startId: number; startUs: number | null; lastUs: number | null } = { startId: 1, startUs: null, lastUs: null };
+
+/** The shards the setting asks for, started if they are not the ones running. True when it changed anything. */
+function applyThreads(): boolean {
+  const shards = shardsFor(threadsWanted, navigator.hardwareConcurrency ?? 1);
+  if (shards === (parallel?.workers.length ?? 0)) return false;
+  startParallel(shards);
+  return true;
+}
+
 function resetPipeline(startId: number, startUs?: number | null, lastUs?: number | null) {
+  resetAt = { startId, startUs: startUs ?? null, lastUs: lastUs ?? null };
+  // The setting is applied here, between captures.
+  if (!applyThreads() && parallel !== null) parallel.coordinator.reset(laneZero());
   ordering.clear();
   // Cleared frames will never be dissected, so main is told it is owed
   // nothing for them; the next flush sends the ids.
@@ -271,7 +483,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   capturedSinceReset = false;
   pendingRecords = [];
   // A restored session hands back the capture it is continuing (`resumeLive`).
-  sequencer.clock.resumeLive(startUs ?? null, lastUs ?? null);
+  frameClock().resumeLive(startUs ?? null, lastUs ?? null);
   arrivalSeq = 0;
   nextId = startId;
 }
@@ -560,6 +772,9 @@ function flush(): void {
   if (!capturing) take = released.length - releasedFrom;
   else if (!flow.storeBehind) {
     take = Math.min(released.length - releasedFrom, Math.max(256, Math.floor((SLICE_MS * 1000) / usPerFrame)));
+    // With shards, what is in flight on them is the queue to bound: past it
+    // frames wait here, and each answer that brings it down asks for a flush.
+    if (parallel !== null) take = Math.max(0, Math.min(take, PARALLEL_BACKLOG - parallel.coordinator.backlog));
   }
   const ready = released.slice(releasedFrom, releasedFrom + take);
   releasedFrom += take;
@@ -572,7 +787,8 @@ function flush(): void {
   }
   // More waiting and the store not in the way: straight back for it, after
   // whatever messages queued behind this slice.
-  if (releasedFrom < released.length && !flow.storeBehind && !flushSoon) {
+  // With shards full, it is their answers that come back for it (`afterMerge`).
+  if (releasedFrom < released.length && !flow.storeBehind && !flushSoon && !(parallel !== null && take === 0)) {
     flushSoon = true;
     setTimeout(flush, 0);
   }
@@ -613,14 +829,41 @@ function flush(): void {
   }
 
   const sliceStart = performance.now();
-  for (const { frame, id } of assigned) {
-    ingest(frame, id);
-    flow.frameDone(frame.batch);
+  if (parallel !== null) {
+    // On several cores (ADR 0053 phase 3): numbered here in frame order, then
+    // TCP to the shards and the rest dissected on this thread. Every frame
+    // comes back through `emitMerged`, in order - this flush's lane-0 frames
+    // before this returns, the shards' as they answer.
+    const clock = parallel.coordinator.clock;
+    parallel.coordinator.dispatch(assigned.map(({ frame, id }) => {
+      const { relativeTime, timeDelta } = clock.fromLive(frame.tsUs, frame.tsNsRem);
+      const precision = tsPrecisionById.get(frame.iface) ?? 6;
+      return {
+        id, bytes: frame.bytes, tsUs: frame.tsUs, relativeTime, timeDelta, origLen: frame.origLen,
+        linktype: linkTypeFor(frame.iface), iface: frame.iface,
+        facts: { nanosRemainder: precision > 6 ? frame.tsNsRem : undefined },
+        meta: frame,
+      };
+    }));
+  } else {
+    for (const { frame, id } of assigned) {
+      ingest(frame, id);
+      flow.frameDone(frame.batch);
+    }
   }
   if (assigned.length >= 64) {
     const measured = ((performance.now() - sliceStart) * 1000) / assigned.length;
     usPerFrame = usPerFrame * 0.7 + measured * 0.3;
   }
+  postFlushed();
+}
+
+/**
+ * Everything dissected since the last call, posted: main's credit, the
+ * records to the store, the rows to the app. The end of every flush, and -
+ * with shards - of every answer from one.
+ */
+function postFlushed(): void {
   // Main's credit for every batch whose last frame is now dissected.
   const drained = flow.takeCompleted();
   if (drained.length > 0) tellAgent({ type: 'drained', batches: drained });
@@ -698,7 +941,7 @@ function flush(): void {
   post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount }, transfer);
 }
 
-setInterval(flush, FLUSH_MS);
+// Started at the bottom of this file, in the pipeline role only.
 
 // --- the agent link ----------------------------------------------------------
 //
@@ -853,7 +1096,7 @@ function receiveControl(text: string): void {
     pendingPackets.push(buildFallbackPacket({
       id: nextId++,
       tsUs,
-      relativeTime: sequencer.clock.liveStartUs === null ? 0 : (tsUs - sequencer.clock.liveStartUs) / 1_000_000,
+      relativeTime: frameClock().liveStartUs === null ? 0 : (tsUs - frameClock().liveStartUs!) / 1_000_000,
       timeDelta: 0,
       length: Number(raw.length) || 0,
       source: String(raw.source ?? ''),
@@ -875,7 +1118,7 @@ function base64Bytes(text: string): Uint8Array {
 
 // --- commands from the main thread -------------------------------------------
 
-ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
+function handleCommand(event: MessageEvent<ToPipeline>): void {
   const command = event.data;
   switch (command.type) {
     case 'agentPort': {
@@ -962,12 +1205,38 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       // the app has the last rows in hand when it seals the capture.
       capturing = false;
       flush();
-      post({ type: 'drained', requestId: command.requestId });
+      if (parallel === null) {
+        post({ type: 'drained', requestId: command.requestId });
+        break;
+      }
+      // With shards, the last frames are still on them: the answer waits
+      // until every one has been merged and posted.
+      {
+        const requestId = command.requestId;
+        parallel.coordinator.whenIdle(() => {
+          postFlushed();
+          post({ type: 'drained', requestId });
+        });
+      }
+      break;
+
+    case 'threads':
+      // Applied at the next reset - the start of the next capture - so a
+      // capture is never dissected half one way and half the other. Or now,
+      // when nothing has been dissected since the last one: the setting
+      // arrives once at launch, before any capture.
+      threadsWanted = command.threads;
+      if (!capturedSinceReset && nextId === resetAt.startId && released.length === releasedFrom
+        && (parallel?.coordinator.backlog ?? 0) === 0) {
+        applyThreads();
+        frameClock().resumeLive(resetAt.startUs, resetAt.lastUs);
+      }
       break;
 
     case 'interfaces':
       interfaces = command.interfaces;
       rebuildInterfaceIndex();
+      parallel?.coordinator.broadcast(interfacesMessage());
       break;
 
     case 'host':
@@ -980,6 +1249,10 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
         macs: new Set(command.macs), addresses: new Set(command.addresses),
         inferred: command.inferred, confidence: command.confidence, basis: command.basis,
       };
+      if (parallel !== null) {
+        parallel.coordinator.lane0.host = host;
+        parallel.coordinator.broadcast(hostMessage());
+      }
       break;
     case 'reset':
       resetPipeline(command.nextId, command.captureStartUs, command.lastPacketUs);
@@ -995,6 +1268,9 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
 
     case 'keylog':
       keyLog.add(command.text);
+      // Every shard holds the key log too, and one started later is given it whole.
+      keyLogTexts.push(command.text);
+      parallel?.coordinator.broadcast({ type: 'keylog', text: command.text });
       // A rebuilt tree read the key log as it was; with more keys, the same
       // frame may now decrypt. Arrival's cache stays, as ADR 0045 records.
       revisitedTrees.clear();
@@ -1003,6 +1279,9 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
     case 'keylog-clear':
       // `clear` also flushes the derived AES schedules; see its comment.
       keyLog.clear();
+      keyLogTexts.length = 0;
+      // A shard's cached trees are a fourth place, cleared with its key log.
+      parallel?.coordinator.broadcast({ type: 'keylogClear' });
       // And the cached trees, which are the other place a decrypted payload
       // lives: without this a recent frame would keep showing plaintext after
       // the panel said the secrets were gone. The decrypted answers kept for
@@ -1023,15 +1302,20 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
     case 'detail': {
       const layers = treeCache.get(command.id) ?? revisitedTrees.get(command.id);
       if (layers) {
+        // Lane 0's tree, its `tls.stream` placeholders numbered by now.
+        if (parallel !== null) settleTreeTls(layers, (p) => parallel!.coordinator.resolveLaneZero(p));
         post({ type: 'detail', id: command.id, layers });
         break;
       }
       // Not dissected recently: rebuilt from the frame's record, which the
       // store holds for every frame of the capture (ADR 0049). Only a frame
       // with no record - a capture older than records, a frame that failed to
-      // dissect - falls back to replaying its conversation.
+      // dissect - falls back to replaying its conversation. A frame a shard
+      // dissected recently is asked of the shard first, which still has it.
       const id = command.id;
-      void revisitFromStore(id).then((rebuilt) => {
+      const shard = parallel?.coordinator.treeShard(id) ?? null;
+      const fromShard = shard === null ? Promise.resolve(null) : treeFromShard(shard, id);
+      void fromShard.then((cached) => cached ?? revisitFromStore(id)).then((rebuilt) => {
         if (rebuilt !== null) post({ type: 'detail', id, layers: rebuilt });
         else post({ type: 'needReplay', id });
       });
@@ -1060,4 +1344,17 @@ ctx.onmessage = (event: MessageEvent<ToPipeline>) => {
       break;
     }
   }
-};
+}
+
+// --- start ---------------------------------------------------------------------
+//
+// One script, two roles. The app starts it as the pipeline; the pipeline starts
+// it again, by its own URL, for each TCP shard it dissects on (ADR 0053 phase 3,
+// `shardRole.ts`) - and a shard must never run the pipeline's timer or answer
+// the app.
+if (isShardRole(ctx)) {
+  runShard(ctx);
+} else {
+  setInterval(flush, FLUSH_MS);
+  ctx.onmessage = handleCommand;
+}

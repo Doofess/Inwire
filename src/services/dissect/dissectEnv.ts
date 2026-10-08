@@ -33,8 +33,14 @@ export const MAX_TOTAL_BODY_BYTES = 32 * 1024 * 1024;
 export interface DissectEnv {
   /** The moment a certificate's validity is judged against. */
   now(): Date;
-  /** How many more HTTP/1 body bytes the shared budget will admit. */
-  sharedBodyRoom(): number;
+  /**
+   * How many more HTTP/1 body bytes the shared budget will admit, up to
+   * `atMost` - the most the caller could take, which is what makes the answer
+   * the same however many connections are collecting at once, until the
+   * budget actually binds. That is what lets a frame dissected on one of
+   * several cores (ADR 0053) record the answer one core would have.
+   */
+  sharedBodyRoom(atMost: number): number;
   /** `n` body bytes were kept. */
   takeBodyBytes(n: number): void;
   /** `n` body bytes were given back - finished, replaced or evicted. */
@@ -70,7 +76,7 @@ let liveBodyBytes = 0;
 /** The environment of a frame dissected as it arrives. */
 export const LIVE_ENV: DissectEnv = {
   now: () => new Date(),
-  sharedBodyRoom: () => MAX_TOTAL_BODY_BYTES - liveBodyBytes,
+  sharedBodyRoom: (atMost) => Math.min(atMost, MAX_TOTAL_BODY_BYTES - liveBodyBytes),
   takeBodyBytes: (n) => { liveBodyBytes += n; },
   releaseBodyBytes: (n) => {
     liveBodyBytes -= n;
