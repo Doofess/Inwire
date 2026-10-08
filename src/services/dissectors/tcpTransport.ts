@@ -769,6 +769,56 @@ export function dissectTcpTransport(
     ? `${expertTags.join(' ')} , ${infoParts.join(' ')}`
     : `${expertTags.map(t => t + ' ').join('')}${infoParts.join(' ')}`;
 
+  // The filter bag, built by assignment in the order its keys always had.
+  // It was one object literal of 21 conditional spreads - `...(x ? { k: v }
+  // : {})` - each allocating a throwaway object and copying through V8's
+  // generic path, on every TCP segment (scripts/perf/profile.ts).
+  const fields: Record<string, string | number> = {};
+  if (kerberosResult) Object.assign(fields, kerberosResult.fields);
+  if (bgpResult) Object.assign(fields, bgpResult.fields);
+  if (sshResult) Object.assign(fields, sshResult.fields);
+  if (rdpResult) Object.assign(fields, rdpResult.fields);
+  if (nbssResult) Object.assign(fields, nbssResult.fields);
+  if (dcerpcResult) Object.assign(fields, dcerpcResult.fields);
+  if (smb2Result) Object.assign(fields, smb2Result.fields);
+  if (ldapResult) Object.assign(fields, ldapResult.fields);
+  if (tlsResult) Object.assign(fields, tlsResult.fields);
+  if (httpResult) Object.assign(fields, httpResult.fields);
+  if (tcpDns) Object.assign(fields, tcpDns.fields);
+  fields['tcp.flags'] = flags;
+  fields['tcp.flags.syn'] = syn ? 1 : 0;
+  fields['tcp.flags.fin'] = fin ? 1 : 0;
+  fields['tcp.flags.reset'] = rst ? 1 : 0;
+  fields['tcp.flags.push'] = psh ? 1 : 0;
+  fields['tcp.flags.ack'] = ack ? 1 : 0;
+  fields['tcp.srcport'] = srcPort;
+  fields['tcp.dstport'] = dstPort;
+  fields['tcp.window_size'] = windowSize;
+  fields['tcp.len'] = payloadLength;
+  fields['tcp.seq'] = relSeq;
+  fields['tcp.seq_raw'] = seqNum;
+  fields['tcp.ack'] = relAck;
+  fields['tcp.ack_raw'] = ackNum;
+  fields['tcp.checksum'] = storedChecksum;
+  fields['tcp.checksum.status'] = checksum.status;
+  if (tcpOptions?.mss !== undefined) fields['tcp.options.mss_val'] = tcpOptions.mss;
+  if (tcpOptions?.windowScale !== undefined) fields['tcp.options.wscale.shift'] = tcpOptions.windowScale;
+  if (tcpOptions?.sackPermitted) fields['tcp.options.sack_perm'] = 1;
+  if (tcpOptions?.tsval !== undefined) fields['tcp.options.timestamp.tsval'] = tcpOptions.tsval;
+  if (analysis?.ackRttUs !== undefined) fields['tcp.analysis.ack_rtt'] = analysis.ackRttUs / 1e6;
+  if (analysis?.initialRttUs !== undefined) fields['tcp.analysis.initial_rtt'] = analysis.initialRttUs / 1e6;
+  if (analysis?.bytesInFlight !== undefined) fields['tcp.analysis.bytes_in_flight'] = analysis.bytesInFlight;
+  if (analysis?.ackOfFrame !== undefined && analysis.partialAck) fields['tcp.analysis.partial_ack'] = 1;
+  if (analysis?.ackOfFrame !== undefined && analysis.ambiguousAck) fields['tcp.analysis.ambiguous_ack'] = 1;
+  if (analysis?.dupAckNum !== undefined) {
+    fields['tcp.analysis.duplicate_ack_num'] = analysis.dupAckNum;
+    fields['tcp.analysis.duplicate_ack_frame'] = analysis.dupAckFrame ?? 0;
+  }
+  // Registered as filterable time fields and drawn in the tree, but never
+  // given a value here - so `tcp.time_relative > 1` matched nothing.
+  if (sinceStreamStart !== undefined) fields['tcp.time_relative'] = sinceStreamStart;
+  if (sincePreviousInStream !== undefined) fields['tcp.time_delta'] = sincePreviousInStream;
+
   return {
     proto,
     protocolLabel,
@@ -833,49 +883,7 @@ export function dissectTcpTransport(
       ? { linkPatches: [((answered) => ({ frameId: answered.requestFrame, links: { 'dcerpc.response_in': answered.responseFrame } }))(
         (dcerpcResult?.answered ?? smb2Result?.answered)!)] }
       : {}),
-    fields: {
-      ...(kerberosResult ? kerberosResult.fields : {}),
-      ...(bgpResult ? bgpResult.fields : {}),
-      ...(sshResult ? sshResult.fields : {}),
-      ...(rdpResult ? rdpResult.fields : {}),
-      ...(nbssResult ? nbssResult.fields : {}),
-      ...(dcerpcResult ? dcerpcResult.fields : {}),
-      ...(smb2Result ? smb2Result.fields : {}),
-      ...(ldapResult ? ldapResult.fields : {}),
-      ...(tlsResult ? tlsResult.fields : {}),
-      ...(httpResult ? httpResult.fields : {}),
-      ...(tcpDns ? tcpDns.fields : {}),
-      'tcp.flags': flags,
-      'tcp.flags.syn': syn ? 1 : 0,
-      'tcp.flags.fin': fin ? 1 : 0,
-      'tcp.flags.reset': rst ? 1 : 0,
-      'tcp.flags.push': psh ? 1 : 0,
-      'tcp.flags.ack': ack ? 1 : 0,
-      'tcp.srcport': srcPort,
-      'tcp.dstport': dstPort,
-      'tcp.window_size': windowSize,
-      'tcp.len': payloadLength,
-      'tcp.seq': relSeq,
-      'tcp.seq_raw': seqNum,
-      'tcp.ack': relAck,
-      'tcp.ack_raw': ackNum,
-      'tcp.checksum': storedChecksum,
-      'tcp.checksum.status': checksum.status,
-      ...(tcpOptions?.mss !== undefined ? { 'tcp.options.mss_val': tcpOptions.mss } : {}),
-      ...(tcpOptions?.windowScale !== undefined ? { 'tcp.options.wscale.shift': tcpOptions.windowScale } : {}),
-      ...(tcpOptions?.sackPermitted ? { 'tcp.options.sack_perm': 1 } : {}),
-      ...(tcpOptions?.tsval !== undefined ? { 'tcp.options.timestamp.tsval': tcpOptions.tsval } : {}),
-      ...(analysis?.ackRttUs !== undefined ? { 'tcp.analysis.ack_rtt': analysis.ackRttUs / 1e6 } : {}),
-      ...(analysis?.initialRttUs !== undefined ? { 'tcp.analysis.initial_rtt': analysis.initialRttUs / 1e6 } : {}),
-      ...(analysis?.bytesInFlight !== undefined ? { 'tcp.analysis.bytes_in_flight': analysis.bytesInFlight } : {}),
-      ...(analysis?.ackOfFrame !== undefined && analysis.partialAck ? { 'tcp.analysis.partial_ack': 1 } : {}),
-      ...(analysis?.ackOfFrame !== undefined && analysis.ambiguousAck ? { 'tcp.analysis.ambiguous_ack': 1 } : {}),
-      ...(analysis?.dupAckNum !== undefined ? { 'tcp.analysis.duplicate_ack_num': analysis.dupAckNum, 'tcp.analysis.duplicate_ack_frame': analysis.dupAckFrame ?? 0 } : {}),
-      // Registered as filterable time fields and drawn in the tree, but never
-      // given a value here - so `tcp.time_relative > 1` matched nothing.
-      ...(sinceStreamStart !== undefined ? { 'tcp.time_relative': sinceStreamStart } : {}),
-      ...(sincePreviousInStream !== undefined ? { 'tcp.time_delta': sincePreviousInStream } : {}),
-    },
+    fields,
     status: status ?? (analysisFlags.length > 0 && !isKeepAlive && !isKeepAliveAck ? 'warning' : undefined),
     analysisFlags,
     layer: {
