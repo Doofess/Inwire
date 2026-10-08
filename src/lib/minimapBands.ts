@@ -21,14 +21,19 @@ import { prefixShift } from '../services/packetPrefix';
  * trim moves an offset. Anything else starts again - which costs exactly the
  * one full pass every repaint used to cost.
  *
- * **It only indexes colours that are already decided.** A frame no rule has
- * been asked about (after a rule edit every frame is one) has no colour yet,
- * and deciding a million of them synchronously is the 1.7 s freeze the strip's
- * progressive fill exists to avoid. So a rebuild that meets one gives up and
- * says so, and the caller paints the old way until the fill has decided them.
- * Appended frames are few, so those are decided as they are indexed.
+ * **It decides only a few colours itself.** A frame no rule has been asked
+ * about has no colour yet, and deciding a million of them synchronously is
+ * the 1.7 s freeze the strip's progressive fill exists to avoid - which is
+ * what a rule edit leaves. So a rebuild decides at most `REBUILD_DECIDE`
+ * frames and past that gives up and says so, and the caller paints the old way
+ * until the fill has decided them. The budget is not optional: a live capture
+ * brings frames nobody has coloured between every two repaints, so a rebuild
+ * that refused on the first one would never succeed while it ran. Appended
+ * frames are few, so those are always decided as they are indexed.
  */
 export const BLOCK = 64;
+/** How many undecided frames a rebuild may decide before it hands back to the fill. */
+export const REBUILD_DECIDE = 50_000;
 
 /** A frame's colour, packed `r << 24 | g << 16 | b << 8 | a`; undefined while undecided. */
 export type ColourOf = (packet: Packet, decide: boolean) => number | undefined;
@@ -64,11 +69,16 @@ export class MinimapBands {
       this.offset += shift;
       from = this.source.length - shift;
     }
-    // A rebuild must not decide; an append may, because it is only the new.
-    const decide = shift !== null;
+    // An append decides what it meets, because it is only the new; a rebuild
+    // decides at most its budget.
+    let budget = shift !== null ? Number.POSITIVE_INFINITY : REBUILD_DECIDE;
     if (this.offset > 0 && this.offset > this.count - this.offset) this.compact();
     for (let i = from; i < packets.length; i++) {
-      const colour = colourOf(packets[i], decide);
+      let colour = colourOf(packets[i], false);
+      if (colour === undefined && budget > 0) {
+        budget--;
+        colour = colourOf(packets[i], true);
+      }
       if (colour === undefined) {
         this.reset();
         return false;

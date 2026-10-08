@@ -8,7 +8,7 @@
  * (far enough to make the index compact), is replaced, and meets a frame
  * nobody has coloured.
  */
-import { MinimapBands, BLOCK, type ColourOf } from '../../src/lib/minimapBands';
+import { MinimapBands, BLOCK, REBUILD_DECIDE, type ColourOf } from '../../src/lib/minimapBands';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -85,14 +85,20 @@ buffer = buffer.concat(fresh);
 check('an appended undecided frame is decided as it is indexed', bands.sync(buffer, colourOf) && decidedOnTheWay === 5);
 check('...and sums right', agrees(bands, buffer) === null);
 
-// A replaced buffer with undecided frames in it: a rebuild must not decide.
+// A rebuild decides a few undecided frames itself - a live capture always
+// brings some - and refuses past its budget, which is what a rule edit leaves.
 const replaced = Array.from({ length: 300 }, frame);
 undecided.add(replaced[150].id);
 const before = decidedOnTheWay;
-check('a rebuild that meets an undecided frame refuses', bands.sync(replaced, colourOf) === false);
-check('...without deciding it', decidedOnTheWay === before && undecided.has(replaced[150].id));
-undecided.delete(replaced[150].id);
-check('once it is decided, the rebuild succeeds and sums right', bands.sync(replaced, colourOf) && agrees(bands, replaced) === null);
+check('a rebuild decides a few undecided frames itself', bands.sync(replaced, colourOf) && decidedOnTheWay === before + 1);
+check('...and sums right', agrees(bands, replaced) === null);
+const edited = Array.from({ length: REBUILD_DECIDE + 10 }, frame);
+for (const p of edited) undecided.add(p.id);
+const beforeEdit = decidedOnTheWay;
+check('a rebuild over more undecided frames than its budget refuses', bands.sync(edited, colourOf) === false);
+check('...having decided no more than its budget', decidedOnTheWay - beforeEdit <= REBUILD_DECIDE);
+for (const p of edited) undecided.delete(p.id);
+check('once they are decided, the rebuild succeeds', bands.sync(replaced, colourOf) && agrees(bands, replaced) === null);
 
 // Same ids, different head: not an extension.
 const twin = replaced.map((p) => ({ ...p }));
