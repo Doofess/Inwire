@@ -59000,6 +59000,12 @@ function octets(mac: string): string[] {
  */
 const macNameCache = new Map<string, string>();
 const MAC_NAME_CACHE_MAX = 4096;
+/**
+ * The display string, beside the name `resolveMacName` caches: an Ethernet
+ * frame asks for it four times (each address, and each address's `eth.addr`
+ * row), and rebuilt it - two lowercasings and a template - every time.
+ */
+const macVendorCache = new Map<string, string>();
 
 export function resolveMacName(mac: string): string {
   const cached = macNameCache.get(mac);
@@ -59030,6 +59036,10 @@ function computeMacName(mac: string): string {
  * to the raw MAC unchanged when nothing resolves.
  */
 export function resolveMacVendor(mac: string): string {
+  const cached = macVendorCache.get(mac);
+  if (cached !== undefined) return cached;
   const name = resolveMacName(mac);
-  return name === mac.toLowerCase() ? mac : `${name} (${mac.toLowerCase()})`;
+  const shown = name === mac.toLowerCase() ? mac : `${name} (${mac.toLowerCase()})`;
+  if (macVendorCache.size < MAC_NAME_CACHE_MAX) macVendorCache.set(mac, shown);
+  return shown;
 }

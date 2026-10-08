@@ -34,7 +34,18 @@ const ETHERNET_IPV4_HEADER_BYTES = 14 + 20;
 function transportChecksum(pseudoHeader: Uint8Array, rawBytes: Uint8Array, start: number, end: number): number {
   let sum = 0;
   for (let i = 0; i + 1 < pseudoHeader.length; i += 2) sum += (pseudoHeader[i] << 8) | pseudoHeader[i + 1];
-  for (let i = start; i + 1 < end; i += 2) sum += (rawBytes[i] << 8) | rawBytes[i + 1];
+  // The payload's high and low bytes summed apart and joined once: the same
+  // ones'-complement sum as `(hi << 8) | lo` per word, with a shift and an or
+  // fewer per word - and this runs over every byte of every TCP and UDP
+  // segment that is checked. Both sums stay far inside a small integer.
+  let hi = 0;
+  let lo = 0;
+  const last = end - 1;
+  for (let i = start; i < last; i += 2) {
+    hi += rawBytes[i];
+    lo += rawBytes[i + 1];
+  }
+  sum += hi * 256 + lo;
   if ((end - start) % 2 === 1) sum += rawBytes[end - 1] << 8;
   while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
   return (~sum) & 0xffff;
