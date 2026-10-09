@@ -34,6 +34,7 @@ import {
   SAVE_FILE_CHANNEL, STORE_INGEST_PORT_REQUEST, STORE_PORT_REQUEST,
   WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
+  SPEEDTEST_CANCEL_CHANNEL, SPEEDTEST_START_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
 } from './channels';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
@@ -43,6 +44,7 @@ import { KeyLogFollower } from './keyLogFollower';
 import { AgentPipeLink } from './agentPipe';
 import { isComponentId } from './updateCenter/components';
 import { UpdateCenter } from './updateCenter/host';
+import { SpeedTestHost } from './speedTest/host';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
@@ -275,6 +277,12 @@ async function start(): Promise<void> {
     if (!isComponentId(id)) return undefined;
     return updates.apply(id);
   });
+  // The speed test (ADR 0054): one click, one test, nothing the renderer says
+  // reaches the engine but "start" and "cancel".
+  const speedTest = new SpeedTestHost();
+  ipcMain.handle(SPEEDTEST_START_CHANNEL, () => speedTest.start());
+  ipcMain.handle(SPEEDTEST_CANCEL_CHANNEL, () => speedTest.cancel());
+  app.on('will-quit', () => speedTest.dispose());
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.

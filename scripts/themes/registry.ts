@@ -146,6 +146,9 @@ const REQUIRED_TOKENS = tokensIn(':root');
 // someone adding a token to `:root` and to nowhere else, which is silent - the
 // other themes just inherit the light value and nothing throws.
 //
+// 33 since the speed test's two directions (ADR 0054), `--speed-download` and
+// `--speed-upload`.
+//
 // It was 35 until the four `--chrome*` tokens went. They painted a 64px accent
 // header and a menu drawer, both of which are deleted, and the Colourful switch
 // that chose between them had nothing left to change.
@@ -160,7 +163,7 @@ const REQUIRED_TOKENS = tokensIn(':root');
 // value would not merely be a shade out, it would draw the line on the wrong
 // side of the ground - which is the state that shipped while this was a
 // fraction of white and every theme shared it.
-check('the :root baseline declares 31 tokens', REQUIRED_TOKENS.length, 31);
+check('the :root baseline declares 33 tokens', REQUIRED_TOKENS.length, 33);
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;
@@ -376,6 +379,11 @@ const CHROME_PAIRS: readonly [string, string, string][] = [
   // continuous chrome - so its quiet items ride the two pairs above. Its
   // elapsed clock is its own, and it clears the text floor on both themes.
   ['--primary', '--secondary', 'StatusBar capture elapsed'],
+  // The speed test's upload colour is on its figures' icons, the dial's label
+  // and the live tile's edge, on the card and on the ground (ADR 0054).
+  ['--speed-upload', '--card', 'speed test upload, on a card'],
+  ['--speed-upload', '--background', 'speed test upload, on the ground'],
+  ['--speed-download', '--card', 'speed test download, on a card'],
 ];
 
 /**
@@ -401,6 +409,8 @@ const GLYPH_PAIRS: readonly [string, string, string][] = [
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;
+  // Download IS the accent, written out as a hex so it can be measured.
+  check(`${t.value}: --speed-download is --primary`, hexOf(t.value, '--speed-download'), hexOf(t.value, '--primary'));
   for (const [ink, ground, what] of GLYPH_PAIRS) {
     const ratio = contrastRatio(hexOf(t.value, ink), hexOf(t.value, ground));
     checkTrue(`${t.value}: ${what} (${ratio.toFixed(2)}:1, graphic)`, ratio >= 3);

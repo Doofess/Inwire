@@ -64,9 +64,9 @@ pcapng import and export all happen client-side in TypeScript.
 
 Everything is local. There is no account, no backend, no telemetry, and no
 server of any kind in this repository. The only outbound requests are four
-optional lookups from the renderer and two from main — the update feed and
-npcap.com — all listed under **Invariants**, and every one behind a switch or a
-click.
+optional lookups from the renderer and three from main — the update feed,
+npcap.com and the speed test's Cloudflare endpoint — all listed under
+**Invariants**, and every one behind a switch or a click.
 
 What it is **not**, any more: a web app. There is no browser build, no
 `server.ts`, no Express, no hosted deployment. macOS and Linux still have a
@@ -664,17 +664,21 @@ blocked `fetch` is indistinguishable from a machine with no outbound route.
 through main's JavaScript to be handed a header that means nothing on a tile —
 that filter is what made the check necessary.
 
-**Main reaches two more hosts, and they are deliberately not in the policy.**
+**Main reaches three more hosts, and they are deliberately not in the policy.**
 The update feed and `npcap.com` are dialled by `net.fetch` in the main process,
-which is not a page and which no CSP governs — so a `connect-src` entry for
-either would grant the *renderer* permission to reach a host it never touches,
-the same hole with no user as `8999`. What is kept is the list:
-`MAIN_OUTBOUND_HOSTS` in `electron/csp.ts` records both with their purposes, and
-`shell.ts` asserts they are **absent** from the policy, that the recorded feed
-host is the one `updateCenter/manifest.ts` actually dials, and that the recorded
-Npcap host is the one its download allowlist admits. Both are behind an explicit
-action: the feed behind `inwire.updates`, off until asked, and Npcap behind a
-click.
+and `speed.cloudflare.com` by the speed test's own `utilityProcess` (ADR 0054)
+- neither a page, so no CSP governs them, and a `connect-src` entry for any
+would grant the *renderer* permission to reach a host it never touches, the
+same hole with no user as `8999`. What is kept is the list:
+`MAIN_OUTBOUND_HOSTS` in `electron/csp.ts` records all three with their
+purposes, and `shell.ts` asserts they are **absent** from the policy, that the
+recorded feed host is the one `updateCenter/manifest.ts` actually dials, that
+the recorded Npcap host is the one its download allowlist admits, and that the
+speed test dials its recorded host and nothing the renderer could name - its
+start and cancel carry no argument, and `INWIRE_SPEEDTEST_TARGET` admits only a
+loopback server, for the drives. All are behind an explicit action: the feed
+behind `inwire.updates`, off until asked, Npcap behind a click, and a speed
+test behind its own Run - one press, one test, results kept only here.
 
 **Cross-origin isolation is on.** `ISOLATION_HEADERS` in `electron/main.ts`
 sets COOP/COEP on every `app://` response, so `crossOriginIsolated` is true and

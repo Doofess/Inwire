@@ -133,10 +133,16 @@ radius, no border, because `<main>` is the card and a second one inside it is a
 card in a card. It covers the workspace, the view underneath is untouched, and
 closing it puts that view back rather than navigating anywhere.
 
-**The slot stays a union.** `App` models it as `sheet: 'settings' | null` rather
-than a boolean, which makes "the card holds exactly one surface" a fact the type
-carries — a boolean invites a second boolean beside it, and then "both open" is
-representable in a card that shows one.
+**The slot stays a union, and it has a second member now.** `App` models it as
+`sheet: 'settings' | 'speedtest' | null` rather than a boolean, which makes "the
+card holds exactly one surface" a fact the type carries — a boolean invites a
+second boolean beside it, and then "both open" is representable in a card that
+shows one. **The speed test's sheet** (`speedtest/SpeedTestSheet.tsx`, ADR 0054)
+follows every rule below; what it adds is that leaving it does not stop a test,
+because the test's state is `services/speedTest/state.ts`'s, a module store, not
+the sheet's - so App also does not re-render at the dial's ten updates a second.
+It is opened from the Network panel's *Speed test* section, never from the
+rail.
 
 **Three ways out and no fourth**: the title row's back step, reading
 "Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and
@@ -199,6 +205,14 @@ surface's.
 undo by accident: every other tab is a table and wants `overflow-y-auto`, but
 `TrafficTimelineChart` measures its own container, so a parent that grows to fit
 its child would size the SVG from a box the SVG is itself defining.
+
+**The speed test's server is an overlay on the map, not traffic** (ADR 0054):
+a DOM marker and one arc, read from the speed test's history, never from
+`packets` - so it is in no route, pin, count, legend or export, and the arc
+joins `ArcLayer` only at `syncConnectionsLayer`'s final `setArcs`.
+`scripts/speed-test/map-overlay.ts` reads GeoMap's source to hold that. Its
+two colours are tokens, `--speed-download` (the accent) and `--speed-upload`
+(purple), which the dial, the tiles, the history and the tooltip all share.
 
 **Exactly one MapLibre instance is ever live** — a fact about the component tree
 rather than a condition somebody keeps true, since the Routing Map is a view and
@@ -278,7 +292,12 @@ four panels are Interfaces, Schedule, Export/Import and Network.
 detour by every test here.
 
 **Network is a panel and not a view.** It is not in `APP_VIEWS`, it has no
-`Ctrl+n`, and `viewPrefs.ts` lands a stored `'network'` back on Packets. Its
+`Ctrl+n`, and `viewPrefs.ts` lands a stored `'network'` back on Packets. **Its
+first section is the speed test** (`speedtest/SpeedTestSection.tsx`): the last
+result, Run - a tinted outline, the one thing in the panel to press, still
+quieter than the facts around it - and Results and history, which opens the
+speed-test sheet. Sized for the panel's 170 px floor: the figures stack rather
+than squeeze. Its
 organising idea is the pairing — the OS says how the machine was told to behave,
 the capture shows what actually happened — so it has to sit *beside* the frames
 it is comparing against rather than on top of them. Capture Health stays a

@@ -162,6 +162,12 @@ has.
 
 ## Part 2 - an internet speed test
 
+> **Built - ADR 0054 (2026-10-09).** Cloudflare, our own engine, a Network
+> panel section and a sheet. What is below stays as the research it was;
+> where the build measured something different (latency from the server's
+> TCP RTT, 5 MB requests, 600/200 MB caps), the ADR is the record. Tagging
+> the test's frames and the per-connection diagnosis are the next steps.
+
 ### Who was studied
 
 Ookla Speedtest, Netflix fast.com, Cloudflare's speed test, M-Lab NDT7 (which

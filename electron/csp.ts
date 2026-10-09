@@ -76,6 +76,14 @@ export const MAIN_OUTBOUND_HOSTS = {
    * redistribution, so a copy we served would be a copy we had no right to.
    */
   npcap: 'https://npcap.com',
+  /**
+   * `speedTest/engine.ts` - the internet speed test (ADR 0054), one click per
+   * test and never otherwise. Cloudflare's speed endpoints, measured by our own
+   * engine rather than their library, which posts every result back to them.
+   * Cloudflare sees this machine's address and the bytes moved; nothing else
+   * is sent, and the results stay on this machine.
+   */
+  speedTest: 'https://speed.cloudflare.com',
 } as const;
 
 function join(parts: readonly string[]): string {

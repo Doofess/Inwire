@@ -29,6 +29,7 @@ import {
   STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_INGEST_PORT_REQUEST,
   STORE_PORT_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
+  SPEEDTEST_CANCEL_CHANNEL, SPEEDTEST_EVENT_CHANNEL, SPEEDTEST_START_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
   type WindowControl,
 } from './channels';
@@ -244,6 +245,23 @@ const api = {
   /** Downloads, verifies and installs one component. Raises a UAC prompt. */
   applyUpdate(id: string): Promise<unknown> {
     return ipcRenderer.invoke(UPDATE_APPLY_CHANNEL, id);
+  },
+
+  /**
+   * The internet speed test (ADR 0054). Takes nothing: what is dialled is
+   * main's to decide. Progress arrives through `onSpeedTestEvent`.
+   */
+  startSpeedTest(): Promise<unknown> {
+    return ipcRenderer.invoke(SPEEDTEST_START_CHANNEL);
+  },
+  cancelSpeedTest(): Promise<unknown> {
+    return ipcRenderer.invoke(SPEEDTEST_CANCEL_CHANNEL);
+  },
+  /** Subscribes to the running test's events, and returns the unsubscribe. */
+  onSpeedTestEvent(listener: (event: unknown) => void): () => void {
+    const handler = (_event: unknown, event: unknown): void => listener(event);
+    ipcRenderer.on(SPEEDTEST_EVENT_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(SPEEDTEST_EVENT_CHANNEL, handler); };
   },
 
   /**

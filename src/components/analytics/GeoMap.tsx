@@ -58,6 +58,10 @@ import {
 import { ZoomControls } from './ZoomControls';
 import { combineFilter, RIM_CLAUSE } from './mapDeclutter';
 import { createDoubleRightClick } from '../../lib/doubleRightClick';
+import { speedHistoryStore, whenText } from '../../services/speedTest/history';
+import {
+  onMapFocusRequest, overlayArcEnds, speedTestOverlay, takeMapFocus,
+} from '../../services/speedTest/mapOverlay';
 
 /**
  * Where maplibre's tile worker actually is.
@@ -570,6 +574,10 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * being rebuilt from routes that may not have changed.
    */
   const arcLayerRef = useRef<ArcLayer | null>(null);
+  /** The speed test's arc (ADR 0054), appended at the arc layer's final setArcs and nowhere earlier. */
+  const speedArcRef = useRef<Arc[]>([]);
+  /** The speed test's history, whose latest entry is the overlay. */
+  const [speedHistory] = usePreferenceValue(speedHistoryStore);
   const connectionsSyncTimeoutRef = useRef<number | null>(null);
   const isCameraMovingRef = useRef(false);
   /**
@@ -1080,7 +1088,11 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // `setStyle` removes the layer but leaves this object holding its
     // geometry, so re-adding is enough - onAdd rebuilds the buffer.
     if (!map.getLayer(layer.id)) map.addLayer(layer);
-    layer.setArcs(arcsForSync());
+    // The speed test's arc joins HERE and nowhere earlier: it is drawn with the
+    // routes but is not one - not in `routes`, so not in the legend, the top
+    // routes, the location counter or anything exported (ADR 0054).
+    const speedArcs = speedArcRef.current;
+    layer.setArcs(speedArcs.length > 0 ? [...arcsForSync(), ...speedArcs] : arcsForSync());
   };
 
   // During active capture `packets` (and therefore `routes`)
@@ -1706,6 +1718,13 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // size, because at card size the popup was wider than the map it covered.
       // There is no card size.
 
+      // The speed test's chip claims its own hover: the home pin is often a few
+      // kilometres from the data centre, so without this the pin beneath the
+      // chip answered and its popup covered the chip's.
+      if ((e.originalEvent.target as Element | null)?.closest?.('[data-speedtest-chip]')) {
+        if (hoveredPinRef.current !== null) { hoveredPinRef.current = null; popup.remove(); }
+        return;
+      }
       const hit = layer.hitTest(e.point.x, e.point.y);
       if (!hit) {
         if (hoveredPinRef.current !== null) {
@@ -1755,6 +1774,92 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     // the clamp it turns on is derived from each theme's own accent.
     pinLayerRef.current?.setColors(accent, themePalette(themeKey).hues.green, isDark);
   }, [accent, themeKey, isDark, mapEpoch, pinEpoch]);
+
+  /**
+   * The speed test's server (ADR 0054): a labelled chip on the data centre and
+   * an arc to it from this machine's network, for the latest test only.
+   *
+   * **An overlay, not traffic.** Read from the speed test's history, never
+   * from `packets`, so it is in no route, no pin, no count and no export - the
+   * arc joins the arc layer only at its final `setArcs` (see
+   * `syncConnectionsLayer`). Its own colour, the palette's violet, which no
+   * pin uses, and its own words on the chip.
+   *
+   * **A DOM marker rather than a pin in the WebGL layer**, because it carries
+   * a label and because a marker is not part of the style: `setStyle` and a lost
+   * GPU context (CLAUDE.md §6) leave it standing, where a layer would have to
+   * be re-added on the rebuild path. The arc IS in the style, and rides the
+   * routes' own re-add in `syncConnectionsLayer`.
+   */
+  const speedOverlay = React.useMemo(() => speedTestOverlay(speedHistory[0] ?? null), [speedHistory]);
+  const speedColor = themePalette(themeKey).hues.violet;
+  useEffect(() => {
+    const ends = overlayArcEnds(speedOverlay, ispLocation);
+    speedArcRef.current = ends
+      ? splitAtAntimeridian(greatCircleArc(ends.from, ends.to, ARC_STEPS, ARC_CURVATURE))
+        .map((points) => ({ points, color: speedColor, weight: 0.35 }))
+      : [];
+    scheduleConnectionsSync(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speedOverlay, ispLocation, speedColor, mapEpoch]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !speedOverlay) return;
+    const el = document.createElement('div');
+    el.className = 'flex flex-col items-center font-sans select-none';
+    el.dataset.speedtestChip = '';
+    el.setAttribute('role', 'img');
+    el.setAttribute('aria-label', `${speedOverlay.label}: ${speedOverlay.summary}`);
+    el.innerHTML = `
+      <div class="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5
+        text-[11px] font-semibold text-popover-foreground shadow-md">
+        <span class="inline-block h-2 w-2 rounded-full" style="background:${speedColor}"></span>
+        <span>${escapeHtml(speedOverlay.label)}</span>
+      </div>
+      <div class="h-2 w-px" style="background:${speedColor}"></div>
+      <div class="h-2.5 w-2.5 rounded-full ring-2 ring-background" style="background:${speedColor}"></div>`;
+    const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 30, className: 'inwire-geo-popup' });
+    const show = () => popup
+      .setLngLat(speedOverlay.lngLat)
+      // Each direction in its own colour, as the sheet draws them, and the ISP
+      // beside the server when Cloudflare named one.
+      .setHTML(`<div class="font-sans text-xs"><div class="font-semibold">${escapeHtml(speedOverlay.label)}</div>`
+        + (speedOverlay.isp ? `<div class="text-muted-foreground">${escapeHtml(speedOverlay.isp)}</div>` : '')
+        + `<div class="tabular-nums"><span style="color:var(--speed-download)">↓</span> ${escapeHtml(speedOverlay.down)}`
+        + ` · <span style="color:var(--speed-upload)">↑</span> ${escapeHtml(speedOverlay.up)} Mb/s`
+        + ` · ${escapeHtml(speedOverlay.ping)}</div>`
+        + `<div class="text-muted-foreground">${escapeHtml(whenText(speedOverlay.at, Date.now()))}</div></div>`)
+      .addTo(map);
+    el.addEventListener('mouseenter', show);
+    el.addEventListener('mouseleave', () => popup.remove());
+    const marker = new maplibregl.Marker({ element: el, anchor: 'bottom', opacityWhenCovered: '0' })
+      .setLngLat(speedOverlay.lngLat)
+      .addTo(map);
+    return () => {
+      popup.remove();
+      marker.remove();
+    };
+  }, [speedOverlay, speedColor, mapEpoch]);
+
+  /**
+   * "Show on map", from the speed test's results: the request waits in
+   * `mapOverlay.ts` until this map exists, then flies there - jumping under
+   * reduced motion, like every camera move here.
+   */
+  useEffect(() => {
+    const go = () => {
+      const map = mapRef.current;
+      if (!map) return;
+      const target = takeMapFocus();
+      if (!target) return;
+      const camera = { center: target, zoom: Math.max(map.getZoom(), 4) };
+      if (prefersReducedMotion()) map.jumpTo(camera);
+      else map.flyTo({ ...camera, speed: 1.2 });
+    };
+    go();
+    return onMapFocusRequest(go);
+  }, [mapEpoch]);
 
 
   /**
