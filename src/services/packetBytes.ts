@@ -149,8 +149,24 @@ export function evictOldBytes(
   storedRange: { first: number; last: number } | null,
 ): number {
   if (storedRange === null) return 0;
-  const limit = packets.length - residentFrames;
+  let limit = packets.length - residentFrames;
   if (limit <= 0) return 0;
+
+  // **Start at the newest frame the store holds, not at the window's edge.**
+  // The store seals a row only once its patch horizon has passed - up to
+  // 100,000 frames behind the newest - so at rate everything between the
+  // resident window and the stored range is a run of frames this walk can
+  // only `continue` past, and it stepped over all of them on every flush:
+  // 5% of the main thread at 60,000 frames a second, measured. Frames arrive
+  // in id order, so a binary search finds the run's edge; were they not, the
+  // walk below still checks every frame it reaches, and a frame skipped here
+  // only keeps its bytes a flush longer.
+  let lo = 0, hi = limit;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (packets[mid].id <= storedRange.last) lo = mid + 1; else hi = mid;
+  }
+  limit = lo;
 
   let freed = 0;
   for (let i = limit - 1; i >= 0; i--) {

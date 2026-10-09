@@ -3,7 +3,12 @@
  * tasks, where the main thread's time goes, how far the list falls behind.
  *
  *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25] [--threads auto|1]
- *       [--app <dir>] [--out report.txt]
+ *       [--app <dir>] [--out report.txt] [--profile <prefix>] [--follow-only]
+ *
+ * `--profile` also writes each phase's raw CPU profiles, the main thread's as
+ * `<prefix>-<n>-main.cpuprofile` and the Worker's as `-worker`, for DevTools'
+ * Performance panel or a second look. `--follow-only` skips the scrolling and
+ * filter phases, which is what a before/after of the frame path wants.
  *
  * `--app` launches another app directory: `package.json`, `dist-electron/`, a
  * `node_modules` link, and a `dist/` built with
@@ -50,6 +55,8 @@ const OUT = arg('out', '');
 const APP = arg('app', '');
 /** Dissection threads: `auto`, the default, or `1`. */
 const THREADS = arg('threads', 'auto');
+const PROFILE_PREFIX = arg('profile', '');
+const FOLLOW_ONLY = process.argv.includes('--follow-only');
 const DEVTOOLS_PORT = 9339;
 if (!PCAP) { console.log('usage: --pcap file.pcapng'); process.exit(2); }
 
@@ -397,7 +404,7 @@ const phases: Phase[] = ascending.map((rate) => ({ label: `${rate.toLocaleString
 // measure the window rather than a backlog building.
 const mid = ascending[Math.floor((ascending.length - 1) / 2)];
 const filterInput = () => page.getByPlaceholder('e.g. tcp.port == 443');
-phases.push({
+if (!FOLLOW_ONLY) phases.push({
   label: `${mid.toLocaleString()} f/s, scrolling the list`, rate: mid,
   during: async () => {
     const box = await page.evaluate(() => {
@@ -415,7 +422,7 @@ phases.push({
     }
   },
 });
-phases.push({
+if (!FOLLOW_ONLY) phases.push({
   label: `${mid.toLocaleString()} f/s, display filter tcp.len > 1000`, rate: mid,
   before: async () => {
     const input = filterInput();
@@ -454,7 +461,7 @@ async function behindLive(): Promise<number> {
   return agent.sent() - await shown() - await skipped();
 }
 
-for (const phase of phases) {
+for (const [phaseIndex, phase] of phases.entries()) {
   // Level with live before it starts: the agent stops sending until the count
   // has caught up, so a phase measures its own rate and not the last one's
   // backlog. Bounded, and said when it ran out.
@@ -494,6 +501,10 @@ for (const phase of phases) {
   if (raw && workerSession) {
     try { workerProfile = (await raw.send<{ profile: CpuProfile }>('Profiler.stop', {}, workerSession)).profile; } catch { /* none */ }
   }
+  if (PROFILE_PREFIX) {
+    writeFileSync(`${PROFILE_PREFIX}-${phaseIndex + 1}-main.cpuprofile`, JSON.stringify(mainProfile));
+    if (workerProfile) writeFileSync(`${PROFILE_PREFIX}-${phaseIndex + 1}-worker.cpuprofile`, JSON.stringify(workerProfile));
+  }
   const b = await page.evaluate(() => {
     const x = (window as unknown as { __burst: { frames: number; long: number[] } }).__burst;
     return { frames: x.frames, long: [...x.long] };
@@ -519,7 +530,7 @@ for (const phase of phases) {
   const row = (r: { pct: number; ms: number; fn: string }) =>
     say(`    ${r.pct.toFixed(1).padStart(5)}%  ${r.ms.toFixed(0).padStart(6)} ms  ${r.fn}`);
   say('  main thread, top self time:');
-  topSelf(mainProfile).forEach(row);
+  topSelf(mainProfile, 25).forEach(row);
   say('  main thread, by file:');
   topFiles(mainProfile).forEach(row);
   if (workerProfile) {
