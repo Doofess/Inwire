@@ -223,11 +223,21 @@ function directionTitle(slot: number | undefined): string {
  * Row height is not listed here because it is MEASURED, not declared. Stating
  * it would be stating it twice, and the two would drift the first time a
  * padding value changed.
+ *
+ * **The line height is whole pixels, never a ratio**, so that the row is. It
+ * was `leading-[1.15]` at 11px - a 20.641px row - and every row's top was then
+ * `index * 20.641`, a different fraction of a pixel for each one. While a
+ * capture follows, the pin to the bottom moves the list by a fractional amount
+ * on every flush, so each row re-snapped its text to the pixel grid a beat
+ * apart from its neighbours: the whole list wobbled by a pixel as it scrolled
+ * (the owner's report). Whole-pixel rows put every row on the grid at every
+ * scroll position. The values are the old ratios rounded: 11, 12.65 -> 13 and
+ * 17.4 -> 17.
  */
 const DENSITY_CLASS: Record<'compact' | 'default' | 'comfortable', { body: string; cell: string }> = {
-  compact: { body: 'font-mono text-[10px] leading-[1.1]', cell: 'py-0.5' },
-  default: { body: 'font-mono text-[11px] leading-[1.15]', cell: 'py-1' },
-  comfortable: { body: 'font-mono text-[12px] leading-[1.45]', cell: 'py-1.5' },
+  compact: { body: 'font-mono text-[10px] leading-[11px]', cell: 'py-0.5' },
+  default: { body: 'font-mono text-[11px] leading-[13px]', cell: 'py-1' },
+  comfortable: { body: 'font-mono text-[12px] leading-[17px]', cell: 'py-1.5' },
 };
 
 const MIN_COLUMN_WIDTH = 36;
