@@ -9,8 +9,11 @@
  * sets is what keeps this one pass: both halves arrive in id order.
  *
  * `signal.cancelled` is read between pages, not inside one, so a cancelled
- * load returns on the next boundary with whatever it had. The caller that
- * cancels is a view going away or changing stream, and it discards the result.
+ * load returns on the next boundary with whatever it had from disk - and
+ * nothing from RAM, because RAM frames appended behind an unfinished disk read
+ * would leave a hole between the two that reads as frames the capture lost.
+ * The caller that cancels is a view going away or changing stream, and it
+ * discards the result; what it gets back is still contiguous.
  */
 import type { Packet } from '../../types/packet';
 import type { StreamSummary } from './streamDigest';
@@ -50,6 +53,7 @@ export async function loadStreamFrames(
     }
     chunk = page.nextChunk;
   }
+  if (signal?.cancelled) return frames;
   const lastDisk = frames.length > 0 ? frames[frames.length - 1].id : 0;
   for (const p of ram) {
     if (p.id > lastDisk && p.streamId === summary.streamId && p.frameProtocols?.includes('tcp')) frames.push(p);

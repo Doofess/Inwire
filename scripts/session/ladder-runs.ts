@@ -269,6 +269,16 @@ await (async () => {
   const frames = await loadStreamFrames(summaryOf(disk), [], source, undefined, signal);
   check('cancelled after the first page of rows: what it has is returned', frames.length, 256);
   check('...and no further page is asked for', [source.ordinalCalls, source.rowCalls], [[0], [256]]);
+
+  // With RAM frames past the disk: appending them behind an unfinished read
+  // would leave a hole between the two that reads as frames the capture lost.
+  nextId = 1;
+  const disk2 = data(400);
+  const ram = [...disk2.slice(350), ...data(30)];
+  const cut = { cancelled: false };
+  const source2 = fakeSource(disk2, 300, () => { cut.cancelled = true; });
+  const partial = await loadStreamFrames(summaryOf([...disk2, ...ram.slice(50)]), ram, source2, undefined, cut);
+  check('...and nothing from RAM is appended behind it', ids(partial), ids(disk2.slice(0, 256)));
 })();
 
 await (async () => {

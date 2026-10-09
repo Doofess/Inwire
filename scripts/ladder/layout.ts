@@ -327,8 +327,9 @@ function band(frames: readonly Packet[]): LadderItem {
   check('...from the lane its frames left', row.from, 'client');
   check('...with no flags', row.flags, '');
   check('...and no category', row.category, null);
-  // 1,000 frames of `100 + id` with ids 10..1009: 609,500 B.
-  check('...labelled with what it holds', row.info, '1,000 frames · 595.2 KB · 3.996 s');
+  // 1,000 frames of `100 + id` with ids 10..1009: 609,500 B. The count is
+  // formatted by the locale, so the expectation is too.
+  check('...labelled with what it holds', row.info, `${(1000).toLocaleString()} frames · 595.2 KB · 3.996 s`);
   check('...as thick as its mean frame', row.length, quiet.reduce((n, f) => n + f.length, 0) / 1000);
   checkTrue('...and carrying the band itself', row.item === stream[2]);
 
@@ -338,10 +339,27 @@ function band(frames: readonly Packet[]): LadderItem {
   const closing: LadderItem[] = [...items([frame(1, 0, true)]), band(quiet)];
   check('the extent runs to a band\'s end', ladderExtent(closing), { from: 0, to: 2 + 999 * 0.004 });
 
-  // The window test reads where an item starts, so a band is counted on the
-  // side its first frame falls, like any other item.
-  const later = layoutLadder(stream, { from: 5, to: 10 }, 600);
-  check('a band starting before the window is counted above it', [later.before, later.arrows.length, later.after], [3, 1, 0]);
+  // A band is an interval, and it is in the window when any of it is. The
+  // failure this guards: zoom into the middle of a long band and the ladder
+  // goes empty, saying there is one row above.
+  const bandEnd = 2 + 999 * 0.004;
+  const left = layoutLadder(stream, { from: 5, to: 10 }, 600);
+  check('a band straddling the window\'s top edge is drawn',
+    [left.before, left.arrows.map((a) => itemPacket(a.item).id), left.after], [2, [10, 2000], 0]);
+  check('...placed at the edge', left.arrows[0].y, 0);
+  check('...and still saying where it really started', left.arrows[0].time, 2);
+  const right = layoutLadder(stream, { from: 0, to: 3 }, 600);
+  check('a band straddling the window\'s bottom edge is drawn',
+    [right.before, right.arrows.map((a) => itemPacket(a.item).id), right.after], [0, [1, 2, 10], 1]);
+  check('...where it starts', right.arrows[2].y, 600 * 2 / 3);
+  const inside = layoutLadder(stream, { from: 3, to: 4 }, 600);
+  check('a band covering the whole window is the whole window',
+    [inside.before, inside.arrows.map((a) => itemPacket(a.item).id), inside.after], [2, [10], 1]);
+  const past = layoutLadder(stream, { from: bandEnd + 0.5, to: 10 }, 600);
+  check('a band wholly before the window is counted above it',
+    [past.before, past.arrows.map((a) => itemPacket(a.item).id), past.after], [3, [2000], 0]);
+  const ahead = layoutLadder(stream, { from: 0, to: 1.5 }, 600);
+  check('...and wholly after it, below', [ahead.before, ahead.arrows.length, ahead.after], [0, 2, 2]);
 
   // The opening window is sized by items, so a band that would have been a
   // thousand rows counts as one.

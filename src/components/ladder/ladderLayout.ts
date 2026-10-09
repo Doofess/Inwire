@@ -52,7 +52,11 @@ export interface LadderArrow {
   from: Lane;
   /** Vertical position in the laid-out area, in pixels from the top. */
   y: number;
-  /** Seconds since the capture started, for the axis. */
+  /**
+   * Seconds since the capture started: where the item starts, even when that
+   * is above the window. A band straddling the window's top edge is placed at
+   * the edge - `y` says where - and keeps its own start here.
+   */
   time: number;
   /** The frame's own length, for the thickness; a band's mean frame length. */
   length: number;
@@ -157,9 +161,13 @@ export function ladderExtent(items: readonly LadderItem[]): LadderWindow {
  * Lays out the items that fall inside a time window.
  *
  * `items` must be in capture order, which is what `foldRuns` returns from
- * frames in capture order. An item is inside the window by the time it
- * starts. Items outside the window are counted rather than positioned, so the
- * view can say what is above and below without walking the stream again.
+ * frames in capture order. A frame is inside the window by its time; a band
+ * is an interval, and is inside when any of it is - zooming into the middle
+ * of a long band must show the band, not an empty ladder saying there is one
+ * row above. A band that starts above the window is placed at the window's
+ * top edge. Items wholly outside the window are counted rather than
+ * positioned, so the view can say what is above and below without walking
+ * the stream again.
  */
 export function layoutLadder(
   items: readonly LadderItem[],
@@ -196,13 +204,16 @@ export function layoutLadder(
 
   for (const item of items) {
     const time = itemTime(item);
-    if (time < window.from) { before++; continue; }
+    const end = item.kind === 'band' ? item.endTime : time;
+    if (end < window.from) { before++; continue; }
     if (time > window.to) { after++; continue; }
     // Past the cap everything else is "later", which is exactly what it is:
     // the view offers to pan to it rather than pretending it is not there.
     if (arrows.length >= maxArrows) { after++; continue; }
 
-    const exact = scale > 0 ? (time - window.from) * scale : height / 2;
+    // Clamped: a band that began above the window is drawn at its top edge.
+    const placed = Math.max(time, window.from);
+    const exact = scale > 0 ? (placed - window.from) * scale : height / 2;
     // Order is preserved by construction: items arrive in capture order and
     // `y` never decreases, so an arrow nudged down pushes the next one down
     // too rather than being overtaken by it.
