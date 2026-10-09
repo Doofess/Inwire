@@ -754,6 +754,30 @@ export const PacketList: React.FC<PacketListProps> = ({
   const armUserScroll = () => {
     userScrollArmedRef.current = true;
   };
+  /**
+   * A wheel turned UPWARD on a list that can scroll stops following then and
+   * there, and arms nothing.
+   *
+   * Arming alone left the gesture a race it could lose, two ways round. A
+   * flush committing between the wheel and its scroll event puts `scrollTop`
+   * back at the bottom, and a scroll event this list's own assignment had
+   * already queued reaches the armed handler first - either way the handler
+   * measured the bottom and went on following, and the list swapped every row
+   * under the pointer of somebody trying to read one (`smoke.ts` caught it,
+   * one run in three). Which way the wheel turned is on the event itself, and
+   * upward means "not the newest" in `reading` mode, so no scroll event gets a
+   * say. Following resumes the way it always did: a gesture that ends at the
+   * bottom, or End.
+   */
+  const handleWheel = (event: React.WheelEvent) => {
+    const el = tableContainerRef.current;
+    if (event.deltaY < 0 && followRef.current === 'reading' && el !== null && el.scrollHeight > el.clientHeight) {
+      shouldAutoScrollRef.current = false;
+      userScrollArmedRef.current = false;
+      return;
+    }
+    armUserScroll();
+  };
   const handleScroll = () => {
     if (!tableContainerRef.current) return;
     const { scrollTop: currentScrollTop, scrollHeight, clientHeight } = tableContainerRef.current;
@@ -1035,7 +1059,7 @@ export const PacketList: React.FC<PacketListProps> = ({
       <div
         ref={tableContainerRef}
         onScroll={handleScroll}
-        onWheel={armUserScroll}
+        onWheel={handleWheel}
         onTouchStart={armUserScroll}
         onMouseDown={armUserScroll}
         onKeyDown={handleKeyDown}
