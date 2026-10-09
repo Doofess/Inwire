@@ -29,6 +29,12 @@ export interface TailFrame {
 
 /** Bytes of carry past which consumed space is reclaimed rather than kept. */
 const COMPACT_AT = 1 << 20;
+/**
+ * Reads of a block that does not close before it is called corrupt - at the
+ * catch-up's 150 ms between reads of a file with nothing new, about ten
+ * seconds, against a writer that flushes once a second.
+ */
+export const STALL_LIMIT = 64;
 
 export class PcapngTail {
   private buf: Uint8Array = new Uint8Array(0);
@@ -40,6 +46,11 @@ export class PcapngTail {
   private nsPerTick: number[] = [];
   /** `if_name` per IDB, null where none was written. */
   readonly idbNames: (string | null)[] = [];
+  /**
+   * Times in a row the block at the read position did not close: bytes not
+   * written yet, read again later. Past `STALL_LIMIT` the file is corrupt.
+   */
+  stalled = 0;
 
   constructor(startOffset = 0) {
     this.base = startOffset;
@@ -79,7 +90,10 @@ export class PcapngTail {
    */
   next(copy = true): TailFrame | null {
     for (;;) {
-      if (this.buf.length - this.at < 12) return null;
+      if (this.buf.length - this.at < 12) {
+        this.buf = this.buf.subarray(0, this.at);
+        return null;
+      }
       const view = new DataView(this.buf.buffer, this.buf.byteOffset + this.at, this.buf.length - this.at);
       const type = view.getUint32(0, this.little);
       // A section header carries its own byte order, after the length.
@@ -87,8 +101,25 @@ export class PcapngTail {
         this.little = view.getUint32(8, true) === 0x1a2b3c4d;
       }
       const length = view.getUint32(4, this.little);
-      if (length < 12 || length % 4 !== 0) throw new Error(`pcapng block of length ${length} at offset ${this.base + this.at}`);
-      if (length > view.byteLength) return null;
+      // A block is trusted only whole, from one read, and closed by its
+      // trailing copy of the length. A file being written can be read past
+      // what its writer has put in it - Windows extends a file before it
+      // fills it, and the gap reads as zeros - but never with zeros BEFORE
+      // bytes that were written, so a block whose last four bytes are right
+      // was all written when it was read. A block that is not all here, or
+      // does not close, is dropped and read again from where it starts:
+      // keeping its first part would keep whatever zeros were in it.
+      const malformed = length < 12 || length % 4 !== 0;
+      if (!malformed && length > view.byteLength) {
+        this.buf = this.buf.subarray(0, this.at);
+        return null;
+      }
+      if (malformed || view.getUint32(length - 4, this.little) !== length) {
+        if (++this.stalled > STALL_LIMIT) throw new Error(`pcapng block of length ${length} at offset ${this.base + this.at}`);
+        this.buf = this.buf.subarray(0, this.at);
+        return null;
+      }
+      this.stalled = 0;
       this.at += length;
       if (type === 0x0a0d0d0a) {
         this.nsPerTick = [];

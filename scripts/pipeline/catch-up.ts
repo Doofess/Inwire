@@ -127,6 +127,8 @@ interface Plan {
   skew?: boolean;
   /** Batches the Worker's port runs behind the agent by. */
   portDelay?: number;
+  /** The capture stops as the stream ends, with the catch-up still reading. */
+  stopAtEnd?: boolean;
 }
 
 interface Run {
@@ -137,6 +139,10 @@ interface Run {
   liveDelivered: number;
   catchUp: CatchUp<Frame>;
   ended: string[];
+  /** What the live flow counts as skipped when the run ends. */
+  skipped: number;
+  /** Still catching up when the run ended - before the capture stopped it. */
+  activeAtEnd: boolean;
 }
 
 function run(frames: Frame[], plan: Plan): Run {
@@ -270,12 +276,13 @@ function run(frames: Frame[], plan: Plan): Run {
     serve(plan.readsPerStep ?? 4);
   }
   while (port.length > 0) { handle(port.shift()!); serve(plan.readsPerStep ?? 4); }
-  // The stream has ended; the capture is still running, so the file is read on.
+  // The stream has ended; unless the capture stops now, the file is read on.
   sentSeq = frames.length + lag;
   announce();
-  for (let i = 0; i < 20_000 && catchUp.active; i++) serve(4);
+  if (!plan.stopAtEnd) for (let i = 0; i < 20_000 && catchUp.active; i++) serve(4);
+  const activeAtEnd = catchUp.active;
   router.stop();
-  return { delivered, holes, released, liveArrived, liveDelivered, catchUp, ended };
+  return { delivered, holes, released, liveArrived, liveDelivered, catchUp, ended, skipped: flow.skippedFrames, activeAtEnd };
 }
 
 /** The first way `got` differs from `want`, or null. */
@@ -397,8 +404,19 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     for (let b = mid; b < batches; b++) shed.add(b);
     const r = run(frames, { mainShed: shed });
     const diff = sameFrames(frames, r.delivered);
-    check(`${label}: live never resumes - the file delivers the rest of the capture`,
-      diff === null && r.holes.length === 0, diff ?? JSON.stringify(r.catchUp.stats));
+    check(`${label}: live never resumes - the file delivers the rest of the capture, and the view is level, not still "catching up"`,
+      diff === null && r.holes.length === 0 && !r.activeAtEnd, diff ?? JSON.stringify(r.catchUp.stats));
+  }
+  {
+    // The capture stops while the catch-up is far behind, holding nothing:
+    // what it had not read is counted as skipped - exactly - not silently
+    // missing, which is what a catch-up that simply ended would leave.
+    const shed = new Set<number>();
+    for (let b = 3; b < batches; b++) if (b % 2 === 1) shed.add(b);
+    const r = run(frames, { mainShed: shed, readsPerStep: 1, lag: 50, stopAtEnd: true });
+    const missing = n - r.delivered.length;
+    check(`${label}: the capture stops mid catch-up - every frame not dissected is counted as skipped`,
+      missing > 0 && r.skipped === missing && holdsEveryLiveFrameOnce(r), JSON.stringify({ missing, skipped: r.skipped, stats: r.catchUp.stats }));
   }
   {
     // The ring deletes a file before the catch-up has read it: its frames
@@ -451,19 +469,47 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
 // --- the reader on its own ---------------------------------------------------------
 
 {
+  // A file growing seven bytes at a time, read from wherever the reader says.
   const frames = madeFrames(50);
   const file = concat([fileHeader(), ...frames.map(epb)]);
   const tail = new PcapngTail(0);
   const got: number[] = [];
-  for (let at = 0; at < file.length; at += 7) {
-    tail.push(file.subarray(at, Math.min(file.length, at + 7)));
+  for (let written = 7; written < file.length + 7; written += 7) {
+    tail.push(file.subarray(tail.readOffset, Math.min(file.length, written)));
     let f;
     while ((f = tail.next()) !== null) got.push(f.tsUs);
   }
-  check('the reader: seven bytes at a time, every frame, in order, at the right time',
+  check('the reader: a file growing seven bytes at a time - every frame, in order, at the right time',
     got.length === 50 && got.every((ts, i) => ts === frames[i].tsUs));
   check('...and the offset to read next is the end of the file', tail.readOffset === file.length);
   check('...and it read the adapter\'s name', tail.idbNames[0] === '\\Device\\NPF_{TEST}');
+}
+{
+  // Windows extends a file before it fills it, so a read can run into zeros
+  // where the next frames will be. Read then, and again once written, every
+  // frame comes out as written - none from the zeros, none twice.
+  const frames = madeFrames(40);
+  const file = concat([fileHeader(), ...frames.map(epb)]);
+  const cut = fileHeader().length + frames.slice(0, 20).reduce((n, f) => n + epb(f).length, 0) + 37;
+  const early = file.slice();
+  early.fill(0, cut);
+  const tail = new PcapngTail(0);
+  const got: Uint8Array[] = [];
+  let f;
+  tail.push(early.subarray(0, early.length));
+  while ((f = tail.next()) !== null) got.push(f.bytes);
+  const afterEarly = got.length;
+  tail.push(file.subarray(tail.readOffset));
+  while ((f = tail.next()) !== null) got.push(f.bytes);
+  check('the reader: zeros a writer had not filled yet are read again, not taken - every frame once, as written',
+    afterEarly === 20 && got.length === 40 && got.every((b, i) => b.length === frames[i].bytes.length && b.every((x, j) => x === frames[i].bytes[j])),
+    `${afterEarly} then ${got.length}`);
+  const stuck = new PcapngTail(0);
+  let threw = false;
+  try {
+    for (let i = 0; i < 100; i++) { stuck.push(early.subarray(stuck.readOffset)); while (stuck.next() !== null) { /* frames */ } }
+  } catch { threw = true; }
+  check('...and a block that never closes is, in the end, a corrupt file', threw);
 }
 
 // --- run them --------------------------------------------------------------------

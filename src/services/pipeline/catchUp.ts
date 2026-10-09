@@ -170,6 +170,17 @@ export type LiveVerdict = 'take' | 'hold' | 'drop';
 /** Why catch-up stopped without rejoining. */
 export type CatchUpEnd = 'noFile' | 'anchorMismatch' | 'misaligned' | 'unreadable';
 
+/**
+ * What a catch-up that stopped short leaves behind: the live frames it held,
+ * and the numbers `[from, to)` it was still to deliver - of which only the
+ * held ones will be, live; the rest are counted and marked as skipped.
+ */
+export interface Abandoned<F> {
+  held: F[];
+  from: number;
+  to: number;
+}
+
 export interface ReadRequest {
   /** The file's name, as the agent gave it - never a path. */
   name: string;
@@ -183,7 +194,7 @@ export interface ReadResult<F> {
   /** The view is live again: these held frames go next, after `frames`. */
   rejoin: F[] | null;
   /** Catch-up gave up: what it held goes back to the live path, and the hole is marked there. */
-  ended: { why: CatchUpEnd; held: F[] } | null;
+  ended: ({ why: CatchUpEnd } & Abandoned<F>) | null;
   /** Nothing new in the file: ask again after this long. */
   retryMs?: number;
 }
@@ -323,6 +334,15 @@ export class CatchUp<F extends SeqFrame> {
     return 'hold';
   }
 
+  /**
+   * Main shed frames while catching up: nothing to do with them - the file
+   * has them - except to know the stream reached that far, so a catch-up
+   * that ends counts them among what it never delivered.
+   */
+  shedSeen(firstSeq: number, frames: number): void {
+    if (this.on && firstSeq + frames > this.edge) this.edge = firstSeq + frames;
+  }
+
   /** Held frames given up since the last call, whose credit the caller returns. */
   takeDropped(): F[] {
     const out = this.dropped;
@@ -358,6 +378,7 @@ export class CatchUp<F extends SeqFrame> {
       return out;
     }
     const bytes = result.bytes ?? new Uint8Array(0);
+    const before = cursor.tail.readOffset;
     cursor.tail.push(bytes);
     let frame;
     try {
@@ -405,13 +426,26 @@ export class CatchUp<F extends SeqFrame> {
     } catch {
       return this.end('unreadable', out);
     }
-    if (out.frames.length === 0 && bytes.length === 0) {
-      // Nothing new: the end of a file the agent has finished moves on to the
+    if (this.from >= this.edge && this.held.length === 0) {
+      // The file has delivered everything the stream got to, and no live
+      // frame has come since to rejoin at - the stream went quiet. Level:
+      // live again, and the next live frame carries on from here.
+      this.coveredFrom = this.sessionFrom;
+      this.coveredBelow = this.from;
+      this.holdFrom = null;
+      this.on = false;
+      this.stats.rejoined++;
+      out.rejoin = [];
+      return out;
+    }
+    if (cursor.tail.readOffset <= before) {
+      // Nothing new - no bytes, or only the start of a block still being
+      // written: the end of a file the agent has finished moves on to the
       // next one, and the end of the one it is writing waits for its next
       // flush.
       const facts = this.files.get(cursor.index);
       const next = this.files.after(cursor.index);
-      if (facts?.closed && next !== undefined && next.name !== null && cursor.tail.pending === 0) {
+      if (facts?.closed && bytes.length === 0 && next !== undefined && next.name !== null) {
         if (next.firstSeq !== cursor.next) {
           // The finished file did not hold every frame up to where the next
           // begins - it stopped early, or a frame was refused - so counting
@@ -428,19 +462,24 @@ export class CatchUp<F extends SeqFrame> {
   }
 
   /**
-   * Stop now - the capture stopped. What was held goes back to the live path,
-   * where the frames between are counted and marked as skipped.
+   * Stop now - the capture stopped, or the file let catch-up down. What was
+   * held goes back to the live path; `skipped` is the frames between where
+   * the file got to and the first of them (or the newest live frame, with
+   * none held), which nothing will deliver now and the caller counts and
+   * marks - or they would be missing with nothing saying so.
    */
-  abort(): F[] {
-    if (!this.on) return [];
+  abort(): Abandoned<F> {
+    if (!this.on) return { held: [], from: 0, to: 0 };
     const held = this.held;
+    const from = this.from;
+    const to = this.edge;
     this.on = false;
     this.inFlight = false;
     this.held = [];
     this.heldBytes = 0;
     this.holdFrom = null;
     this.anchor = null;
-    return held;
+    return { held, from, to };
   }
 
   /** The device name an IDB of the file being read gives, if it gives one. */
@@ -458,12 +497,12 @@ export class CatchUp<F extends SeqFrame> {
   }
 
   private end(why: CatchUpEnd, out: ReadResult<F>): ReadResult<F> {
-    const held = this.abort();
+    const abandoned = this.abort();
     // Counting is not to be trusted for the rest of this capture.
     if (why === 'anchorMismatch' || why === 'misaligned' || why === 'unreadable') this.disabled = why;
     this.cursor = null;
     this.stats.ended++;
-    out.ended = { why, held };
+    out.ended = { why, ...abandoned };
     return out;
   }
 }
@@ -547,9 +586,12 @@ export class CatchUpRouter<F extends SeqFrame> {
    * counted, to be marked on the next frame, as before.
    */
   shed(firstSeq: number, frames: number): void {
-    if (this.catchUp.active) return;
+    if (this.catchUp.active) { this.catchUp.shedSeen(firstSeq, frames); return; }
     const expected = this.flow.expectedSeq;
-    if (this.enabled && expected !== null && expected <= firstSeq && this.catchUp.start(expected, this.anchor)) return;
+    if (this.enabled && expected !== null && expected <= firstSeq && this.catchUp.start(expected, this.anchor)) {
+      this.catchUp.shedSeen(firstSeq, frames);
+      return;
+    }
     this.flow.noteShed(firstSeq, frames);
   }
 
@@ -558,8 +600,23 @@ export class CatchUpRouter<F extends SeqFrame> {
     const out = this.catchUp.readDone(result);
     for (const frame of out.frames) this.pass(this.fromFile(frame));
     if (out.rejoin !== null) for (const frame of out.rejoin) this.arrive(frame);
-    if (out.ended !== null) for (const frame of out.ended.held) this.arrive(frame);
+    if (out.ended !== null) this.giveBack(out.ended);
     return { retryMs: out.retryMs, ended: out.ended?.why };
+  }
+
+  /**
+   * What an ended catch-up leaves: the frames nothing will deliver now are
+   * counted and marked on the next frame, as main's shed batches were before
+   * catch-up existed; what was held goes on live.
+   */
+  private giveBack({ held, from, to }: Abandoned<F>): void {
+    // Up to the first held frame, then past the last: the held ones arrive
+    // live between, and mark the first gap themselves.
+    const first = held.reduce((min, f) => Math.min(min, f.seq), to);
+    if (first > from) this.flow.noteShed(from, first - from);
+    for (const frame of held) this.arrive(frame);
+    const after = held.reduce((max, f) => Math.max(max, f.seq + 1), from);
+    if (held.length > 0 && to > after) this.flow.noteShed(after, to - after);
   }
 
   /**
@@ -570,7 +627,7 @@ export class CatchUpRouter<F extends SeqFrame> {
   stop(): void {
     const enabled = this.enabled;
     this.enabled = false;
-    for (const frame of this.catchUp.abort()) this.arrive(frame);
+    this.giveBack(this.catchUp.abort());
     this.enabled = enabled;
   }
 
