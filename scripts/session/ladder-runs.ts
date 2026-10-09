@@ -34,7 +34,7 @@ import { fieldValue } from '../../src/services/dissect/fieldAccess';
 import { segmentOf, type StreamStep, type StreamSummary } from '../../src/services/conversation/streamDigest';
 import { TcpStateMachine, type TcpOutcome } from '../../src/services/conversation/tcpStates';
 import {
-  loadStreamFrames, type StreamFrameSource,
+  loadStreamFrames, progressGate, type StreamFrameSource,
 } from '../../src/services/conversation/streamFrames';
 import { summaryIsTarget, type StreamTarget } from '../../src/services/followStream';
 import { foldRuns, itemTime, type LadderItem } from '../../src/components/ladder/ladderRuns';
@@ -300,9 +300,13 @@ await (async () => {
   const disk = data(400);
   const signal = { cancelled: false };
   const source = fakeSource(disk, 300, () => { signal.cancelled = true; });
-  const frames = await loadStreamFrames(summaryOf(disk), [], source, undefined, signal);
+  const progress: number[] = [];
+  const frames = await loadStreamFrames(summaryOf(disk), [], source, (n) => progress.push(n), signal);
   check('cancelled after the first page of rows: what it has is returned', frames.length, 256);
   check('...and no further page is asked for', [source.ordinalCalls, source.rowCalls], [[0], [256]]);
+  // The page that resolved after the cancel is not reported either: the
+  // caller has moved on, and a report now would land under the next stream.
+  check('...and the page that resolved after the cancel is not reported', progress, []);
 
   // With RAM frames past the disk: appending them behind an unfinished read
   // would leave a hole between the two that reads as frames the capture lost.
@@ -607,6 +611,67 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the chip is painted by getPacketStyle', view.includes('colorEngine.getPacketStyle(packet, packetTheme)'));
   checkTrue('the fold is keyed by getMatchedRuleName', view.includes('colorEngine.getMatchedRuleName(p)'));
   checkTrue('and the one highlight is --primary', view.includes("'var(--primary)'"));
+}
+
+// --- Whether a page of progress reaches the views ------------------------------------------------
+//
+// The pane publishes a loading stream page by page. Two pages must never be
+// published: one inside the flush interval of the last, and any page at all
+// once the stream was left - a page of stream A resolving after stream B is on
+// screen would put A's frames under B's summary, and the ladder would read
+// B's first id against A's first frame as a ring floor.
+{
+  const signal = { cancelled: false };
+  const gate = progressGate(signal, 100);
+  check('the first page passes whenever it comes', gate(5), true);
+  check('a page inside the interval does not', gate(50), false);
+  check('...nor one a tick short of it', gate(104), false);
+  check('one a full interval on does', gate(105), true);
+  check('...and starts the next interval from itself', gate(150), false);
+  signal.cancelled = true;
+  check('after a cancel nothing passes', gate(1000), false);
+  check('...however long it has been', gate(1e9), false);
+  const fresh = progressGate({ cancelled: true }, 100);
+  check('a gate made after the cancel passes nothing either', fresh(0), false);
+}
+
+// --- The pane's load wiring, read from its source ------------------------------------------------
+//
+// What follows is React state and effects, which plain `tsx` cannot drive; the
+// rules are read from the source instead, as `scripts/session/view.ts` reads
+// `App.tsx`. Each is a line whose absence fails silently on screen.
+{
+  const pane = readFileSync(join(root, 'src/components/stream-follower/StreamFollowerPane.tsx'), 'utf8');
+  const hook = readFileSync(join(root, 'src/hooks/useStreamDigest.ts'), 'utf8');
+  const loader = readFileSync(join(root, 'src/services/conversation/streamFrames.ts'), 'utf8');
+  const view = readFileSync(join(root, 'src/components/ladder/LadderView.tsx'), 'utf8');
+
+  // A new capture drops everything the pane keeps per stream, because every
+  // one of those is keyed by a frame id and ids start again from one.
+  checkTrue('the digest hook returns the capture it is answering for',
+    /return \{ summaries, rebuilding, captureId \}/.test(hook));
+  const reset = pane.match(/const seenCapture = useRef\(captureId\);[\s\S]*?\}, \[captureId\]\);/)?.[0] ?? '';
+  checkTrue('the pane has an effect keyed on the capture id', reset.length > 0);
+  for (const call of ['cache.current.clear()', 'setStream(null)', 'setExpanded(NONE_EXPANDED)']) {
+    checkTrue(`...which drops the per-stream state: ${call}`, reset.includes(call));
+  }
+  checkTrue('...declared before the load, so a commit that does both resets first',
+    pane.indexOf('}, [captureId]);') < pane.indexOf('}, [summaryId]);'));
+
+  // A page of a stream that was left is never published, and the summary goes
+  // only with the frames it describes.
+  checkTrue('the loader reports no page after a cancel', loader.includes('if (!signal?.cancelled) onProgress?.('));
+  checkTrue('the pane publishes through the gate', pane.includes('progressGate(signal, PUBLISH_MS)') && pane.includes('if (!publish(performance.now())) return;'));
+  checkTrue('the summary reaches the ladder only with frames read through it',
+    pane.includes('summary={loaded !== null ? summary : null}'));
+  checkTrue('a failed read falls back to the buffer rather than reading "Reading 0 of N" for good',
+    /\.catch\(\(error: unknown\) => \{[\s\S]*?setStream\(null\);/.test(pane));
+
+  // A band closed over the selected frame stays closed until the selection moves.
+  checkTrue('the ladder opens a band for an id once, not once per fold',
+    view.includes('const autoOpened = useRef') && view.includes('if (id === autoOpened.current[source]) return;'));
+  // The ladder draws nothing by direction, so the direction legend is the dialogue's alone.
+  checkTrue('the direction legend is not shown over the ladder', /\{tab !== 'ladder' && \([\s\S]*?Client Traffic/.test(pane));
 }
 
 console.log();

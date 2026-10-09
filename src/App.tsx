@@ -3469,6 +3469,7 @@ export default function App() {
                 target={streamToFollow}
                 packets={packets}
                 summary={streamSummary}
+                captureId={streamDigest.captureId}
                 colorEngine={colorEngine}
                 packetTheme={packetTheme}
                 initialTab={streamView}

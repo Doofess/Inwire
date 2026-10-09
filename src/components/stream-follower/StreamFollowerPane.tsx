@@ -14,7 +14,7 @@ import {
 } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
-import { loadStreamFrames } from '../../services/conversation/streamFrames';
+import { loadStreamFrames, progressGate } from '../../services/conversation/streamFrames';
 import { captureStore } from '../../services/capture/captureClient';
 import type { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -130,6 +130,13 @@ interface StreamFollowerPaneProps {
    * whole capture; without, it shows what the buffer holds, as it always did.
    */
   summary: StreamSummary | null;
+  /**
+   * The capture the digest is answering for, or null when none has answered.
+   * Everything this pane keeps per stream belongs to one capture, and a stream
+   * index is unique within one capture only; a change here, to anything,
+   * drops it all.
+   */
+  captureId: string | null;
   /** The packet list's own colouring, so an arrow looks like its row. */
   colorEngine: ColorRulesEngine;
   packetTheme: PacketTheme;
@@ -158,6 +165,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   target,
   packets,
   summary,
+  captureId,
   colorEngine,
   packetTheme,
   selectedId,
@@ -237,6 +245,34 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
    */
   const [stream, setStream] = useState<LoadedStream | null>(null);
   const cache = useRef(new Map<number, Packet[]>());
+
+  // Bands the user opened, by their first frame's id. Held here rather than in
+  // the ladder so a band stays open across the tabs; an id rather than an
+  // index because a live stream grows under the fold, and the band somebody
+  // opened must stay open across the next flush.
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(NONE_EXPANDED);
+
+  // The arrow under the pointer. The ladder reports it and draws it lit; the
+  // state map, docked beside it, reads the same id to light the transition.
+  const [hoverFrameId, setHoverFrameId] = useState<number | null>(null);
+
+  // A new capture drops everything kept per stream - the frames, the cache,
+  // the opened bands, the hovered frame - because all of it is keyed by ids
+  // that start again from one. Keyed on the capture the digest is answering
+  // for rather than on the target being cleared, because an import under an
+  // open view clears nothing. Declared before the load below so that, in a
+  // commit where both run, the reset goes first and the load finds an empty
+  // cache. Skipped on mount, when there is nothing to drop.
+  const seenCapture = useRef(captureId);
+  useEffect(() => {
+    if (seenCapture.current === captureId) return;
+    seenCapture.current = captureId;
+    cache.current.clear();
+    setStream(null);
+    setExpanded(NONE_EXPANDED);
+    setHoverFrameId(null);
+  }, [captureId]);
+
   const summaryId = summary?.streamId;
   useEffect(() => {
     if (summary === null) return;
@@ -248,18 +284,25 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     }
     const total = summary.toServer.packets + summary.toClient.packets;
     const signal = { cancelled: false };
-    let published = -Infinity;
+    // The gate answers for a page that resolves after this stream was left:
+    // published, it would put the old frames under the new stream's summary.
+    const publish = progressGate(signal, PUBLISH_MS);
     setStream({ streamId, frames: EMPTY_FRAMES, loading: { loaded: 0, total } });
     void loadStreamFrames(summary, packets, captureStore, (loaded, soFar) => {
-      const now = performance.now();
-      if (now - published < PUBLISH_MS) return;
-      published = now;
+      if (!publish(performance.now())) return;
       // A copy: the array handed over is the one still being filled.
       setStream({ streamId, frames: soFar.slice(), loading: { loaded, total } });
     }, signal).then((frames) => {
       if (signal.cancelled) return;
       cache.current.set(streamId, frames);
       setStream({ streamId, frames, loading: null });
+    }).catch((error: unknown) => {
+      // The read failed: the pane falls back to the buffer's frames, as it
+      // would with no summary, rather than reading "Reading 0 of N" for good.
+      // Not cached, so opening the stream again tries again.
+      if (signal.cancelled) return;
+      console.warn('[Inwire] Reading a stream from the capture failed; showing the buffer\'s frames.', error);
+      setStream(null);
     });
     return () => { signal.cancelled = true; };
     // `summary` and `packets` are read as they were when the stream changed;
@@ -339,12 +382,6 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     return { toServer, toClient };
   }, [frames, client]);
 
-  // Bands the user opened, by their first frame's id. Held here rather than in
-  // the ladder so a band stays open across the tabs; an id rather than an
-  // index because a live stream grows under the fold, and the band somebody
-  // opened must stay open across the next flush. Ids are unique within a
-  // capture, so a set from an earlier stream opens nothing in a later one.
-  const [expanded, setExpanded] = useState<ReadonlySet<number>>(NONE_EXPANDED);
   const toggleBand = useCallback((firstId: number) => {
     setExpanded((current) => {
       const next = new Set(current);
@@ -355,10 +392,6 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   const openBand = useCallback((firstId: number) => {
     setExpanded((current) => (current.has(firstId) ? current : new Set(current).add(firstId)));
   }, []);
-
-  // The arrow under the pointer. The ladder reports it and draws it lit; the
-  // state map, docked beside it, reads the same id to light the transition.
-  const [hoverFrameId, setHoverFrameId] = useState<number | null>(null);
 
   /**
    * Scroll position, coalesced to one update per animation frame.
@@ -518,20 +551,25 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
           </div>
         </div>
 
-        {/* Legend */}
-        <div className="px-4 py-2 border-b text-xs flex items-center justify-between bg-secondary/50 border-border text-foreground/80">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-rose-500" />
-              <span className="font-semibold text-rose-400">Client Traffic ({totals.toServer} bytes)</span>
+        {/* Legend - the dialogue's, whose rows are coloured by direction. The
+            ladder colours nothing by direction (its chips are the colour
+            rules', ADR 0055 §2), so a key to rose and sky over it would name
+            two colours it does not use. */}
+        {tab !== 'ladder' && (
+          <div className="px-4 py-2 border-b text-xs flex items-center justify-between bg-secondary/50 border-border text-foreground/80">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-full bg-rose-500" />
+                <span className="font-semibold text-rose-400">Client Traffic ({totals.toServer} bytes)</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-full bg-sky-400" />
+                <span className="font-semibold text-sky-400">Server Traffic ({totals.toClient} bytes)</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-sky-400" />
-              <span className="font-semibold text-sky-400">Server Traffic ({totals.toClient} bytes)</span>
-            </div>
+            <span className="text-[11px] font-mono text-muted-foreground">Stream Follower Engine</span>
           </div>
-          <span className="text-[11px] font-mono text-muted-foreground">Stream Follower Engine</span>
-        </div>
+        )}
 
         {/* What this window is NOT sure about, said before the dialogue rather
             than after it. Both of these change how the conversation below
@@ -558,7 +596,10 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             loading={loading}
             client={client}
             server={server}
-            summary={summary}
+            // The summary goes with the frames it describes, and only those:
+            // over the buffer's frames its first id would read as a ring floor
+            // and its steps would land on rows the buffer happens to hold.
+            summary={loaded !== null ? summary : null}
             colorEngine={colorEngine}
             packetTheme={packetTheme}
             selectedId={selectedId}

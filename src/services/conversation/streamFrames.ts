@@ -28,6 +28,27 @@ export interface StreamFrameSource {
 const ROW_PAGE = 256;
 
 /**
+ * Whether a page of progress should reach the views.
+ *
+ * Never after a cancel: a page of the stream being left can resolve after the
+ * next stream is on screen, and publishing it would put the old frames under
+ * the new stream's summary - a ladder marking frames "removed by the ring"
+ * that were never in this stream. And no more often than `intervalMs`: a
+ * stream of a hundred thousand frames is four hundred pages, and each one
+ * published is a copy of the frames so far and a fold of them.
+ *
+ * The first page passes whenever it comes; the clock is the caller's.
+ */
+export function progressGate(signal: { cancelled: boolean }, intervalMs: number): (now: number) => boolean {
+  let last = -Infinity;
+  return (now) => {
+    if (signal.cancelled || now - last < intervalMs) return false;
+    last = now;
+    return true;
+  };
+}
+
+/**
  * Frames in id order: disk rows first, then the RAM rows of the stream whose
  * ids are past the last disk id.
  *
@@ -54,7 +75,9 @@ export async function loadStreamFrames(
         const row = rows.get(ordinal);
         if (row !== undefined) frames.push(row);
       }
-      onProgress?.(frames.length, frames);
+      // A page that resolved after the cancel is not reported: the caller has
+      // moved on, and what it is showing now is not this stream.
+      if (!signal?.cancelled) onProgress?.(frames.length, frames);
     }
     chunk = page.nextChunk;
   }

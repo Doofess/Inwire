@@ -271,12 +271,21 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // the selection must be drawn selected, and a frame the state map points at
   // must be there to point at. The pane's set is the one source of what is
   // open, so this asks rather than folding differently.
+  //
+  // Once per id, not once per fold: the ref remembers the last id each source
+  // was opened for, so a band the user then closes over the selected frame
+  // stays closed until the selection moves. An id whose frame is not here
+  // yet is not remembered, so the page that brings it opens its band.
+  const autoOpened = useRef<(number | null | undefined)[]>([undefined, undefined, undefined]);
   useEffect(() => {
-    for (const id of [selectedId, highlightFrameId, scrollToFrameId]) {
-      if (id === undefined || id === null) continue;
-      const band = bandHolding(items, id);
-      if (band !== null) onOpenBand(band.first.id);
-    }
+    [selectedId, highlightFrameId, scrollToFrameId].forEach((id, source) => {
+      if (id === autoOpened.current[source]) return;
+      if (id === undefined || id === null) { autoOpened.current[source] = id; return; }
+      const holder = holding(items, id);
+      if (holder === null) return;
+      autoOpened.current[source] = id;
+      if (holder !== 'row') onOpenBand(holder.first.id);
+    });
   }, [items, selectedId, highlightFrameId, scrollToFrameId, onOpenBand]);
 
   const onWheel = useCallback((event: React.WheelEvent) => {
@@ -434,10 +443,11 @@ function readingText(loading: { loaded: number; total: number }): string {
   return `Reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()} frames`;
 }
 
-/** The closed band holding frame `id`, or null when the frame is a row of its own or not here. */
-function bandHolding(items: readonly LadderItem[], id: number): Extract<LadderItem, { kind: 'band' }> | null {
+/** What holds frame `id`: its own row, the closed band it folded into, or nothing when it is not here. */
+function holding(items: readonly LadderItem[], id: number): 'row' | Extract<LadderItem, { kind: 'band' }> | null {
   for (const item of items) {
-    if (item.kind === 'band' && id >= item.first.id && id <= item.last.id) return item;
+    if (item.kind === 'frame') { if (item.packet.id === id) return 'row'; }
+    else if (id >= item.first.id && id <= item.last.id) return item;
   }
   return null;
 }
