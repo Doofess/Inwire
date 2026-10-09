@@ -28,25 +28,32 @@ export function useStreamDigest(enabled: boolean) {
     let alive = true;
     let timer = 0;
     const poll = async () => {
-      const answer = await captureStore.streamDigest(version);
+      const since = version;
+      const answer = await captureStore.streamDigest(since);
       if (!alive) return;
       if (answer.captureId !== captureId) {
-        // Another capture is open, and it was asked with the last one's
-        // version: drop everything and ask it again from zero, now.
+        // Another capture answered. Whatever was held is the last one's.
         captureId = answer.captureId;
-        version = 0;
         setSummaries(new Map());
-        timer = window.setTimeout(poll, 0);
-        return;
-      } else {
-        version = answer.version;
-        if (answer.summaries.length > 0) {
-          setSummaries((current) => {
-            const next = new Map(current);
-            for (const s of answer.summaries) next.set(s.streamId, s);
-            return next;
-          });
+        if (since !== 0) {
+          // It was asked with the last capture's version, so this answer is
+          // a partial one: ask it again from zero, now.
+          version = 0;
+          setRebuilding(answer.rebuilding);
+          timer = window.setTimeout(poll, 0);
+          return;
         }
+        // Asked from zero, the answer is already the whole of the new
+        // capture - the first poll on every enable - so it is used, not
+        // thrown away and asked for a second time.
+      }
+      version = answer.version;
+      if (answer.summaries.length > 0) {
+        setSummaries((current) => {
+          const next = new Map(current);
+          for (const s of answer.summaries) next.set(s.streamId, s);
+          return next;
+        });
       }
       setRebuilding(answer.rebuilding);
       timer = window.setTimeout(poll, POLL_MS);
