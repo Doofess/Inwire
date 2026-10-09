@@ -101,10 +101,19 @@ try {
   checkTrue('Start can be pressed', await clicks('Start capture', () => p.getByLabel('Start capture').click()));
   checkTrue('frames arrive', await until(async () => (await counted(p)) > 200));
   checkTrue('the capture can be stopped', await clicks('Stop capture', () => p.getByLabel('Stop capture').click()));
-  const firstCount = await counted(p);
-  // The session's metadata is written on a two-second throttle; the store
-  // seals on Stop.
-  await sleep(4_000);
+  // Read once the count has settled, not at the click: Stop drains the frames
+  // still in the pipeline into the list after it is pressed (under a loaded
+  // gate, 280 at the click and 360 sealed). The session's metadata is written
+  // on a two-second throttle.
+  let firstCount = -1;
+  await until(async () => {
+    const now = await counted(p);
+    const settled = now === firstCount;
+    firstCount = now;
+    if (settled) await sleep(2_500);
+    return settled && (await counted(p)) === now;
+  }, 20_000);
+  await sleep(2_500);
   await close();
 
   console.log('\n--- the second launch offers it ---\n');
