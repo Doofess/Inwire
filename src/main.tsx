@@ -6,6 +6,7 @@ import {RETIRED_THEMES, THEME_NAMES, isDarkTheme, normalizeThemeName} from './li
 import {motionStore} from './services/interfacePrefs';
 import {usePreferenceValue} from './services/preferenceStore';
 import App from './App.tsx';
+import {QuitConfirmDialog} from './components/common/QuitConfirmDialog';
 import './index.css';
 
 /**
@@ -128,6 +129,10 @@ createRoot(document.getElementById('root')!).render(
     >
       <ColorScheme>
       <MotionPreference>
+        {/* Before App, and outside it: App renders ten times a second during a
+            capture and this need not, and its key guard has to be the first
+            capture-phase listener on `window` - see the component. */}
+        <QuitConfirmDialog />
         <App />
       </MotionPreference>
       </ColorScheme>

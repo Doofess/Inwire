@@ -40,7 +40,7 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  DEFAULT_WINDOW_THEME, isHexColor, resolveWindowBackground, resolveWindowIsDark,
+  DEFAULT_WINDOW_THEME, isHexColor, resolveWindowBackground,
 } from '../../electron/windowColors';
 import {
   TITLE_BAR_HEIGHT, WINDOW_CONTROL_COUNT, WINDOW_CONTROL_HEIGHT, WINDOW_CONTROL_WIDTH,
@@ -106,35 +106,23 @@ console.log('--- the ground a window opens on, per theme ---\n');
     THEME_OPTIONS.length >= 2, true);
 }
 
-console.log('\n--- the theme the quit confirm is drawn in ---\n');
+console.log('\n--- main never overrides the OS theme ---\n');
 
 {
-  // `showMessageBox` is drawn by the OS and follows `nativeTheme`, so the app in
-  // Night on a machine set to light threw a white box over a dark window on the
-  // way out. `guardClose` sets `themeSource` from this, and the decision has to
-  // agree with the theme's own declared mode - a palette dark enough to need a
-  // dark dialog is exactly a palette whose `mode` is `dark`. That agreement is
-  // the whole reason the decision could be derived from luminance rather than
-  // from a second list of theme names kept in main.
-  for (const { value, label, mode } of THEME_OPTIONS) {
-    check(`${label} wants a ${mode} dialog`, resolveWindowIsDark(value), mode === 'dark');
-  }
-  // Same fallback as the ground it is derived from: a stored name from a build
-  // that retired a theme must not decide this by accident.
-  check('an unresolvable name falls back to dark', resolveWindowIsDark('nope'), true);
-  check('...and so does a missing one', resolveWindowIsDark(undefined), true);
-
-  // The override is held only while the dialog is up. A standing one would pin
-  // `prefers-color-scheme` in the renderer, and `useSystemThemePreference` reads
-  // exactly that media query - so the app would be following itself, and an OS
-  // theme change would never be seen at all. Asserted on the source because the
-  // failure is a MISSING restore, which has no runtime signature until somebody
+  // The quit confirm used to set `nativeTheme.themeSource` around
+  // `showMessageBox`, believing the box followed it. On Windows it does not -
+  // the box is a task dialog the OS paints light regardless - so the confirm is
+  // the renderer's own dialog now and the override is gone. It must not come
+  // back in any form: a standing one pins `prefers-color-scheme` in the
+  // renderer, which `useSystemThemePreference` reads, so under System the app
+  // would follow itself and never see an OS theme change. Asserted on the
+  // source because that failure has no runtime signature until somebody
   // changes their OS theme and nothing happens.
   const main = readFileSync('electron/main.ts', 'utf8');
-  checkTrue('guardClose sets themeSource for the dialog',
-    main.includes('nativeTheme.themeSource = windowIsDark'));
-  checkTrue('...and puts it back afterwards',
-    main.includes('nativeTheme.themeSource = restore'));
+  checkTrue('main assigns nativeTheme.themeSource nowhere',
+    !/themeSource\s*=[^=]/.test(main));
+  checkTrue('...and the quit confirm is asked of the renderer first',
+    main.includes('confirm.requested()') && main.includes('QUIT_CONFIRM_CHANNEL'));
 }
 
 console.log('\n--- a name it cannot resolve still opens a window ---\n');

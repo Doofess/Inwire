@@ -1068,8 +1068,9 @@ reintroduction. Four things about running it:
   **none** and a control that never renders would hang the whole suite with no
   output rather than fail.
 - It clears `setUnsavedCapture` before closing, because closing with frames in
-  the buffer opens `guardClose`'s native "Quit Inwire?" box, which is not in the
-  page and which no test can answer. Killing the process instead was tried and
+  the buffer opens the "Quit Inwire?" confirm and `app.close()` would wait on it
+  for ever (the OS's box, the fallback when the renderer does not answer within
+  a second, no test can answer at all). Killing the process instead was tried and
   is worse — `kill()` reaches main and orphans the GPU, renderer, store and
   crashpad children.
 

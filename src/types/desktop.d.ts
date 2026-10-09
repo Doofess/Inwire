@@ -220,6 +220,18 @@ declare global {
        * narrowed on this side.
        */
       onWindowState?(listener: (state: unknown) => void): () => void;
+      /**
+       * The quit confirm, which this page draws so it follows the app's theme.
+       *
+       * Main asks on `close` with a capture in the buffer; the page answers
+       * `shown` at once and `quit` or `keep` once the reader decides. Main
+       * shows the OS's box instead if `shown` does not arrive within a second,
+       * so a hung page can never make the window unclosable
+       * (`electron/quitConfirm.ts`). Requests are `unknown` and narrowed by
+       * `readQuitConfirmRequest`.
+       */
+      onQuitConfirm?(listener: (request: unknown) => void): () => void;
+      answerQuitConfirm?(id: number, answer: 'shown' | 'quit' | 'keep'): void;
     };
   }
 }

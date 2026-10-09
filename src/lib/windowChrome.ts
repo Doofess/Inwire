@@ -6,8 +6,8 @@ import { useEffect, useSyncExternalStore } from 'react';
  * Three things cross to main, and each is here because only one side knows it:
  *
  *  - the **resolved theme**, so main knows what ground to open the NEXT window
- *    on and what to draw the quit confirm in. Main owns the hex
- *    (`electron/windowColors.ts`); this sends a name. Nothing here colours a
+ *    on. Main owns the hex (`electron/windowColors.ts`); this sends a name.
+ *    Nothing here colours a
  *    window button - those are ours, in CSS, and follow the cascade.
  *  - the **title**, because only this side knows the adapter's name and whether
  *    frames are arriving.
