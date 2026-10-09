@@ -30,7 +30,8 @@ import { LINKTYPE } from '../services/dissect/types';
 import { flowAnnotations } from '../services/flowAnnotations';
 import { addProcessRow, annotatePacket } from '../services/dissect/processFields';
 import { addLiveGapRow, markLiveGap } from '../services/dissect/liveGapFields';
-import { LiveFlow } from '../services/pipeline/liveFlow';
+import { HOLE_MIN_FRAMES, LiveFlow } from '../services/pipeline/liveFlow';
+import { CaptureFiles, CatchUp, CatchUpRouter, type CatchUpEnd, type FileFrame } from '../services/pipeline/catchUp';
 import { clientFingerprints, learnOrLabelFingerprint } from '../services/dissect/clientFingerprints';
 import { buildFallbackPacket } from '../services/sessionRestore';
 import { TcpStreamTracker } from '../services/tcpStreamTracker';
@@ -222,6 +223,118 @@ let nextId = 1;
 const ringFiling = new RingFiling();
 /** Stand-in sequence number for an agent that sends none. */
 let arrivalSeq = 0;
+
+// --- catching up from the agent's file (ADR 0053 phase 4) ---------------------
+
+/**
+ * The capture's id, from its `start_capture`: what main is asked to read the
+ * agent's pcapng under. Null for a capture that writes no file - then a hole
+ * in the stream is marked, as it was before catch-up existed.
+ */
+let captureId: string | null = null;
+/** What the agent has said about the capture's files: where each begins, its name, whether it is gone. */
+const captureFiles = new CaptureFiles();
+const catchUp = new CatchUp<LiveFrame>(captureFiles);
+/** Every live frame meets the live path here, and every frame read back from the file (`catchUp.ts`). */
+const router = new CatchUpRouter<LiveFrame>(
+  flow, catchUp, fromFile,
+  (frame, hole) => { ordering.push(hole > 0 ? { ...frame, holeBefore: hole } : frame); },
+  (frame) => { flow.frameDone(frame.batch); },
+  HOLE_MIN_FRAMES,
+);
+/** The read main is answering, if one is out. */
+let catchUpRequest: number | null = null;
+let nextCatchUpRequest = 1;
+let catchUpRetry: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Frames waiting to be dissected past which the file is not read further:
+ * a read is about 3,600 frames, and this is a second or so of the Worker's
+ * work - enough to keep it busy, not enough to be a heap of its own.
+ */
+const CATCH_UP_BACKLOG = 40_000;
+/** The adapter of the newest live frame, for a file frame whose IDB names none this list has. */
+let lastLiveIface = 0;
+
+/** A frame read back from the file, as the live path carries one. */
+function fromFile(frame: FileFrame): LiveFrame {
+  return {
+    tsUs: frame.tsUs,
+    tsNsRem: frame.tsNsRem,
+    seq: frame.seq,
+    arrivedAt: performance.now(),
+    bytes: frame.bytes,
+    origLen: frame.origLen,
+    iface: ifaceOfIdb(frame.idb),
+    ring: ringFiling.partOf(frame.seq),
+  };
+}
+
+/**
+ * The agent's adapter id for an IDB of its file. The IDB names the device and
+ * the interface list names it too; a name this list does not have - or a file
+ * with no names - is read as the adapter the live stream last came from.
+ */
+function ifaceOfIdb(idb: number): number {
+  const name = catchUp.idbName(idb);
+  if (name !== null) {
+    const index = interfaces.findIndex((entry) => entry.name === name);
+    if (index >= 0) return interfaces[index].id ?? index;
+  }
+  return lastLiveIface;
+}
+
+/** Asks main for the next piece of the file, if catching up and the Worker has room for it. */
+function pumpCatchUp(): void {
+  if (!capturing || !catchUp.active || catchUpRequest !== null || catchUpRetry !== null) return;
+  if (captureId === null || agentPort === null) return;
+  if (released.length - releasedFrom + ordering.size > CATCH_UP_BACKLOG) return;
+  const want = catchUp.wantRead();
+  if (want === null) return;
+  catchUpRequest = nextCatchUpRequest++;
+  tellAgent({ type: 'readCaptured', requestId: catchUpRequest, captureId, ...want });
+}
+
+/** Main's answer to a read. */
+function receiveCaptured(message: Extract<FromAgentLink, { type: 'capturedBytes' }>): void {
+  if (message.requestId !== catchUpRequest) return;
+  catchUpRequest = null;
+  if (!capturing) return;
+  const outcome = router.read(message);
+  if (outcome.ended !== undefined) reportCatchUpEnd(outcome.ended);
+  if (!flushSoon) {
+    flushSoon = true;
+    setTimeout(flush, 0);
+  }
+  if (outcome.retryMs !== undefined && outcome.retryMs > 0) {
+    catchUpRetry = setTimeout(() => { catchUpRetry = null; pumpCatchUp(); }, outcome.retryMs);
+  } else {
+    pumpCatchUp();
+  }
+}
+
+/**
+ * Said when catch-up gives up for a reason a person should hear. A ring file
+ * deleted before it was read needs no message: the hole it leaves is marked
+ * on the frame after it, like any other.
+ */
+function reportCatchUpEnd(why: CatchUpEnd): void {
+  if (why === 'noFile') return;
+  const reason = why === 'unreadable' ? 'the capture file could not be read'
+    : 'the capture file does not hold the frames where their numbers say, because its writer refused some';
+  post({
+    type: 'failure',
+    message: `The live view could not catch up from the capture file: ${reason}. `
+      + 'What it skipped is marked on the frame after each gap, and is in the file.',
+  });
+}
+
+/** The capture stopped: catch-up ends here, and what it held goes on live. */
+function stopCatchUp(): void {
+  if (catchUpRetry !== null) clearTimeout(catchUpRetry);
+  catchUpRetry = null;
+  catchUpRequest = null;
+  router.stop();
+}
 
 let pendingPackets: Packet[] = [];
 let pendingIcmpReplies: { requestFrameId: number; replyId: number }[] = [];
@@ -473,6 +586,14 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   resetAt = { startId, startUs: startUs ?? null, lastUs: lastUs ?? null };
   // The setting is applied here, between captures.
   if (!applyThreads() && parallel !== null) parallel.coordinator.reset(laneZero());
+  // A clear while catching up: what the file still owed is from before the
+  // clear, so it is not read, and the numbering starts again from the next
+  // live frame rather than calling the cleared part a hole.
+  if (catchUp.active) {
+    stopCatchUp();
+    flow.startCapture();
+    router.reset();
+  }
   ordering.clear();
   // Cleared frames will never be dissected, so main is told it is owed
   // nothing for them; the next flush sends the ids.
@@ -875,6 +996,8 @@ function flush(): void {
     usPerFrame = usPerFrame * 0.7 + measured * 0.3;
   }
   postFlushed();
+  // Room for more of the file, if catching up.
+  pumpCatchUp();
 }
 
 /**
@@ -995,21 +1118,36 @@ function receiveFromAgent(message: FromAgentLink): void {
       receiveBatch(message.bytes, message.batch);
       return;
     case 'shed':
-      if (capturing) flow.noteShed(message.firstSeq, message.frames);
+      // Caught up from the capture file where there is one; counted and
+      // marked on the next frame where there is not.
+      if (capturing) {
+        router.shed(message.firstSeq, message.frames);
+        pumpCatchUp();
+      }
       return;
-    case 'backlog':
+    case 'capturedBytes':
+      receiveCaptured(message);
+      return;
+    case 'backlog': {
       // Main counts what this Worker owes it; the skipped frames are counted
       // here, from the agent's numbering, because only the frames say where
       // the stream had holes. Forwarded once a second, as main sends it.
+      //
+      // While catching up, how far behind is the file's to say: the frames
+      // between where it has read to and the newest live one, and the capture
+      // time between them. Main's count is only what it has posted.
+      const behind = catchUp.status();
       post({
         type: 'liveLag',
-        behindFrames: message.backlog.frames,
-        behindMs: message.backlog.oldestMs,
+        behindFrames: catchUp.active ? behind.toGo : message.backlog.frames,
+        behindMs: catchUp.active ? behind.behindMs : message.backlog.oldestMs,
         skippedFrames: flow.skippedFrames,
         shedding: message.backlog.shedding,
         storeBehind: flow.storeBehind,
+        catchingUp: catchUp.active,
       });
       return;
+    }
     case 'text':
       receiveControl(message.text);
       return;
@@ -1047,11 +1185,13 @@ function receiveBatch(bytes: Uint8Array, batch: number | undefined): void {
   flow.batchArrived(batch, frames.length);
   const arrivedAt = performance.now();
   for (const frame of frames) {
-    const hole = flow.seqArrived(frame.seq);
     // Not dissected here: frames wait in the ordering window and are dissected
-    // by the flush, in capture order. `retain` copies the bytes out of the
-    // batch, which one held frame would otherwise keep alive in full.
-    ordering.push({
+    // by the flush, in capture order - unless the stream skipped and the view
+    // is catching up from the file, which has these (`catchUp.ts`). `retain`
+    // copies the bytes out of the batch, which one held frame would otherwise
+    // keep alive in full.
+    lastLiveIface = frame.iface;
+    router.arrive({
       tsUs: frame.tsUs,
       tsNsRem: frame.tsNsRem,
       seq: frame.seq,
@@ -1061,9 +1201,9 @@ function receiveBatch(bytes: Uint8Array, batch: number | undefined): void {
       iface: frame.iface,
       ring: ringFiling.partOf(frame.seq),
       batch,
-      ...(hole > 0 ? { holeBefore: hole } : {}),
     });
   }
+  pumpCatchUp();
 }
 
 function receiveControl(text: string): void {
@@ -1083,7 +1223,11 @@ function receiveControl(text: string): void {
 
   // The ring's two facts the store needs, taken here because here is where
   // frames are filed (ADR 0052). Both are passed on to the app as well.
-  if (message.type === 'capture_boundary') ringFiling.boundary(message.index, message.firstSeq);
+  if (message.type === 'capture_boundary') {
+    ringFiling.boundary(message.index, message.firstSeq);
+    captureFiles.boundary(message.index, message.firstSeq);
+  }
+  if (message.type === 'capture_file') captureFiles.file(message.index, message.name, message.state, message.firstSeq);
   if (message.type === 'capture_file' && message.state === 'deleted' && message.lastSeq !== null) {
     storePort?.postMessage({ type: 'ringDeleted', epoch: ringFiling.epoch, lastSeq: message.lastSeq });
   }
@@ -1200,6 +1344,11 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       break;
 
     case 'command':
+      // The capture's id is what its pcapng is read back under, to catch up.
+      if (command.command.type === 'start_capture') {
+        captureId = command.command.captureId ?? null;
+        router.enable(captureId !== null);
+      }
       // Dropped if the link is not up, exactly as a closed socket dropped it.
       // Main knows whether the pipe is writable; this end does not need to.
       tellAgent({ type: 'send', text: encodeAgentCommand(command.command) });
@@ -1213,7 +1362,11 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
 
     case 'capturing':
       // A capture starting is a new run of the agent's numbering.
-      if (command.capturing && !capturing) flow.startCapture();
+      if (command.capturing && !capturing) {
+        flow.startCapture();
+        router.reset();
+      }
+      if (!command.capturing && capturing) stopCatchUp();
       capturing = command.capturing;
       if (capturing) capturedSinceReset = true;
       break;
@@ -1222,6 +1375,10 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       // Everything held goes now, in the order a flush sends it - bytes and
       // records to the store, then the rows up - and only then the answer, so
       // the app has the last rows in hand when it seals the capture.
+      //
+      // A catch-up stops with the capture: what it had not read yet is
+      // counted as skipped, marked, and in the file.
+      stopCatchUp();
       capturing = false;
       flush();
       if (parallel === null) {

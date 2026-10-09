@@ -443,6 +443,11 @@ export class CatchUp<F extends SeqFrame> {
     return held;
   }
 
+  /** The device name an IDB of the file being read gives, if it gives one. */
+  idbName(idb: number): string | null {
+    return this.cursor?.tail.idbNames[idb] ?? null;
+  }
+
   /** How far the view is behind live, in frames and capture time. */
   status(): { toGo: number; behindMs: number } {
     if (!this.on || this.cursor === null) return { toGo: 0, behindMs: 0 };
@@ -557,9 +562,16 @@ export class CatchUpRouter<F extends SeqFrame> {
     return { retryMs: out.retryMs, ended: out.ended?.why };
   }
 
-  /** The capture stopped: whatever was held goes on live, holes and all. */
+  /**
+   * The capture stopped: whatever was held goes on live, holes and all - and
+   * a hole among them is marked, not caught up, because there is nothing
+   * left to catch up for.
+   */
   stop(): void {
+    const enabled = this.enabled;
+    this.enabled = false;
     for (const frame of this.catchUp.abort()) this.arrive(frame);
+    this.enabled = enabled;
   }
 
   private pass(frame: F): void {

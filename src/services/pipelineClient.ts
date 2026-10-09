@@ -188,6 +188,7 @@ export class PipelineClient {
           skippedFrames: message.skippedFrames,
           shedding: message.shedding,
           storeBehind: message.storeBehind,
+          catchingUp: message.catchingUp === true,
         });
         break;
       case 'agentService':
