@@ -77,7 +77,7 @@ for (const theme of THEMES) {
     await sleep(600);
     await shot('01-panel-never-tested');
 
-    await p.getByRole('button', { name: 'Run speed test' }).click();
+    await p.getByRole('button', { name: 'Run test' }).click();
     await until(() => text('Measuring ping'), 10_000);
     await shot('02-ping');
     await until(() => dialOn('Download'), 15_000);

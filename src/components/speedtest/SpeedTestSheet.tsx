@@ -275,7 +275,7 @@ function Hint({ term, explain }: { term: string; explain: string }) {
       {term}
       <span role="tooltip"
         className="pointer-events-none absolute bottom-full left-0 z-20 mb-1.5 hidden w-64 rounded-md border border-border bg-popover px-2.5 py-1.5
-          text-[11px] font-normal leading-snug text-popover-foreground shadow-lg no-underline group-hover:block group-focus-visible:block">
+          text-[11px] font-normal leading-snug text-popover-foreground shadow-lg no-underline group-hover:block group-focus:block">
         {explain}
       </span>
     </span>

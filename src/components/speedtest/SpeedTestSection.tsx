@@ -50,13 +50,15 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
           </div>
         ) : last ? (
           <div className="space-y-0.5">
+            {/* The two figures alone on the first line and the unit with the
+                rest on the second: at the panel's 170 px floor a unit after
+                the figures wrapped onto a line of its own. */}
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-sm tabular-nums text-foreground">
               <span className="inline-flex items-center gap-1"><ArrowDown className="h-3.5 w-3.5 text-muted-foreground" aria-label="Download" />{formatMbps(last.downMbps)}</span>
               <span className="inline-flex items-center gap-1"><ArrowUp className="h-3.5 w-3.5 text-muted-foreground" aria-label="Upload" />{formatMbps(last.upMbps)}</span>
-              <span className="text-xs text-muted-foreground">Mb/s</span>
             </div>
             <div className="text-[11px] text-muted-foreground tabular-nums">
-              Ping {Math.round(last.pingMs)} ms · {whenText(last.at, Date.now())}
+              Mb/s · ping {Math.round(last.pingMs)} ms · {whenText(last.at, Date.now())}
             </div>
           </div>
         ) : (
@@ -68,7 +70,7 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
             className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-secondary px-3 py-1.5
               text-xs font-semibold text-foreground transition-colors hover:bg-accent cursor-pointer
               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            Show the test <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+            Show test <ChevronRight className="h-3.5 w-3.5" aria-hidden />
           </button>
         ) : (
           <>
@@ -80,7 +82,9 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
                 text-xs font-semibold text-primary transition-colors hover:bg-primary/20 cursor-pointer
                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
               <Gauge className="h-3.5 w-3.5" aria-hidden />
-              {last ? 'Run again' : 'Run speed test'}
+              {/* Short, so it fits on one line at 170 px: the section's own
+                  title already says what kind of test. */}
+              {last ? 'Run again' : 'Run test'}
             </button>
             {last && (
               <button type="button" onClick={onOpen}

@@ -64,9 +64,9 @@ try {
   };
 
   await p.getByRole('button', { name: 'Network' }).click();
-  checkTrue('the Network panel offers the speed test', await until(() => visible('Run speed test'), 10_000));
+  checkTrue('the Network panel offers the speed test', await until(() => visible('Run test'), 10_000));
   checkTrue('...and says who sees the address before the first test', await visible(/Cloudflare sees this machine/));
-  await p.getByRole('button', { name: 'Run speed test' }).click();
+  await p.getByRole('button', { name: 'Run test' }).click();
   checkTrue('running a test opens the sheet with the dial', await until(() => p.locator('svg[role="img"][aria-label]').count().then((n) => n > 0), 10_000));
   checkTrue('the server and ISP show before the numbers', await until(() => visible(/Example Networks/), 10_000));
   checkTrue('the download reaches the dial', await until(() => p.locator('svg[aria-label^="Download:"]').count().then((n) => n > 0), 15_000));

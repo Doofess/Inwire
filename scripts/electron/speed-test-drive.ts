@@ -41,7 +41,7 @@ try {
 
   await p.getByRole('button', { name: 'Network' }).click();
   const started = Date.now();
-  await p.getByRole('button', { name: 'Run speed test' }).click();
+  await p.getByRole('button', { name: 'Run test' }).click();
   const end = Date.now() + 90_000;
   let outcome = 'timed out';
   while (Date.now() < end) {
