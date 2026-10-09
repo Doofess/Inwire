@@ -372,7 +372,8 @@ and `pcapParser.ts`.
 ```
 agent → pipe → main (deframe) → MessagePortMain → pipeline Worker
                                                    ├─→ bytes → capture store → disk
-                                                   └─→ dissect → 100 ms flush
+                                                   └─→ dissect ─┬─→ rows, patches → capture store
+                                                                └─→ 100 ms flush
                                                        → renderer main thread → React state
 ```
 
@@ -405,17 +406,26 @@ was reading. The role travels with the port now; `scripts/electron/store-ports.t
 holds it.
 
 The Worker's port carries **records** as well as bytes, posted after each
-flush's bytes, and it asks one question back: a **`revisitKit`** — a frame's
+flush's bytes - and, since ADR 0053's main-thread pass, **a live capture's rows
+and their patches** too, which used to cross to the renderer's main thread and
+be cloned again from there: a fifth of that thread at 60,000 frames a second,
+the largest single thing on it. It asks one question back: a **`revisitKit`** — a frame's
 record, its row, and the bytes of it and every frame the record names (ADR
 0049). That answer goes down the Worker's own port as a callback on the
 request, so the port still never becomes `port`, and a failure still reports on
 the client port. `store-ports.ts` holds the host to exactly that one answer.
 
-**The app never chooses between "bytes and row" and "row only".** There is no
-`attachRows` message. Rows keep arriving as `append`, and `CaptureWriter`
-answers one local question — *do I already have a slot for this id?* That is
-what makes an import, a live capture and a build with no ingest port all
-correct, with no renderer-side knowledge of which case it is in.
+**The app never chooses between "bytes and row" and "row only".** Rows arrive
+as `append`, and `CaptureWriter` answers one local question — *do I already
+have a slot for this id?* That is what makes an import, a live capture and a
+build with no ingest port all correct, with no renderer-side knowledge of which
+case it is in. **The one sender that does know is the Worker**, which posted
+those bytes itself on the same port a flush earlier: its rows say so
+(`bytesSent`), travel without their bytes, and are attached and never staged,
+so an empty `rawBytes` cannot be written as a frame. Cloning the bytes again
+was 30% of a row's clone, and the store held a second copy of every staged
+frame for its whole patch horizon. A Worker with no store port says
+`stored: false` on its flush and the window persists as it always did.
 
 Main hands the Worker one end of a `MessageChannelMain`. The renderer's main
 thread receives that port from the preload and transfers it straight into the
@@ -936,7 +946,11 @@ now takes through the installed agent - along with a third: Stop sent the
 store's `finish` straight away, ahead of the frames the Worker still held in
 its ordering window, so a stopped capture's tail sat staged, unwritten, until
 the store next closed. Stop now waits for the Worker's `drain` and flushes the
-last rows before it seals (`handlePauseCapture`). Worker failures reach only
+last rows before it seals (`handlePauseCapture`). **The drain is answered only
+once the store has acked an empty append posted behind everything else on the
+Worker's port**, because the last rows now travel there and the `finish` on the
+app's port, and nothing orders two ports into one process against each other
+(`answerDrain`). Worker failures reach only
 `console.warn`, which is why about 5% of live frames failing to dissect went
 unnoticed; the drive listens for them.
 

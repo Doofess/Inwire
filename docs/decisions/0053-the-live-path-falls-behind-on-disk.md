@@ -262,6 +262,38 @@ frame, the field writer - and that is not dissection.
 (they never used the Worker). Shards post rows through the coordinator,
 which deserializes and re-serializes each - its next limit near 100,000 a
 second; phase 6 is that. QUIC and UDP stay on lane 0 until phase 5.
+
+**The main thread, after phase 3** (2026-10-09). Profiled first, by
+`ui-burst-drive.ts --profile` on the burst at 60,000 a second, six shards. The
+top of the renderer's main thread was the rows going to the store - the window
+cloning every frame a second time on its own port, 19.7% - then unpacking the
+flush (11.9%), the dense-field writer (6.9%), and a walk in `evictOldBytes`
+over every frame the store had not sealed yet (5.4%). What changed:
+
+- **A live capture's rows and patches go to the store from the Worker**, on
+  its own port behind the bytes it already sent there, and the window sends
+  them only when the Worker had no port (`stored` on the flush). They travel
+  **without their bytes** (`bytesSent`): the store already wrote those, and the
+  copy was 30% of a row's clone and a second copy of every staged frame in the
+  store's heap. Stop's drain now waits for the store to ack an empty append
+  behind everything, because the last rows and the `finish` are on two ports.
+- **`evictOldBytes` starts at the stored range's edge**, by binary search.
+- **The field writer takes one lookup per field** (`tryWrite`), and a filter's
+  network is parsed once (`cidrMatcher`).
+- **An upward wheel stops the list following by itself.** The lighter main
+  thread exposed a race `smoke.ts` then lost one run in three.
+
+Three runs each, before (`7a5e036`) -> after, unminified builds with source
+maps: at 60,000 a second
+the main thread's long tasks 32-36% -> 2-5%, animation 47-51 -> 110-115 fps,
+its idle 15-18% -> 40-43%, frames advanced 55,300-55,900 -> 57,500-59,900 a
+second and the lag at the end of the phase 123,000-136,000 -> 61,000-101,000
+frames; at 40,000, 100-103 -> 131-132 fps. **The cost moved to the
+coordinator** - its idle at 60,000 went from ~27% to ~9%, as it now clones
+each row for the store as well as for the window - so it, not the window, is
+the next limit, and phase 6 is still what removes it. What is left on the
+main thread is the flush's unpacking (12.5%), which is the message's shape,
+not code.
 4. **Catch-up from the agent's file.**
 5. **QUIC and UDP sharding** - the CID-to-connection map into the Sequencer,
    QUIC sharded by server; SDP handed out in frame order.
