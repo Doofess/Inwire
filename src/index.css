@@ -506,8 +506,15 @@ html[data-platform="win32"] {
    rather than a second `color-mix` because the thing being said IS "this
    colour, moved in lightness" - a mix toward a fixed endpoint can only say it
    by accident. */
+/* **Drawn the way the header's are: an inset shadow on the cell's right edge.**
+   It was a collapsed 1px border (`divide-x` on the row), and a collapsed border
+   is centred ON the line between two cells, half in each, where the header's
+   inset shadow sits wholly inside the cell to its left - so every header rule
+   stood up to a pixel off the body rule under it, and the grid looked broken at
+   the seam (the owner's report). One mechanism for both puts them on the same
+   pixels. */
 .packet-grid tbody tr > :not(:last-child) {
-  border-right-color: oklch(from var(--row-bg) calc(l + var(--packet-gridline-step, 0.02)) c h);
+  box-shadow: inset -1px 0 0 oklch(from var(--row-bg) calc(l + var(--packet-gridline-step, 0.02)) c h);
 }
 
 /* **The header's rules are the app's own hairline, and they are box-shadows.**

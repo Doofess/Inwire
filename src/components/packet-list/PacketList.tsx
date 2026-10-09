@@ -1409,13 +1409,14 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // the window that opens over it.
                     onDoubleClick={() => onInspectPacket?.(packet)}
                     onContextMenu={e => handleContextMenu(e, packet)}
-                    // `divide-x` on every body row. The columns had no vertical
-                    // rule at all below the header, so where one value ended
-                    // and the next began was carried entirely by the gap
-                    // between them - which disappears the moment a column is
-                    // narrow enough for its text to fill it.
+                    // A vertical rule between every body cell, drawn by
+                    // `.packet-grid` - no `divide-x` here any more. The columns
+                    // had no rule at all below the header once, so where one
+                    // value ended and the next began was carried entirely by
+                    // the gap between them - which disappears the moment a
+                    // column is narrow enough for its text to fill it.
                     //
-                    // **Width only; the colour is `.packet-grid`'s**, which
+                    // **The colour is `.packet-grid`'s too**, which
                     // takes this row's own fill and steps it in lightness -
                     // toward the light on Day, toward the dark on Night. Two
                     // earlier answers are recorded there: `divide-border/40`,
@@ -1424,7 +1425,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // row; and the row's INK, which the colouring rule does
                     // guarantee reads on the fill, but which draws a rule as
                     // strong as the text it separates.
-                    className={`cursor-pointer divide-x ${
+                    className={`cursor-pointer ${
                       isSelected
                         // `--row-bg` has to follow, or the one row painted by a
                         // CLASS rather than by the inline style would draw its
