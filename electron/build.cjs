@@ -36,6 +36,8 @@ async function main() {
       // The capture store's utilityProcess entry. Bundled like the others so
       // it carries its `src/services/capture` imports with it.
       'store/store': path.join(root, 'electron/store/entry.ts'),
+      // The speed test's utilityProcess (ADR 0054), forked for one test.
+      'speedTest/speedTest': path.join(root, 'electron/speedTest/entry.ts'),
     },
     outdir: path.join(root, 'dist-electron'),
     outExtension: { '.js': '.cjs' },

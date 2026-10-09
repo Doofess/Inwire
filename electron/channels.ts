@@ -104,6 +104,23 @@ export const UPDATE_CHECK_CHANNEL = 'inwire:update-check';
 export const UPDATE_APPLY_CHANNEL = 'inwire:update-apply';
 
 /**
+ * Renderer -> main: run an internet speed test (ADR 0054). Carries nothing -
+ * the renderer never names a host, a size or a URL; the engine is pinned to
+ * `MAIN_OUTBOUND_HOSTS.speedTest`. Answers once the test has started.
+ */
+export const SPEEDTEST_START_CHANNEL = 'inwire:speedtest-start';
+
+/** Renderer -> main: cancel the test running, if any. */
+export const SPEEDTEST_CANCEL_CHANNEL = 'inwire:speedtest-cancel';
+
+/**
+ * Main -> renderer: the engine's events (`src/services/speedTest/protocol.ts`),
+ * relayed unread from its utilityProcess, ending with `done`, `failed` or
+ * `cancelled`.
+ */
+export const SPEEDTEST_EVENT_CHANNEL = 'inwire:speedtest-event';
+
+/**
  * Renderer -> main: the theme the title row is currently painted in.
  *
  * Carries the **resolved theme name**, not a colour. Main owns the hex, in

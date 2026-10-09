@@ -159,6 +159,14 @@ declare global {
       onUpdateState?(listener: (state: unknown) => void): () => void;
 
       /**
+       * The internet speed test (ADR 0054). None takes a host or a URL; the
+       * events are `unknown` here and narrowed by `isSpeedEvent`.
+       */
+      startSpeedTest?(): Promise<unknown>;
+      cancelSpeedTest?(): Promise<unknown>;
+      onSpeedTestEvent?(listener: (event: unknown) => void): () => void;
+
+      /**
        * The followed TLS key log. None takes a path - see
        * `electron/keyLogFollower.ts`. Statuses are `unknown` here and narrowed
        * by `src/lib/keyLogFollow.ts`, like every other value from main.
