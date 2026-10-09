@@ -118,6 +118,16 @@ let capturing = false;
  */
 let storePort: MessagePort | null = null;
 /**
+ * The ids whose bytes this Worker has posted on `storePort`, as one run:
+ * frames are numbered consecutively, so a capture is one run, and anything
+ * that breaks it - a reset, a new port, a group posted with no port - starts
+ * another. A row inside the run goes to the store without its bytes
+ * (`bytesSent`); one outside it carries them, and the store's own slot rule
+ * decides, as it always has.
+ */
+let bytesSentFrom = -1;
+let bytesSentThrough = -1;
+/**
  * Frames posted to the store that it may not have had a capture open for.
  *
  * Should always be zero. The app sends `open` to the store before it sends
@@ -505,6 +515,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   frameClock().resumeLive(startUs ?? null, lastUs ?? null);
   arrivalSeq = 0;
   nextId = startId;
+  bytesSentFrom = bytesSentThrough = -1;
 }
 
 // --- dissection --------------------------------------------------------------
@@ -837,6 +848,9 @@ function flush(): void {
       });
     }
     if (!capturing && !capturedSinceReset) bytesPostedWhileIdle += assigned.length;
+    const first = assigned[0].id;
+    if (first !== bytesSentThrough + 1 || bytesSentFrom < 0) bytesSentFrom = first;
+    bytesSentThrough = assigned[assigned.length - 1].id;
     storePort.postMessage({
       type: 'appendBytes',
       frames: assigned.map(({ frame, id }) => (frame.ring === undefined
@@ -957,10 +971,93 @@ function postFlushed(): void {
     transfer.push(buffer);
   }
 
-  post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount }, transfer);
+  // **The rows and their patches go to the store from here, not from the
+  // window.** They used to cross to the renderer's main thread and be cloned
+  // again from there on its own port - a fifth of that thread at 60,000 frames
+  // a second, the largest single thing on it, measured. This Worker has the
+  // same objects in hand: no `FieldBlock` yet (the window adds that), so the
+  // graph cloned here is the one `plainForStore` copied there, bytes and all,
+  // and the writer's one question - do I have a slot? - answers as before.
+  // Behind this group's bytes on the same port, so a row never overtakes its
+  // slot; before the transfer below, which detaches the bytes this clones.
+  //
+  // **And the bytes stay behind.** The store wrote each of these frames' bytes
+  // when this Worker posted them, a flush ago; cloning them again cost 30% of
+  // a row's clone, and the store then held a second copy of every staged frame
+  // for its whole patch horizon. A row whose id is in the run this Worker sent
+  // goes as a row and nothing else (`bytesSent`); any other - an agent's
+  // metadata-only frame - carries its bytes, as the window's always did.
+  const stored = storePort !== null;
+  if (storePort !== null) {
+    if (packets.length > 0) postRows(storePort, packets);
+    if (infoPatches.length > 0) storePort.postMessage({ type: 'patches', patches: infoPatches });
+  }
+
+  post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount, stored }, transfer);
   // Owed until the app says it committed them (`rowsTaken`).
   flow.rowsPosted(packets.length);
   lastPostedAt = performance.now();
+}
+
+/** An empty view, for a row whose bytes stay behind; never detached, never written. */
+const NO_ROW_BYTES = new Uint8Array(0);
+
+/**
+ * A flush's rows to the store: those whose bytes went out on this port as rows
+ * alone, the rest with their bytes. The clone is synchronous, so each row's
+ * `rawBytes` is swapped out for the length of the `postMessage` and put back -
+ * the packets go on to the window with theirs, and no copy of 25 fields is made
+ * per frame to leave one out.
+ */
+function postRows(port: MessagePort, packets: readonly Packet[]): void {
+  const rows: Packet[] = [];
+  const withBytes: Packet[] = [];
+  for (const packet of packets) {
+    if (packet.id >= bytesSentFrom && packet.id <= bytesSentThrough && packet.rawBytes.byteLength > 0) rows.push(packet);
+    else withBytes.push(packet);
+  }
+  if (rows.length > 0) {
+    const bytes = rows.map((packet) => packet.rawBytes);
+    for (const packet of rows) packet.rawBytes = NO_ROW_BYTES;
+    try {
+      port.postMessage({ type: 'append', packets: rows, bytesSent: true });
+    } finally {
+      for (let i = 0; i < rows.length; i++) rows[i].rawBytes = bytes[i];
+    }
+  }
+  if (withBytes.length > 0) port.postMessage({ type: 'append', packets: withBytes });
+}
+
+/**
+ * Drains whose answer waits for the store, by the ack of the empty append
+ * that is their barrier.
+ *
+ * **Stop seals the capture with a `finish` on the app's port, and the last
+ * rows now travel on this Worker's.** Nothing orders two ports into one
+ * process against each other - which is why the rows used to be sent on the
+ * app's port, "ahead of the finish". So the drain is answered only once the
+ * store has answered an append posted behind everything this Worker sent it:
+ * every byte, record, row and patch of the tail has been read by then, and
+ * the finish the app sends next cannot overtake any of them. The records had
+ * leaned on two ports arriving in order before this; now nothing does.
+ */
+const drainBarriers = new Map<number, number>();
+/** How long a drain waits for a store that does not answer, before answering anyway. */
+const DRAIN_BARRIER_MS = 5_000;
+
+function answerDrain(requestId: number): void {
+  if (storePort === null) {
+    post({ type: 'drained', requestId });
+    return;
+  }
+  const ack = flow.storeSent(0);
+  drainBarriers.set(ack, requestId);
+  storePort.postMessage({ type: 'appendBytes', frames: [], ack });
+  // A store that died answers nothing, and Stop must still end: the app's own
+  // port is what reports that store's death.
+  setTimeout(() => {
+    if (drainBarriers.delete(ack)) post({ type: 'drained', requestId });
+  }, DRAIN_BARRIER_MS);
 }
 
 // Started at the bottom of this file, in the pipeline role only.
@@ -1162,6 +1259,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       const [port] = event.ports;
       if (!port) break;
       storePort = port;
+      bytesSentFrom = bytesSentThrough = -1;
       // Frames and records go out on it; the one thing that comes back is a
       // revisit kit this Worker asked for (ADR 0049). Everything else the store
       // says goes to the app's own port - `entry.ts` keeps them apart.
@@ -1171,6 +1269,11 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
         // The store has taken an append: its backlog shrinks, and a flush
         // the backlog was holding can go.
         if (message.data?.type === 'bytesTaken') {
+          const drainRequest = drainBarriers.get(message.data.ack);
+          if (drainRequest !== undefined) {
+            drainBarriers.delete(message.data.ack);
+            post({ type: 'drained', requestId: drainRequest });
+          }
           const wasBehind = downstreamBehind();
           flow.storeTaken(message.data.ack);
           resumeIfHeld(wasBehind);
@@ -1225,7 +1328,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       capturing = false;
       flush();
       if (parallel === null) {
-        post({ type: 'drained', requestId: command.requestId });
+        answerDrain(command.requestId);
         break;
       }
       // With shards, the last frames are still on them: the answer waits
@@ -1234,7 +1337,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
         const requestId = command.requestId;
         parallel.coordinator.whenIdle(() => {
           postFlushed();
-          post({ type: 'drained', requestId });
+          answerDrain(requestId);
         });
       }
       break;

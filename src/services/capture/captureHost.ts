@@ -360,7 +360,12 @@ export class CaptureHost {
       }
       return;
     }
-    this.open.writer.append(message.packets);
+    // Rows whose bytes their sender already wrote, on the same port: attached
+    // and nothing staged, so an empty `rawBytes` can never be written as a
+    // frame. A row whose bytes never arrived is held and then counted missed,
+    // like any other (`attachRows`).
+    if (message.bytesSent) this.open.writer.attachRows(message.packets);
+    else this.open.writer.append(message.packets);
   }
 
   /**

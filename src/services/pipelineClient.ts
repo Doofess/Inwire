@@ -27,6 +27,8 @@ export interface FrameBatch {
   icmpReplies: { requestFrameId: number; replyId: number }[];
   infoPatches: InfoPatch[];
   lateCount: number;
+  /** The rows and patches are already on their way to the store, from the Worker. */
+  stored?: boolean;
 }
 
 /** What a replay needs, produced by the caller only when one is actually needed. */

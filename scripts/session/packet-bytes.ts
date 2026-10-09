@@ -146,6 +146,29 @@ function pkt(id: number, bytes: Uint8Array): Packet {
     buffer.map(hasBytes), [true, true, true, true, false, false, false, false, true, true]);
 }
 
+// --- A store behind the window ------------------------------------------------
+//
+// At rate the store seals rows up to its patch horizon behind the newest frame,
+// so most of what lies outside the resident window is not stored yet. Those
+// keep their bytes, the stored ones below them go - and the walk starts at the
+// stored range's edge rather than stepping over the unstored run every flush,
+// which is what it used to cost (5% of the main thread at 60,000 frames a
+// second). Counted by watching which frames' ids the walk reads.
+{
+  const buffer = Array.from({ length: 1000 }, (_, i) => pkt(i + 1, new Uint8Array([1])));
+  const freed = evictOldBytes(buffer, 100, { first: 1, last: 200 });
+  check('a store behind the window evicts exactly the stored frames', freed, 200);
+  check('...and the unstored run between it and the window keeps its bytes',
+    buffer.slice(200).every(hasBytes), true);
+  let reads = 0;
+  const watched = buffer.map((p) => new Proxy(p, {
+    get(target, key, receiver) { if (key === 'rawBytes') reads++; return Reflect.get(target, key, receiver); },
+  }));
+  evictOldBytes(watched, 100, { first: 1, last: 300 });
+  check('...the next flush reads only the newly stored frames and the one that stops it', reads <= 2 * 101 + 2, true);
+  check('...and evicts them', buffer.slice(0, 300).every((p) => !hasBytes(p)) && buffer.slice(300).every(hasBytes), true);
+}
+
 // --- Mutation, not replacement --------------------------------------------------
 //
 // The display filter's cache is a second array of references to these same

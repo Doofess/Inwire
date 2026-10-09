@@ -60,8 +60,14 @@ export type ToCapture =
   /**
    * Frames to store. Bytes are written at once; rows wait behind the patch
    * horizon - see `captureWriter.ts`.
+   *
+   * `bytesSent` is the pipeline Worker saying that it sent every one of these
+   * frames' bytes itself, ahead of this, on this same port - so these are rows
+   * and nothing else, and their `rawBytes` are empty rather than a second copy
+   * (ADR 0053). Only a sender that wrote the bytes may say it; the app never
+   * does, for the reason `appendBytes` below gives.
    */
-  | { type: 'append'; packets: Packet[] }
+  | { type: 'append'; packets: Packet[]; bytesSent?: true }
   /**
    * Frames as they arrived, before anything dissected them.
    *
@@ -78,6 +84,8 @@ export type ToCapture =
    * as `append`, and the writer answers "do I already have this frame's bytes?"
    * itself - so the app never has to know whether the ingest port exists, and a
    * build without one writes bytes and rows together exactly as it always did.
+   * The one sender that does know is the Worker, which wrote the bytes: its
+   * rows say so (`bytesSent`), and travel without them.
    */
   | {
       type: 'appendBytes';
