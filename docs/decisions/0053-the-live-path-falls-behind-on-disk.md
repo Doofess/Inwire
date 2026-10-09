@@ -32,7 +32,11 @@ two adversarial ones. On the burst, live: at 40,000 frames a second the view
 kept up (40,750 advanced against 37,400 on one core, its lag flat at ~11,000
 frames instead of growing past 75,000); at 60,000 the dissection is no longer
 the limit - the app's main thread is - see **Phases** for the numbers and what
-changed from the design. The rest of the phases are still to come. The fixes
+changed from the design. **Phase 4 landed 2026-10-09**: a hole in the live
+stream is read back out of the agent's own pcapng and dissected in order, and
+the view rejoins the stream where the file reaches it - on the burst at 94,000
+frames a second, every frame sent was in the list and none skipped (see
+**Phase 4, as built**). Phases 5 and 6 are still to come. The fixes
 that measured the problem landed the same day and are listed under **What came
 first**. Narrows **[0038](0038-the-worker-writes-the-bytes.md)**: the
 Worker still writes the bytes before it dissects, and now also stops when the
@@ -92,7 +96,9 @@ gets a budget:
 
 The heap guards stay, as backstops that should never fire again.
 
-**Until phase 4, a hole is reported, not caught up.** The first frame after
+**Before phase 4, a hole was reported, not caught up** - and still is where
+there is no file to catch up from, or its counting does not check (see
+**Phase 4, as built**). The first frame after
 it carries `inwire.live.skipped`, a `CaptureGap` finding saying the frames are
 in the capture file, and a row on its Frame layer. TCP analysis runs across
 the hole and says "previous segment not captured" of the streams that crossed
@@ -262,7 +268,83 @@ frame, the field writer - and that is not dissection.
 (they never used the Worker). Shards post rows through the coordinator,
 which deserializes and re-serializes each - its next limit near 100,000 a
 second; phase 6 is that. QUIC and UDP stay on lane 0 until phase 5.
-4. **Catch-up from the agent's file.**
+4. **Catch-up from the agent's file.** *Landed* - see below.
+
+### Phase 4, as built
+
+`services/pipeline/catchUp.ts` (the plan: `CaptureFiles`, `CatchUp`, and
+`CatchUpRouter`, the live path's front door), `pipeline/pcapngTail.ts` (the
+file, a chunk at a time, as it grows), `electron/capturedRead.ts` (main's
+read), and the Worker's half in `pipeline.worker.ts`.
+
+- **Every live frame goes through the router.** A frame numbered 16 or more
+  past what the stream owes, or main's `shed`, starts a catch-up from the first
+  frame missing; while it runs, live frames from there on are dropped - which
+  answers main's credit, so main stops shedding - and the Worker pulls the
+  capture's pcapng from main 4 MB at a time, only while fewer than 40,000
+  frames wait to be dissected, and dissects what it reads through the
+  ordinary path: ordering window, ids, bytes to the store, Sequencer, shards.
+  A dropped live frame never had an id, so nothing is stored twice.
+- **Main reads by capture id and the agent's own file name, never a path**
+  (`capturedRead.ts`, `scripts/electron/captured-read.ts`), opening and
+  closing the file every read so a ring's delete never waits on the app. The
+  names come from `capture_file`; what each file starts at from
+  `capture_boundary`.
+- **A file frame's number is counted, not read.** The agent's EPBs carry none
+  - dumpcap writes none, and the agent writes what dumpcap writes - but a
+  frame is in the file exactly when it has a number, in order, so the k-th
+  packet of a file is its `firstSeq + k`. **That count is checked twice
+  against frames the stream did deliver**, because a frame the agent's writer
+  refused (`droppedWriter`, a disk falling behind) shifts every number after
+  it: the frame before the hole must be the file's frame of that number, or
+  nothing is read and the hole is marked as before; and the rejoin is found
+  by the held frame's bytes, not its number, so a shifted count rejoins
+  without dissecting anything twice and turns catch-up off for the capture.
+  No agent change was needed.
+- **Rejoining.** Within 20,000 frames of the newest live frame, live frames
+  are held (at most 100,000, 96 MB) and the file read up to the first of
+  them; then they go on, and live copies of anything the file delivered are
+  dropped. A stream that went quiet rejoins with nothing held once the file
+  has delivered all it reached. A hold the file cannot reach in time is let
+  go and started again later.
+- **A growing file is read whole blocks at a time.** Windows can extend a
+  file before its writer fills it, and the gap reads as zeros; a block is
+  taken only whole, from one read, closed by its trailing length, and
+  anything else is read again from its start. The first drive found this:
+  catch-up read zeros, called the file corrupt and stopped.
+- **Never silent.** A catch-up that stops short - the capture stopped, the
+  ring deleted a file before it was read, a count that did not check - counts
+  and marks what it had not delivered, exactly as a shed was marked before.
+- **The status bar** says *catching up · behind live 12 s · 410,000 to go*,
+  and its title *Behind live by 12 s, 410,000 frames to go, nothing lost*. There
+  is no follow chip to change; the status item is where it is said.
+
+**Measured** (`ui-burst-drive.ts`, the burst replayed into the built app with
+the agent's pcapng written as the agent writes it, six shards, 94,000 frames a
+second offered for 22 s): every frame sent was in the list at the end -
+2,928,104 sent, 2,928,104 shown, 0 skipped - and the view was level with live
+22.7 s after the stream stopped; while catching up the count advanced 42,500
+frames a second with 20% of the main thread in long tasks. The same run with
+no file (`--no-file`, which is the app before this phase): 3,121,854 sent,
+2,185,928 shown, **935,926 skipped**, level 4.7 s after the stream stopped,
+the count advancing 55,300 a second with 31% long tasks. So catching up costs
+time - 22.7 s against 4.7 to be level, and 42,500 a second against 55,300
+while behind, the file being read one 4 MB piece at a time behind a 40,000-frame
+gate - and buys every frame. `scripts/pipeline/catch-up.ts` plays every fixture and
+made frames through the router with holes of every kind and holds the result
+to an uninterrupted run, frame for frame and, dissected, hash for hash.
+
+**What phase 4 leaves for later.**
+
+- **The *Pause live view* offer** (Decision 3), past about two minutes behind.
+  Not built: it needs the stopped capture's file opened as an import, and an
+  import reads a `File` in the renderer, which cannot name the agent's.
+- **A Stop while catching up ends the catch-up**: what it had not read is
+  counted as skipped and is in the file. Reading on after Stop would hold the
+  Stop button for as long as the backlog.
+- **A hole's mark says the frames are in the capture file**, which is not
+  true of a ring file deleted before it was read.
+
 5. **QUIC and UDP sharding** - the CID-to-connection map into the Sequencer,
    QUIC sharded by server; SDP handed out in frame order.
 6. **Shards post rows straight to the store and renderer**, merged by a

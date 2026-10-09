@@ -165,7 +165,7 @@ export class PcapngTail {
         nsPerTick = (raw & 0x80) !== 0 ? Math.max(1, Math.round(1e9 / 2 ** exponent)) : Math.max(1, Math.round(10 ** (9 - exponent)));
       }
       if (code === 2) {
-        name = new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset + at + 4, len)).replace(/\0+$/, '');
+        name = UTF8.decode(new Uint8Array(view.buffer, view.byteOffset + at + 4, len)).replace(/\0+$/, '');
       }
       at += 4 + len + ((4 - (len % 4)) % 4);
     }
@@ -182,3 +182,4 @@ export class PcapngTail {
 }
 
 const EMPTY = new Uint8Array(0);
+const UTF8 = new TextDecoder();
