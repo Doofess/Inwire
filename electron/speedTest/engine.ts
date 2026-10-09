@@ -43,6 +43,24 @@ export const CLOUDFLARE: SpeedTarget = {
   metaHeaders: { Origin: 'https://speed.cloudflare.com', Referer: 'https://speed.cloudflare.com/' },
 };
 
+/**
+ * A test server on THIS machine, from `INWIRE_SPEEDTEST_TARGET` - how the
+ * drives exercise every state of the sheet without spending Cloudflare's
+ * quota, as `INWIRE_UPDATE_FEED` does for the updater. Loopback only, by
+ * construction: anything that is not `http://127.0.0.1`, `http://localhost`
+ * or `http://[::1]` with a port is ignored, so the variable can never point a
+ * test at another host. `scripts/electron/shell.ts` holds that.
+ */
+export function loopbackTarget(value: string | undefined): SpeedTarget | null {
+  if (!value) return null;
+  let url: URL;
+  try { url = new URL(value); } catch { return null; }
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (url.protocol !== 'http:' || !url.port || !['127.0.0.1', 'localhost', '::1'].includes(host)) return null;
+  if (url.pathname !== '/' || url.search || url.username || url.password) return null;
+  return { protocol: 'http:', host, port: Number(url.port) };
+}
+
 /** The method's knobs, all defaulted to `method.ts`; tests shorten them. */
 export interface EngineOptions {
   target: SpeedTarget;
@@ -197,7 +215,7 @@ class Run {
         if (status < 200 || status >= 300) {
           res.resume();
           this.requests.delete(req);
-          reject(status === 429 ? new RateLimited() : new Error(`the test server answered ${status} to ${path.split('?')[0]}`));
+          reject(status === 429 ? new RateLimited() : new Error(`The test server returned an error (HTTP ${status}).`));
           return;
         }
         res.on('data', (chunk: Buffer) => {

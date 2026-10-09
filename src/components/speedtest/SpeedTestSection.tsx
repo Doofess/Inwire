@@ -34,12 +34,20 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
     <Section title="Speed test">
       <div className="space-y-2 px-3 py-2.5 font-sans">
         {running ? (
-          <p className="text-xs text-foreground">
-            <span className="text-muted-foreground">Testing {state.phase === 'upload' ? 'upload' : state.phase === 'download' ? 'download' : 'ping'}…</span>{' '}
+          // The phase on one line and the figure on the next: at the panel's
+          // 170 px a sentence with a number in it broke between the number
+          // and its unit.
+          <div className="space-y-0.5">
+            <div className="text-[11px] text-muted-foreground">
+              Testing {state.phase === 'upload' ? 'upload' : state.phase === 'download' ? 'download' : 'ping'}…
+            </div>
             {(state.phase === 'download' || state.phase === 'upload') && (
-              <span className="tabular-nums font-semibold">{formatMbps(state.liveMbps)} Mb/s</span>
+              <div className="flex items-baseline gap-1 text-sm text-foreground">
+                <span className="font-semibold tabular-nums">{formatMbps(state.liveMbps)}</span>
+                <span className="text-xs text-muted-foreground">Mb/s</span>
+              </div>
             )}
-          </p>
+          </div>
         ) : last ? (
           <div className="space-y-0.5">
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-sm tabular-nums text-foreground">
@@ -63,23 +71,25 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
             Show the test <ChevronRight className="h-3.5 w-3.5" aria-hidden />
           </button>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <>
+            {/* A tinted outline rather than a fill: unmistakably the thing to
+                press in this section, and still quieter than the facts the
+                rest of the panel is for. */}
             <button type="button" onClick={run}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold
-                text-primary-foreground transition-colors hover:bg-primary/90 cursor-pointer
+              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-primary/50 bg-primary/10 px-3 py-1.5
+                text-xs font-semibold text-primary transition-colors hover:bg-primary/20 cursor-pointer
                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
               <Gauge className="h-3.5 w-3.5" aria-hidden />
               {last ? 'Run again' : 'Run speed test'}
             </button>
             {last && (
               <button type="button" onClick={onOpen}
-                className="flex items-center justify-center gap-1 rounded-md border border-border bg-secondary px-2.5 py-1.5
-                  text-xs font-semibold text-foreground transition-colors hover:bg-accent cursor-pointer
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                History <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+                className="flex items-center gap-0.5 rounded-sm text-[11px] text-muted-foreground hover:text-foreground cursor-pointer
+                  focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+                Results and history <ChevronRight className="h-3 w-3" aria-hidden />
               </button>
             )}
-          </div>
+          </>
         )}
 
         {!running && !last && (

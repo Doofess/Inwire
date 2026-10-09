@@ -99,6 +99,7 @@ function Idle({ last }: { last: SpeedHistoryEntry | null }) {
 }
 
 function Running({ state, capturing }: { state: SpeedState; capturing: boolean }) {
+  const ping = livePing(state);
   const transferring = state.phase === 'download' || state.phase === 'upload';
   const phase = state.phase ?? 'connecting';
   const icon = phase === 'upload' ? <ArrowUp className="h-3.5 w-3.5" />
@@ -113,6 +114,10 @@ function Running({ state, capturing }: { state: SpeedState; capturing: boolean }
           label={transferring ? PHASE_LABEL[phase] : phase === 'latency' ? 'Measuring ping' : 'Connecting to Cloudflare'}
           icon={icon}
           active={transferring}
+          readout={transferring ? null : {
+            value: ping === null ? '–' : fmtMsValue(ping),
+            unit: 'ms',
+          }}
         />
       </div>
       <div className="flex flex-col items-center gap-3">
@@ -149,7 +154,8 @@ function Done({ state, previous }: { state: SpeedState; previous: SpeedHistoryEn
         />
         {previous && (
           <Detail
-            label={<span>Compared with {whenText(previous.at, Date.now())}</span>}
+            wide
+            label={<span>Compared with the test {whenText(previous.at, Date.now())}</span>}
             value={
               <span className="tabular-nums">
                 ↓ {changeText(r.download.mbps, previous.downMbps)} · ↑ {changeText(r.upload.mbps, previous.upMbps)} · ping {changeText(r.latency.idleMs, previous.pingMs)}
@@ -157,26 +163,38 @@ function Done({ state, previous }: { state: SpeedState; previous: SpeedHistoryEn
             }
           />
         )}
-        <Detail
-          label={<span>Your address</span>}
-          value={<span className="truncate font-mono text-xs" title={r.server.ip ?? undefined}>{r.server.ip ?? 'not reported'}</span>}
-        />
       </div>
       <EmptyStateButton icon={RotateCcw} primary onClick={startSpeedTest}>Test again</EmptyStateButton>
+      <ServerFooter server={r.server} />
     </>
   );
 }
 
+/**
+ * What went wrong, in the reader's words, with the machine's own words kept
+ * underneath for anyone who wants them - this app's readers often do.
+ *
+ * Classified by WHERE it failed and WHAT failed rather than by matching error
+ * strings: a refusal with an HTTP status is the server's, Cloudflare's 429 is
+ * its own case, and anything else is the network - before any number arrived
+ * that means Cloudflare could not be reached, during a transfer that the
+ * connection dropped.
+ */
 function Failed({ error }: { error: NonNullable<SpeedState['error']> }) {
-  const offline = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ECONNREFUSED|ECONNRESET|EHOSTUNREACH/i.test(error.message);
-  const Icon = error.rateLimited ? ShieldAlert : offline ? WifiOff : AlertTriangle;
-  const title = error.rateLimited ? 'Cloudflare is limiting tests right now'
-    : offline ? 'Could not reach Cloudflare'
-      : `The test stopped during ${PHASE_LABEL[error.phase].toLowerCase()}`;
-  const body = error.rateLimited
-    ? 'Too many tests have run from this address recently. Wait a few minutes and try again.'
-    : offline ? 'This machine has no route to speed.cloudflare.com - check the connection, then try again.'
-      : error.message;
+  const http = /\(HTTP (\d+)\)/.exec(error.message)?.[1] ?? null;
+  const early = error.phase === 'connecting' || error.phase === 'latency';
+  const phase = PHASE_LABEL[error.phase].toLowerCase();
+  const { Icon, title, body } = error.rateLimited
+    ? { Icon: ShieldAlert, title: 'Cloudflare is limiting tests right now',
+      body: 'Too many tests have run from this address recently. Wait a few minutes and try again.' }
+    : http !== null
+      ? { Icon: AlertTriangle, title: `The test stopped during ${phase}`,
+        body: `Cloudflare's test server returned an error (HTTP ${http}). Nothing was recorded; try again in a moment.` }
+      : early
+        ? { Icon: WifiOff, title: 'Could not reach Cloudflare',
+          body: 'Check this machine\u2019s connection to the internet, then try again.' }
+        : { Icon: WifiOff, title: `The connection dropped during ${phase}`,
+          body: 'This happens when the network changes mid-test. Nothing was recorded; try again.' };
   return (
     <div role="alert" className="flex flex-col items-center gap-3 text-center">
       <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-secondary">
@@ -184,6 +202,9 @@ function Failed({ error }: { error: NonNullable<SpeedState['error']> }) {
       </div>
       <p className="text-[13px] font-semibold text-foreground">{title}</p>
       <p className="max-w-[26rem] text-xs leading-relaxed text-muted-foreground">{body}</p>
+      {!error.rateLimited && http === null && (
+        <p className="font-mono text-[11px] text-muted-foreground/80">{error.message}</p>
+      )}
       <EmptyStateButton icon={RotateCcw} primary onClick={startSpeedTest}>Try again</EmptyStateButton>
     </div>
   );
@@ -224,10 +245,12 @@ function Tiles({ state, large = false }: { state: SpeedState; large?: boolean })
             {t.icon}{t.label}
           </div>
           <div className="mt-1 flex items-baseline gap-1">
-            <span className={`${large ? 'text-3xl' : 'text-2xl'} font-semibold tabular-nums leading-none ${t.value === null ? 'text-muted-foreground/60' : 'text-foreground'}`}>
-              {t.value ?? '—'}
+            {/* A pending figure is a quiet dash at the figure's own height, with no
+                unit beside it - a long dash and "Mb/s" read as a rule with a label. */}
+            <span className={`${large ? 'text-3xl' : 'text-2xl'} font-semibold tabular-nums leading-none ${t.value === null ? 'text-muted-foreground/50' : 'text-foreground'}`}>
+              {t.value ?? '–'}
             </span>
-            <span className="text-xs text-muted-foreground">{t.unit}</span>
+            {t.value !== null && <span className="text-xs text-muted-foreground">{t.unit}</span>}
           </div>
         </div>
       ))}
@@ -235,9 +258,9 @@ function Tiles({ state, large = false }: { state: SpeedState; large?: boolean })
   );
 }
 
-function Detail({ label, value }: { label: React.ReactNode; value: React.ReactNode }) {
+function Detail({ label, value, wide = false }: { label: React.ReactNode; value: React.ReactNode; wide?: boolean }) {
   return (
-    <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2">
+    <div className={`flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2 ${wide ? 'sm:col-span-2' : ''}`}>
       <span className="shrink-0 text-xs text-muted-foreground">{label}</span>
       <span className="min-w-0 text-sm text-foreground">{value}</span>
     </div>
@@ -292,6 +315,18 @@ function ServerLine({ server, running }: { server: SpeedServer | null; running: 
         <span className="hidden truncate md:inline" title={server.isp}>· {shortIsp(server.isp)}</span>
       )}
     </span>
+  );
+}
+
+/** Where the result came from, said once, quietly, under it. */
+function ServerFooter({ server }: { server: SpeedServer }) {
+  const where = server.coloCity ? `${server.coloCity}${server.colo ? ` (${server.colo})` : ''}` : server.colo;
+  return (
+    <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+      <span className="inline-flex items-center gap-1"><Server className="h-3 w-3" aria-hidden />Cloudflare{where ? ` · ${where}` : ''}</span>
+      {server.isp && <span title={server.isp}>{'·'} {shortIsp(server.isp)}</span>}
+      {server.ip && <span>{'·'} Your address <span className="font-mono">{server.ip}</span></span>}
+    </p>
   );
 }
 

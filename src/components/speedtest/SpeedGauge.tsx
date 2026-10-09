@@ -68,7 +68,7 @@ function useEased(target: number): number {
 }
 
 export function SpeedGauge({
-  mbps, label, icon, active,
+  mbps, label, icon, active, readout,
 }: {
   mbps: number;
   /** What is being measured - "Download", "Upload" - shown under the number with its icon. */
@@ -76,6 +76,12 @@ export function SpeedGauge({
   icon: React.ReactNode;
   /** False between transfers: the arc rests empty and the number dims. */
   active: boolean;
+  /**
+   * What the centre says instead of the dial's own speed - the live ping while
+   * the ping is measured, so the hero is always the thing being measured and
+   * never a "0 Mb/s" that is not a measurement at all.
+   */
+  readout?: { value: string; unit: string } | null;
 }) {
   const eased = useEased(active ? mbps : 0);
   const frac = gaugeFraction(eased);
@@ -85,7 +91,9 @@ export function SpeedGauge({
   const [baseBX, baseBY] = polar(needleDeg - 90, 5);
 
   return (
-    <div className="relative mx-auto w-full max-w-[22rem] font-sans">
+    // Wider on a wide workspace: at 1600 px a 22rem dial sat small in a lot of
+    // nothing. The SVG scales; the number steps up with it.
+    <div className="relative mx-auto w-full max-w-[22rem] font-sans xl:max-w-[28rem]">
       <svg viewBox="0 0 300 268" className="block w-full" role="img"
         aria-label={`${label}: ${formatMbps(mbps)} megabits per second`}>
         {/* The track, then how far along it the speed is. */}
@@ -113,11 +121,11 @@ export function SpeedGauge({
       {/* The number, in the dial's open quarter. Tabular figures in a fixed
           box, so the digits changing never shifts anything around them. */}
       <div className="absolute inset-x-0 bottom-0 flex flex-col items-center" aria-hidden>
-        <div className={`flex items-baseline gap-1.5 ${active ? 'text-foreground' : 'text-muted-foreground'}`}>
-          <span className="inline-block min-w-[4ch] text-right text-5xl font-semibold tabular-nums leading-none">
-            {formatMbps(eased)}
+        <div className={`flex items-baseline gap-1.5 ${active || readout ? 'text-foreground' : 'text-muted-foreground'}`}>
+          <span className="inline-block min-w-[4ch] text-right text-5xl font-semibold tabular-nums leading-none xl:text-6xl">
+            {readout ? readout.value : formatMbps(eased)}
           </span>
-          <span className="text-sm font-medium text-muted-foreground">Mb/s</span>
+          <span className="w-10 text-sm font-medium text-muted-foreground">{readout ? readout.unit : 'Mb/s'}</span>
         </div>
         <div className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           {icon}

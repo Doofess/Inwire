@@ -36,7 +36,7 @@ import {
   DEFAULT_UPDATE_FEED_URL, isAllowedDownload,
 } from '../../electron/updateCenter/manifest';
 import { menuTemplate } from '../../electron/menu';
-import { CLOUDFLARE } from '../../electron/speedTest/engine';
+import { CLOUDFLARE, loopbackTarget } from '../../electron/speedTest/engine';
 import {
   APP_ORIGIN, COMMAND_LINE_SWITCHES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SCHEME_PRIVILEGES,
   TITLE_BAR_HEIGHT, WEB_PREFERENCES, WINDOW_CONTROL_COUNT, WINDOW_CONTROL_WIDTH,
@@ -313,8 +313,17 @@ console.log('\n--- the policy, and the list it has to keep up with ---\n');
   check('the recorded speed-test host is the one the engine dials',
     hostOf(MAIN_OUTBOUND_HOSTS.speedTest), `${CLOUDFLARE.protocol}//${CLOUDFLARE.host}`);
   checkTrue('...over TLS', CLOUDFLARE.protocol === 'https:' && MAIN_OUTBOUND_HOSTS.speedTest.startsWith('https://'));
-  checkTrue('...and the test process runs against that target and no other',
-    /runSpeedTest\(\{ target: CLOUDFLARE \}/.test(readFileSync('electron/speedTest/entry.ts', 'utf8')));
+  const entry = readFileSync('electron/speedTest/entry.ts', 'utf8');
+  checkTrue('...and the test process runs against that target or a loopback one, and no other',
+    /const TARGET = loopbackTarget\(process\.env\.INWIRE_SPEEDTEST_TARGET\) \?\? CLOUDFLARE;/.test(entry)
+    && /runSpeedTest\(\{ target: TARGET \}/.test(entry));
+  check('...where loopback means loopback',
+    ['http://127.0.0.1:8123', 'http://localhost:8123', 'http://[::1]:8123'].map((v) => loopbackTarget(v)?.host ?? null),
+    ['127.0.0.1', 'localhost', '::1']);
+  check('...and nothing else gets through',
+    ['https://speed.cloudflare.com', 'http://192.168.1.10:8123', 'http://example.com:80', 'http://127.0.0.1',
+      'https://127.0.0.1:8123', 'http://127.0.0.1:8123/x', 'http://user:pw@127.0.0.1:8123', 'not a url', '']
+      .map((v) => loopbackTarget(v)), [null, null, null, null, null, null, null, null, null]);
   const preload = readFileSync('electron/preload.ts', 'utf8');
   checkTrue('...and the renderer cannot hand it a URL: start and cancel take nothing',
     /startSpeedTest\(\): Promise<unknown> \{\s*return ipcRenderer\.invoke\(SPEEDTEST_START_CHANNEL\);/.test(preload)

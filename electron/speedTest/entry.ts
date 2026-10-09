@@ -11,10 +11,14 @@
  * second.
  *
  * Takes `start` and `cancel` from main and posts the engine's events back. The
- * target is fixed here - `CLOUDFLARE`, the host `MAIN_OUTBOUND_HOSTS` records -
- * so nothing that arrives over the port can point the test anywhere else.
+ * target is fixed here - `CLOUDFLARE`, the host `MAIN_OUTBOUND_HOSTS` records,
+ * or a loopback server the drives name in the environment - so nothing that
+ * arrives over the port can point the test anywhere else.
  */
-import { CLOUDFLARE, runSpeedTest } from './engine';
+import { CLOUDFLARE, loopbackTarget, runSpeedTest } from './engine';
+
+/** Cloudflare, or a server on this machine for the drives - never anywhere else. */
+const TARGET = loopbackTarget(process.env.INWIRE_SPEEDTEST_TARGET) ?? CLOUDFLARE;
 
 let running: AbortController | null = null;
 
@@ -26,7 +30,7 @@ process.parentPort.on('message', (event) => {
   }
   if (message?.type !== 'start' || running !== null) return;
   running = new AbortController();
-  void runSpeedTest({ target: CLOUDFLARE }, (e) => process.parentPort.postMessage(e), running.signal)
+  void runSpeedTest({ target: TARGET }, (e) => process.parentPort.postMessage(e), running.signal)
     .finally(() => {
       running = null;
       // One test per process: main forks a fresh one for the next.
