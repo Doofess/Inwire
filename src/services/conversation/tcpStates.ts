@@ -108,10 +108,11 @@ export class TcpStateMachine {
 
     if (seg.syn) {
       if (!seg.ack) {
-        st.sawSyn = true;
-        // A new incarnation on a five-tuple that closed: the FIN bookkeeping
-        // belongs to the connection before it.
+        // A new incarnation on a five-tuple that closed: everything the
+        // connection before it left behind belongs to that connection. The
+        // reset runs first, so the SYN below is the new one's first fact.
         if (CLOSED_LIKE.has(st[s]) && st[s] !== 'UNKNOWN') this.resetIncarnation();
+        st.sawSyn = true;
         if (CLOSED_LIKE.has(st[s])) move(s, 'SYN_SENT', 'sent', 'syn');
         if (st[r] === 'UNKNOWN' || st[r] === 'CLOSED') move(r, 'LISTEN', 'inferred', 'listen');
         else if (st[r] === 'SYN_SENT') move(r, 'SYN_RCVD', 'received', 'syn');
@@ -148,7 +149,8 @@ export class TcpStateMachine {
 
     if (seg.fin && !st.finSent[s]) {
       st.finSent[s] = true;
-      if (seg.seq !== undefined) st.finEnd[s] = seg.seq + (seg.len ?? 0) + 1;
+      // Sequence numbers are 32-bit: a FIN at the top of the range ends at 0.
+      if (seg.seq !== undefined) st.finEnd[s] = (seg.seq + (seg.len ?? 0) + 1) >>> 0;
       if (st[s] === 'ESTABLISHED' || st[s] === 'SYN_RCVD') move(s, 'FIN_WAIT_1', 'sent', 'fin');
       else if (st[s] === 'CLOSE_WAIT') move(s, 'LAST_ACK', 'sent', 'fin');
       if (st[r] === 'ESTABLISHED') move(r, 'CLOSE_WAIT', 'received', 'fin');
@@ -161,7 +163,9 @@ export class TcpStateMachine {
   private acknowledges(seg: TcpSegment, finSender: Side): boolean {
     const end = this.state.finEnd[finSender];
     if (end === null || seg.ackNo === undefined) return true;
-    return seg.ackNo >= end;
+    // Modular 32-bit distance: the ACK covers the FIN when it is at or past
+    // `end`, counting around the wrap.
+    return ((seg.ackNo - end) | 0) >= 0;
   }
 
   private resetIncarnation(): void {
@@ -170,6 +174,10 @@ export class TcpStateMachine {
     st.finSent = { client: false, server: false };
     st.finAcked = { client: false, server: false };
     st.rstFrom = null;
+    st.everEstablished = false;
+    st.joined = false;
+    st.sawSyn = false;
+    st.sawSynAck = false;
   }
 }
 

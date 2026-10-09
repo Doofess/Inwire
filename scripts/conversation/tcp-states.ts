@@ -111,6 +111,22 @@ check('no sequence numbers: the next ACK acknowledges the FIN',
   check('port reuse: a new SYN after CLOSED reopens', r.state, { client: 'ESTABLISHED', server: 'ESTABLISHED' });
 }
 
+// A reused five-tuple is a new connection: the old one's outcome must not leak.
+check('reused port pair, refused: outcome is refused', run([
+  ...handshake, seg('client', 'RA'), seg('client', 'S'), seg('server', 'RA'),
+]).outcome, 'refused');
+check('reused port pair, no answer: outcome is no reply', run([
+  ...handshake, seg('client', 'RA'), seg('client', 'S'),
+]).outcome, 'no reply');
+
+// FIN at the top of the 32-bit range ends at 0 once the sequence wraps.
+check('FIN at the wrap point is acknowledged by ackNo 0', run([
+  ...handshake, seg('client', 'FA', { seq: 4294967295, ack: 1 }), seg('server', 'A', { seq: 1, ack: 0 }),
+]).state, { client: 'FIN_WAIT_2', server: 'CLOSE_WAIT' });
+check('an ACK just below the wrapped FIN end is not taken as acknowledging', run([
+  ...handshake, seg('client', 'FA', { seq: 4294967295, ack: 1 }), seg('server', 'A', { seq: 1, ack: 4294967295 }),
+]).state, { client: 'FIN_WAIT_1', server: 'CLOSE_WAIT' });
+
 check('state round-trips through JSON', (() => {
   const m = new TcpStateMachine();
   for (const s of handshake) m.apply(s);
