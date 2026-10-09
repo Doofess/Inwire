@@ -1718,6 +1718,13 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // size, because at card size the popup was wider than the map it covered.
       // There is no card size.
 
+      // The speed test's chip claims its own hover: the home pin is often a few
+      // kilometres from the data centre, so without this the pin beneath the
+      // chip answered and its popup covered the chip's.
+      if ((e.originalEvent.target as Element | null)?.closest?.('[data-speedtest-chip]')) {
+        if (hoveredPinRef.current !== null) { hoveredPinRef.current = null; popup.remove(); }
+        return;
+      }
       const hit = layer.hitTest(e.point.x, e.point.y);
       if (!hit) {
         if (hoveredPinRef.current !== null) {
@@ -1801,6 +1808,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     if (!map || !speedOverlay) return;
     const el = document.createElement('div');
     el.className = 'flex flex-col items-center font-sans select-none';
+    el.dataset.speedtestChip = '';
     el.setAttribute('role', 'img');
     el.setAttribute('aria-label', `${speedOverlay.label}: ${speedOverlay.summary}`);
     el.innerHTML = `
@@ -1814,8 +1822,13 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 30, className: 'inwire-geo-popup' });
     const show = () => popup
       .setLngLat(speedOverlay.lngLat)
+      // Each direction in its own colour, as the sheet draws them, and the ISP
+      // beside the server when Cloudflare named one.
       .setHTML(`<div class="font-sans text-xs"><div class="font-semibold">${escapeHtml(speedOverlay.label)}</div>`
-        + `<div class="tabular-nums">${escapeHtml(speedOverlay.summary)}</div>`
+        + (speedOverlay.isp ? `<div class="text-muted-foreground">${escapeHtml(speedOverlay.isp)}</div>` : '')
+        + `<div class="tabular-nums"><span style="color:var(--speed-download)">↓</span> ${escapeHtml(speedOverlay.down)}`
+        + ` · <span style="color:var(--speed-upload)">↑</span> ${escapeHtml(speedOverlay.up)} Mb/s`
+        + ` · ${escapeHtml(speedOverlay.ping)}</div>`
         + `<div class="text-muted-foreground">${escapeHtml(whenText(speedOverlay.at, Date.now()))}</div></div>`)
       .addTo(map);
     el.addEventListener('mouseenter', show);

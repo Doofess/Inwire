@@ -2,7 +2,7 @@ import { ArrowDown, ArrowUp, ChevronRight, Gauge } from 'lucide-react';
 import { Section } from '../network/rows';
 import { formatMbps, TEST_CAP_MB } from '../../services/speedTest/method';
 import { startSpeedTest, useSpeedTest, speedTestAvailable } from '../../services/speedTest/state';
-import { speedHistoryStore, whenText } from '../../services/speedTest/history';
+import { shortIsp, speedHistoryStore, whenText } from '../../services/speedTest/history';
 import { usePreferenceValue } from '../../services/preferenceStore';
 
 /**
@@ -54,12 +54,20 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
                 rest on the second: at the panel's 170 px floor a unit after
                 the figures wrapped onto a line of its own. */}
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-sm tabular-nums text-foreground">
-              <span className="inline-flex items-center gap-1"><ArrowDown className="h-3.5 w-3.5 text-muted-foreground" aria-label="Download" />{formatMbps(last.downMbps)}</span>
-              <span className="inline-flex items-center gap-1"><ArrowUp className="h-3.5 w-3.5 text-muted-foreground" aria-label="Upload" />{formatMbps(last.upMbps)}</span>
+              <span className="inline-flex items-center gap-1"><ArrowDown className="h-3.5 w-3.5 text-speed-download" aria-label="Download" />{formatMbps(last.downMbps)}</span>
+              <span className="inline-flex items-center gap-1"><ArrowUp className="h-3.5 w-3.5 text-speed-upload" aria-label="Upload" />{formatMbps(last.upMbps)}</span>
             </div>
             <div className="text-[11px] text-muted-foreground tabular-nums">
               Mb/s · ping {Math.round(last.pingMs)} ms · {whenText(last.at, Date.now())}
             </div>
+            {/* Where it ran and from which network, cut to the panel's width -
+                the whole of both is the title. */}
+            {last.server && (
+              <div className="truncate text-[11px] text-muted-foreground"
+                title={[`Cloudflare · ${last.server}`, last.isp].filter(Boolean).join(' — ')}>
+                Cloudflare · {last.server}{last.isp && <> — {shortIsp(last.isp)}</>}
+              </div>
+            )}
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">How fast this connection is right now: download, upload and ping.</p>

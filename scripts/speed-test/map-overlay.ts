@@ -11,7 +11,7 @@ import { placeServer } from '../../electron/speedTest/engine';
 import {
   onMapFocusRequest, overlayArcEnds, requestMapFocus, speedTestOverlay, takeMapFocus,
 } from '../../src/services/speedTest/mapOverlay';
-import type { SpeedHistoryEntry } from '../../src/services/speedTest/history';
+import { shortIsp, type SpeedHistoryEntry } from '../../src/services/speedTest/history';
 import type { SpeedServer } from '../../src/services/speedTest/protocol';
 
 let failures = 0;
@@ -45,10 +45,14 @@ const entry: SpeedHistoryEntry = {
   server: 'Tel Aviv', isp: 'Bezeq', colo: 'TLV', lat: 32.01, lon: 34.89,
 };
 const overlay = speedTestOverlay(entry);
-check('the latest test, placed', overlay, {
+check('the latest test, placed, with its ISP', overlay, {
   lngLat: [34.89, 32.01], label: 'Speed test · Cloudflare Tel Aviv',
-  summary: '↓ 1616 · ↑ 225 Mb/s · 2.9 ms', at: entry.at,
+  summary: '↓ 1616 · ↑ 225 Mb/s · 2.9 ms', down: '1616', up: '225', ping: '2.9 ms',
+  isp: 'Bezeq', at: entry.at,
 });
+check('no ISP from Cloudflare, none shown - never "Unknown"', speedTestOverlay({ ...entry, isp: null })?.isp, null);
+check('a long AS organisation reads as its first word', shortIsp('Bezeq- THE ISRAEL TELECOMMUNICATION CORP. LTD.'), 'Bezeq');
+check('...and a name with no separator is kept whole', shortIsp('Example Networks Ltd.'), 'Example Networks Ltd.');
 check('no test, no overlay', speedTestOverlay(null), null);
 check('a test that was not placed has none', speedTestOverlay({ ...entry, lat: null, lon: null }), null);
 check('...nor one placed nowhere on earth', speedTestOverlay({ ...entry, lat: 120 }), null);

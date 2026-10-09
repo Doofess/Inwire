@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowDown, ArrowUp, Globe, History, MapPin, RotateCcw, Server, ShieldAlert, Square,
+  Activity, AlertTriangle, ArrowDown, ArrowUp, Globe, History, MapPin, Network, RotateCcw, Server, ShieldAlert, Square,
   WifiOff, Wifi,
 } from 'lucide-react';
 import { requestMapFocus } from '../../services/speedTest/mapOverlay';
@@ -11,7 +11,7 @@ import { formatMbps, TEST_CAP_MB, type BloatGrade } from '../../services/speedTe
 import {
   cancelSpeedTest, livePing, startSpeedTest, useSpeedTest, type SpeedState,
 } from '../../services/speedTest/state';
-import { changeText, speedHistoryStore, whenText, type SpeedHistoryEntry } from '../../services/speedTest/history';
+import { changeText, shortIsp, speedHistoryStore, whenText, type SpeedHistoryEntry } from '../../services/speedTest/history';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import type { SpeedPhase, SpeedServer } from '../../services/speedTest/protocol';
 
@@ -96,7 +96,11 @@ function Idle({ last }: { last: SpeedHistoryEntry | null }) {
       {last && (
         <p className="text-xs text-muted-foreground">
           Last test {whenText(last.at, Date.now())}:{' '}
-          <span className="tabular-nums text-foreground">↓ {formatMbps(last.downMbps)} · ↑ {formatMbps(last.upMbps)} Mb/s · {Math.round(last.pingMs)} ms</span>
+          <span className="tabular-nums text-foreground">
+            <span className="text-speed-download">↓</span> {formatMbps(last.downMbps)} ·{' '}
+            <span className="text-speed-upload">↑</span> {formatMbps(last.upMbps)} Mb/s · {Math.round(last.pingMs)} ms
+          </span>
+          {last.server && <> · <ServerIsp city={last.server} colo={null} isp={last.isp} inline /></>}
         </p>
       )}
     </>
@@ -119,6 +123,7 @@ function Running({ state, capturing }: { state: SpeedState; capturing: boolean }
           label={transferring ? PHASE_LABEL[phase] : phase === 'latency' ? 'Measuring ping' : 'Connecting to Cloudflare'}
           icon={icon}
           active={transferring}
+          tone={phase === 'upload' ? 'upload' : 'download'}
           readout={transferring ? null : {
             value: ping === null ? '–' : fmtMsValue(ping),
             unit: 'ms',
@@ -126,7 +131,7 @@ function Running({ state, capturing }: { state: SpeedState; capturing: boolean }
         />
       </div>
       <div className="flex flex-col items-center gap-3">
-        <Sparkline values={transferring ? state.spark : []} />
+        <Sparkline values={transferring ? state.spark : []} tone={phase === 'upload' ? 'upload' : 'download'} />
         <EmptyStateButton icon={Square} onClick={cancelSpeedTest}>Cancel</EmptyStateButton>
       </div>
       {capturing && (
@@ -151,7 +156,8 @@ function Done({ state, previous, onShowOnMap }: {
           label={<Hint term="Loaded latency" explain="Ping while the connection is busy downloading or uploading. The closer to the idle ping, the better calls and games hold up during a download." />}
           value={
             <span className="tabular-nums">
-              ↓ {fmtMs(r.download.loadedLatencyMs)} · ↑ {fmtMs(r.upload.loadedLatencyMs)}
+              <span className="text-speed-download">↓</span> {fmtMs(r.download.loadedLatencyMs)} ·{' '}
+              <span className="text-speed-upload">↑</span> {fmtMs(r.upload.loadedLatencyMs)}
             </span>
           }
         />
@@ -165,7 +171,8 @@ function Done({ state, previous, onShowOnMap }: {
             label={<span>Compared with the test {whenText(previous.at, Date.now())}</span>}
             value={
               <span className="tabular-nums">
-                ↓ {changeText(r.download.mbps, previous.downMbps)} · ↑ {changeText(r.upload.mbps, previous.upMbps)} · ping {changeText(r.latency.idleMs, previous.pingMs)}
+                <span className="text-speed-download">↓</span> {changeText(r.download.mbps, previous.downMbps)} ·{' '}
+                <span className="text-speed-upload">↑</span> {changeText(r.upload.mbps, previous.upMbps)} · ping {changeText(r.latency.idleMs, previous.pingMs)}
               </span>
             }
           />
@@ -234,8 +241,8 @@ function Tiles({ state, large = false }: { state: SpeedState; large?: boolean })
   const ping = livePing(state);
   const jitterMs = state.result?.latency.jitterMs ?? state.liveJitterMs;
   const tiles: { key: string; icon: React.ReactNode; label: React.ReactNode; value: string | null; unit: string; live: boolean }[] = [
-    { key: 'down', icon: <ArrowDown className="h-3.5 w-3.5" />, label: 'Download', value: state.downloadMbps === null ? null : formatMbps(state.downloadMbps), unit: 'Mb/s', live: state.phase === 'download' },
-    { key: 'up', icon: <ArrowUp className="h-3.5 w-3.5" />, label: 'Upload', value: state.uploadMbps === null ? null : formatMbps(state.uploadMbps), unit: 'Mb/s', live: state.phase === 'upload' },
+    { key: 'down', icon: <ArrowDown className="h-3.5 w-3.5 text-speed-download" />, label: 'Download', value: state.downloadMbps === null ? null : formatMbps(state.downloadMbps), unit: 'Mb/s', live: state.phase === 'download' },
+    { key: 'up', icon: <ArrowUp className="h-3.5 w-3.5 text-speed-upload" />, label: 'Upload', value: state.uploadMbps === null ? null : formatMbps(state.uploadMbps), unit: 'Mb/s', live: state.phase === 'upload' },
     { key: 'ping', icon: <Activity className="h-3.5 w-3.5" />, label: 'Ping', value: ping === null ? null : fmtMsValue(ping), unit: 'ms', live: state.phase === 'latency' },
     {
       key: 'jitter', icon: <Activity className="h-3.5 w-3.5 opacity-60" />,
@@ -247,7 +254,8 @@ function Tiles({ state, large = false }: { state: SpeedState; large?: boolean })
     <div className="grid w-full grid-cols-2 gap-3 md:grid-cols-4">
       {tiles.map((t) => (
         <div key={t.key}
-          className={`rounded-lg border bg-card px-3 py-2.5 transition-colors duration-200 ${t.live ? 'border-primary/60' : 'border-border'}`}>
+          className={`rounded-lg border bg-card px-3 py-2.5 transition-colors duration-200 ${
+            !t.live ? 'border-border' : t.key === 'up' ? 'border-speed-upload/70' : t.key === 'down' ? 'border-speed-download/70' : 'border-primary/50'}`}>
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
             {t.icon}{t.label}
           </div>
@@ -310,17 +318,40 @@ function GradeBadge({ grade }: { grade: BloatGrade }) {
   );
 }
 
+/**
+ * The server and the network the test ran from, as one line: "Cloudflare ·
+ * Tel Aviv (TLV) — Bezeq", with a server glyph and a network glyph so the two
+ * halves read apart. The ISP is Cloudflare's own AS organisation for this
+ * address, from the test's `/meta`; absent, nothing is shown. The whole name
+ * is the title, where the line has room only for the short one.
+ */
+export function ServerIsp({ city, colo, isp, inline = false }: {
+  city: string | null; colo: string | null; isp: string | null; inline?: boolean;
+}) {
+  const where = city ? `${city}${colo ? ` (${colo})` : ''}` : colo;
+  const short = shortIsp(isp);
+  return (
+    <span className={`${inline ? 'inline-flex' : 'flex'} min-w-0 items-center gap-1.5 font-sans font-normal normal-case`}
+      title={[`Cloudflare${where ? ` · ${where}` : ''}`, isp].filter(Boolean).join(' — ')}>
+      <Server className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="truncate">Cloudflare{where ? ` · ${where}` : ''}</span>
+      {short && (
+        <>
+          <span aria-hidden className="shrink-0">—</span>
+          <Network className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="truncate">{short}</span>
+        </>
+      )}
+    </span>
+  );
+}
+
 /** Who the test is talking to - shown as soon as it is known, before any number. */
 function ServerLine({ server, running }: { server: SpeedServer | null; running: boolean }) {
   if (!server) return running ? <span className="font-sans font-normal text-muted-foreground">finding a server…</span> : null;
-  const where = server.coloCity ? `${server.coloCity}${server.colo ? ` (${server.colo})` : ''}` : server.colo;
   return (
-    <span className="flex min-w-0 items-center gap-2 font-sans font-normal normal-case text-muted-foreground">
-      <Server className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span className="truncate">Cloudflare{where ? ` · ${where}` : ''}</span>
-      {server.isp && (
-        <span className="hidden truncate md:inline" title={server.isp}>· {shortIsp(server.isp)}</span>
-      )}
+    <span className="text-muted-foreground">
+      <ServerIsp city={server.coloCity} colo={server.colo} isp={server.isp} />
     </span>
   );
 }
@@ -331,7 +362,6 @@ function ServerLine({ server, running }: { server: SpeedServer | null; running: 
  * placed (no guess: the globe shows no pin either).
  */
 function ServerFooter({ server, onShowOnMap }: { server: SpeedServer; onShowOnMap?: () => void }) {
-  const where = server.coloCity ? `${server.coloCity}${server.colo ? ` (${server.colo})` : ''}` : server.colo;
   const placed = server.coloLat !== null && server.coloLon !== null;
   return (
     <div className="flex flex-col items-center gap-1.5">
@@ -348,8 +378,7 @@ function ServerFooter({ server, onShowOnMap }: { server: SpeedServer; onShowOnMa
       </span>
     ))}
     <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-      <span className="inline-flex items-center gap-1"><Server className="h-3 w-3" aria-hidden />Cloudflare{where ? ` · ${where}` : ''}</span>
-      {server.isp && <span title={server.isp}>{'·'} {shortIsp(server.isp)}</span>}
+      <ServerIsp city={server.coloCity} colo={server.colo} isp={server.isp} inline />
       {server.ip && <span>{'·'} Your address <span className="font-mono">{server.ip}</span></span>}
     </p>
     </div>
@@ -385,11 +414,11 @@ function HistoryTable({ history, onClear }: { history: SpeedHistoryEntry[]; onCl
           <thead className="bg-secondary text-muted-foreground">
             <tr>
               <th className="px-3 py-1.5 text-left font-medium">When</th>
-              <th className="px-3 py-1.5 text-right font-medium"><span className="inline-flex items-center gap-1"><ArrowDown className="h-3 w-3" aria-hidden />Download</span></th>
-              <th className="px-3 py-1.5 text-right font-medium"><span className="inline-flex items-center gap-1"><ArrowUp className="h-3 w-3" aria-hidden />Upload</span></th>
+              <th className="px-3 py-1.5 text-right font-medium"><span className="inline-flex items-center gap-1"><ArrowDown className="h-3 w-3 text-speed-download" aria-hidden />Download</span></th>
+              <th className="px-3 py-1.5 text-right font-medium"><span className="inline-flex items-center gap-1"><ArrowUp className="h-3 w-3 text-speed-upload" aria-hidden />Upload</span></th>
               <th className="px-3 py-1.5 text-right font-medium">Ping</th>
               <th className="hidden px-3 py-1.5 text-center font-medium sm:table-cell">Grade</th>
-              <th className="hidden px-3 py-1.5 text-left font-medium lg:table-cell">Server</th>
+              <th className="hidden px-3 py-1.5 text-left font-medium md:table-cell">Server and ISP</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border bg-card">
@@ -400,7 +429,10 @@ function HistoryTable({ history, onClear }: { history: SpeedHistoryEntry[]; onCl
                 <td className="px-3 py-1.5 text-right tabular-nums text-foreground">{formatMbps(h.upMbps)} <span className="text-muted-foreground">Mb/s</span></td>
                 <td className="px-3 py-1.5 text-right tabular-nums text-foreground">{fmtMsValue(h.pingMs)} <span className="text-muted-foreground">ms</span></td>
                 <td className="hidden px-3 py-1.5 text-center sm:table-cell">{h.grade}</td>
-                <td className="hidden truncate px-3 py-1.5 text-muted-foreground lg:table-cell">{h.server ?? '—'}</td>
+                <td className="hidden max-w-[14rem] truncate px-3 py-1.5 text-muted-foreground md:table-cell"
+                  title={[h.server, h.isp].filter(Boolean).join(' — ')}>
+                  {h.server ?? '—'}{h.isp && <> — {shortIsp(h.isp)}</>}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -440,10 +472,5 @@ function fmtMsValue(ms: number): string {
 }
 function fmtMs(ms: number | null): string {
   return ms === null ? '—' : `${fmtMsValue(ms)} ms`;
-}
-/** "Bezeq- THE ISRAEL TELECOMMUNICATION CORP. LTD." reads as "Bezeq" at a glance; the whole name is the title. */
-export function shortIsp(isp: string): string {
-  const head = isp.split(/[-,(]/)[0].trim();
-  return head.length >= 2 ? head : isp;
 }
 

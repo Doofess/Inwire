@@ -80,6 +80,18 @@ export function recordResult(result: SpeedResult): void {
   speedHistoryStore.set([historyEntry(result), ...speedHistoryStore.get()].slice(0, HISTORY_LIMIT));
 }
 
+/**
+ * An ISP's name as a glance reads it - "Bezeq- THE ISRAEL TELECOMMUNICATION
+ * CORP. LTD." is "Bezeq" - with the whole name kept for a title. Cloudflare's
+ * own AS organisation for the client, never a lookup; null stays null, and
+ * nothing is shown rather than "Unknown".
+ */
+export function shortIsp(isp: string | null | undefined): string | null {
+  if (!isp) return null;
+  const head = isp.split(/[-,(]/)[0].trim();
+  return head.length >= 2 ? head : isp;
+}
+
 /** When a test ran, as a glance reads it: "just now", "5 min ago", "3 h ago", then the date. */
 export function whenText(at: number, now: number): string {
   const s = Math.max(0, (now - at) / 1000);

@@ -15,14 +15,19 @@
  */
 import type { LngLat } from '../../lib/greatCircle';
 import { formatMbps } from './method';
-import type { SpeedHistoryEntry } from './history';
+import { shortIsp, type SpeedHistoryEntry } from './history';
 
 export interface SpeedOverlay {
   lngLat: LngLat;
   /** "Speed test · Cloudflare Tel Aviv" - the chip's own words. */
   label: string;
-  /** "↓ 940 · ↑ 41.9 Mb/s · 3 ms" - the hover's. */
+  /** "↓ 940 · ↑ 41.9 Mb/s · 3 ms" - the hover's, and its parts for colouring each direction. */
   summary: string;
+  down: string;
+  up: string;
+  ping: string;
+  /** The network the test ran from, short; null when Cloudflare did not say. */
+  isp: string | null;
   at: number;
 }
 
@@ -32,10 +37,15 @@ const placed = (n: number | null | undefined): n is number => typeof n === 'numb
 export function speedTestOverlay(latest: SpeedHistoryEntry | null): SpeedOverlay | null {
   if (!latest || !placed(latest.lat) || !placed(latest.lon)) return null;
   if (Math.abs(latest.lat) > 90 || Math.abs(latest.lon) > 180) return null;
+  const down = formatMbps(latest.downMbps);
+  const up = formatMbps(latest.upMbps);
+  const ping = `${latest.pingMs < 10 ? latest.pingMs.toFixed(1) : Math.round(latest.pingMs)} ms`;
   return {
     lngLat: [latest.lon, latest.lat],
     label: `Speed test · Cloudflare${latest.server ? ` ${latest.server}` : ''}`,
-    summary: `↓ ${formatMbps(latest.downMbps)} · ↑ ${formatMbps(latest.upMbps)} Mb/s · ${latest.pingMs < 10 ? latest.pingMs.toFixed(1) : Math.round(latest.pingMs)} ms`,
+    summary: `↓ ${down} · ↑ ${up} Mb/s · ${ping}`,
+    down, up, ping,
+    isp: shortIsp(latest.isp),
     at: latest.at,
   };
 }

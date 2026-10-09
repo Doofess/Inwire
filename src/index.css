@@ -67,6 +67,13 @@
   --popover-foreground: #1b1f24;
   --primary: #0b6bcb;
   --primary-foreground: #ffffff;
+  /* The speed test's two directions (ADR 0054): download in the accent, upload
+     in purple, as every speed test draws them. Download repeats `--primary`'s
+     hex rather than `var()`-ing it so the registry can measure it, and is held
+     equal to it there. Upload is text on the card and the ground, so 4.5:1 on
+     both - measured, not eyeballed. */
+  --speed-download: #0b6bcb;
+  --speed-upload: #7c3aed;
   --secondary: #eef1f5;
   --secondary-foreground: #1b1f24;
   --muted: #eef1f5;
@@ -110,6 +117,8 @@
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
+  --color-speed-download: var(--speed-download);
+  --color-speed-upload: var(--speed-upload);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -685,6 +694,8 @@ html[data-platform="win32"] {
   --popover: #040404;
   --popover-foreground: #e4e4e4;
   --primary: #38bdf8;
+  --speed-download: #38bdf8;
+  --speed-upload: #c084fc;
   --primary-foreground: #000000;
   --secondary: #0d0d0d;
   --secondary-foreground: #e4e4e4;

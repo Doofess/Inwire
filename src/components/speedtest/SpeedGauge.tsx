@@ -67,9 +67,24 @@ function useEased(target: number): number {
   return shown;
 }
 
+/** The two directions' colours, as CSS: download is the accent, upload purple (ADR 0054). */
+export const SPEED_INK = {
+  download: 'var(--speed-download)',
+  upload: 'var(--speed-upload)',
+} as const;
+
+/**
+ * The colour change between directions: short, so it reads as the dial
+ * resetting into a new test rather than as decoration, and turned off with
+ * every other transition under the app's reduced-motion setting.
+ */
+const INK_TRANSITION = { transition: 'stroke 250ms ease, fill 250ms ease, color 250ms ease' };
+
 export function SpeedGauge({
-  mbps, label, icon, active, readout,
+  mbps, label, icon, active, readout, tone = 'download',
 }: {
+  /** Which direction is being measured: its colour on the arc, the needle and the label. */
+  tone?: 'download' | 'upload';
   mbps: number;
   /** What is being measured - "Download", "Upload" - shown under the number with its icon. */
   label: string;
@@ -84,6 +99,7 @@ export function SpeedGauge({
   readout?: { value: string; unit: string } | null;
 }) {
   const eased = useEased(active ? mbps : 0);
+  const ink = SPEED_INK[tone];
   const frac = gaugeFraction(eased);
   const needleDeg = START_DEG + SWEEP_DEG * frac;
   const [tipX, tipY] = polar(needleDeg, R - 22);
@@ -99,7 +115,7 @@ export function SpeedGauge({
         {/* The track, then how far along it the speed is. */}
         <path d={arcPath(0, 1, R)} fill="none" stroke="var(--border)" strokeWidth={14} strokeLinecap="round" />
         {frac > 0.001 && (
-          <path d={arcPath(0, frac, R)} fill="none" stroke="var(--primary)" strokeWidth={14} strokeLinecap="round" />
+          <path d={arcPath(0, frac, R)} fill="none" stroke={ink} style={INK_TRANSITION} strokeWidth={14} strokeLinecap="round" />
         )}
         {/* The scale: one label per mark, every mark an equal step of arc. */}
         {GAUGE_MARKS.map((mark, i) => {
@@ -115,7 +131,7 @@ export function SpeedGauge({
         {/* The needle: a slim wedge from the hub. */}
         <polygon
           points={`${tipX.toFixed(2)},${tipY.toFixed(2)} ${baseAX.toFixed(2)},${baseAY.toFixed(2)} ${baseBX.toFixed(2)},${baseBY.toFixed(2)}`}
-          fill="var(--foreground)" opacity={active ? 0.9 : 0.35} aria-hidden />
+          fill={active ? ink : 'var(--foreground)'} style={INK_TRANSITION} opacity={active ? 0.95 : 0.35} aria-hidden />
         <circle cx={CX} cy={CY} r={8} fill="var(--card)" stroke="var(--foreground)" strokeOpacity={0.5} strokeWidth={2} aria-hidden />
       </svg>
       {/* The number, in the dial's open quarter. Tabular figures in a fixed
@@ -128,7 +144,7 @@ export function SpeedGauge({
           <span className="w-10 text-sm font-medium text-muted-foreground">{readout ? readout.unit : 'Mb/s'}</span>
         </div>
         <div className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-          {icon}
+          <span style={active ? { ...INK_TRANSITION, color: ink } : INK_TRANSITION} className="flex">{icon}</span>
           {label}
         </div>
       </div>
@@ -137,7 +153,7 @@ export function SpeedGauge({
 }
 
 /** The last ten seconds of the transfer, as a line. */
-export function Sparkline({ values }: { values: readonly number[] }) {
+export function Sparkline({ values, tone = 'download' }: { values: readonly number[]; tone?: 'download' | 'upload' }) {
   const W = 240;
   const H = 36;
   if (values.length < 2) return <div style={{ height: H }} aria-hidden />;
@@ -145,7 +161,7 @@ export function Sparkline({ values }: { values: readonly number[] }) {
   const pts = values.map((v, i) => `${((i / (values.length - 1)) * W).toFixed(1)},${(H - 2 - (v / max) * (H - 4)).toFixed(1)}`);
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="block h-9 w-60" aria-hidden preserveAspectRatio="none">
-      <polyline points={pts.join(' ')} fill="none" stroke="var(--primary)" strokeWidth={1.5}
+      <polyline points={pts.join(' ')} fill="none" stroke={SPEED_INK[tone]} style={INK_TRANSITION} strokeWidth={1.5}
         strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
     </svg>
   );
