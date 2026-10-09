@@ -6,7 +6,7 @@
  * connection starts, and once at the bottom where it ends, so the drawing
  * reads top to bottom without an edge looping back across it.
  */
-import type { TcpState } from '../../services/conversation/tcpStates';
+import type { TcpState, TransitionCause } from '../../services/conversation/tcpStates';
 
 export type MapNodeId = TcpState | 'CLOSED_END';
 
@@ -73,19 +73,29 @@ export const STATE_EDGES: MapEdge[] = [
   ...RST_FROM.map((from) => e(from, 'CLOSED_END', 'RST', { id: `${from}>CLOSED_END:rst`, rst: true })),
 ];
 
-// A transition is looked up by its endpoints, so where two edges share them the
-// ordinary one wins: LAST_ACK's ACK is the close the machine makes, and its RST
-// is an edge only when nothing else connects the pair. `expected` edges are
-// never walked, because the machine takes no timeouts.
-const BY_ENDS = new Map<string, MapEdge>();
+// Two tables, by what the transition was: an RST edge answers only an `rst`
+// cause, and every other cause takes the ordinary edge for the pair. Where a
+// pair has no ordinary edge (only a reset can reach CLOSED from TIME_WAIT), the
+// RST edge answers. `expected` edges are never walked: the machine takes no
+// timeouts.
+const ORDINARY = new Map<string, MapEdge>();
+const RESET = new Map<string, MapEdge>();
 for (const edge of STATE_EDGES) {
   if (edge.expected) continue;
   const key = `${edge.from}>${edge.to}`;
-  if (!edge.rst || !BY_ENDS.has(key)) BY_ENDS.set(key, edge);
+  if (edge.rst) RESET.set(key, edge);
+  else ORDINARY.set(key, edge);
 }
 
-/** The edge a transition walked. Every transition to CLOSED ends at the bottom node. */
-export function edgeFor(from: TcpState, to: TcpState): MapEdge | undefined {
+/**
+ * The edge a transition walked. Every transition to CLOSED ends at the bottom
+ * node. A `cause` of `'rst'` gets the reset edge for the pair; any other cause
+ * gets the ordinary edge, falling back to the reset edge only where no ordinary
+ * one exists.
+ */
+export function edgeFor(from: TcpState, to: TcpState, cause?: TransitionCause): MapEdge | undefined {
   const target: MapNodeId = to === 'CLOSED' ? 'CLOSED_END' : to;
-  return BY_ENDS.get(`${from}>${target}`);
+  const key = `${from}>${target}`;
+  if (cause === 'rst') return RESET.get(key);
+  return ORDINARY.get(key) ?? RESET.get(key);
 }

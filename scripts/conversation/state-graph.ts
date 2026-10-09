@@ -14,6 +14,7 @@ let seed = 0x5eed;
 const rand = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32);
 const flagSets = ['S', 'SA', 'A', 'FA', 'F', 'RA', 'R', 'A'];
 const missing = new Set<string>();
+const wrongReset = new Set<string>();
 for (let run = 0; run < 20_000; run++) {
   const m = new TcpStateMachine();
   let seq = { client: 0, server: 0 };
@@ -27,12 +28,22 @@ for (let run = 0; run < 20_000; run++) {
     };
     if (segment.syn || segment.fin) seq[from]++;
     for (const t of m.apply(segment)) {
-      if (edgeFor(t.from, t.to) === undefined) missing.add(`${t.from}>${t.to}`);
+      const edge = edgeFor(t.from, t.to, t.cause);
+      if (edge === undefined) missing.add(`${t.from}>${t.to}`);
+      else if (t.cause === 'rst' && edge.rst !== true) wrongReset.add(`${t.from}>${t.to}`);
     }
   }
 }
 if (missing.size > 0) fail(`transitions with no edge: ${[...missing].sort().join(', ')}`);
 else console.log('PASS  every transition from 20,000 random runs has an edge');
+if (wrongReset.size > 0) fail(`reset transitions answered by a non-reset edge: ${[...wrongReset].sort().join(', ')}`);
+else console.log('PASS  every reset transition from 20,000 random runs is drawn as a reset');
+
+const lastAckAck = edgeFor('LAST_ACK', 'CLOSED', 'ack');
+const lastAckRst = edgeFor('LAST_ACK', 'CLOSED', 'rst');
+if (lastAckAck?.id !== 'LAST_ACK>CLOSED_END' || lastAckAck.rst) fail(`LAST_ACK>CLOSED by ack is ${lastAckAck?.id}`);
+else if (lastAckRst?.id !== 'LAST_ACK>CLOSED_END:rst' || lastAckRst.rst !== true) fail(`LAST_ACK>CLOSED by rst is ${lastAckRst?.id}`);
+else console.log('PASS  LAST_ACK to CLOSED is the ACK edge on ack and the RST edge on rst');
 
 const ids = new Set(STATE_NODES.map((n) => n.id));
 for (const e of STATE_EDGES) {
