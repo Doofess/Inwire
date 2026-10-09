@@ -334,7 +334,7 @@ export class PipelineClient {
     if (count > 0) this.send({ type: 'rowsTaken', count });
   }
 
-  /** Dissection threads (ADR 0053 phase 3); the Worker applies it at the next `reset`. */
+  /** Multi Threaded Capture (ADR 0053 phase 3); the Worker applies it at the next `reset`. */
   setThreads(threads: DissectionThreads) {
     this.send({ type: 'threads', threads });
   }

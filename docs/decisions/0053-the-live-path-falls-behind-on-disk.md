@@ -137,6 +137,8 @@ becomes a coordinator and spawns N shard Workers:
 - **Frames are merged in id order** before they reach the renderer; records
   and patches go by id as they already do.
 - **A setting, Dissection threads: auto / 1**, where 1 is today's path.
+  *Shipped as **Multi Threaded Capture**: Auto, or 1, 2, 4, 6, 8, 12 or 16
+  threads, as many of those as leave the coordinator a core.*
 
 **Where the pool lives.** In the renderer, as nested dedicated Workers - not in
 the store's `utilityProcess` that §10 named. Every shard parses hostile bytes;

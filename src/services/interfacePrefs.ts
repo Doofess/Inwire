@@ -11,7 +11,7 @@ import {
 } from '../lib/packetColumns';
 import { FIELD_BY_ABBREV } from './dissect/fieldRegistry';
 import { BUDGET_CHOICES, type BufferBudgetSetting } from './bufferBudget';
-import type { DissectionThreads } from './pipeline/threads';
+import { readThreads, type DissectionThreads } from './pipeline/threads';
 
 const TIME_FORMATS: readonly TimeFormat[] = ['relative', 'clock', 'date', 'utc', 'delta'];
 
@@ -228,9 +228,9 @@ export interface PerformancePrefs {
    */
   packetBufferBytes: BufferBudgetSetting;
   /**
-   * How many cores dissect a live capture (ADR 0053 phase 3): `auto` shards
-   * TCP across them, 1 is the single pipeline Worker exactly as it was. Takes
-   * effect when the next capture starts.
+   * Multi Threaded Capture (ADR 0053 phase 3): how many threads dissect a live
+   * capture's TCP - `auto`, or a count, where 1 is the single pipeline Worker
+   * exactly as it was. Takes effect when the next capture starts.
    */
   dissectionThreads: DissectionThreads;
 }
@@ -272,7 +272,9 @@ export function normalizePerformance(raw: unknown): PerformancePrefs | null {
           (BUDGET_CHOICES as readonly number[]).includes(v.packetBufferBytes)
           ? v.packetBufferBytes
           : PERFORMANCE_DEFAULTS.packetBufferBytes,
-    dissectionThreads: v.dissectionThreads === 1 ? 1 : PERFORMANCE_DEFAULTS.dissectionThreads,
+    // Snapped to an offered value, like the budget: a count this build does
+    // not offer would render the control with nothing selected.
+    dissectionThreads: readThreads(v.dissectionThreads) ?? PERFORMANCE_DEFAULTS.dissectionThreads,
   };
 }
 

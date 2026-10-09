@@ -16,7 +16,7 @@ import {
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import { Section, SettingRow } from './settingsLayout';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
-import { shardsFor } from '../../services/pipeline/threads';
+import { shardsFor, threadChoices, type DissectionThreads } from '../../services/pipeline/threads';
 
 /**
  * Settings -> Interface: how the app looks and behaves as a UI.
@@ -91,14 +91,19 @@ const BUFFER_OPTIONS = [
 ];
 
 
-/** Dissection threads (ADR 0053 phase 3): auto first, for the reason the buffer's is. */
+/** This machine's cores, as the pipeline Worker will read them. */
+const CORES = typeof navigator === 'undefined' ? 1 : navigator.hardwareConcurrency ?? 1;
+/**
+ * Multi Threaded Capture (ADR 0053 phase 3): Auto first, for the reason the
+ * buffer's is, then every count this machine has the cores for.
+ */
 const THREAD_OPTIONS = [
-  { value: 'auto' as const, label: 'Auto' },
-  { value: '1' as const, label: '1' },
+  { value: 'auto', label: 'Auto' },
+  ...threadChoices(CORES).map((n) => ({ value: String(n), label: String(n) })),
 ];
 
 /** The TCP shards `auto` resolves to on this machine; 0 is one core. */
-const THREAD_CORES = shardsFor('auto', typeof navigator === 'undefined' ? 1 : navigator.hardwareConcurrency ?? 1);
+const THREAD_CORES = shardsFor('auto', CORES);
 
 /**
  * Animations live in the Accessibility tab now, not here.
@@ -226,20 +231,23 @@ export const InterfaceSettingsPanel: React.FC = () => {
         </SettingRow>
 
         <SettingRow
-          label="Dissection threads"
+          label="Multi Threaded Capture"
           description={
-            THREAD_CORES > 0
-              ? `Auto dissects a live capture's TCP on ${THREAD_CORES} cores beside the one that merges it, `
-                + `which is what keeps the list live through a download faster than one core can read. `
-                + `1 dissects on one core, as before. Takes effect when the next capture starts.`
-              : 'This machine has too few cores to spare, so Auto dissects on one, as 1 does. '
-                + 'Takes effect when the next capture starts.'
+            (THREAD_CORES > 0
+              ? `How many threads dissect a live capture's TCP, which is what keeps the list live through a `
+                + `download faster than one core can read. Auto uses ${THREAD_CORES} on this machine's ${CORES} cores, `
+                + `leaving two for the rest of the app; past about ${THREAD_CORES} the thread that merges them is the limit, `
+                + `so more mostly adds memory. 1 dissects on one core, as before.`
+              : 'This machine has too few cores to spare, so Auto dissects on one, as 1 does.')
+            + ' Takes effect when the next capture starts.'
           }
         >
           <Segmented
-            ariaLabel="Dissection threads"
-            value={String(perf.dissectionThreads) as 'auto' | '1'}
-            onValueChange={(v) => patchPerf({ dissectionThreads: v === '1' ? 1 : 'auto' })}
+            ariaLabel="Multi Threaded Capture"
+            value={String(perf.dissectionThreads)}
+            onValueChange={(v) => patchPerf({
+              dissectionThreads: v === 'auto' ? 'auto' : Number(v) as DissectionThreads,
+            })}
             options={THREAD_OPTIONS}
           />
         </SettingRow>

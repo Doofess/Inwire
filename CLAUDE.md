@@ -171,7 +171,7 @@ beside `electron/agentService.ts`.
   renderer (sandboxed Chromium)                      pipeline Worker
     React UI ── pipelineClient ──────────────────────  dissection
     ferries both ports across, then sees no frame      trackers
-                                                       │ Dissection threads: auto
+                                                       │ Multi Threaded Capture
                                                        ▼
                                                      TCP shards (nested Workers,
                                                      the same script, ADR 0053)
@@ -377,7 +377,8 @@ agent → pipe → main (deframe) → MessagePortMain → pipeline Worker
                                                        → renderer main thread → React state
 ```
 
-**With Dissection threads on `auto` the Worker is a coordinator** (ADR 0053
+**With Multi Threaded Capture on `auto` or a count above 1, the Worker is a
+coordinator** (ADR 0053
 phase 3, `services/pipeline/coordinator.ts`): it numbers every frame in order
 through the one `Sequencer`, sends plain TCP segments to N shard Workers by
 connection, dissects everything else itself, and merges the results back into

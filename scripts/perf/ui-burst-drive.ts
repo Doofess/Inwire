@@ -2,7 +2,7 @@
  * What a high-rate live capture costs the window: frames per second, long
  * tasks, where the main thread's time goes, how far the list falls behind.
  *
- *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25] [--threads auto|1] [--no-file]
+ *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25] [--threads auto|N] [--no-file]
  *       [--app <dir>] [--out report.txt] [--profile <prefix>] [--follow-only]
  *
  * `--profile` also writes each phase's raw CPU profiles, the main thread's as
@@ -53,7 +53,7 @@ const RATES = arg('rates', '10000,20000,40000').split(',').map(Number);
 const SECONDS = Number(arg('seconds', '25'));
 const OUT = arg('out', '');
 const APP = arg('app', '');
-/** Dissection threads: `auto`, the default, or `1`. */
+/** Multi Threaded Capture: `auto`, the default, or an offered count (1, 2, 4, 6, 8, 12, 16). */
 const THREADS = arg('threads', 'auto');
 const PROFILE_PREFIX = arg('profile', '');
 const FOLLOW_ONLY = process.argv.includes('--follow-only');
@@ -390,17 +390,17 @@ page.on('console', (message) => {
 // page does not have; a string evaluate goes through CDP and defines it.
 await page.evaluate('window.__name = (f) => f');
 await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
-// Dissection threads (ADR 0053 phase 3): the profile is fresh, so the setting
-// is its default, `auto`, unless this asks for one core - written where the
-// app keeps it, and read by a reload before any capture.
-if (THREADS === '1') {
-  await page.evaluate(() => localStorage.setItem('inwire.performance',
-    JSON.stringify({ dashboardRefreshMs: 500, packetBufferBytes: 'auto', dissectionThreads: 1 })));
+// Multi Threaded Capture (ADR 0053 phase 3): the profile is fresh, so the
+// setting is its default, `auto`, unless this asks for a count - written where
+// the app keeps it, and read by a reload before any capture.
+if (THREADS !== 'auto') {
+  await page.evaluate((threads) => localStorage.setItem('inwire.performance',
+    JSON.stringify({ dashboardRefreshMs: 500, packetBufferBytes: 'auto', dissectionThreads: threads })), Number(THREADS));
   await page.reload();
   await page.evaluate('window.__name = (f) => f');
   await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
 }
-say(`dissection threads: ${THREADS}`);
+say(`multi threaded capture: ${THREADS}`);
 const cdp = await page.context().newCDPSession(page);
 await cdp.send('Performance.enable');
 await cdp.send('Profiler.enable');

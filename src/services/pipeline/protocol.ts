@@ -141,8 +141,9 @@ export type ToPipeline =
    */
   | { type: 'drain'; requestId: number }
   /**
-   * Settings > Capture > Dissection threads (ADR 0053 phase 3): `auto` shards
-   * TCP across cores, 1 is the single Worker. Takes effect at the next `reset`.
+   * Settings > Interface > Multi Threaded Capture (ADR 0053 phase 3): `auto`
+   * or a count of TCP shards, 1 is the single Worker. Takes effect at the next
+   * `reset`.
    */
   | { type: 'threads'; threads: DissectionThreads }
   /**

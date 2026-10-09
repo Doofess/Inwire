@@ -167,10 +167,13 @@ for (const [name, fn] of [
 }
 
 {
-  // Dissection threads (ADR 0053 phase 3): one core survives a load, anything
-  // else is the default - a stored 4 is not a choice this setting offers.
-  check('dissection threads: 1 survives a load', normalizePerformance({ dissectionThreads: 1 })?.dissectionThreads, 1);
-  check('...and an unoffered count is the default', normalizePerformance({ dissectionThreads: 4 })?.dissectionThreads, 'auto');
+  // Multi Threaded Capture (ADR 0053 phase 3): every offered count survives a
+  // load, anything else is the default - a stored 5 is not a choice it offers.
+  check('threads: 1 survives a load', normalizePerformance({ dissectionThreads: 1 })?.dissectionThreads, 1);
+  check('...and 4 does', normalizePerformance({ dissectionThreads: 4 })?.dissectionThreads, 4);
+  check('...and 16 does', normalizePerformance({ dissectionThreads: 16 })?.dissectionThreads, 16);
+  check('...and an unoffered count is the default', normalizePerformance({ dissectionThreads: 5 })?.dissectionThreads, 'auto');
+  check('...and so is a string', normalizePerformance({ dissectionThreads: '4' })?.dissectionThreads, 'auto');
 }
 
 // --- Clamping, not rejecting -----------------------------------------------
