@@ -59,6 +59,14 @@ import {
 } from './window';
 
 /**
+ * `INWIRE_BACKGROUND_WINDOW=1` parks the window off-screen and shows it without
+ * activation, so a test launch neither takes focus from the person working on
+ * this machine nor appears in front of them. Set by
+ * `scripts/electron/launchApp.ts` for every script that starts the app.
+ */
+const BACKGROUND_WINDOW = process.env.INWIRE_BACKGROUND_WINDOW === '1';
+const BACKGROUND_PARK = -20000;
+/**
  * Where the renderer comes from in development.
  *
  * Set by `npm run dev`. When it is absent the app serves itself from `app://`,
@@ -66,13 +74,6 @@ import {
  * script exists because otherwise the protocol handler, the MIME table, the
  * 404 rule and the CSP would only ever be exercised in a packaged build.
  */
-/**
- * `INWIRE_BACKGROUND_WINDOW=1` keeps the window from ever being shown, so a
- * test launch does not take focus from the person working on this machine.
- * Set by `scripts/electron/launchApp.ts` for every script that starts the app.
- */
-const BACKGROUND_WINDOW = process.env.INWIRE_BACKGROUND_WINDOW === '1';
-const BACKGROUND_PARK = -20000;
 const DEV_SERVER_URL = process.env.INWIRE_DEV_SERVER ?? '';
 
 /**
@@ -121,6 +122,10 @@ app.setPath('userData', process.env.INWIRE_USER_DATA
   || path.join(app.getPath('appData'), '..', 'Local', 'Inwire'));
 
 for (const flag of COMMAND_LINE_SWITCHES) app.commandLine.appendSwitch(flag);
+// A parked window must keep painting through a locked or Remote Desktop
+// session, where Windows would otherwise report it occluded and Chromium
+// throttle it. (`disable-backgrounding-occluded-windows` is in the list above.)
+if (BACKGROUND_WINDOW) app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 
 protocol.registerSchemesAsPrivileged([
   { scheme: APP_SCHEME, privileges: { ...SCHEME_PRIVILEGES } },
@@ -498,8 +503,10 @@ async function createWindow(): Promise<BrowserWindow> {
     },
   });
 
-  if (state.maximized) window.maximize();
-  trackWindowState(window);
+  // Neither in a background launch: `maximize()` shows an unshown window, and
+  // the parked bounds must not be saved over the person's real placement.
+  if (state.maximized && !BACKGROUND_WINDOW) window.maximize();
+  if (!BACKGROUND_WINDOW) trackWindowState(window);
   guardClose(window);
 
   // Both facts the renderer cannot observe. Sent on change and once the page

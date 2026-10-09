@@ -19,7 +19,12 @@ export async function launchApp(options: LaunchOptions = {}): ReturnType<typeof 
   // Imported here so a script that skips cleanly without playwright still can.
   const { _electron } = await import('playwright');
   const { visible, ...rest } = options;
-  if (visible) return _electron.launch(rest);
+  if (visible) {
+    // An inherited flag must not background a launch that asked to be seen.
+    const env = { ...(rest.env ?? process.env) } as Record<string, string>;
+    delete env.INWIRE_BACKGROUND_WINDOW;
+    return _electron.launch({ ...rest, env });
+  }
   return _electron.launch({
     ...rest,
     env: { ...(rest.env ?? process.env) as Record<string, string>, INWIRE_BACKGROUND_WINDOW: '1' },
