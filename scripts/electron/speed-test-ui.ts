@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
 import { startSpeedStub, type SpeedStub } from '../speed-test/stubServer';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function checkTrue(name: string, ok: boolean, detail = ''): void {
@@ -30,9 +31,8 @@ if (process.platform !== 'win32') skip('the desktop app is Windows-only - nothin
 if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-electron', 'speedTest', 'speedTest.cjs'))) {
   skip('no build with the speed test to launch - run `npm run build` first');
 }
-let electron: typeof import('playwright')['_electron'];
 try {
-  ({ _electron: electron } = await import('playwright'));
+  await import('playwright');
 } catch {
   skip('playwright is not installed');
 }
@@ -42,13 +42,13 @@ const PIPE = String.raw`\\.\pipe\inwire-speedui-` + process.pid;
 let agent: StubAgent | null = null;
 let stub: SpeedStub | null = null;
 let profile: string | null = null;
-let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
+let app: Awaited<ReturnType<typeof launchApp>> | null = null;
 
 try {
   agent = await startStubAgent(PIPE, 5);
   stub = await startSpeedStub({ downMbps: 100, upMbps: 30 });
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-speedui-'));
-  app = await electron.launch({
+  app = await launchApp({
     args: ['.'],
     env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE, INWIRE_SPEEDTEST_TARGET: stub.url },
   });

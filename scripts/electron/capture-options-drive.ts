@@ -32,6 +32,7 @@ import { dataFilesOf } from '../../src/services/capture/captureWriter';
 import { CaptureReader } from '../../src/services/capture/captureReader';
 import { SIZE_LIMITED, bytesNotCaptured } from '../../src/services/dissect/captureShort';
 import type { Packet } from '../../src/types/packet';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -153,7 +154,7 @@ try {
 
 const profile = mkdtempSync(path.join(tmpdir(), 'inwire-capture-options-'));
 const copyRoot = mkdtempSync(path.join(tmpdir(), 'inwire-capture-options-copy-'));
-const app = await playwright._electron.launch({
+const app = await launchApp({
   args: ['.'],
   env: { ...process.env, INWIRE_USER_DATA: profile } as Record<string, string>,
 });

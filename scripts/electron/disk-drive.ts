@@ -46,6 +46,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
 import { watchMainOutput } from './mainOutput';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -69,9 +70,8 @@ if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-
   skip('no build to launch - run `npm run build` first');
 }
 
-let electron: typeof import('playwright')['_electron'];
 try {
-  ({ _electron: electron } = await import('playwright'));
+  await import('playwright');
 } catch {
   skip('playwright is not installed');
 }
@@ -112,8 +112,8 @@ let profile: string | null = null;
  */
 const DRIVE_PIPE = `\\\\.\\pipe\\inwire-disk-${process.pid}`;
 
-let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
-let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof electron.launch>>['firstWindow']>> | null = null;
+let app: Awaited<ReturnType<typeof launchApp>> | null = null;
+let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof launchApp>>['firstWindow']>> | null = null;
 
 try {
   try {
@@ -126,7 +126,7 @@ try {
   }
 
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-disk-'));
-  app = await electron.launch({
+  app = await launchApp({
     args: ['.'],
     env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: DRIVE_PIPE },
   });
