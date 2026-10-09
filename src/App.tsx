@@ -94,6 +94,7 @@ import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerP
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
+import { SpeedTestSheet } from "./components/speedtest/SpeedTestSheet";
 import { NetworkPane, NetworkPanelActions } from './components/network/NetworkPane';
 import { SideBar } from './components/sidebar/SideBar';
 import { CaptureInterfacePanel } from './components/sidebar/CaptureInterfacePanel';
@@ -537,7 +538,7 @@ export default function App() {
    * a sheet would then have to remember to close both. That argument was won
    * once; a union is what stops it being re-litigated by an edit.
    */
-  const [sheet, setSheet] = useState<'settings' | null>(null);
+  const [sheet, setSheet] = useState<'settings' | 'speedtest' | null>(null);
   const sheetOpen = sheet !== null;
 
   /**
@@ -2949,6 +2950,7 @@ export default function App() {
                 facts={networkFacts}
                 captureInterfaces={selectedInterfaces}
                 agentConnected={agentStatus === 'connected'}
+                onOpenSpeedTest={() => setSheet('speedtest')}
               />
             )}
             {sideBar === 'transfer' && (
@@ -3132,6 +3134,12 @@ export default function App() {
               filterPresetLibrary={filterPresetLibrary}
               onFilterPresetLibraryChange={handleFilterPresetLibraryChange}
             />
+          ) : sheet === 'speedtest' ? (
+            // The speed test (ADR 0054): opened from the Network panel, a sheet
+            // by the same rules as Settings - the view underneath is untouched
+            // and the back step, Escape or any view leaves it. Leaving does not
+            // stop a test; the state is `services/speedTest/state.ts`'s.
+            <SpeedTestSheet capturing={isCapturing} />
           ) : (
           <div className="flex-1 flex min-h-0 overflow-hidden">
             {/* Main Packet Inspection Core */}

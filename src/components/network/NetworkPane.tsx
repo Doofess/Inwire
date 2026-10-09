@@ -10,6 +10,7 @@ import type { AgentAdapter } from '../../services/agentProtocol';
 import type { NetworkFacts } from '../../services/networkFacts';
 import { Row, Section, Empty, Compare, Value } from './rows';
 import { PublicIdentity } from './PublicIdentity';
+import { SpeedTestSection } from '../speedtest/SpeedTestSection';
 
 /**
  * What this machine's network actually looks like - configured, and observed.
@@ -110,6 +111,11 @@ interface NetworkPaneProps {
   captureInterfaces: string[];
   agentConnected: boolean;
   /**
+   * Opens the speed test's sheet (ADR 0054). The panel holds the test's
+   * summary and its Run button; the dial is the sheet's.
+   */
+  onOpenSpeedTest?: () => void;
+  /**
    * No longer a prop, for the second time.
    *
    * The first deletion was `onClose` - a pane describing the MACHINE has
@@ -155,7 +161,7 @@ function countdown(seconds: number | null, now: number): string | null {
 }
 
 export const NetworkPane: React.FC<NetworkPaneProps> = ({
-  adapters, facts, captureInterfaces, agentConnected,
+  adapters, facts, captureInterfaces, agentConnected, onOpenSpeedTest,
 }) => {
   /**
    * Whether the one section that reaches the internet has been asked for.
@@ -260,6 +266,9 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
        see whether the same disagreement shows up twice. A comparison panel
        should be readable as a whole. */
     <div className="p-2 space-y-2">
+      {/* First: it is the one thing on this panel a reader comes to DO, and a
+          measurement of exactly the connection the rest of it describes. */}
+      {onOpenSpeedTest && <SpeedTestSection onOpen={onOpenSpeedTest} />}
 
                           <Section title="Capture adapter">
                 {adapter === null ? noAdapter : (

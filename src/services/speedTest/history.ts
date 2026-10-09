@@ -69,3 +69,25 @@ export function historyEntry(result: SpeedResult): SpeedHistoryEntry {
 export function recordResult(result: SpeedResult): void {
   speedHistoryStore.set([historyEntry(result), ...speedHistoryStore.get()].slice(0, HISTORY_LIMIT));
 }
+
+/** When a test ran, as a glance reads it: "just now", "5 min ago", "3 h ago", then the date. */
+export function whenText(at: number, now: number): string {
+  const s = Math.max(0, (now - at) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86_400) return `${Math.floor(s / 3600)} h ago`;
+  return new Date(at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+/**
+ * How a figure compares with the same figure last time, as a signed percentage
+ * and nothing more - "+4%", "-12%", "same". No "better" or "worse": a lower ping
+ * and a higher download are both the good direction, and a word would have to
+ * know which one it was describing.
+ */
+export function changeText(now: number, before: number): string {
+  if (!(before > 0)) return '';
+  const pct = Math.round(((now - before) / before) * 100);
+  if (pct === 0) return 'same';
+  return `${pct > 0 ? '+' : '−'}${Math.abs(pct)}%`;
+}
