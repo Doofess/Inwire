@@ -104,6 +104,8 @@ export interface TransferPanelProps {
   capturedFileCount: number;
   /** A capture running: its files are still being written. */
   capturing: boolean;
+  /** Why an import cannot start for a reason the app knows, beside a running export. */
+  importBlockedBy?: string | null;
 }
 
 type Scope = 'capture' | 'filter';
@@ -160,7 +162,7 @@ const PHASE_LABEL: Record<ExportPhase, string> = {
 export const TransferPanel: React.FC<TransferPanelProps> = ({
   packets, appliedFilter, permissions, captureStats, belowWindow, captureRowCount, filteredRowCount,
   filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
-  captureId, capturedFileCount, capturing,
+  captureId, capturedFileCount, capturing, importBlockedBy = null,
 }) => {
   const [scope, setScope] = useState<Scope>('capture');
   const [includeRawBytes, setIncludeRawBytes] = useState(true);
@@ -526,7 +528,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
             onImportBatch={onImportBatch}
             onFailure={(filename, failure) => setRejected({ filename, failure })}
             retryToken={retryToken}
-            blockedBy={busy ? 'Not while an export is running - an import would replace the frames it is reading.' : null}
+            blockedBy={busy ? 'Not while an export is running - an import would replace the frames it is reading.' : importBlockedBy}
           />
         </div>
       </Section>

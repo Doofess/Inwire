@@ -63,6 +63,13 @@ import {
 
 interface PacketListProps {
   /**
+   * The previous capture, still on disk and offered rather than loaded. The
+   * empty list is where it is offered, because an empty list is what a launch
+   * shows and what a reader looks at to see what is there. Null when there is
+   * nothing to offer, or once the buffer holds anything.
+   */
+  previousCapture?: { label: string; onReopen: () => void } | null;
+  /**
    * What the capture says its addresses are called, from the passive name map.
    *
    * Display only: `packet.source` stays the address everywhere else, so a
@@ -291,6 +298,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   colorEngine,
   packetTheme,
   themeKey,
+  previousCapture = null,
 }) => {
   // Restored from the last session, so a refresh keeps the column the user
   // was sorting by rather than snapping back to packet number.
@@ -1313,6 +1321,18 @@ export const PacketList: React.FC<PacketListProps> = ({
                         ? 'The capture buffer is empty.'
                         : 'No packets match the current display filter.'}
                     </span>
+                    {allPackets.length === 0 && previousCapture !== null && (
+                      <span className="text-[11px] mt-1">
+                        Last capture: {previousCapture.label} -{' '}
+                        <button
+                          type="button"
+                          onClick={previousCapture.onReopen}
+                          className="text-primary hover:underline font-medium cursor-pointer"
+                        >
+                          Reopen
+                        </button>
+                      </span>
+                    )}
                     {/* What was actually searched. A filter that finds nothing
                         is exactly when the reader wonders whether it is the
                         filter or the traffic, so the scope is stated rather

@@ -341,6 +341,12 @@ export interface ActivityRailProps {
   /** Emptied before a restart, so every buffer is one continuous recording. */
   onClearPackets: () => void;
   bufferedPackets: number;
+  /**
+   * The previous capture, still on disk and offered rather than loaded, named
+   * for the prompt ("the capture from Oct 8, 02:23"). Null when there is none.
+   * Start deletes it, so it is asked about exactly as a buffer is.
+   */
+  previousCapture?: string | null;
   permissions: Capabilities;
   /**
    * Still here, and only for the BUTTON - the list itself is the panel's.
@@ -452,7 +458,7 @@ export interface ActivityRailProps {
 
 export const ActivityRail: React.FC<ActivityRailProps> = ({
   isCapturing, startBlockedReason, onStartCapture, onStopCapture, onClearPackets,
-  bufferedPackets, permissions, agentInterfaces, selectedInterfaces,
+  bufferedPackets, previousCapture = null, permissions, agentInterfaces, selectedInterfaces,
   captureOwnedElsewhere, agentHealth,
   view, onViewChange, streamAvailable,
   settingsOpen, onOpenSettings, sideBarOpen,
@@ -502,7 +508,10 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
    * a buffer appended to across two runs has a gap in the middle that nothing
    * in the file records.
    */
-  const restartDiscards = !isCapturing && bufferedPackets > 0;
+  // A previous capture offered on disk is discarded by Start just the same,
+  // and nobody can see it in the list - which is why it has to be asked.
+  const discardsOffered = bufferedPackets === 0 && previousCapture != null;
+  const restartDiscards = !isCapturing && (bufferedPackets > 0 || discardsOffered);
   const startBlocked = !permissions.canCapture || selected === null || captureOwnedElsewhere
     || startBlockedReason !== null;
   const captureBlocked = captureOwnedElsewhere
@@ -520,8 +529,8 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   // A capture that STARTS while the prompt is up, or a buffer that empties from
   // somewhere else, has answered the question by other means.
   React.useEffect(() => {
-    if (isCapturing || bufferedPackets === 0) setConfirmRestart(false);
-  }, [isCapturing, bufferedPackets]);
+    if (isCapturing || !restartDiscards) setConfirmRestart(false);
+  }, [isCapturing, restartDiscards]);
 
   React.useEffect(() => {
     if (!confirmRestart) return;
@@ -628,9 +637,11 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
                   ? 'Stop capture. A stopped capture cannot be resumed.'
                   : startBlocked
                     ? startBlockedReason ?? 'Choose an interface first'
-                    : restartDiscards
-                      ? `Start a new capture - discards the ${bufferedPackets.toLocaleString()} packets in the buffer`
-                      : 'Start capture'
+                    : discardsOffered
+                      ? `Start a new capture - deletes ${previousCapture} from disk`
+                      : restartDiscards
+                        ? `Start a new capture - discards the ${bufferedPackets.toLocaleString()} packets in the buffer`
+                        : 'Start capture'
             }
             className={`${railButton(false)} ${
               captureBlocked ? 'opacity-50 cursor-not-allowed' : ''
@@ -659,12 +670,25 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
               <div className="flex items-start gap-2">
                 <TriangleAlert className="w-4 h-4 mt-0.5 shrink-0 text-warning" />
                 <div className="text-[11px] leading-relaxed text-muted-foreground">
-                  <span className="font-bold text-foreground">
-                    Discard {bufferedPackets.toLocaleString()} captured packets?
-                  </span>
-                  <br />
-                  A stopped capture cannot be resumed, so starting again clears the buffer
-                  first. Export the capture from the menu if you want to keep it.
+                  {discardsOffered ? (
+                    <>
+                      <span className="font-bold text-foreground">
+                        Delete {previousCapture}?
+                      </span>
+                      <br />
+                      It is still on disk, and only one capture is kept. Reopen it and
+                      export it first if you want to keep it.
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-bold text-foreground">
+                        Discard {bufferedPackets.toLocaleString()} captured packets?
+                      </span>
+                      <br />
+                      A stopped capture cannot be resumed, so starting again clears the buffer
+                      first. Export the capture from the menu if you want to keep it.
+                    </>
+                  )}
                 </div>
               </div>
               <div className="flex justify-end gap-1.5 mt-3">

@@ -78,6 +78,7 @@ import {
   clearSession,
   loadSessionMeta,
   saveSessionMeta,
+  type SessionMeta,
 } from "./services/sessionStore";
 import { ColorRulesEngine, DEFAULT_COLOR_RULES } from "./services/colorRules";
 import {
@@ -718,6 +719,23 @@ export default function App() {
   // the filter row's progress readout; also the flag the UI uses to explain why
   // packets are appearing without a capture being started.
   const [restoreProgress, setRestoreProgress] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * The previous capture, on disk and offered in the empty list rather than
+   * loaded at launch. Null once it is reopened, replaced, or there was none.
+   */
+  const [lastCapture, setLastCapture] = useState<SessionMeta | null>(null);
+  const lastCaptureRef = useRef(lastCapture);
+  lastCaptureRef.current = lastCapture;
+  /** True while `reopenLastCapture` runs, from its first read to its last row. */
+  const [reopening, setReopening] = useState(false);
+  /** "the capture from Oct 8, 02:23", for the offer and for Start's prompt. */
+  const lastCaptureLabel = useMemo(() => {
+    if (lastCapture === null) return null;
+    const at = new Date(lastCapture.captureStartMs ?? lastCapture.updatedAt);
+    const day = at.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const time = at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    return `the capture from ${day}, ${time}`;
+  }, [lastCapture]);
 
 
   /**
@@ -880,7 +898,8 @@ export default function App() {
   // Why Start must wait, or null: a filter the agent refused, or ring and stop
   // settings it would refuse - said here, with the reason, rather than by a
   // refusal after the click.
-  const startBlockedReason = filterBlocksStart(captureFilterVerdict) ?? ringProblem(captureOptions);
+  const startBlockedReason = (reopening ? 'Reopening the last capture - Start waits for it.' : null)
+    ?? filterBlocksStart(captureFilterVerdict) ?? ringProblem(captureOptions);
   const startBlockedRef = useRef(startBlockedReason);
   startBlockedRef.current = startBlockedReason;
   const filterToCheck = effectiveFilter(captureOptions);
@@ -983,6 +1002,10 @@ export default function App() {
       setNavNotice('Scheduled capture skipped: the agent is not connected.');
       return false;
     }
+    if (restoringRef.current) {
+      setNavNotice('Scheduled capture skipped: the last capture was being reopened.');
+      return false;
+    }
     handleClearPackets();
     void handleStartCapture();
     setNavNotice('Scheduled capture started.');
@@ -1052,19 +1075,16 @@ export default function App() {
   }, [hasCapturedPackets]);
 
   /**
-   * Rebuilds the previous session's buffer on load, so a refresh is not a
-   * reset.
+   * At launch: keeps the previous session's capture on disk and OFFERS it, and
+   * puts the adapter selection back. It does not load it - `reopenLastCapture`
+   * does, when the reader asks.
    *
-   * Runs once, before anything is captured. That ordering is what keeps it
-   * simple: the agent starts idle and this app only tells it to capture at the
-   * end of this effect, and the live-packet handler drops anything that
-   * arrives while `isCapturing` is false - so restored packets can never
-   * interleave with new ones or collide over packet numbers.
-   *
-   * Decoded in chunks with a yield between them. A full 50,000-packet buffer
-   * is about 5.8 seconds of dissection; spending it in ~30ms slices means the
-   * app is usable immediately and the list visibly fills rather than the tab
-   * freezing for six seconds on every reload.
+   * It used to load it, unasked, on every launch: the newest chunks that fit
+   * the buffer budget, streamed into the list in slices. After a burst that was
+   * 1.36 million rows arriving for fifteen seconds with nobody having pressed
+   * Start, indistinguishable from a capture - and Start was not blocked while
+   * it ran, so a capture started under it deleted the directory being read and
+   * then had its numbering and clock moved onto the old capture's.
    */
   useEffect(() => {
     // Runs exactly once per page load. Two things have to be true at the same
@@ -1092,162 +1112,13 @@ export default function App() {
     (async () => {
       const meta = await loadSessionMeta();
 
-      // The session's frames are in the capture directory the metadata names,
-      // and only that one. Pairing this metadata with a different capture's
-      // frames would shift every timestamp in the list, because the
-      // relative-time origin and the adapter table both belong to the run that
-      // wrote them.
-      const stored = meta?.captureId ? await captureStore.reopen(meta.captureId) : null;
-      // Everything else on disk goes. One capture is the retention rule, and
-      // it is the whole of it (`docs/decisions/0026`): a capture on disk is
-      // 5 GB and twenty minutes at full rate, so wanting the previous one is
-      // mostly wanting a longer current one, and a capture worth keeping past
-      // a session is one to Export. Start wiped the previous capture out of
-      // IndexedDB before this, so nothing about that changed with the
-      // backend.
-      captureStore.prune(stored === null ? [] : [stored.captureId]);
-      captureIdRef.current = stored?.captureId ?? null;
-
-      if (stored !== null && stored.frameCount > 0) {
-        // Whose machine this was, read back rather than re-inferred. A session
-        // written before this was saved has none, and restores the way it
-        // always did.
-        const storedHost: HostIdentity | undefined = meta?.host && {
-          macs: new Set(meta.host.macs),
-          addresses: new Set(meta.host.addresses),
-          inferred: meta.host.inferred,
-          confidence: meta.host.confidence,
-          basis: meta.host.basis,
-        };
-        if (storedHost) {
-          hostIdentityRef.current = storedHost;
-          // The Worker rebuilds the detail tree by replaying the conversation
-          // (`pipeline/replay.ts`), so it needs the same answer or the tree
-          // will contradict the row that opened it.
-          pipeline.setHost(storedHost);
-        }
-
-        // --- what to bring back ---------------------------------------------
-        //
-        // The newest chunks that fit the budget, read from the END backwards.
-        // The old restore read the whole store forwards and trimmed the front
-        // as it went, which on a capture larger than the buffer meant decoding
-        // every frame in order to throw most of them away. A chunk is
-        // self-contained, so the tail can be read first - and the tail is what
-        // the reader was looking at.
-        //
-        // The rest of the capture is not lost. It is on disk and inside the
-        // stored id range; what it is not yet is *reachable*, which is what
-        // the row source in a later step is for.
-        const chunks: Packet[][] = [];
-        let restoring = 0;
-        let bytes = 0;
-        for (let c = stored.chunkCount - 1; c >= 0; c--) {
-          const rows = await captureStore.readRows(c);
-          if (rows.length === 0) continue;      // a torn tail; the rest still reads
-          let chunkBytes = 0;
-          for (const packet of rows) chunkBytes += estimateSummaryBytes(packet);
-          // Always at least one chunk, whatever the budget says: a buffer that
-          // restored nothing because the first chunk it looked at was large
-          // would be worse than one slightly over.
-          if (chunks.length > 0 && bytes + chunkBytes > budgetBytes()) break;
-          chunks.unshift(rows);
-          bytes += chunkBytes;
-          restoring += rows.length;
-        }
-
-        setRestoreProgress({ done: 0, total: restoring });
-        // How to read each adapter's frames, from the session's own table.
-        //
-        // A restored row is already dissected and needs nothing - but the
-        // detail pane rebuilds its tree by RE-dissecting the conversation
-        // (`pipeline/replay.ts`), and both export writers ask the frame what
-        // link layer it carries. Without this a restored loopback capture
-        // shows a tree that contradicts the row that opened it, and exports a
-        // file that declares Ethernet.
-        //
-        // Only adapters the table names a type for, and only when that type
-        // is not Ethernet - so an ordinary session does nothing here and no
-        // frame gains a property. See `SessionMeta.interfaces`, which also
-        // states what this cannot cover.
-        const restoredLinkTypes = new Map(
-          (meta?.interfaces ?? [])
-            .filter((i) => i.linkType !== undefined && i.linkType !== LINKTYPE.ETHERNET)
-            .map((i) => [i.label, i.linkType as number]),
-        );
-
-        let done = 0;
-        for (const rows of chunks) {
-          // A restored session fills the buffer as full as a live capture ever
-          // does, so its frames get the same treatment. The chunk codec hands
-          // back the field bag, because the bag is the contract; the split into
-          // columns belongs here, where the frames join the buffer.
-          fieldWriter.current.absorb(rows);
-          for (const packet of rows) {
-            accountingRef.current.residentBytes += estimateSummaryBytes(packet);
-            // Only where the row has none: a chunk written since link types
-            // were stored with each row already carries the frame's own, and
-            // the table - keyed by label, not by adapter - is the fallback for
-            // older chunks, never an override.
-            if (restoredLinkTypes.size > 0 && packet.linkType === undefined) {
-              const linkType = restoredLinkTypes.get(packet.interfaceName);
-              if (linkType !== undefined) packet.linkType = linkType;
-            }
-          }
-          done += rows.length;
-          // No ICMP or Info patches to apply: the writer held each row behind
-          // the patch horizon until no open reassembly could still reach it, so
-          // what comes back is the row the reader actually saw. That is the
-          // whole reason the summary is on disk - re-dissecting a frame from
-          // the middle of a capture can produce a DIFFERENT Info line, and the
-          // old restore did exactly that.
-          setPackets((prev) => prev.concat(rows));
-          setRestoreProgress({ done, total: restoring });
-          // Yield so React can commit and the browser can paint this chunk.
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-
-        // The direction pass an import takes. A restored row carries the
-        // direction it was written with, but the host override, the resolved
-        // names and the network facts are all rebuilt from the buffer, and
-        // this is the pass that does it.
-        //
-        // Read through the ref rather than from inside a state updater. An
-        // updater must be pure - StrictMode double-invokes it - and this one
-        // would have started the derive pass twice.
-        deriveForBuffer(packetsRef.current);
-
-        // Numbering continues from the stored capture rather than restarting
-        // at 1 and colliding with packets already in the list. `stored.lastId`
-        // is the whole capture's last id, not the window's - the frames below
-        // the window are still on disk and their ids are still taken.
-        packetGenerator.resumeAfter(stored.lastId);
-        accountingRef.current.persistedThroughId = stored.lastId;
-        // The relative-time clock is restored too, so a resumed capture's
-        // timestamps continue the original timeline instead of jumping to 0.
-        // The clock refs are microseconds; the stored meta stays in
-        // milliseconds so an older session file still reads.
-        captureStartRef.current = meta?.captureStartMs != null ? meta.captureStartMs * 1000 : null;
-        lastPacketTimeRef.current = meta?.lastPacketMs != null ? meta.lastPacketMs * 1000 : null;
-        // A fresh column block, so live frames start one of their own rather
-        // than extending the restored capture's - but NOT a fresh byte count.
-        // The loop above added every restored frame to it, and those frames
-        // are still in the buffer. Zeroing it here reported a full buffer as
-        // "0 / 512 MB", and worse: `planBufferTrim` reads the same number, so
-        // a restored session never trimmed until enough live frames had
-        // arrived to rebuild a total from nothing.
-        fieldWriter.current = new FieldBlockWriter();
-        pipeline.reset(Math.floor(stored.lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
-      }
-
-      setRestoreProgress(null);
-      // An imported file keeps its name across a reload; anything else
-      // restored is a session whose adapters may no longer exist.
-      if (stored !== null && stored.frameCount > 0) {
-        setCaptureSource(meta?.importedFrom
-          ? { kind: 'import', fileName: meta.importedFrom }
-          : { kind: 'session' });
-      }
+      // Everything on disk but the stored session's capture goes. One capture
+      // is the retention rule, and it is the whole of it
+      // (`docs/decisions/0026`): a capture on disk is 5 GB and twenty minutes
+      // at full rate, so wanting the previous one is mostly wanting a longer
+      // current one, and a capture worth keeping past a session is one to
+      // Export. The stored one stays until a Start or an import replaces it.
+      captureStore.prune(meta?.captureId ? [meta.captureId] : []);
       restoringRef.current = false;
 
       if (meta?.selectedInterfaces.length) {
@@ -1261,14 +1132,205 @@ export default function App() {
         sendAgentCommand({ type: 'set_interfaces', interfaces: meta.selectedInterfaces });
       }
 
-      // Capture is not resumed, and nothing is said about it: a reload leaves
-      // the app exactly as pressing Pause would - buffer intact, adapter and
-      // filters intact, capture stopped. That is also what has already happened
-      // underneath, since the agent stops sniffing the moment its last client
+      // The previous capture is OFFERED, not loaded. Loading it at launch
+      // streamed up to the whole buffer budget of rows into the list - 1.36
+      // million of them after a burst - which looked exactly like a capture
+      // running nobody had started, and a Start pressed while it ran deleted
+      // the capture it was still reading. Only a capture that ever received
+      // a frame is offered.
+      if (meta?.captureId && meta.lastPacketMs != null) setLastCapture(meta);
+
+      // Capture is not resumed, and nothing is said about it: a launch leaves
+      // the app exactly as pressing Pause would - adapter and filters intact,
+      // capture stopped. That is also what has already happened underneath,
+      // since the agent stops sniffing the moment its last client
       // disconnects, so `isCapturing` starting false is simply the truth.
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Reopens the previous capture, on the reader's word - the empty list's
+   * "Reopen". Its newest chunks come back into the buffer and the rest stays
+   * reachable on disk, as a launch used to do unasked.
+   *
+   * Start is blocked while this runs (`reopening` is a reason in
+   * `startBlockedReason`), because the two cannot interleave: a Start deletes
+   * the capture this is reading, and this ends by moving the numbering and
+   * the clock onto that capture's.
+   */
+  const reopenLastCapture = async (): Promise<void> => {
+    const meta = lastCaptureRef.current;
+    if (meta === null || isCapturingRef.current || restoringRef.current) return;
+    restoringRef.current = true;
+    setReopening(true);
+    setLastCapture(null);
+    try {
+      // The session's frames are in the capture directory the metadata names,
+      // and only that one. Pairing this metadata with a different capture's
+      // frames would shift every timestamp in the list, because the
+      // relative-time origin and the adapter table both belong to the run that
+      // wrote them.
+      const stored = meta.captureId ? await captureStore.reopen(meta.captureId) : null;
+      captureIdRef.current = stored?.captureId ?? null;
+      if (stored === null || stored.frameCount === 0) {
+        setNavNotice('The last capture could not be reopened.');
+      }
+
+        if (stored !== null && stored.frameCount > 0) {
+          // Whose machine this was, read back rather than re-inferred. A session
+          // written before this was saved has none, and restores the way it
+          // always did.
+          const storedHost: HostIdentity | undefined = meta?.host && {
+            macs: new Set(meta.host.macs),
+            addresses: new Set(meta.host.addresses),
+            inferred: meta.host.inferred,
+            confidence: meta.host.confidence,
+            basis: meta.host.basis,
+          };
+          if (storedHost) {
+            hostIdentityRef.current = storedHost;
+            // The Worker rebuilds the detail tree by replaying the conversation
+            // (`pipeline/replay.ts`), so it needs the same answer or the tree
+            // will contradict the row that opened it.
+            pipeline.setHost(storedHost);
+          }
+
+          // --- what to bring back ---------------------------------------------
+          //
+          // The newest chunks that fit the budget, read from the END backwards.
+          // The old restore read the whole store forwards and trimmed the front
+          // as it went, which on a capture larger than the buffer meant decoding
+          // every frame in order to throw most of them away. A chunk is
+          // self-contained, so the tail can be read first - and the tail is what
+          // the reader was looking at.
+          //
+          // The rest of the capture is not lost. It is on disk and inside the
+          // stored id range; what it is not yet is *reachable*, which is what
+          // the row source in a later step is for.
+          const chunks: Packet[][] = [];
+          let restoring = 0;
+          let bytes = 0;
+          for (let c = stored.chunkCount - 1; c >= 0; c--) {
+            const rows = await captureStore.readRows(c);
+            if (rows.length === 0) continue;      // a torn tail; the rest still reads
+            let chunkBytes = 0;
+            for (const packet of rows) chunkBytes += estimateSummaryBytes(packet);
+            // Always at least one chunk, whatever the budget says: a buffer that
+            // restored nothing because the first chunk it looked at was large
+            // would be worse than one slightly over.
+            if (chunks.length > 0 && bytes + chunkBytes > budgetBytes()) break;
+            chunks.unshift(rows);
+            bytes += chunkBytes;
+            restoring += rows.length;
+          }
+
+          setRestoreProgress({ done: 0, total: restoring });
+          // How to read each adapter's frames, from the session's own table.
+          //
+          // A restored row is already dissected and needs nothing - but the
+          // detail pane rebuilds its tree by RE-dissecting the conversation
+          // (`pipeline/replay.ts`), and both export writers ask the frame what
+          // link layer it carries. Without this a restored loopback capture
+          // shows a tree that contradicts the row that opened it, and exports a
+          // file that declares Ethernet.
+          //
+          // Only adapters the table names a type for, and only when that type
+          // is not Ethernet - so an ordinary session does nothing here and no
+          // frame gains a property. See `SessionMeta.interfaces`, which also
+          // states what this cannot cover.
+          const restoredLinkTypes = new Map(
+            (meta?.interfaces ?? [])
+              .filter((i) => i.linkType !== undefined && i.linkType !== LINKTYPE.ETHERNET)
+              .map((i) => [i.label, i.linkType as number]),
+          );
+
+          let done = 0;
+          for (const rows of chunks) {
+            // A restored session fills the buffer as full as a live capture ever
+            // does, so its frames get the same treatment. The chunk codec hands
+            // back the field bag, because the bag is the contract; the split into
+            // columns belongs here, where the frames join the buffer.
+            fieldWriter.current.absorb(rows);
+            for (const packet of rows) {
+              accountingRef.current.residentBytes += estimateSummaryBytes(packet);
+              // Only where the row has none: a chunk written since link types
+              // were stored with each row already carries the frame's own, and
+              // the table - keyed by label, not by adapter - is the fallback for
+              // older chunks, never an override.
+              if (restoredLinkTypes.size > 0 && packet.linkType === undefined) {
+                const linkType = restoredLinkTypes.get(packet.interfaceName);
+                if (linkType !== undefined) packet.linkType = linkType;
+              }
+            }
+            done += rows.length;
+            // No ICMP or Info patches to apply: the writer held each row behind
+            // the patch horizon until no open reassembly could still reach it, so
+            // what comes back is the row the reader actually saw. That is the
+            // whole reason the summary is on disk - re-dissecting a frame from
+            // the middle of a capture can produce a DIFFERENT Info line, and the
+            // old restore did exactly that.
+            setPackets((prev) => prev.concat(rows));
+            setRestoreProgress({ done, total: restoring });
+            // Yield so React can commit and the browser can paint this chunk.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+
+          // The direction pass an import takes. A restored row carries the
+          // direction it was written with, but the host override, the resolved
+          // names and the network facts are all rebuilt from the buffer, and
+          // this is the pass that does it.
+          //
+          // Read through the ref rather than from inside a state updater. An
+          // updater must be pure - StrictMode double-invokes it - and this one
+          // would have started the derive pass twice.
+          deriveForBuffer(packetsRef.current);
+
+          // Numbering continues from the stored capture rather than restarting
+          // at 1 and colliding with packets already in the list. `stored.lastId`
+          // is the whole capture's last id, not the window's - the frames below
+          // the window are still on disk and their ids are still taken.
+          packetGenerator.resumeAfter(stored.lastId);
+          accountingRef.current.persistedThroughId = stored.lastId;
+          // The relative-time clock is restored too, so a resumed capture's
+          // timestamps continue the original timeline instead of jumping to 0.
+          // The clock refs are microseconds; the stored meta stays in
+          // milliseconds so an older session file still reads.
+          captureStartRef.current = meta?.captureStartMs != null ? meta.captureStartMs * 1000 : null;
+          lastPacketTimeRef.current = meta?.lastPacketMs != null ? meta.lastPacketMs * 1000 : null;
+          // A fresh column block, so live frames start one of their own rather
+          // than extending the restored capture's - but NOT a fresh byte count.
+          // The loop above added every restored frame to it, and those frames
+          // are still in the buffer. Zeroing it here reported a full buffer as
+          // "0 / 512 MB", and worse: `planBufferTrim` reads the same number, so
+          // a restored session never trimmed until enough live frames had
+          // arrived to rebuild a total from nothing.
+          fieldWriter.current = new FieldBlockWriter();
+          pipeline.reset(Math.floor(stored.lastId) + 1, captureStartRef.current, lastPacketTimeRef.current);
+        }
+
+        setRestoreProgress(null);
+        // An imported file keeps its name across a reload; anything else
+        // restored is a session whose adapters may no longer exist.
+        if (stored !== null && stored.frameCount > 0) {
+          setCaptureSource(meta?.importedFrom
+            ? { kind: 'import', fileName: meta.importedFrom }
+            : { kind: 'session' });
+        }
+      setRestoreProgress(null);
+      // An imported file keeps its name across a reload; anything else
+      // restored is a session whose adapters may no longer exist.
+      if (stored !== null && stored.frameCount > 0) {
+        setCaptureSource(meta.importedFrom
+          ? { kind: 'import', fileName: meta.importedFrom }
+          : { kind: 'session' });
+      }
+    } finally {
+      restoringRef.current = false;
+      setReopening(false);
+      setRestoreProgress(null);
+    }
+  };
 
   // Drives the session-metadata write below at a sane rate. Two seconds is far
   // more often than the values it guards actually change, and still cheap.
@@ -1294,7 +1356,10 @@ export default function App() {
    * once per capture.
    */
   useEffect(() => {
-    if (restoringRef.current) return;
+    // Nor while a previous capture is only offered: writing now would replace
+    // its metadata - the clock origin, the adapter table, which directory -
+    // with this empty session's, and the offer would reopen nothing.
+    if (restoringRef.current || lastCaptureRef.current !== null) return;
     void saveSessionMeta({
       selectedInterfaces,
       interfaces: agentInterfaces,
@@ -2118,7 +2183,9 @@ export default function App() {
     setSelectedPacket,
     // The same start and stop as the rail's button: a capture Space starts is
     // a capture with an id, a store and its own files like any other.
-    startBlocked: () => startBlockedRef.current !== null,
+    // An offered previous capture is deleted by Start, and Space has nowhere
+    // to ask - the same rule as a buffer with frames in it.
+    startBlocked: () => startBlockedRef.current !== null || lastCaptureRef.current !== null,
     onStartCapture: () => { void handleStartCapture(); },
     onStopCapture: () => handlePauseCapture(),
   });
@@ -2176,6 +2243,8 @@ export default function App() {
     // into the new one (`cancelExportForChange`). Every Start goes through
     // here: the rail's button, the shortcut and the schedule.
     await cancelExportForChange('a new capture started');
+    // The offered capture is about to be pruned; the rail's prompt asked.
+    setLastCapture(null);
     setBufferAutoPaused(false);
     clearCaptureStats();
     await clearSession();
@@ -2448,6 +2517,8 @@ export default function App() {
       cancelExportJob('an import started');
       stopCaptureForImportRef.current();
       importCaptureIdRef.current = newCaptureId();
+      // The offered capture is pruned when this one is stored, as Start's is.
+      setLastCapture(null);
       // The Worker's budget, so an import keeps what a live capture would.
       importDerivedRef.current = new DerivedStore(derivedBudgetRef.current);
       captureStore.begin(importCaptureIdRef.current);
@@ -2718,6 +2789,7 @@ export default function App() {
           onStopCapture={handlePauseCapture}
           onClearPackets={handleClearPackets}
           bufferedPackets={packets.length}
+          previousCapture={lastCaptureLabel}
           permissions={permissions}
           agentInterfaces={agentInterfaces}
           selectedInterfaces={selectedInterfaces}
@@ -2908,6 +2980,7 @@ export default function App() {
                 captureId={captureStorage.captureId}
                 capturedFileCount={keptFiles(captureFiles).length}
                 capturing={isCapturing}
+                importBlockedBy={reopening ? 'Not while the last capture is being reopened - an import would replace it.' : null}
               />
             )}
           </SideBar>
@@ -3088,6 +3161,8 @@ export default function App() {
                 className="flex-1 flex flex-col min-h-0 overflow-hidden"
               >
                 <PacketList
+                  previousCapture={lastCaptureLabel === null ? null
+                    : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
                   names={nameMap}
                   resolveNames={nameResolution.network}
                   sourceProcess={sourceProcessFor}

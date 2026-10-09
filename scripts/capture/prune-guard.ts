@@ -3,7 +3,7 @@
  *
  *   npx tsx scripts/capture/prune-guard.ts
  *
- * `App.tsx` calls `captureStore.prune(stored === null ? [] : [stored.captureId])`
+ * `App.tsx` calls `captureStore.prune(meta?.captureId ? [meta.captureId] : [])`
  * at startup, and the store removes every directory not in that list,
  * recursively. While the store lived in OPFS this was safe by construction:
  * the root was the origin's private filesystem and nothing else could put
