@@ -55,9 +55,11 @@ the shared golden vectors and the byte-identical capture comparison from ADR
 ## Phase 0: the spike that settles it
 
 Completion: a number for each line below, written into the ADR that opens the
-port. Budget one day. No WSL and no Docker on the owner's PC; use a Linux VM or
-a cloud box, and GitHub Actions `ubuntu-latest` and `macos-latest` for the
-build checks.
+port. Budget one day. The owner's PC has Docker Desktop and WSL 2 (installed
+2026-10-09; the Virtual Machine Platform feature finishes enabling on the next
+reboot). A Linux container with `--cap-add NET_RAW --cap-add NET_ADMIN` is
+enough for steps 1 to 3 on Linux; macOS needs GitHub Actions `macos-latest`
+for the build check and a real Mac for capture.
 
 1. `cargo check --target x86_64-unknown-linux-gnu` and
    `--target aarch64-apple-darwin` after moving the Windows modules behind
