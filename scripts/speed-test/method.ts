@@ -72,7 +72,10 @@ check('never past the most connections', shouldRamp(MAX_CONNECTIONS, 500, 100), 
 check('not from nothing', shouldRamp(4, 100, 0), false);
 
 console.log('\n--- latency ---');
-check('the speed Worker\'s time is the server\'s', serverTimeMs('cfSpeedEdge;dur=4, cfSpeedWorker;dur=26'), 26);
+check('the edge and the speed Worker are the server\'s time', serverTimeMs('cfSpeedEdge;dur=4, cfSpeedWorker;dur=26'), 30);
+check('the server\'s TCP round trip wins when it is sent',
+  netLatency(41, 'cfSpeedEdge;dur=6, cfSpeedWorker;dur=30, cfL4;desc="?proto=TCP&rtt=3412&min_rtt=2624&rtt_var=923"'), 3.412);
+check('...and min_rtt is not mistaken for it', netLatency(41, 'cfL4;desc="?proto=TCP&min_rtt=2624&rtt=5000"'), 5);
 check('cfRequestDuration wins where it is sent', serverTimeMs('cfRequestDuration;dur=3.5, cfSpeedWorker;dur=26'), 3.5);
 check('no header, no server time', serverTimeMs(undefined), 0);
 check('latency is net of the server', netLatency(30, 'cfSpeedWorker;dur=26'), 4);
@@ -90,7 +93,7 @@ check('between marks is linear', near(gaugeFraction(75), 3.5 / 8), true);
 check('past the last mark the needle is pinned', gaugeFraction(2500), 1);
 check('nothing, or nonsense, is zero', [0, -5, NaN].map(gaugeFraction), [0, 0, 0]);
 check('three significant figures', [0, 0.456, 5.678, 56.78, 567.8, 1234.5].map(formatMbps), ['0', '0.46', '5.68', '56.8', '568', '1235']);
-check('the cap the consent copy quotes', TEST_CAP_MB, 1300);
+check('the cap the consent copy quotes', TEST_CAP_MB, 800);
 
 console.log('\n--- history ---');
 const result: SpeedResult = {

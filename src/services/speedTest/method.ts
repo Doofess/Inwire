@@ -26,10 +26,11 @@ export const RAMP_GAIN = 1.1;
  * The most a test transfers, whatever the link. Cloudflare rate-limits an
  * address that pulls much more - a measured 429 after about a gigabyte in a
  * few minutes - so a cap is what keeps a second test possible. At 1 Gb/s the
- * download reaches it in about eight seconds, which is still past warm-up.
+ * download reaches it in about five seconds: three past warm-up, thirty
+ * slices, plenty for a median. Faster than that, the figure is the cap's.
  */
-export const DOWNLOAD_CAP_BYTES = 1_000_000_000;
-export const UPLOAD_CAP_BYTES = 300_000_000;
+export const DOWNLOAD_CAP_BYTES = 600_000_000;
+export const UPLOAD_CAP_BYTES = 200_000_000;
 /** Per request: `__down` refuses 100,000,000 bytes and more. */
 export const DOWNLOAD_REQUEST_BYTES = 25_000_000;
 export const UPLOAD_REQUEST_BYTES = 10_000_000;
@@ -186,24 +187,35 @@ export function formatMbps(mbps: number): string {
 }
 
 /**
- * Round-trip time from a timed request, net of the server's own time.
+ * Round-trip time for one empty request.
  *
- * Cloudflare reports its processing in `Server-Timing` (`cfRequestDuration`,
- * or the speed Worker's own `cfSpeedWorker`); without that subtraction an empty
- * request read ~30 ms where the TCP round trip was 3. Never below a tenth of a
- * millisecond: a server time that outran the client's clock is a clock skew,
- * not a negative trip.
+ * **The server's own measurement of the TCP round trip, when it sends one.**
+ * Cloudflare reports its kernel's smoothed RTT for the connection in
+ * `Server-Timing: cfL4;desc="?...&rtt=<us>&..."`, and measured against it the
+ * client-side figure - time to first byte, net of the `cfSpeedEdge` and
+ * `cfSpeedWorker` durations - was still 5-15 ms over a 3 ms round trip: the
+ * server spends time it does not report. Idle and loaded latency both use the
+ * same measure, so the bufferbloat grade compares like with like.
+ *
+ * Without that header (another server, the tests' local one): time to first
+ * byte net of the server time it reports. Never below a tenth of a
+ * millisecond: a server time that outran the client's clock is skew, not a
+ * negative trip.
  */
 export function netLatency(elapsedMs: number, serverTiming: string | undefined): number {
+  const rttUs = serverTiming ? /cfL4;[^,]*?[?&]rtt=([0-9]+)/.exec(serverTiming)?.[1] : undefined;
+  if (rttUs !== undefined) return Math.max(0.1, Number(rttUs) / 1000);
   return Math.max(0.1, elapsedMs - serverTimeMs(serverTiming));
 }
 
-/** The server's time out of a `Server-Timing` header: the named durations this server sends. */
+/** The server's time out of a `Server-Timing` header: what this server reports spending. */
 export function serverTimeMs(header: string | undefined): number {
   if (!header) return 0;
-  for (const name of ['cfRequestDuration', 'cfSpeedWorker']) {
+  const dur = (name: string): number | null => {
     const m = new RegExp(`${name};dur=([0-9.]+)`).exec(header);
-    if (m) return Number(m[1]);
-  }
-  return 0;
+    return m ? Number(m[1]) : null;
+  };
+  const request = dur('cfRequestDuration');
+  if (request !== null) return request;
+  return (dur('cfSpeedEdge') ?? 0) + (dur('cfSpeedWorker') ?? 0);
 }
