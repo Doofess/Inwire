@@ -583,6 +583,10 @@ function guardClose(window: BrowserWindow): void {
   ipcMain.on(QUIT_CONFIRM_REPLY_CHANNEL, onReply);
   window.once('closed', () => ipcMain.removeListener(QUIT_CONFIRM_REPLY_CHANNEL, onReply));
   contents.on('render-process-gone', () => confirm.rendererGone());
+  // A reload takes the page's dialog with it; see `rendererReset`.
+  contents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) confirm.rendererReset();
+  });
 
   window.on('close', (event) => {
     if (quitConfirmed || !unsavedCapture) return;

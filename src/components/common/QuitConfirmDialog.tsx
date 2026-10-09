@@ -57,7 +57,11 @@ export function QuitConfirmDialog(): React.ReactElement {
       return;
     }
     if (!dialog.open) dialog.showModal();
-    keepRef.current?.focus();
+    // `focusVisible`, or the default would carry no ring on the usual route:
+    // the close is a CLICK on the window's own X, and Chromium rings a
+    // scripted focus only when the last input was a key. The reader has to
+    // see which answer Enter gives. Not in TypeScript's DOM lib yet.
+    keepRef.current?.focus({ focusVisible: true } as FocusOptions);
     window.inwire?.answerQuitConfirm?.(open.id, 'shown');
   }, [open]);
 

@@ -75,13 +75,6 @@ export function resolveWindowBackground(resolvedTheme: string | undefined): stri
   return palette.surface.background;
 }
 
-// **`resolveWindowIsDark` was here**, deriving dark-or-light from this ground's
-// luminance so `guardClose` could set `nativeTheme.themeSource` around the
-// quit confirm. That never reached the box - on Windows `showMessageBox` is a
-// task dialog the OS paints light regardless - so the confirm is the
-// renderer's own dialog now and nothing in main needs the answer. See
-// `guardClose` in `main.ts`.
-
 /**
  * Whether a value off the disk is a colour this can hand to Electron.
  *

@@ -193,6 +193,36 @@ function harness(options: { rendererAlive?: boolean } = {}) {
   check('a renderer crash with nothing asked shows nothing', h.nativeShown === 0 && !h.confirm.pending);
 }
 
+{
+  const h = harness();
+  h.confirm.requested();
+  h.confirm.replied({ id: h.sent[0].id, answer: 'shown' });
+  h.confirm.rendererReset();
+  check('a reload while the confirm is up drops it, not hands it to the OS',
+    !h.confirm.pending && h.nativeShown === 0 && h.liveTimers === 0);
+  h.confirm.replied({ id: h.sent[0].id, answer: 'quit' });
+  check('...an answer to the dropped confirm decides nothing', h.quits === 0);
+  h.confirm.requested();
+  check('...and the next close asks the fresh page, as a new confirm',
+    h.sent.length === 2 && h.sent[1].open && h.sent[1].id !== h.sent[0].id);
+}
+
+{
+  const h = harness();
+  h.confirm.requested();
+  h.confirm.rendererReset();
+  h.advance(RENDERER_ACK_MS * 2);
+  check('...and a reload before "shown" disarms the fallback too', h.nativeShown === 0);
+}
+
+{
+  const h = harness();
+  h.confirm.requested();
+  h.advance(RENDERER_ACK_MS);
+  h.confirm.rendererReset();
+  check('a reload while the OS\'s box is up leaves the box in charge', h.confirm.pending);
+}
+
 // --- a second close never stacks a second confirm ------------------------------
 {
   const h = harness();

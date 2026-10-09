@@ -108,6 +108,18 @@ export class QuitConfirm {
     if (this.state.kind === 'renderer') this.fallBack();
   }
 
+  /**
+   * The page navigated - a reload - and took its dialog with it. The question
+   * is simply dropped rather than handed to the OS: nobody closed anything
+   * this time, and the next close asks a fresh page. Without this the guard
+   * would stay `renderer` with nothing on screen and no timer until then.
+   */
+  rendererReset(): void {
+    if (this.state.kind !== 'renderer') return;
+    this.host.clearTimer(this.state.timer);
+    this.state = { kind: 'idle' };
+  }
+
   private ask(id: number): void {
     if (!this.host.send({ id, open: true })) {
       this.state = { kind: 'renderer', id, timer: undefined };
