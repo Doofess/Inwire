@@ -88,7 +88,7 @@ export const BASEMAP_PALETTE = {
   /** Punched behind the labels, so the few that fall on water still read. */
   labelHalo: '#e9edda',
   /**
-   * Buildings, roads, runways.
+   * Buildings and runways.
    *
    * Every layer this colours is hidden outright by `HIDDEN_SOURCE_LAYERS`, so
    * it paints nothing on the style that ships today. Kept as the fallback for
@@ -96,6 +96,19 @@ export const BASEMAP_PALETTE = {
    * the alternative being that they arrive in OpenFreeMap's own grey, on green.
    */
   structure: '#94a274',
+  /**
+   * A city's built-up area, from zoom 8 (`CITY_MIN_ZOOM.urban`). A breath off
+   * the land - 1.1:1 - so a city's footprint shows without becoming a shape
+   * that competes with the arcs.
+   */
+  urban: '#aab58f',
+  /**
+   * Roads, from the major ones at zoom 8 to the streets at 13. Lighter than the
+   * land and the built-up area both, so a city's layout reads as pale lines
+   * on green the way a street plan does - asserted visible and still a
+   * backdrop by `scripts/themes/basemap.ts`.
+   */
+  road: '#cfd6b6',
 } as const;
 
 /**
@@ -354,8 +367,17 @@ export function applyBasemapPalette(map: MapLibreMap): void {
         if (layer.type === 'line') set(layer.id, 'line-color', BASEMAP_PALETTE.sea);
         break;
 
-      case 'landcover':
+      // The built-up area, which `mapDeclutter` keeps from zoom 8 - the only
+      // landuse that draws. Opaque, because the stock style fades it in with
+      // an opacity ramp of its own made for a white map.
       case 'landuse':
+        if (layer.type === 'fill') {
+          set(layer.id, 'fill-color', BASEMAP_PALETTE.urban);
+          set(layer.id, 'fill-opacity', 1);
+        }
+        break;
+
+      case 'landcover':
       // `park` is its own source-layer in Positron, and it was the single layer
       // in the whole style the colour pass did not cover - which is invisible
       // while the light themes use a light-built style, and a stock green blob
@@ -364,8 +386,16 @@ export function applyBasemapPalette(map: MapLibreMap): void {
         if (layer.type === 'fill') set(layer.id, 'fill-color', BASEMAP_PALETTE.land);
         break;
 
-      case 'building':
+      // The roads `mapDeclutter` keeps for a city's layout. One colour for the
+      // whole hierarchy: the stock widths already say which road is which.
       case 'transportation':
+        if (layer.type === 'line') {
+          set(layer.id, 'line-color', BASEMAP_PALETTE.road);
+          set(layer.id, 'line-opacity', 1);
+        }
+        break;
+
+      case 'building':
       case 'aeroway':
         if (layer.type === 'fill') set(layer.id, 'fill-color', BASEMAP_PALETTE.structure);
         if (layer.type === 'line') set(layer.id, 'line-color', BASEMAP_PALETTE.structure);
@@ -455,6 +485,8 @@ export function basemapTokensFor(resolvedTheme: string | undefined, accent: stri
 const WATER_TINT = 0.1;
 const LAND_TINT = 0.08;
 const STRUCTURE_TINT = 0.22;
+/** How far a city's built-up area steps from the land toward the roads, in the muted skin. */
+const URBAN_TINT = 0.3;
 const BOUNDARY_TINT = 0.5;
 
 /**
@@ -603,14 +635,28 @@ export function applyMutedBasemap(map: MapLibreMap, tokens: BasemapTokens): void
         if (layer.type === 'line') set(layer.id, 'line-color', tokens.accent);
         break;
 
-      case 'landcover':
+      // The built-up area, a step from the land toward the roads, so a city's
+      // footprint shows in this skin as it does in the colourful one.
       case 'landuse':
+        if (layer.type === 'fill') {
+          set(layer.id, 'fill-color', mixHex(structure, land, URBAN_TINT));
+          set(layer.id, 'fill-opacity', 1);
+        }
+        break;
+
+      case 'landcover':
       case 'park':
         if (layer.type === 'fill') set(layer.id, 'fill-color', land);
         break;
 
-      case 'building':
       case 'transportation':
+        if (layer.type === 'line') {
+          set(layer.id, 'line-color', structure);
+          set(layer.id, 'line-opacity', 1);
+        }
+        break;
+
+      case 'building':
       case 'aeroway':
         if (layer.type === 'fill') set(layer.id, 'fill-color', structure);
         if (layer.type === 'line') set(layer.id, 'line-color', structure);

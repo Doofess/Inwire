@@ -56,6 +56,7 @@ import {
  * the prop back, not a reason to keep a two-valued union with one value.
  */
 import { ZoomControls } from './ZoomControls';
+import { combineFilter, RIM_CLAUSE } from './mapDeclutter';
 import { createDoubleRightClick } from '../../lib/doubleRightClick';
 
 /**
@@ -401,7 +402,9 @@ function applyLandLift(
           // the small-water clause onto it by the time this runs, so the walls
           // appear and disappear with the lakes they belong to instead of
           // outlining ghosts of them at world zoom.
-          ...(waterFill.filter === undefined ? {} : { filter: waterFill.filter as never }),
+          // And no rim around a lake (`RIM_CLAUSE`): coasts are a step, lakes
+          // are flat.
+          filter: combineFilter(waterFill.filter, RIM_CLAUSE) as never,
           paint: {
             'fill-color': color,
             'fill-translate': step.translate as never,

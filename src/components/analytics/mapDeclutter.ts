@@ -76,14 +76,74 @@ export const HIDDEN_SOURCE_LAYERS: ReadonlySet<string> = new Set([
   'building',
   'housenumber',
   'landcover',
-  'landuse',
   'mountain_peak',
   'park',
   'poi',
-  'transportation',
   'transportation_name',
   'waterway',
 ]);
+
+/**
+ * A city's layout, once you are close enough to be looking at one.
+ *
+ * `transportation` and `landuse` were hidden with the rest, and that was right
+ * at world zoom and wrong at city zoom: zoomed onto the city an endpoint
+ * resolved to, the map showed a green plate with a name on it, where the
+ * question being asked is "where in this city". The owner asked for "a little
+ * bit of city layout, not something too detailed". So the two come back, held
+ * by zoom and by class, in a hierarchy that grows as you close in:
+ *
+ * - the built-up area (`landuse` residential) as a faint tint, from `urban`;
+ * - motorways, trunk and primary roads from `major` - a city's skeleton;
+ * - secondary and tertiary roads from `secondary`;
+ * - minor streets from `minor`, where the grid is the layout.
+ *
+ * Never service roads, tracks, paths, rail, piers, buildings or road names: a
+ * street map's detail, and the arcs' clutter. Road casings are not drawn either
+ * - each road is one line, not an outlined one (see `declutterFor`).
+ */
+export const CITY_MIN_ZOOM = {
+  urban: 7,
+  major: 7,
+  secondary: 9,
+  minor: 12,
+} as const;
+// **These are TILE zooms, one below what the map's zoom readout says.** A
+// `['zoom']` inside a filter is evaluated per tile, at the tile's own integer
+// zoom, and OpenFreeMap's 512-pixel tiles are fetched a level below the map's
+// zoom - so `major: 7` draws from map zoom 8, `minor: 12` from 13. Measured in
+// screenshots: at the first values written here, 8/10/13, the roads arrived a
+// whole level late and the street grid only at the map's maximum.
+
+/**
+ * The water the land's relief rim is drawn for: everything but lakes.
+ *
+ * The rim (`LAND_LIFT` in GeoMap) is what makes the coast read as a step. Around
+ * a lake it ringed every small one in a dark band, which at zoom 8 over the
+ * Canadian Shield was a field of hundreds of rimmed specks - the "too detailed"
+ * the owner reported. A lake is a flat blue shape; only coasts get the step.
+ */
+//
+// Written as `!=` on purpose, not as the `['!', ['match', ...]]` the small-water
+// clause uses: `combineFilter` skips a clause whose text already appears in the
+// filter, and that spelling of "not a lake" is already inside the water filter
+// the rim copies - so it was taken as applied and the rims stayed. Measured in
+// the running map, not assumed.
+export const RIM_CLAUSE = ['!=', ['get', 'class'], 'lake'];
+
+const MAJOR_ROADS = ['motorway', 'trunk', 'primary'];
+const SECONDARY_ROADS = ['secondary', 'tertiary'];
+const STREETS = ['minor'];
+/** Every road class the layout draws at some zoom - anything else in `transportation` is hidden. */
+const LAYOUT_ROADS = new Set([...MAJOR_ROADS, ...SECONDARY_ROADS, ...STREETS]);
+
+/** The filter clause every kept road layer takes: each class from its own zoom. */
+export const ROAD_CLAUSE = [
+  'any',
+  ['all', ['>=', ['zoom'], CITY_MIN_ZOOM.major], ['match', ['get', 'class'], MAJOR_ROADS, true, false]],
+  ['all', ['>=', ['zoom'], CITY_MIN_ZOOM.secondary], ['match', ['get', 'class'], SECONDARY_ROADS, true, false]],
+  ['all', ['>=', ['zoom'], CITY_MIN_ZOOM.minor], ['match', ['get', 'class'], STREETS, true, false]],
+];
 
 /**
  * The highest admin level that still draws.
@@ -117,7 +177,7 @@ export const PLACE_MIN_ZOOM = {
 } as const;
 
 /**
- * When lakes, rivers and ponds join the ocean.
+ * When lakes join the ocean.
  *
  * The `water` source layer is not just the sea: it carries every lake, pond,
  * reservoir, dock and wide river on Earth, with no size threshold. Drawn at
@@ -133,6 +193,16 @@ export const PLACE_MIN_ZOOM = {
 export const SMALL_WATER_MIN_ZOOM = 4;
 
 /**
+ * Water this map never draws, at any zoom: rivers drawn as areas, ponds, docks
+ * and pools. At city zoom they were the most detailed thing on the map - every
+ * pond and the banks of every river, on a map that otherwise shows a city's
+ * roads and nothing finer (the owner's report: "lakes and rivers ... too
+ * detailed ... unnecessary for this use case"). Lakes stay, from
+ * `SMALL_WATER_MIN_ZOOM`: they are geography at the scale this map is read.
+ */
+const NEVER_WATER_CLASSES = ['dock', 'pond', 'river', 'swimming_pool'];
+
+/**
  * The water classes that wait for `SMALL_WATER_MIN_ZOOM`.
  *
  * Listed positively - "these are small" - rather than as "everything except
@@ -142,7 +212,7 @@ export const SMALL_WATER_MIN_ZOOM = 4;
  * make it vanish. Getting this backwards empties the sea below zoom 4, which is
  * the entire map.
  */
-const SMALL_WATER_CLASSES = ['dock', 'lake', 'pond', 'river', 'swimming_pool'];
+const SMALL_WATER_CLASSES = ['lake'];
 
 /**
  * When sea and ocean names may appear.
@@ -333,11 +403,38 @@ export function declutterFor(layer: DeclutterInput): DeclutterRule {
       // difference between "speckled" and "not" across a whole zoom level, not
       // something that has to animate smoothly through one.
       clause: [
-        'any',
-        ['>=', ['zoom'], SMALL_WATER_MIN_ZOOM],
-        ['!', ['match', ['get', 'class'], SMALL_WATER_CLASSES, true, false]],
+        'all',
+        ['!', ['match', ['get', 'class'], NEVER_WATER_CLASSES, true, false]],
+        [
+          'any',
+          ['>=', ['zoom'], SMALL_WATER_MIN_ZOOM],
+          ['!', ['match', ['get', 'class'], SMALL_WATER_CLASSES, true, false]],
+        ],
       ],
     };
+  }
+
+  if (layer.sourceLayer === 'landuse') {
+    // The built-up area and nothing else: a residential fill is what shows a
+    // city's footprint. Any other landuse layer a style ships stays hidden.
+    if (layer.type !== 'fill') return { kind: 'hide' };
+    const facts = readFilter(layer.filter);
+    if (!facts.classes.includes('residential')) return { kind: 'hide' };
+    return { kind: 'filter', clause: ['>=', ['zoom'], CITY_MIN_ZOOM.urban] };
+  }
+
+  if (layer.sourceLayer === 'transportation') {
+    // One line per road. A casing is the outline a street map draws around
+    // each road; here it would double every line's weight for no meaning.
+    // Matched by id because the casing and its road share a filter exactly -
+    // nothing in the schema tells them apart - and OpenMapTiles styles name
+    // casings `*_casing` throughout.
+    if (layer.type !== 'line' || /casing/.test(layer.id)) return { kind: 'hide' };
+    // A layer that draws none of the layout's classes - rail, paths, piers -
+    // goes entirely rather than being filtered to nothing tile by tile.
+    const facts = readFilter(layer.filter);
+    if (!facts.classes.some(c => LAYOUT_ROADS.has(c))) return { kind: 'hide' };
+    return { kind: 'filter', clause: ROAD_CLAUSE };
   }
 
   if (layer.sourceLayer === 'water_name') {

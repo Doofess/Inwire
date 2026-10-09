@@ -192,6 +192,24 @@ const { land, sea, wallUpper, wallLower, boundary, label, labelHalo } = BASEMAP_
   checkTrue(`country borders do not shout (${ratio.toFixed(2)}:1)`, ratio <= 2.5);
 }
 
+// --- 5b. A city's layout is a backdrop too -----------------------------------
+//
+// The built-up area and its roads, from zoom 8 (`CITY_MIN_ZOOM`). The urban
+// tint is a breath off the land; roads read as pale lines on both, and none of
+// it as loud as a label.
+{
+  const { urban, road } = BASEMAP_PALETTE;
+  const tint = contrastRatio(urban, land);
+  checkTrue(`a city's footprint shows on the land (${tint.toFixed(2)}:1)`, tint >= 1.05);
+  checkTrue(`...and stays a tint (${tint.toFixed(2)}:1)`, tint <= 1.3);
+  const onLand = contrastRatio(road, land);
+  const onUrban = contrastRatio(road, urban);
+  checkTrue(`roads read on the land (${onLand.toFixed(2)}:1)`, onLand >= 1.3);
+  checkTrue(`roads read inside the built-up area (${onUrban.toFixed(2)}:1)`, onUrban >= 1.3);
+  checkTrue(`roads do not shout (${onLand.toFixed(2)}:1)`, onLand <= 2.5);
+  checkTrue('roads are lighter than the land, as a street plan draws them', relativeLuminance(road) > relativeLuminance(land));
+}
+
 // --- 6. Two skies, and they are actually two ---------------------------------
 //
 // The only part of the map the app's theme still touches.

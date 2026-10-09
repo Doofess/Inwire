@@ -20,6 +20,8 @@
  * these styles actually use lands on the zoom it should.
  */
 import {
+  CITY_MIN_ZOOM,
+  RIM_CLAUSE,
   combineFilter,
   declutterFor,
   HIDDEN_SOURCE_LAYERS,
@@ -344,6 +346,100 @@ check('dark country with no rank filter -> world zoom', zoomOf(DARK, 'place_coun
   check('water keeps its own filter', JSON.stringify(combined).includes('brunnel'), true);
   check('water line layers get the same clause',
     declutterFor({ id: 'water_line', type: 'line', sourceLayer: 'water' }), rule);
+}
+
+// --- 6e. A city's layout, and the water it no longer draws ------------------
+//
+// Real Positron layers, and the clauses evaluated by a small interpreter of
+// exactly the expression shapes the rules emit - so this checks what the map
+// will draw at a zoom, not the shape of an array.
+{
+  type Feature = { class?: string };
+  const evaluate = (expr: unknown, f: Feature, zoom: number): unknown => {
+    if (!Array.isArray(expr)) return expr;
+    const [op, ...a] = expr;
+    switch (op) {
+      case 'all': return a.every(e => evaluate(e, f, zoom) === true);
+      case 'any': return a.some(e => evaluate(e, f, zoom) === true);
+      case '!': return evaluate(a[0], f, zoom) !== true;
+      case 'zoom': return zoom;
+      case 'get': return (f as Record<string, unknown>)[a[0] as string];
+      case '>=': return (evaluate(a[0], f, zoom) as number) >= (evaluate(a[1], f, zoom) as number);
+      case '<=': return (evaluate(a[0], f, zoom) as number) <= (evaluate(a[1], f, zoom) as number);
+      case '==': return evaluate(a[0], f, zoom) === evaluate(a[1], f, zoom);
+      case '!=': return evaluate(a[0], f, zoom) !== evaluate(a[1], f, zoom);
+      case 'match': {
+        const v = evaluate(a[0], f, zoom);
+        const labels = a[1];
+        return (Array.isArray(labels) ? labels.includes(v) : labels === v) ? a[2] : a[3];
+      }
+      default: throw new Error(`the test's interpreter does not know '${String(op)}'`);
+    }
+  };
+  const rule = (input: DeclutterInput) => declutterFor(input);
+  const drawsAt = (input: DeclutterInput, f: Feature, zoom: number) => {
+    const r = rule(input);
+    if (r === null) return true;
+    if (r.kind === 'hide') return false;
+    if (r.kind === 'minzoom') return zoom >= r.minzoom;
+    return evaluate(r.clause, f, zoom) === true;
+  };
+  const geom = ['match', ['geometry-type'], ['LineString', 'MultiLineString'], true, false];
+  const road = (id: string, classes: string[]): DeclutterInput => ({
+    id, type: 'line', sourceLayer: 'transportation',
+    filter: ['all', geom, ['match', G('class'), classes, true, false]],
+  });
+  const major = road('highway_major_inner', ['primary', 'secondary', 'tertiary', 'trunk']);
+  const minor = road('highway_minor', ['minor', 'service', 'track']);
+  const motorway: DeclutterInput = {
+    id: 'highway_motorway_inner', type: 'line', sourceLayer: 'transportation',
+    filter: ['all', geom, ['all', ['match', G('brunnel'), ['bridge', 'tunnel'], false, true], ['==', G('class'), 'motorway']]],
+  };
+
+  check('no road at world zoom', drawsAt(motorway, { class: 'motorway' }, 3), false);
+  check('motorways come with the city', drawsAt(motorway, { class: 'motorway' }, CITY_MIN_ZOOM.major), true);
+  check('primary roads come with the city', drawsAt(major, { class: 'primary' }, CITY_MIN_ZOOM.major), true);
+  check('secondary roads wait', drawsAt(major, { class: 'secondary' }, CITY_MIN_ZOOM.secondary - 1), false);
+  check('...until their zoom', drawsAt(major, { class: 'tertiary' }, CITY_MIN_ZOOM.secondary), true);
+  check('streets wait longest', drawsAt(minor, { class: 'minor' }, CITY_MIN_ZOOM.minor - 1), false);
+  check('...and show the grid once close', drawsAt(minor, { class: 'minor' }, CITY_MIN_ZOOM.minor), true);
+  check('service roads never draw', drawsAt(minor, { class: 'service' }, 14), false);
+  check('tracks never draw', drawsAt(minor, { class: 'track' }, 14), false);
+  check('a casing is hidden - one line per road', rule(road('highway_major_casing', ['primary']))?.kind, 'hide');
+  check('rail is hidden', rule(road('railway', ['rail']))?.kind, 'hide');
+  check('paths are hidden', rule(road('highway_path', ['path']))?.kind, 'hide');
+  check('a pier area is hidden',
+    rule({ id: 'road_area_pier', type: 'fill', sourceLayer: 'transportation', filter: ['==', G('class'), 'pier'] })?.kind, 'hide');
+  check('road names stay hidden', rule({ id: 'n', type: 'symbol', sourceLayer: 'transportation_name' })?.kind, 'hide');
+
+  const residential: DeclutterInput = {
+    id: 'landuse_residential', type: 'fill', sourceLayer: 'landuse',
+    filter: ['all', ['match', ['geometry-type'], ['MultiPolygon', 'Polygon'], true, false], ['==', G('class'), 'residential']],
+  };
+  check('the built-up area is not drawn at world zoom', drawsAt(residential, { class: 'residential' }, 4), false);
+  check('the built-up area shows a city footprint', drawsAt(residential, { class: 'residential' }, CITY_MIN_ZOOM.urban), true);
+  check('other landuse stays hidden',
+    rule({ id: 'landuse_park', type: 'fill', sourceLayer: 'landuse', filter: ['==', G('class'), 'park'] })?.kind, 'hide');
+
+  const water: DeclutterInput = { id: 'water', type: 'fill', sourceLayer: 'water' };
+  check('the ocean draws at every zoom', [1, 8, 14].map(z => drawsAt(water, { class: 'ocean' }, z)), [true, true, true]);
+  check('lakes wait for their zoom', drawsAt(water, { class: 'lake' }, SMALL_WATER_MIN_ZOOM - 1), false);
+  check('...and then draw', drawsAt(water, { class: 'lake' }, SMALL_WATER_MIN_ZOOM), true);
+  for (const c of ['river', 'pond', 'dock', 'swimming_pool']) {
+    check(`${c} never draws, even at street zoom`, drawsAt(water, { class: c }, 14), false);
+  }
+  check('unclassed water still draws', drawsAt(water, {}, 1), true);
+  // The coast's relief rim is drawn for the sea, never around a lake.
+  check('the sea keeps its rim', evaluate(RIM_CLAUSE, { class: 'ocean' }, 8), true);
+  check('a lake has no rim', evaluate(RIM_CLAUSE, { class: 'lake' }, 8), false);
+  check('unclassed water keeps its rim', evaluate(RIM_CLAUSE, {}, 8), true);
+  // The bug the first spelling had: combined onto the real water filter, the
+  // clause must actually be there, not skipped as already applied.
+  const waterFilter = combineFilter(undefined, (declutterFor(water) as { clause: unknown }).clause);
+  const rimFilter = combineFilter(waterFilter, RIM_CLAUSE);
+  check('the rim clause survives being combined onto the water filter', rimFilter !== waterFilter, true);
+  check('...so a lake at zoom 8 gets no rim', evaluate(rimFilter, { class: 'lake' }, 8), false);
+  check('...and the sea does', evaluate(rimFilter, { class: 'ocean' }, 8), true);
 }
 
 // --- 7. Inert outside its remit ---------------------------------------------
