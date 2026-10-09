@@ -143,7 +143,15 @@ for (const theme of THEMES) {
     await p.getByLabel('Stop capture').click().catch(() => {});
 
     await p.evaluate(() => window.inwire?.setUnsavedCapture?.(false)).catch(() => {});
+    const firstPid = app.process().pid;
     await app.close();
+    // The app holds a single-instance lock per profile: a relaunch before the
+    // first process has gone hands the window back to it, and the photo is of
+    // the old instance. Wait for it to be gone.
+    for (let i = 0; i < 50; i++) {
+      try { process.kill(firstPid!, 0); await sleep(200); } catch { break; }
+    }
+    await sleep(500);
 
     // A fresh launch with history: the sheet idle, GO and the past results.
     {
