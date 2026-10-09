@@ -55,10 +55,16 @@ const usesElectronApi = [...code].filter(([, t]) => /\b_electron\b/.test(t)).map
 check('no script references playwright\'s _electron outside launchApp', usesElectronApi.length === 0,
   usesElectronApi.join(', '));
 
-const spawnsElectron = [...code]
-  .filter(([, t]) => /\b(spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\(\s*[^)]{0,120}electron(\.exe|\.cmd)?['"`]/.test(t)
-    || /\.bin[\/]electron/.test(t))
-  .map(([f]) => f);
+// Anchored on the spawned BINARY - the first argument - never on the word anywhere in the
+// arguments: scripts/electron/preload-sandbox.ts runs `node electron/build.cjs` and must stay clean.
+const SPAWNS_ELECTRON =
+  /\b(spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\(\s*['"`]([^'"`]*[\\/])?electron(\.exe|\.cmd)?['"`]|\.bin[\\/]electron/;
+const spawnsElectron = [...code].filter(([, t]) => SPAWNS_ELECTRON.test(t)).map(([f]) => f);
+check('the spawn check flags electron binaries',
+  [String.raw`spawn('electron', [])`, String.raw`execFileSync("C:\x\node_modules\.bin\electron", [])`, String.raw`spawnSync('a/electron.exe')`]
+    .every((x) => SPAWNS_ELECTRON.test(x)));
+check('the spawn check leaves preload-sandbox.ts\'s build.cjs call clean',
+  !SPAWNS_ELECTRON.test(`execFileSync('node', [path.join('electron', 'build.cjs')], {})`));
 check('no script spawns electron through child_process', spawnsElectron.length === 0, spawnsElectron.join(', '));
 
 const helper = stripComments(readFileSync(HELPER, 'utf8'));
