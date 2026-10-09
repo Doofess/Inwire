@@ -100,6 +100,9 @@ const emptyTotals = (): DirectionTotals => ({ packets: 0, bytes: 0, first: null,
 export class StreamDigest {
   private readonly streams = new Map<number, Entry>();
   private readonly recent = new Map<number, number>();
+  /** `recent`'s keys in arrival order, 0 where none yet; `recentAt` is the oldest. */
+  private readonly recentIds = new Float64Array(RECENT_FRAMES);
+  private recentAt = 0;
   private through = 0;
   private versionValue = 0;
 
@@ -156,11 +159,15 @@ export class StreamDigest {
     s.outcome = outcomeOf(entry.machine);
     s.version = ++this.versionValue;
 
+    // A ring of the ids, not `recent.keys().next()`: deleting from a Map's
+    // front leaves holes its iterator walks on every call, and that one line
+    // was most of `feed` once the window filled (`scripts/perf/store-boundary.ts`).
+    const slot = this.recentAt;
+    const evicted = this.recentIds[slot];
+    if (evicted !== 0) this.recent.delete(evicted);
+    this.recentIds[slot] = row.id;
+    this.recentAt = (slot + 1) % RECENT_FRAMES;
     this.recent.set(row.id, streamId);
-    if (this.recent.size > RECENT_FRAMES) {
-      const oldest = this.recent.keys().next();
-      if (!oldest.done) this.recent.delete(oldest.value);
-    }
   }
 
   /** An `InfoPatch.protocolLabel` for a frame already folded. */
