@@ -1333,7 +1333,16 @@ export const PacketList: React.FC<PacketListProps> = ({
           <tbody className={density.body}>
             {totalRows === 0 ? (
               <tr>
-                <td colSpan={visibleColumnCount} className="py-16">
+                <td colSpan={visibleColumnCount} className="p-0">
+                  {/* Centred in the space under the header, not pinned near its
+                      top: the empty state IS the pane while there are no rows,
+                      and one parked in the upper third read as something left
+                      over (the owner's report). A min-height, so a pane shorter
+                      than the message grows and scrolls rather than clipping. */}
+                  <div
+                    className="flex items-center justify-center py-6"
+                    style={{ minHeight: Math.max(0, viewportHeight - headerHeight) }}
+                  >
                   {/* Against the BUFFER, not the filtered view. `packets` is
                       empty in both cases and they are not the same case: a
                       filter that matched nothing used to report the buffer as
@@ -1391,6 +1400,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                       Choose an adapter and press Start, or import a capture file.
                     </EmptyState>
                   )}
+                  </div>
                 </td>
               </tr>
             ) : (
