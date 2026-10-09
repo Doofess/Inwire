@@ -626,7 +626,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
           e.stopPropagation();
           setMapWidth(DEFAULT_MINIMAP_WIDTH);
         }}
-        className="absolute left-0 top-0 h-full w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/50 z-10"
+        className="absolute left-0 top-0 h-full w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-foreground/25 z-10"
         title="Drag to resize packet map - right-click to reset"
       />
     </div>

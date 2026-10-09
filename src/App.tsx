@@ -3033,8 +3033,8 @@ export default function App() {
             }}
             className="w-1 shrink-0 z-10 cursor-col-resize relative
               after:absolute after:inset-y-0 after:-left-1 after:-right-1
-              transition-colors hover:bg-primary/50
-              focus-visible:outline-none focus-visible:bg-primary/50"
+              transition-colors hover:bg-foreground/25
+              focus-visible:outline-none focus-visible:bg-foreground/25"
           />
         )}
 
@@ -3205,7 +3205,7 @@ export default function App() {
                 aria-valuemax={Math.max(100, window.innerHeight - 200)}
                 tabIndex={0}
                 title="Drag to resize - right-click to reset, Enter to hide the panes"
-                className="block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50"
+                className="block h-1.5 w-full cursor-row-resize transition-colors shrink-0 z-10 bg-muted hover:bg-foreground/25"
                 onPointerDown={() => beginDrag("height")}
                 // Right-click restores the default, on every draggable bar in the
                 // app. A drag is easy to overshoot and there is nothing to undo
@@ -3285,7 +3285,7 @@ export default function App() {
                   aria-valuemin={10}
                   aria-valuemax={90}
                   tabIndex={0}
-                  className={`block transition-colors shrink-0 z-10 bg-muted hover:bg-primary/50 ${
+                  className={`block transition-colors shrink-0 z-10 bg-muted hover:bg-foreground/25 ${
                     stacked ? "h-1.5 w-full cursor-row-resize" : "w-1.5 h-full cursor-col-resize"
                   }`}
                   title="Drag to resize - right-click, double-click or Enter to even out"

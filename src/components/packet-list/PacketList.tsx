@@ -457,7 +457,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         e.stopPropagation();
         setColumnWidths(prev => ({ ...prev, [column]: DEFAULT_COLUMN_WIDTHS[column] }));
       }}
-      className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-primary/50 z-10"
+      className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-foreground/25 z-10"
       title="Drag to resize column - right-click to reset"
     />
   );
