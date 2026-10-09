@@ -3163,6 +3163,9 @@ export default function App() {
                 <PacketList
                   previousCapture={lastCaptureLabel === null ? null
                     : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
+                  capturing={isCapturing}
+                  onChooseAdapter={() => showSideBar('interfaces')}
+                  onClearFilter={() => { setFilterText(''); applyFilter(''); }}
                   names={nameMap}
                   resolveNames={nameResolution.network}
                   sourceProcess={sourceProcessFor}

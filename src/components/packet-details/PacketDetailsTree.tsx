@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Packet } from '../../types/packet';
-import { Layers } from 'lucide-react';
+import { ListTree } from 'lucide-react';
+import { EmptyState, Kbd } from '../common/EmptyState';
 import { ProtocolTreeView } from './ProtocolTreeView';
 import { ExpertFindings } from './ExpertFindings';
 import { PaneHeader } from '../common/PaneHeader';
@@ -49,14 +50,14 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
 
   if (!packet) {
     return (
-      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
-        <div className="flex flex-col items-center gap-1.5">
-          <Layers className="w-6 h-6 text-muted-foreground/70 mb-1" />
-          <span className="uppercase tracking-wider">No packet selected</span>
-          <span className="text-[10px] text-muted-foreground/70">
-            Select any packet from the list above for deep protocol dissection
-          </span>
-        </div>
+      <div className="h-full flex items-center justify-center p-6">
+        <EmptyState
+          icon={ListTree}
+          title="No packet selected"
+          hint={<><Kbd>↑</Kbd><Kbd>↓</Kbd> step through the list</>}
+        >
+          Select a packet in the list to see its protocol layers, field by field.
+        </EmptyState>
       </div>
     );
   }

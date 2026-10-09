@@ -22,8 +22,14 @@ import {
   MessageSquare,
   ArrowRightLeft,
   Funnel,
+  FunnelX,
+  SearchX,
+  Radar,
+  History,
+  Cable,
   Copy,
 } from 'lucide-react';
+import { EmptyState, EmptyStateButton, Kbd } from '../common/EmptyState';
 import { packetHexDump } from '../../services/pcapParser';
 import { hasBytes, packetBytes } from '../../services/packetBytes';
 import { fieldValue } from '../../services/dissect/fieldAccess';
@@ -69,6 +75,12 @@ interface PacketListProps {
    * nothing to offer, or once the buffer holds anything.
    */
   previousCapture?: { label: string; onReopen: () => void } | null;
+  /** Whether a capture is running, so an empty list can say it is waiting rather than idle. */
+  capturing?: boolean;
+  /** Opens the adapter panel, from the empty list's "Choose an adapter". */
+  onChooseAdapter?: () => void;
+  /** Clears the display filter, from the empty list's "Clear filter". */
+  onClearFilter?: () => void;
   /**
    * What the capture says its addresses are called, from the passive name map.
    *
@@ -309,6 +321,9 @@ export const PacketList: React.FC<PacketListProps> = ({
   packetTheme,
   themeKey,
   previousCapture = null,
+  capturing = false,
+  onChooseAdapter,
+  onClearFilter,
 }) => {
   // Restored from the last session, so a refresh keeps the column the user
   // was sorting by rather than snapping back to packet number.
@@ -1318,51 +1333,64 @@ export const PacketList: React.FC<PacketListProps> = ({
           <tbody className={density.body}>
             {totalRows === 0 ? (
               <tr>
-                <td colSpan={visibleColumnCount} className="text-center py-16 text-muted-foreground">
-                  <div className="flex flex-col items-center justify-center gap-1">
-                    <Funnel className="w-6 h-6 text-muted-foreground/70 mb-1" />
-                    <span>
-                      {/* Against the BUFFER, not the filtered view. `packets`
-                          is empty in both cases and they are not the same
-                          case: a filter that matched nothing used to report
-                          the buffer as empty, which is the wrong answer in the
-                          one situation a reader most needs the right one. */}
-                      {allPackets.length === 0
-                        ? 'The capture buffer is empty.'
-                        : 'No packets match the current display filter.'}
-                    </span>
-                    {allPackets.length === 0 && previousCapture !== null && (
-                      <span className="text-[11px] mt-1">
-                        Last capture: {previousCapture.label} -{' '}
-                        <button
-                          type="button"
-                          onClick={previousCapture.onReopen}
-                          className="text-primary hover:underline font-medium cursor-pointer"
-                        >
-                          Reopen
-                        </button>
-                      </span>
-                    )}
-                    {/* What was actually searched. A filter that finds nothing
-                        is exactly when the reader wonders whether it is the
-                        filter or the traffic, so the scope is stated rather
-                        than left to be assumed - and the scope is now one of
-                        two things rather than always the buffer. */}
-                    {allPackets.length > 0 && filterView !== null && (
-                      <span className="text-[11px] font-mono text-muted-foreground mt-0.5">
-                        Searched the whole stored capture —{' '}
-                        {(Math.max(0, below - floor) + allPackets.length).toLocaleString()} frames.
-                      </span>
-                    )}
-                    {allPackets.length > 0 && filterView === null && droppedBuffer > 0 && (
-                      <span className="text-[11px] font-mono text-amber-600 dark:text-amber-400 mt-0.5">
-                        Searched frames {allPackets[0].id.toLocaleString()}–
-                        {allPackets[allPackets.length - 1].id.toLocaleString()};{' '}
-                        {droppedBuffer.toLocaleString()} earlier frames have left the buffer.
-                      </span>
-                    )}
-                    <span className="text-[10px] text-muted-foreground/70">Start capture or clear filter to resume telemetry</span>
-                  </div>
+                <td colSpan={visibleColumnCount} className="py-16">
+                  {/* Against the BUFFER, not the filtered view. `packets` is
+                      empty in both cases and they are not the same case: a
+                      filter that matched nothing used to report the buffer as
+                      empty, which is the wrong answer in the one situation a
+                      reader most needs the right one. */}
+                  {allPackets.length > 0 ? (
+                    <EmptyState
+                      icon={SearchX}
+                      title="No packets match this filter"
+                      actions={onClearFilter && (
+                        <EmptyStateButton icon={FunnelX} onClick={onClearFilter}>Clear filter</EmptyStateButton>
+                      )}
+                    >
+                      {/* What was actually searched. A filter that finds
+                          nothing is exactly when the reader wonders whether it
+                          is the filter or the traffic, so the scope is stated
+                          rather than left to be assumed. */}
+                      {filterView !== null ? (
+                        <>Searched the whole stored capture, {(Math.max(0, below - floor) + allPackets.length).toLocaleString()} frames.</>
+                      ) : droppedBuffer > 0 ? (
+                        <span className="text-warning">
+                          Searched frames {allPackets[0].id.toLocaleString()}–{allPackets[allPackets.length - 1].id.toLocaleString()};{' '}
+                          {droppedBuffer.toLocaleString()} earlier frames have left the buffer.
+                        </span>
+                      ) : (
+                        <>Searched every frame in the buffer.</>
+                      )}
+                    </EmptyState>
+                  ) : capturing ? (
+                    <EmptyState icon={Radar} title="Waiting for packets" busy>
+                      The capture is running. Packets appear here as the adapter sees them.
+                    </EmptyState>
+                  ) : previousCapture !== null ? (
+                    <EmptyState
+                      icon={History}
+                      title="No packets yet"
+                      actions={(
+                        <EmptyStateButton icon={History} primary onClick={previousCapture.onReopen}>
+                          Reopen the last capture
+                        </EmptyStateButton>
+                      )}
+                      hint="Or press Start in the rail to begin a new capture, which replaces it."
+                    >
+                      The capture from {previousCapture.label} is still on disk.
+                    </EmptyState>
+                  ) : (
+                    <EmptyState
+                      icon={Radar}
+                      title="No packets yet"
+                      actions={onChooseAdapter && (
+                        <EmptyStateButton icon={Cable} onClick={onChooseAdapter}>Choose an adapter</EmptyStateButton>
+                      )}
+                      hint={<>Start is at the top of the rail, or <Kbd>Space</Kbd> once an adapter is chosen.</>}
+                    >
+                      Choose an adapter and press Start, or import a capture file.
+                    </EmptyState>
+                  )}
                 </td>
               </tr>
             ) : (

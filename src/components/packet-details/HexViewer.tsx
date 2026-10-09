@@ -22,6 +22,7 @@ import { HexDumpView } from './HexDumpView';
 import { hasBytes } from '../../services/packetBytes';
 import type { PacketDetailState } from '../../lib/usePacketDetail';
 import { PaneHeader } from '../common/PaneHeader';
+import { EmptyState } from '../common/EmptyState';
 
 export interface HexViewerProps {
   packet: Packet | null;
@@ -201,12 +202,16 @@ export const HexViewer: React.FC<HexViewerProps> = ({
 
   if (!packet) {
     return (
-      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
-        <div className="flex flex-col items-center gap-1.5">
-          <Binary className="w-6 h-6 text-muted-foreground/70 mb-1" />
-          <span className="uppercase tracking-wider">Hex Dump Inspector</span>
-          <span className="text-[10px] text-muted-foreground/70">Select a frame to inspect raw hexadecimal &amp; ASCII dump</span>
-        </div>
+      <div className="h-full flex items-center justify-center p-6">
+        <EmptyState
+          icon={Binary}
+          title="No bytes to show"
+          // One line and a hint, the shape of the tree's empty state beside
+          // it, so the two stand at the same height.
+          hint="Hover a field in the tree to light up the bytes it came from."
+        >
+          Select a packet to see its raw bytes in hex and ASCII.
+        </EmptyState>
       </div>
     );
   }
