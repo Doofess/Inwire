@@ -11,9 +11,13 @@ import type { DigestSnapshotData } from './streamDigest';
 export const DIGEST_FORMAT = 1;
 const MAGIC = 0x47445749;
 const HEADER = 16;
+// Built once, as `chunkCodec.ts` builds its pair: a codec's cost is in its
+// constructor (`scripts/perf/hot-path-allocations.ts`).
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 export function encodeDigest(data: DigestSnapshotData, deflate: (b: Uint8Array) => Uint8Array): Uint8Array {
-  const body = deflate(new TextEncoder().encode(JSON.stringify(data)));
+  const body = deflate(textEncoder.encode(JSON.stringify(data)));
   const out = new Uint8Array(HEADER + body.length);
   const view = new DataView(out.buffer);
   view.setUint32(0, MAGIC, true);
@@ -33,7 +37,7 @@ export function decodeDigest(bytes: Uint8Array, inflate: (b: Uint8Array) => Uint
   const body = bytes.subarray(HEADER);
   if (fnv1a(body) !== view.getUint32(12, true)) return null;
   try {
-    const data = JSON.parse(new TextDecoder().decode(inflate(body))) as DigestSnapshotData;
+    const data = JSON.parse(textDecoder.decode(inflate(body))) as DigestSnapshotData;
     return typeof data.throughId === 'number' && Array.isArray(data.entries) ? data : null;
   } catch {
     return null;
