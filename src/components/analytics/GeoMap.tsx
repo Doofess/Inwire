@@ -234,9 +234,8 @@ const BEARING_DEGREES_PER_PIXEL = 0.8;
 const PITCH_DEGREES_PER_PIXEL = 0.5;
 
 /**
- * Where the map looks when it has never been moved, and where a double
- * right-click puts it back: the whole world, level, north up. The zoom is the
- * constructor's; the projection's floor (`GLOBE_MIN_ZOOM`) wins over it.
+ * Where the map looks when it has never been moved: the whole world. The zoom
+ * is the constructor's; the projection's floor (`GLOBE_MIN_ZOOM`) wins over it.
  */
 const HOME_CENTER: [number, number] = [15, 20];
 const HOME_ZOOM = 1;
@@ -1194,9 +1193,12 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * context menu is suppressed for the duration, which is what MapLibre does
    * too and the reason a right-drag is usable as a gesture at all.
    *
-   * **A double right-click goes home** - the whole world, level, north up -
-   * because a right-drag is exactly what leaves a globe at an angle nobody can
-   * find their way back from. It lives here because it is the same button;
+   * **A double right-click undoes what the right-drag did, and nothing else** -
+   * level and north up, with the centre and zoom left where they are. A
+   * right-drag is exactly what leaves a globe at an angle nobody can find their
+   * way back from, but the place you panned to and the zoom you chose are not
+   * that gesture's, and flying back to the whole world threw them away too (the
+   * owner's report). It lives here because it is the same button;
    * `lib/doubleRightClick.ts` decides which presses were clicks.
    */
   useEffect(() => {
@@ -1209,16 +1211,11 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     let lastY = 0;
     const rightClicks = createDoubleRightClick();
 
-    const goHome = () => {
-      const home = {
-        center: HOME_CENTER,
-        zoom: Math.max(HOME_ZOOM, map.getMinZoom()),
-        pitch: 0,
-        bearing: 0,
-      };
+    const straighten = () => {
+      const level = { pitch: 0, bearing: 0 };
       // Reduced motion: a jump, for the reason the settle effect above gives.
-      if (prefersReducedMotion()) map.jumpTo(home);
-      else map.easeTo({ ...home, duration: 800 });
+      if (prefersReducedMotion()) map.jumpTo(level);
+      else map.easeTo({ ...level, duration: 600 });
     };
 
     // The same test MapLibre applies, so the gesture is unchanged and only
@@ -1262,7 +1259,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       rotating = false;
       surface.releasePointerCapture?.(e.pointerId);
       if (e.type !== 'pointerup' || e.button !== 2) return;
-      if (rightClicks.release({ x: e.clientX, y: e.clientY, at: performance.now() }) === 'double') goHome();
+      if (rightClicks.release({ x: e.clientX, y: e.clientY, at: performance.now() }) === 'double') straighten();
     };
 
     // Only while the gesture is running - a plain right-click on the map
