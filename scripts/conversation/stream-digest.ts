@@ -63,6 +63,16 @@ function row(fromClient: boolean, flags: string, extra: Partial<Packet> & { seq?
 
   const back = StreamDigest.restore(JSON.parse(JSON.stringify(d.snapshot())));
   check('snapshot round-trips', back.get(7), d.get(7));
+  const snap = d.snapshot();
+  const snapJson = JSON.stringify(snap);
+  nextId = 9;
+  d.feed(row(true, 'A', { seq: 102, ack: 1002 }));
+  check('feeding after snapshot() leaves the snapshot taken unchanged', JSON.stringify(snap), snapJson);
+  const data = JSON.parse(snapJson);
+  const restored = StreamDigest.restore(data);
+  nextId = 9;
+  restored.feed(row(true, 'RA'));
+  check('feeding a restored digest leaves its source data unchanged', JSON.stringify(data), snapJson);
   nextId = 9;
   back.feed(row(true, 'RA'));
   check('a restored digest keeps folding', [back.get(7)!.lastId, back.get(7)!.outcome], [9, 'closed cleanly']);

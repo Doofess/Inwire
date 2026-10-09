@@ -181,14 +181,16 @@ export class StreamDigest {
   }
 
   snapshot(): DigestSnapshotData {
-    return { throughId: this.through, version: this.versionValue, entries: [...this.streams.values()] };
+    // Copied: the store serialises this later while the digest keeps folding.
+    return { throughId: this.through, version: this.versionValue, entries: structuredClone([...this.streams.values()]) };
   }
 
   static restore(data: DigestSnapshotData): StreamDigest {
     const d = new StreamDigest();
     d.through = data.throughId;
     d.versionValue = data.version;
-    for (const entry of data.entries) d.streams.set(entry.summary.streamId, entry);
+    // Copied: the caller keeps its data, and feed mutates what it adopts.
+    for (const entry of structuredClone(data.entries)) d.streams.set(entry.summary.streamId, entry);
     return d;
   }
 

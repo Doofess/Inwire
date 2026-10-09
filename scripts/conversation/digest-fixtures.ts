@@ -125,7 +125,7 @@ for (const rel of FIXTURES) {
     continue;
   }
   const out = spawnSync(tshark, ['-n', '-r', file, '-Y', 'tcp', '-T', 'fields',
-    '-e', 'frame.number', '-e', 'tcp.completeness', '-e', 'tcp.flags.fin', '-e', 'tcp.flags.reset'],
+    '-e', 'frame.number', '-e', 'tcp.stream', '-e', 'tcp.completeness', '-e', 'tcp.flags.fin', '-e', 'tcp.flags.reset'],
   { encoding: 'utf8', env, maxBuffer: 1 << 30 }).stdout.trim().split(/\r?\n/);
   // A stream's mask is every bit the reference reported on any of its frames.
   // Not the last frame's value: tshark prints the completeness a frame sees
@@ -135,26 +135,42 @@ for (const rel of FIXTURES) {
   // RST on frame 1280 reads 28 and the next frame 60). The frame's own
   // FIN and RST flags are therefore added, read from tshark's own flag fields.
   const frameMask = new Map<number, number>();
+  const tsharkStream = new Map<number, number>();
   for (const l of out) {
-    const [frame, value, fin, rst] = l.split('\t');
+    const [frame, stream, value, fin, rst] = l.split('\t');
     if (frame === undefined || value === undefined || value === '') continue;
     // A frame can carry the field more than once (tunnels); the last is the stream's own.
     const v = Number(value.split(',').pop());
     if (Number.isNaN(v)) continue;
     const own = (fin?.split(',').pop() === 'True' ? 16 : 0) | (rst?.split(',').pop() === 'True' ? 32 : 0);
     frameMask.set(Number(frame), v | own);
+    tsharkStream.set(Number(frame), Number(stream?.split(',').pop()));
   }
+  // Buckets are tshark's own streams. Our summaries are mapped onto them
+  // through the frames they contain, and each must land on exactly one: that
+  // agreement on where streams begin and end is itself under test.
   const completeness = new Map<number, number>();
-  for (const p of packets) {
-    const m = frameMask.get(p.id);
-    if (m === undefined || p.streamId === undefined) continue;
-    completeness.set(p.streamId, (completeness.get(p.streamId) ?? 0) | m);
+  for (const [frame, m] of frameMask) {
+    const ts = tsharkStream.get(frame)!;
+    completeness.set(ts, (completeness.get(ts) ?? 0) | m);
   }
+  const mapsTo = new Map<number, Set<number>>();
+  for (const p of packets) {
+    const ts = tsharkStream.get(p.id);
+    if (ts === undefined || p.streamId === undefined || !p.frameProtocols?.includes('tcp')) continue;
+    (mapsTo.get(p.streamId) ?? mapsTo.set(p.streamId, new Set()).get(p.streamId)!).add(ts);
+  }
+  const split = summaries.filter((s) => (mapsTo.get(s.streamId)?.size ?? 0) !== 1)
+    .map((s) => `stream ${s.streamId} (frames ${s.firstId}-${s.lastId}) maps to tshark streams [${[...(mapsTo.get(s.streamId) ?? [])]}]`);
+  check(`${name}: every stream is exactly one of tshark's tcp.stream`, split.length === 0,
+    `${split.length} differ, e.g. ${split.slice(0, 4).join('; ')}`);
 
   const bad: string[] = [];
   let compared = 0;
   for (const s of summaries) {
-    const mask = completeness.get(s.streamId);
+    const only = mapsTo.get(s.streamId);
+    if (only === undefined || only.size !== 1) continue;
+    const mask = completeness.get([...only][0]!);
     if (mask === undefined) continue;
     compared++;
     const why = (msg: string) => bad.push(`stream ${s.streamId} (frames ${s.firstId}-${s.lastId}, "${s.outcome}", mask ${mask}): ${msg}`);
