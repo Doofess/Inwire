@@ -56,6 +56,7 @@ import {
  * the prop back, not a reason to keep a two-valued union with one value.
  */
 import { ZoomControls } from './ZoomControls';
+import { createDoubleRightClick } from '../../lib/doubleRightClick';
 
 /**
  * Where maplibre's tile worker actually is.
@@ -230,6 +231,14 @@ const BEARING_DEGREES_PER_PIXEL = 0.8;
 
 /** Degrees of tilt per pixel dragged, also MapLibre's value. */
 const PITCH_DEGREES_PER_PIXEL = 0.5;
+
+/**
+ * Where the map looks when it has never been moved, and where a double
+ * right-click puts it back: the whole world, level, north up. The zoom is the
+ * constructor's; the projection's floor (`GLOBE_MIN_ZOOM`) wins over it.
+ */
+const HOME_CENTER: [number, number] = [15, 20];
+const HOME_ZOOM = 1;
 
 const ARC_STEPS = 48;
 
@@ -1181,6 +1190,11 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    * left button - so nothing has to be relearned except the direction. The
    * context menu is suppressed for the duration, which is what MapLibre does
    * too and the reason a right-drag is usable as a gesture at all.
+   *
+   * **A double right-click goes home** - the whole world, level, north up -
+   * because a right-drag is exactly what leaves a globe at an angle nobody can
+   * find their way back from. It lives here because it is the same button;
+   * `lib/doubleRightClick.ts` decides which presses were clicks.
    */
   useEffect(() => {
     const map = mapRef.current;
@@ -1190,6 +1204,19 @@ export const GeoMap: React.FC<GeoMapProps> = ({
     let rotating = false;
     let lastX = 0;
     let lastY = 0;
+    const rightClicks = createDoubleRightClick();
+
+    const goHome = () => {
+      const home = {
+        center: HOME_CENTER,
+        zoom: Math.max(HOME_ZOOM, map.getMinZoom()),
+        pitch: 0,
+        bearing: 0,
+      };
+      // Reduced motion: a jump, for the reason the settle effect above gives.
+      if (prefersReducedMotion()) map.jumpTo(home);
+      else map.easeTo({ ...home, duration: 800 });
+    };
 
     // The same test MapLibre applies, so the gesture is unchanged and only
     // its direction differs: `(button === 0 && ctrlKey) || (button === 2 &&
@@ -1200,6 +1227,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
 
     const onDown = (e: PointerEvent) => {
       if (!isRotateGesture(e)) return;
+      if (e.button === 2) rightClicks.press({ x: e.clientX, y: e.clientY, at: performance.now() });
       rotating = true;
       lastX = e.clientX;
       lastY = e.clientY;
@@ -1230,6 +1258,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       if (!rotating) return;
       rotating = false;
       surface.releasePointerCapture?.(e.pointerId);
+      if (e.type !== 'pointerup' || e.button !== 2) return;
+      if (rightClicks.release({ x: e.clientX, y: e.clientY, at: performance.now() }) === 'double') goHome();
     };
 
     // Only while the gesture is running - a plain right-click on the map
@@ -1279,8 +1309,8 @@ export const GeoMap: React.FC<GeoMapProps> = ({
       // Where the map was last pointing, if it has been open before this
       // session. Someone who flew to a city and then left for another view
       // should not come back to the world view.
-      center: geoSession().camera?.center ?? [15, 20],
-      zoom: geoSession().camera?.zoom ?? 1,
+      center: geoSession().camera?.center ?? HOME_CENTER,
+      zoom: geoSession().camera?.zoom ?? HOME_ZOOM,
       // `applyProjectionMode` sets the real floor a moment later; this is
       // only what the map is constructed with, before its style exists. Kept
       // looser than `GLOBE_MIN_ZOOM` deliberately - a constructor value that

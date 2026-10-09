@@ -26,6 +26,7 @@ const GESTURES: [string, string][] = [
   ['Pan', 'Drag with the left button'],
   ['Zoom', 'Scroll - on the globe it holds the centre, on the flat map it comes to the pointer'],
   ['Rotate and tilt', 'Right-drag, or Ctrl / ⌘ with the left button'],
+  ['Reset the view', 'Double right-click - the whole world, level, north up'],
   ['Projection', 'The globe button below switches between the sphere and the flat map'],
 ];
 
