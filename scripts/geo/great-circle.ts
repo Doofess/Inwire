@@ -194,6 +194,21 @@ const peakOf = (a: [number, number], b: [number, number]) =>
 const NEARBY: [number, number] = [34.8, 32.0];   // ~10km from TLV
 checkTrue('a longer route arcs higher than a shorter one', peakOf(TLV, NYC) > peakOf(TLV, NEARBY));
 checkTrue('even a very short route lifts off the surface', peakOf(TLV, NEARBY) > 0);
+// A short hop is a low curve, never a hoop: no arc stands taller than a quarter
+// of the ground it spans (`ARC_MAX_ASPECT`). The old constant floor stood a
+// 50 km route 76 km tall.
+const spanOf = (a: [number, number], b: [number, number]) => {
+  const r = Math.PI / 180;
+  const v = (p: [number, number]) => [Math.cos(p[1] * r) * Math.cos(p[0] * r), Math.cos(p[1] * r) * Math.sin(p[0] * r), Math.sin(p[1] * r)];
+  const [x, y] = [v(a), v(b)];
+  return Math.acos(Math.min(1, x[0] * y[0] + x[1] * y[1] + x[2] * y[2]));
+};
+const CITY_50KM: [number, number] = [35.21, 31.77];  // Jerusalem, ~55 km from TLV
+const SHORT_HOPS: [number, number][] = [NEARBY, CITY_50KM, [32.3, 34.9], [35.5, 33.9]];
+checkTrue('no short route stands taller than a quarter of its length',
+  SHORT_HOPS.every((b) => peakOf(TLV, b) <= 0.25 * spanOf(TLV, b) + 1e-12));
+checkTrue('...and a long route keeps its full rise, the cap does not touch it',
+  Math.abs(peakOf(TLV, NYC) - (0.012 + (0.18 - 0.012) * spanOf(TLV, NYC) / Math.PI)) < 1e-3);
 
 // The seam is the one place an arc is already two pieces of geometry, so a
 // discontinuity there is the most visible one available.

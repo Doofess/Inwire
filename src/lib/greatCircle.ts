@@ -175,6 +175,20 @@ const ARC_MAX_ALTITUDE = 0.18;
 const ARC_MIN_ALTITUDE = 0.012;
 
 /**
+ * The tallest an arc may be for its length: a quarter of the ground it spans.
+ *
+ * `ARC_MIN_ALTITUDE` is 76 km at Earth scale, and on its own it made every short
+ * hop a loop - two places 50 km apart got an arc half again taller than it was
+ * long, a narrow hoop standing on the map, which reads as wrong the moment you
+ * zoom in (the owner's report). The cap is a shape, not a distance: an arc is
+ * never more than this fraction as tall as it is long, so a short route is a
+ * low curve of the same proportions as a long one, still lifted off the
+ * surface. It binds below roughly 1,200 km; past that the linear rise above is
+ * already flatter than this.
+ */
+const ARC_MAX_ASPECT = 0.25;
+
+/**
  * A great circle with an altitude profile: an arc, not a path painted on.
  *
  * Altitude is `sin(pi * t)`, which is 0 at both endpoints and peaks at the
@@ -205,7 +219,12 @@ export function greatCircleArc(
     Math.cos(lat1) * Math.sin(lng1) * Math.cos(lat2) * Math.sin(lng2) +
     Math.sin(lat1) * Math.sin(lat2);
   const omega = Math.acos(Math.min(1, Math.max(-1, dot)));
-  const peak = ARC_MIN_ALTITUDE + (ARC_MAX_ALTITUDE - ARC_MIN_ALTITUDE) * (omega / Math.PI);
+  // `omega` is also the route's length in globe radii, the unit the altitude
+  // is in, which is what lets the aspect cap compare the two directly.
+  const peak = Math.min(
+    ARC_MIN_ALTITUDE + (ARC_MAX_ALTITUDE - ARC_MIN_ALTITUDE) * (omega / Math.PI),
+    ARC_MAX_ASPECT * omega,
+  );
 
   const last = path.length - 1;
   const arc = path.map((point, i) => {
