@@ -23,6 +23,21 @@ import {
   transferFigure, TRANSFER_MS, UPLOAD_CAP_BYTES, UPLOAD_REQUEST_BYTES, WARMUP_MS, type TransferFigure,
 } from '../../src/services/speedTest/method';
 import type { SpeedEvent, SpeedPhase, SpeedServer } from '../../src/services/speedTest/protocol';
+import { coloPlace } from '../../src/services/speedTest/colos';
+
+/**
+ * The server, placed: `/meta`'s own coordinates when it sent them, otherwise
+ * the colo code - `/meta`'s, or any response's `colo` header - against the
+ * bundled table. Never a lookup of its own.
+ */
+export function placeServer(server: SpeedServer, coloHeader: string | null): SpeedServer {
+  const colo = server.colo ?? coloHeader;
+  if (server.coloLat !== null && server.coloLon !== null) return { ...server, colo };
+  const place = coloPlace(colo);
+  return place
+    ? { ...server, colo, coloLat: place.latitude, coloLon: place.longitude, coloCity: server.coloCity ?? place.city }
+    : { ...server, colo };
+}
 
 /** Where the test goes. Production is `CLOUDFLARE` and nothing else. */
 export interface SpeedTarget {
@@ -119,7 +134,7 @@ export async function runSpeedTest(
       type: 'done',
       result: {
         at: Date.now(),
-        server: { ...server, colo: server.colo ?? run.colo },
+        server: placeServer(server, run.colo),
         latency: { idleMs, jitterMs, samples: idle.length },
         download: down,
         upload: up,
@@ -245,15 +260,24 @@ class Run {
 
   /** Who and where: the ISP and the data centre, from `/meta`. Never fatal. */
   async meta(): Promise<SpeedServer> {
-    const empty: SpeedServer = { colo: null, coloCity: null, isp: null, asn: null, ip: null, city: null };
+    const empty: SpeedServer = { colo: null, coloCity: null, coloLat: null, coloLon: null, isp: null, asn: null, ip: null, city: null };
     try {
       const res = await this.request(this.agent(1), 'GET', '/meta', { headers: this.options.target.metaHeaders });
       const v = JSON.parse(res.body?.toString('utf8') || '{}') as Record<string, unknown>;
       const colo = (typeof v.colo === 'object' && v.colo !== null ? v.colo : {}) as Record<string, unknown>;
       const str = (x: unknown): string | null => (typeof x === 'string' && x.length > 0 && x.length < 200 ? x : null);
+      const num = (x: unknown): number | null => {
+        const n = typeof x === 'number' ? x : typeof x === 'string' ? Number(x) : NaN;
+        return Number.isFinite(n) ? n : null;
+      };
+      const lat = num(colo.lat);
+      const lon = num(colo.lon);
+      const ok = lat !== null && lon !== null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
       return {
         colo: str(colo.iata),
         coloCity: str(colo.city),
+        coloLat: ok ? lat : null,
+        coloLon: ok ? lon : null,
         isp: str(v.asOrganization),
         asn: typeof v.asn === 'number' ? v.asn : null,
         ip: str(v.clientIp),

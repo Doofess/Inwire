@@ -100,7 +100,7 @@ check('the cap the consent copy quotes', TEST_CAP_MB, 800);
 console.log('\n--- history ---');
 const result: SpeedResult = {
   at: 1_791_550_000_000,
-  server: { colo: 'TLV', coloCity: 'Tel Aviv', isp: 'Bezeq', asn: 6810, ip: '192.0.2.1', city: 'Petah Tikva' },
+  server: { colo: 'TLV', coloCity: 'Tel Aviv', coloLat: 32.01, coloLon: 34.89, isp: 'Bezeq', asn: 6810, ip: '192.0.2.1', city: 'Petah Tikva' },
   latency: { idleMs: 3.2, jitterMs: 0.4, samples: 20 },
   download: { mbps: 940, p10: 900, p90: 960, slices: 80, bytes: 1e9, loadedLatencyMs: 12, connections: 6 },
   upload: { mbps: 41, p10: 38, p90: 43, slices: 80, bytes: 5e7, loadedLatencyMs: 30, connections: 4 },
@@ -109,7 +109,7 @@ const result: SpeedResult = {
 };
 const entry = historyEntry(result);
 check('a result as history keeps it', entry, {
-  at: result.at, downMbps: 940, upMbps: 41, pingMs: 3.2, jitterMs: 0.4, grade: 'A', server: 'Tel Aviv', isp: 'Bezeq',
+  at: result.at, downMbps: 940, upMbps: 41, pingMs: 3.2, jitterMs: 0.4, grade: 'A', server: 'Tel Aviv', isp: 'Bezeq', colo: 'TLV', lat: 32.01, lon: 34.89,
 });
 check('history keeps no address', JSON.stringify(entry).includes('192.0.2.1'), false);
 check('a stored history reads back', normalizeHistory([entry]), [entry]);

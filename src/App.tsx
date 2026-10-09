@@ -3139,7 +3139,7 @@ export default function App() {
             // by the same rules as Settings - the view underneath is untouched
             // and the back step, Escape or any view leaves it. Leaving does not
             // stop a test; the state is `services/speedTest/state.ts`'s.
-            <SpeedTestSheet capturing={isCapturing} />
+            <SpeedTestSheet capturing={isCapturing} onShowOnMap={() => handleViewChange('geo')} />
           ) : (
           <div className="flex-1 flex min-h-0 overflow-hidden">
             {/* Main Packet Inspection Core */}

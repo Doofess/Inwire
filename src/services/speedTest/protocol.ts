@@ -14,6 +14,13 @@ export interface SpeedServer {
   /** Cloudflare's data-centre code and city - what the test actually reached. */
   colo: string | null;
   coloCity: string | null;
+  /**
+   * Where that data centre is: from `/meta`, or the colo code resolved against
+   * the bundled table (`colos.ts`) by the engine. Null when neither knew - the
+   * globe then shows no pin and the results say so.
+   */
+  coloLat: number | null;
+  coloLon: number | null;
   /** The network the test ran from, as Cloudflare saw it. */
   isp: string | null;
   asn: number | null;

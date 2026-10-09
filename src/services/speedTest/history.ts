@@ -19,6 +19,10 @@ export interface SpeedHistoryEntry {
   grade: string;
   server: string | null;
   isp: string | null;
+  /** The data centre and where it is, for the globe; absent on a test that was not placed. */
+  colo?: string | null;
+  lat?: number | null;
+  lon?: number | null;
 }
 
 /** The most kept; the oldest goes first. */
@@ -40,6 +44,9 @@ export function normalizeHistory(raw: unknown): SpeedHistoryEntry[] | null {
       grade: typeof v.grade === 'string' && /^(A\+|[A-DF])$/.test(v.grade) ? v.grade : '?',
       server: strOrNull(v.server),
       isp: strOrNull(v.isp),
+      colo: typeof v.colo === 'string' && /^[A-Za-z]{3}$/.test(v.colo) ? v.colo : null,
+      lat: typeof v.lat === 'number' && Math.abs(v.lat) <= 90 ? v.lat : null,
+      lon: typeof v.lon === 'number' && Math.abs(v.lon) <= 180 ? v.lon : null,
     });
   }
   // Newest first, and no more than the limit, however it was stored.
@@ -63,6 +70,9 @@ export function historyEntry(result: SpeedResult): SpeedHistoryEntry {
     grade: result.grade,
     server: result.server.coloCity ?? result.server.colo ?? null,
     isp: result.server.isp,
+    colo: result.server.colo,
+    lat: result.server.coloLat,
+    lon: result.server.coloLon,
   };
 }
 

@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowDown, ArrowUp, Globe, History, RotateCcw, Server, ShieldAlert, Square,
+  Activity, AlertTriangle, ArrowDown, ArrowUp, Globe, History, MapPin, RotateCcw, Server, ShieldAlert, Square,
   WifiOff, Wifi,
 } from 'lucide-react';
+import { requestMapFocus } from '../../services/speedTest/mapOverlay';
 import { PaneHeader } from '../common/PaneHeader';
 import { EmptyStateButton } from '../common/EmptyState';
 import { SpeedGauge, Sparkline } from './SpeedGauge';
@@ -31,7 +32,11 @@ const PHASE_LABEL: Record<SpeedPhase, string> = {
   upload: 'Upload',
 };
 
-export function SpeedTestSheet({ capturing }: { capturing: boolean }) {
+export function SpeedTestSheet({ capturing, onShowOnMap }: {
+  capturing: boolean;
+  /** Opens the Routing Map; the sheet has already asked it to fly to the server. */
+  onShowOnMap?: () => void;
+}) {
   const state = useSpeedTest();
   const [history, setHistory] = usePreferenceValue(speedHistoryStore);
 
@@ -43,7 +48,7 @@ export function SpeedTestSheet({ capturing }: { capturing: boolean }) {
           <Announcer state={state} />
           {state.status === 'idle' && <Idle last={history[0] ?? null} />}
           {state.status === 'running' && <Running state={state} capturing={capturing} />}
-          {state.status === 'done' && state.result && <Done state={state} previous={history[1] ?? null} />}
+          {state.status === 'done' && state.result && <Done state={state} previous={history[1] ?? null} onShowOnMap={onShowOnMap} />}
           {state.status === 'failed' && state.error && <Failed error={state.error} />}
           {state.status === 'cancelled' && <Cancelled />}
           {state.status !== 'running' && history.length > 0 && (
@@ -134,7 +139,9 @@ function Running({ state, capturing }: { state: SpeedState; capturing: boolean }
   );
 }
 
-function Done({ state, previous }: { state: SpeedState; previous: SpeedHistoryEntry | null }) {
+function Done({ state, previous, onShowOnMap }: {
+  state: SpeedState; previous: SpeedHistoryEntry | null; onShowOnMap?: () => void;
+}) {
   const r = state.result!;
   return (
     <>
@@ -165,7 +172,7 @@ function Done({ state, previous }: { state: SpeedState; previous: SpeedHistoryEn
         )}
       </div>
       <EmptyStateButton icon={RotateCcw} primary onClick={startSpeedTest}>Test again</EmptyStateButton>
-      <ServerFooter server={r.server} />
+      <ServerFooter server={r.server} onShowOnMap={onShowOnMap} />
     </>
   );
 }
@@ -318,15 +325,34 @@ function ServerLine({ server, running }: { server: SpeedServer | null; running: 
   );
 }
 
-/** Where the result came from, said once, quietly, under it. */
-function ServerFooter({ server }: { server: SpeedServer }) {
+/**
+ * Where the result came from, said once, quietly, under it - with a way to see
+ * it on the Routing Map, or "location unknown" when the server could not be
+ * placed (no guess: the globe shows no pin either).
+ */
+function ServerFooter({ server, onShowOnMap }: { server: SpeedServer; onShowOnMap?: () => void }) {
   const where = server.coloCity ? `${server.coloCity}${server.colo ? ` (${server.colo})` : ''}` : server.colo;
+  const placed = server.coloLat !== null && server.coloLon !== null;
   return (
+    <div className="flex flex-col items-center gap-1.5">
+    {onShowOnMap && (placed ? (
+      <button type="button"
+        onClick={() => { requestMapFocus([server.coloLon!, server.coloLat!]); onShowOnMap(); }}
+        className="inline-flex items-center gap-1 rounded-sm text-xs font-medium text-primary hover:underline cursor-pointer
+          focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+        <MapPin className="h-3.5 w-3.5" aria-hidden /> Show the server on the map
+      </button>
+    ) : (
+      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        <MapPin className="h-3.5 w-3.5" aria-hidden /> Server location unknown
+      </span>
+    ))}
     <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
       <span className="inline-flex items-center gap-1"><Server className="h-3 w-3" aria-hidden />Cloudflare{where ? ` · ${where}` : ''}</span>
       {server.isp && <span title={server.isp}>{'·'} {shortIsp(server.isp)}</span>}
       {server.ip && <span>{'·'} Your address <span className="font-mono">{server.ip}</span></span>}
     </p>
+    </div>
   );
 }
 

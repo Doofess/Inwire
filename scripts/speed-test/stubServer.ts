@@ -3,7 +3,7 @@
  * our choosing - for the Electron drives that exercise the speed-test sheet
  * through `INWIRE_SPEEDTEST_TARGET` (loopback only; see `loopbackTarget`).
  *
- * A helper, not a test: it has no `process.exit`, so `scripts/check.ts` does
+ * A helper, not a test: it never exits the process itself, so `scripts/check.ts` does
  * not run it on its own.
  *
  * Throughput is a token bucket shared by every connection, so the engine's
