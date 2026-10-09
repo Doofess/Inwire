@@ -7,7 +7,7 @@ import { requestMapFocus } from '../../services/speedTest/mapOverlay';
 import { PaneHeader } from '../common/PaneHeader';
 import { EmptyStateButton } from '../common/EmptyState';
 import { SpeedGauge, Sparkline } from './SpeedGauge';
-import { formatMbps, TEST_CAP_MB, type BloatGrade } from '../../services/speedTest/method';
+import { formatMbps, TEST_CAP_TEXT, type BloatGrade } from '../../services/speedTest/method';
 import {
   cancelSpeedTest, livePing, startSpeedTest, useSpeedTest, type SpeedState,
 } from '../../services/speedTest/state';
@@ -82,7 +82,7 @@ function GoButton({ label = 'GO' }: { label?: string }) {
 function ConsentLine() {
   return (
     <p className="max-w-[26rem] text-center text-xs leading-relaxed text-muted-foreground">
-      Runs against Cloudflare, which sees this machine&rsquo;s public address. Uses up to {TEST_CAP_MB} MB of data.
+      Runs against Cloudflare, which sees this machine&rsquo;s public address. Uses up to {TEST_CAP_TEXT} of data.
       Results stay on this machine.
     </p>
   );
@@ -381,6 +381,16 @@ function ServerFooter({ server, onShowOnMap }: { server: SpeedServer; onShowOnMa
       <ServerIsp city={server.coloCity} colo={server.colo} isp={server.isp} inline />
       {server.ip && <span>{'·'} Your address <span className="font-mono">{server.ip}</span></span>}
     </p>
+    {/* Why another speed test can read differently - said once, on demand,
+        and as a fact about the route rather than an excuse: Ookla often picks
+        a server inside the ISP's own network, a millisecond away, where this
+        one crosses from the ISP to Cloudflare. */}
+    <span className="text-[11px] text-muted-foreground">
+      <Hint
+        term="Comparing with another test?"
+        explain={`This test ran against Cloudflare${server.coloCity ? ` in ${server.coloCity}` : ''}, reached through your ISP's link to Cloudflare. Tests against your ISP's own servers stay inside its network and can read higher.`}
+      />
+    </span>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, ChevronRight, Gauge } from 'lucide-react';
 import { Section } from '../network/rows';
-import { formatMbps, TEST_CAP_MB } from '../../services/speedTest/method';
+import { formatMbps, TEST_CAP_TEXT } from '../../services/speedTest/method';
 import { startSpeedTest, useSpeedTest, speedTestAvailable } from '../../services/speedTest/state';
 import { shortIsp, speedHistoryStore, whenText } from '../../services/speedTest/history';
 import { usePreferenceValue } from '../../services/preferenceStore';
@@ -106,7 +106,7 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
 
         {!running && !last && (
           <p className="text-[10px] leading-snug text-muted-foreground">
-            Cloudflare sees this machine&rsquo;s address. Uses up to {TEST_CAP_MB} MB.
+            Cloudflare sees this machine&rsquo;s address. Uses up to {TEST_CAP_TEXT}.
           </p>
         )}
       </div>

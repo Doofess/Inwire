@@ -12,16 +12,29 @@
 export const TRANSFER_MS = 10_000;
 /** Bytes counted per slice of this length. */
 export const SLICE_MS = 100;
-/** The first stretch of a transfer is TCP slow start and says nothing about the link. */
-export const WARMUP_MS = 2_000;
-/** Connections a transfer opens with, and the most it ramps to. */
-export const START_CONNECTIONS = 4;
-export const MAX_CONNECTIONS = 8;
+/**
+ * The first stretch of a transfer is TCP slow start and the ramp, and says
+ * nothing about the link. 1.5 s rather than 2: on a 2.5 Gb/s link a few
+ * milliseconds from Cloudflare, slow start is over in well under a second, and
+ * every slice spent warming is one the cap does not leave for measuring.
+ */
+export const WARMUP_MS = 1_500;
+/**
+ * Connections a transfer opens with, and the most it ramps to - measured, on
+ * the owner's 2.5 Gb/s link against Cloudflare Tel Aviv: four connections read
+ * 1,507 Mb/s, six 1,866, twelve 2,106, against Ookla's 2,157 on the same
+ * machine. The ramp alone did not find that: on a fast link half a second to
+ * the next differs by noise, not by 5%, so it has to start where the link
+ * needs it. Twelve costs a slow link nothing it would notice; the ramp is
+ * still there for a fatter one.
+ */
+export const START_CONNECTIONS = 12;
+export const MAX_CONNECTIONS = 24;
 /** Connections added per step, and how often a step is considered. */
 export const RAMP_STEP = 2;
-export const RAMP_EVERY_MS = 1_000;
-/** A step is taken while the last second beat the one before by this much. */
-export const RAMP_GAIN = 1.1;
+export const RAMP_EVERY_MS = 500;
+/** A step is taken while the last half second beat the one before by this much. */
+export const RAMP_GAIN = 1.05;
 /**
  * The most a test transfers, whatever the link. Cloudflare rate-limits an
  * address that pulls much more - a measured 429 after about a gigabyte in a
@@ -29,8 +42,8 @@ export const RAMP_GAIN = 1.1;
  * download reaches it in about five seconds: three past warm-up, thirty
  * slices, plenty for a median. Faster than that, the figure is the cap's.
  */
-export const DOWNLOAD_CAP_BYTES = 600_000_000;
-export const UPLOAD_CAP_BYTES = 200_000_000;
+export const DOWNLOAD_CAP_BYTES = 1_600_000_000;
+export const UPLOAD_CAP_BYTES = 400_000_000;
 /**
  * Per request. `__down` refuses 100,000,000 bytes and more outright, and an
  * address it is limiting is refused large requests first - measured: 1 and 5
@@ -47,6 +60,10 @@ export const LOADED_PROBE_MS = 150;
 
 /** The most a test could move, for the consent copy. */
 export const TEST_CAP_MB = Math.round((DOWNLOAD_CAP_BYTES + UPLOAD_CAP_BYTES) / 1e6);
+/** The same, as the copy says it: "800 MB", "2 GB". */
+export const TEST_CAP_TEXT = TEST_CAP_MB >= 1000
+  ? `${Number((TEST_CAP_MB / 1000).toFixed(1))} GB`
+  : `${TEST_CAP_MB} MB`;
 
 /** The `q`-quantile (0..1) of numbers, by linear interpolation. Null for none. */
 export function quantile(values: readonly number[], q: number): number | null {
@@ -137,9 +154,8 @@ export function transferFigure(counter: SliceCounter, warmupMs = WARMUP_MS, elap
 }
 
 /**
- * Whether to open more connections: while the last second beat the one before
- * it by `RAMP_GAIN`, two at a time up to `MAX_CONNECTIONS`, never in warm-up's
- * first second (everything rises then).
+ * Whether to open more connections: while the last half second beat the one
+ * before it by `RAMP_GAIN`, two at a time up to `MAX_CONNECTIONS`.
  */
 export function shouldRamp(connections: number, lastSecondMbps: number, secondBeforeMbps: number): boolean {
   if (connections >= MAX_CONNECTIONS) return false;

@@ -5,7 +5,7 @@
  */
 import {
   bloatGrade, formatMbps, GAUGE_MARKS, gaugeFraction, jitter, median, netLatency, quantile, rpm,
-  serverRttVarMs, serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB,
+  serverRttVarMs, serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB, TEST_CAP_TEXT,
 } from '../../src/services/speedTest/method';
 import { HISTORY_LIMIT, historyEntry, normalizeHistory } from '../../src/services/speedTest/history';
 import { IDLE, livePing, reduceSpeed, STARTING, type SpeedState } from '../../src/services/speedTest/state';
@@ -66,8 +66,8 @@ console.log('\n--- slices and the figure ---');
 check('nothing moved, no figure', transferFigure(new SliceCounter(100), 2000, 1000), null);
 
 console.log('\n--- ramping ---');
-check('rising by 10% ramps', shouldRamp(4, 110, 100), true);
-check('rising by less does not', shouldRamp(4, 105, 100), false);
+check('rising by 5% ramps', shouldRamp(12, 105, 100), true);
+check('rising by less does not', shouldRamp(12, 103, 100), false);
 check('never past the most connections', shouldRamp(MAX_CONNECTIONS, 500, 100), false);
 check('not from nothing', shouldRamp(4, 100, 0), false);
 
@@ -95,7 +95,7 @@ check('between marks is linear', near(gaugeFraction(75), 3.5 / 8), true);
 check('past the last mark the needle is pinned', gaugeFraction(2500), 1);
 check('nothing, or nonsense, is zero', [0, -5, NaN].map(gaugeFraction), [0, 0, 0]);
 check('three significant figures', [0, 0.456, 5.678, 56.78, 567.8, 1234.5].map(formatMbps), ['0', '0.46', '5.68', '56.8', '568', '1235']);
-check('the cap the consent copy quotes', TEST_CAP_MB, 800);
+check('the cap the consent copy quotes', [TEST_CAP_MB, TEST_CAP_TEXT], [2000, '2 GB']);
 
 console.log('\n--- history ---');
 const result: SpeedResult = {
