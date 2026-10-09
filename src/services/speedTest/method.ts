@@ -31,9 +31,15 @@ export const RAMP_GAIN = 1.1;
  */
 export const DOWNLOAD_CAP_BYTES = 600_000_000;
 export const UPLOAD_CAP_BYTES = 200_000_000;
-/** Per request: `__down` refuses 100,000,000 bytes and more. */
-export const DOWNLOAD_REQUEST_BYTES = 25_000_000;
-export const UPLOAD_REQUEST_BYTES = 10_000_000;
+/**
+ * Per request. `__down` refuses 100,000,000 bytes and more outright, and an
+ * address it is limiting is refused large requests first - measured: 1 and 5
+ * MB answered 200 while 10 and 25 MB answered 429. Five megabytes keeps under
+ * that, and over keep-alive with four to eight connections the gap between
+ * requests costs the link nothing it would notice.
+ */
+export const DOWNLOAD_REQUEST_BYTES = 5_000_000;
+export const UPLOAD_REQUEST_BYTES = 5_000_000;
 /** Empty requests for idle latency; the first only opens the connection and is dropped. */
 export const LATENCY_SAMPLES = 20;
 /** Loaded latency is probed this often during a transfer, on a connection of its own. */

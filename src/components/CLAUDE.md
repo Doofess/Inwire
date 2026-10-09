@@ -133,10 +133,16 @@ radius, no border, because `<main>` is the card and a second one inside it is a
 card in a card. It covers the workspace, the view underneath is untouched, and
 closing it puts that view back rather than navigating anywhere.
 
-**The slot stays a union.** `App` models it as `sheet: 'settings' | null` rather
-than a boolean, which makes "the card holds exactly one surface" a fact the type
-carries — a boolean invites a second boolean beside it, and then "both open" is
-representable in a card that shows one.
+**The slot stays a union, and it has a second member now.** `App` models it as
+`sheet: 'settings' | 'speedtest' | null` rather than a boolean, which makes "the
+card holds exactly one surface" a fact the type carries — a boolean invites a
+second boolean beside it, and then "both open" is representable in a card that
+shows one. **The speed test's sheet** (`speedtest/SpeedTestSheet.tsx`, ADR 0054)
+follows every rule below; what it adds is that leaving it does not stop a test,
+because the test's state is `services/speedTest/state.ts`'s, a module store, not
+the sheet's - so App also does not re-render at the dial's ten updates a second.
+It is opened from the Network panel's *Speed test* section, never from the
+rail.
 
 **Three ways out and no fourth**: the title row's back step, reading
 "Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and
@@ -278,7 +284,12 @@ four panels are Interfaces, Schedule, Export/Import and Network.
 detour by every test here.
 
 **Network is a panel and not a view.** It is not in `APP_VIEWS`, it has no
-`Ctrl+n`, and `viewPrefs.ts` lands a stored `'network'` back on Packets. Its
+`Ctrl+n`, and `viewPrefs.ts` lands a stored `'network'` back on Packets. **Its
+first section is the speed test** (`speedtest/SpeedTestSection.tsx`): the last
+result, Run - a tinted outline, the one thing in the panel to press, still
+quieter than the facts around it - and Results and history, which opens the
+speed-test sheet. Sized for the panel's 170 px floor: the figures stack rather
+than squeeze. Its
 organising idea is the pairing — the OS says how the machine was told to behave,
 the capture shows what actually happened — so it has to sit *beside* the frames
 it is comparing against rather than on top of them. Capture Health stays a
