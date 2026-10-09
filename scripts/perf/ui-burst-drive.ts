@@ -570,7 +570,7 @@ for (const [phaseIndex, phase] of phases.entries()) {
       workerHeapSamples.push((await heap()).worker);
       const text = (await statusText()).replace(/\s+/g, ' ').trim();
       const live = /(catching up|behind live [^·]*|[\d,]+ to go|[\d,]+ skipped)/g;
-      statusSamples.push((text.match(live) ?? []).join(' · ') || 'live');
+      statusSamples.push((text.match(live) ?? []).map((s) => s.trim()).join(' · ') || 'live');
     }
   })();
   if (phase.during) await phase.during(); else await sleep(SECONDS * 1000);
