@@ -9,16 +9,30 @@
  * four in-range octets.
  */
 export function parseIpv4(text: string): number | null {
-  const parts = text.split('.');
-  if (parts.length !== 4) return null;
+  // One pass over the characters: a display filter or a colouring rule naming
+  // a network asks this of every frame's addresses, and a split plus a regex
+  // per octet was most of what that cost. Same grammar - four runs of one to
+  // three ASCII digits, each at most 255, three dots between them.
   let value = 0;
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    const octet = Number(part);
-    if (octet > 255) return null;
-    value = (value * 256) + octet;
+  let octet = 0;
+  let digits = 0;
+  let dots = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 46) {
+      if (digits === 0 || octet > 255 || ++dots > 3) return null;
+      value = value * 256 + octet;
+      octet = 0;
+      digits = 0;
+    } else if (c >= 48 && c <= 57) {
+      if (++digits > 3) return null;
+      octet = octet * 10 + (c - 48);
+    } else {
+      return null;
+    }
   }
-  return value >>> 0;
+  if (dots !== 3 || digits === 0 || octet > 255) return null;
+  return (value * 256 + octet) >>> 0;
 }
 
 /**
@@ -73,31 +87,47 @@ export function parseIpv6(text: string): Uint8Array | null {
  * Handles both families; a family mismatch is simply not a match.
  */
 export function addressInCidr(address: string, cidr: string): boolean {
+  return cidrMatcher(cidr)(address);
+}
+
+/**
+ * `addressInCidr` with the network parsed once, for a caller that asks the
+ * same question of many addresses - a compiled filter asks it of every frame.
+ * A network that does not parse matches nothing.
+ */
+export function cidrMatcher(cidr: string): (address: string) => boolean {
+  const never = () => false;
   const slash = cidr.lastIndexOf('/');
-  if (slash === -1) return false;
+  if (slash === -1) return never;
   const network = cidr.slice(0, slash);
   const prefixLength = Number(cidr.slice(slash + 1));
-  if (!Number.isInteger(prefixLength) || prefixLength < 0) return false;
+  if (!Number.isInteger(prefixLength) || prefixLength < 0) return never;
 
   if (network.includes(':')) {
-    const addressBytes = parseIpv6(address);
     const networkBytes = parseIpv6(network);
-    if (!addressBytes || !networkBytes || prefixLength > 128) return false;
-    for (let bit = 0; bit < prefixLength; bit += 8) {
-      const byte = bit >> 3;
-      const bitsHere = Math.min(8, prefixLength - bit);
-      const mask = (0xff << (8 - bitsHere)) & 0xff;
-      if ((addressBytes[byte] & mask) !== (networkBytes[byte] & mask)) return false;
-    }
-    return true;
+    if (!networkBytes || prefixLength > 128) return never;
+    return (address) => {
+      const addressBytes = parseIpv6(address);
+      if (!addressBytes) return false;
+      for (let bit = 0; bit < prefixLength; bit += 8) {
+        const byte = bit >> 3;
+        const bitsHere = Math.min(8, prefixLength - bit);
+        const mask = (0xff << (8 - bitsHere)) & 0xff;
+        if ((addressBytes[byte] & mask) !== (networkBytes[byte] & mask)) return false;
+      }
+      return true;
+    };
   }
 
-  const addressValue = parseIpv4(address);
   const networkValue = parseIpv4(network);
-  if (addressValue === null || networkValue === null || prefixLength > 32) return false;
+  if (networkValue === null || prefixLength > 32) return never;
   // A /0 must not shift by 32, which in JS is a no-op rather than a zero mask.
   const mask = prefixLength === 0 ? 0 : (0xffffffff << (32 - prefixLength)) >>> 0;
-  return (addressValue & mask) === (networkValue & mask);
+  const wanted = (networkValue & mask) >>> 0;
+  return (address) => {
+    const addressValue = parseIpv4(address);
+    return addressValue !== null && ((addressValue & mask) >>> 0) === wanted;
+  };
 }
 
 /** Formats 6 bytes as a lowercase colon-separated MAC address. */

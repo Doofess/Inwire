@@ -29,7 +29,7 @@
  */
 
 import { Packet } from '../../types/packet';
-import { addressInCidr } from '../addressFormat';
+import { cidrMatcher } from '../addressFormat';
 import { CompareOp, FieldRef, Literal, Node, SetEntry, parseFilter } from './parser';
 import { FilterSyntaxError } from './lexer';
 import { FieldResolution, isUndissected, layerPresence, resolveField, Scalar } from './fields';
@@ -149,9 +149,10 @@ function buildCompare(f: FieldRef, op: CompareOp, v: Literal): Predicate {
   // `ip.dst != 224.0.0.0/4` means "is not multicast" instead of being true
   // for every address that is not that literal string.
   if (!v.quoted && looksLikeCidr(v.text)) {
-    const cidr = v.text;
+    // The network parsed once, here, rather than for every address of every frame.
+    const inCidr = cidrMatcher(v.text);
     const inside = (p: Packet) =>
-      read(p).some((value) => typeof value === 'string' && addressInCidr(value, cidr));
+      read(p).some((value) => typeof value === 'string' && inCidr(value));
     return op === '!=' ? (p) => (read(p).length > 0 ? !inside(p) : false) : inside;
   }
 
