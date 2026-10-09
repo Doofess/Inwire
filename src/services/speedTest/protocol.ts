@@ -37,8 +37,8 @@ export interface SpeedResult {
 export type SpeedEvent =
   | { type: 'phase'; phase: SpeedPhase }
   | { type: 'server'; server: SpeedServer }
-  /** One idle-latency sample, in order. */
-  | { type: 'latency'; ms: number }
+  /** One idle-latency sample, in order, with the jitter estimate so far. */
+  | { type: 'latency'; ms: number; jitterMs: number | null }
   /** A transfer's running speed: the last second, sampled every slice-ish. */
   | { type: 'progress'; phase: 'download' | 'upload'; mbps: number; elapsedMs: number; connections: number }
   /** One loaded-latency probe during a transfer. */

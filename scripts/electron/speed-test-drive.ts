@@ -59,7 +59,12 @@ try {
   });
   console.log(`outcome: ${outcome.replace(/\s+/g, ' ')} after ${((Date.now() - started) / 1000).toFixed(1)} s`);
   if (outcome === 'done') {
-    const history = await p.evaluate(() => JSON.parse(localStorage.getItem('inwire.speedTestHistory') ?? '[]'));
+    // Written as the result lands, so read once it has.
+    let history: { downMbps: number; upMbps: number; pingMs: number; jitterMs: number; grade: string; server: string; isp: string }[] = [];
+    for (let i = 0; i < 40 && history.length === 0; i++) {
+      history = await p.evaluate(() => JSON.parse(localStorage.getItem('inwire.speedTestHistory') ?? '[]'));
+      if (history.length === 0) await sleep(250);
+    }
     const r = history[0];
     console.log(`download ${r.downMbps.toFixed(1)} Mb/s, upload ${r.upMbps.toFixed(1)} Mb/s, ping ${r.pingMs.toFixed(1)} ms, jitter ${r.jitterMs.toFixed(1)} ms, grade ${r.grade}`);
     console.log(`server: Cloudflare ${r.server}; ISP: ${r.isp}`);

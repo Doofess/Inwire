@@ -5,7 +5,7 @@
  */
 import {
   bloatGrade, formatMbps, GAUGE_MARKS, gaugeFraction, jitter, median, netLatency, quantile, rpm,
-  serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB,
+  serverRttVarMs, serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB,
 } from '../../src/services/speedTest/method';
 import { HISTORY_LIMIT, historyEntry, normalizeHistory } from '../../src/services/speedTest/history';
 import { IDLE, livePing, reduceSpeed, STARTING, type SpeedState } from '../../src/services/speedTest/state';
@@ -76,6 +76,8 @@ check('the edge and the speed Worker are the server\'s time', serverTimeMs('cfSp
 check('the server\'s TCP round trip wins when it is sent',
   netLatency(41, 'cfSpeedEdge;dur=6, cfSpeedWorker;dur=30, cfL4;desc="?proto=TCP&rtt=3412&min_rtt=2624&rtt_var=923"'), 3.412);
 check('...and min_rtt is not mistaken for it', netLatency(41, 'cfL4;desc="?proto=TCP&min_rtt=2624&rtt=5000"'), 5);
+check('the server\'s RTT variation is read as jitter', serverRttVarMs('cfL4;desc="?proto=TCP&rtt=3412&min_rtt=2624&rtt_var=923"'), 0.923);
+check('...and nothing without it', serverRttVarMs('cfSpeedWorker;dur=26'), null);
 check('cfRequestDuration wins where it is sent', serverTimeMs('cfRequestDuration;dur=3.5, cfSpeedWorker;dur=26'), 3.5);
 check('no header, no server time', serverTimeMs(undefined), 0);
 check('latency is net of the server', netLatency(30, 'cfSpeedWorker;dur=26'), 4);
@@ -123,7 +125,7 @@ console.log('\n--- the state the surfaces draw ---');
     { type: 'phase', phase: 'connecting' },
     { type: 'server', server: result.server },
     { type: 'phase', phase: 'latency' },
-    { type: 'latency', ms: 4 }, { type: 'latency', ms: 2 }, { type: 'latency', ms: 3 },
+    { type: 'latency', ms: 4, jitterMs: null }, { type: 'latency', ms: 2, jitterMs: 2 }, { type: 'latency', ms: 3, jitterMs: 1.5 },
     { type: 'phase', phase: 'download' },
     { type: 'progress', phase: 'download', mbps: 500, elapsedMs: 100, connections: 4 },
     { type: 'progress', phase: 'download', mbps: 900, elapsedMs: 200, connections: 6 },
@@ -132,6 +134,7 @@ console.log('\n--- the state the surfaces draw ---');
   for (const e of events) s = reduceSpeed(s, e);
   check('running, in the download, with the server', [s.status, s.phase, s.server?.isp], ['running', 'download', 'Bezeq']);
   check('the ping tile shows the median so far', livePing(s), 3);
+  check('...and the jitter tile the engine\'s estimate', s.liveJitterMs, 1.5);
   check('the dial follows the last progress', [s.liveMbps, s.connections, s.spark], [900, 6, [500, 900]]);
   s = reduceSpeed(s, { type: 'figure', phase: 'download', figure: result.download });
   check('a finished download fills its tile', s.downloadMbps, 940);

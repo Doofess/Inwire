@@ -214,6 +214,20 @@ export function netLatency(elapsedMs: number, serverTiming: string | undefined):
   return Math.max(0.1, elapsedMs - serverTimeMs(serverTiming));
 }
 
+/**
+ * The server's measure of how much the round trip varies, in ms: the kernel's
+ * `rtt_var` from `cfL4` (RFC 6298's RTTVAR, a smoothed mean deviation).
+ *
+ * **Jitter comes from here when it is sent, not from successive samples.** The
+ * `rtt` beside it is SMOOTHED - each sample moves it an eighth of the way - so
+ * the differences between successive values read about an eighth of the real
+ * variation, and the first real test reported 0.0 ms. Null without the header.
+ */
+export function serverRttVarMs(serverTiming: string | undefined): number | null {
+  const us = serverTiming ? /cfL4;[^,]*?[?&]rtt_var=([0-9]+)/.exec(serverTiming)?.[1] : undefined;
+  return us === undefined ? null : Number(us) / 1000;
+}
+
 /** The server's time out of a `Server-Timing` header: what this server reports spending. */
 export function serverTimeMs(header: string | undefined): number {
   if (!header) return 0;

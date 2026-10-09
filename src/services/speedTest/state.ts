@@ -19,8 +19,9 @@ export interface SpeedState {
   status: SpeedStatus;
   phase: SpeedPhase | null;
   server: SpeedServer | null;
-  /** Idle-latency samples so far, for the live ping tile. */
+  /** Idle-latency samples so far, for the live ping tile, and the engine's jitter estimate. */
   latencySamples: number[];
+  liveJitterMs: number | null;
   /** The dial's live value and the sparkline under it, for the transfer running. */
   liveMbps: number;
   spark: number[];
@@ -32,7 +33,7 @@ export interface SpeedState {
 }
 
 export const IDLE: SpeedState = {
-  status: 'idle', phase: null, server: null, latencySamples: [], liveMbps: 0, spark: [],
+  status: 'idle', phase: null, server: null, latencySamples: [], liveJitterMs: null, liveMbps: 0, spark: [],
   connections: 0, downloadMbps: null, uploadMbps: null, result: null, error: null,
 };
 
@@ -53,7 +54,7 @@ export function reduceSpeed(state: SpeedState, event: SpeedEvent): SpeedState {
     case 'server':
       return { ...state, server: event.server };
     case 'latency':
-      return { ...state, latencySamples: [...state.latencySamples, event.ms] };
+      return { ...state, latencySamples: [...state.latencySamples, event.ms], liveJitterMs: event.jitterMs };
     case 'progress':
       return {
         ...state,

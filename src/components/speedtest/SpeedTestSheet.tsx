@@ -6,7 +6,7 @@ import {
 import { PaneHeader } from '../common/PaneHeader';
 import { EmptyStateButton } from '../common/EmptyState';
 import { SpeedGauge, Sparkline } from './SpeedGauge';
-import { formatMbps, jitter, TEST_CAP_MB, type BloatGrade } from '../../services/speedTest/method';
+import { formatMbps, TEST_CAP_MB, type BloatGrade } from '../../services/speedTest/method';
 import {
   cancelSpeedTest, livePing, startSpeedTest, useSpeedTest, type SpeedState,
 } from '../../services/speedTest/state';
@@ -225,7 +225,7 @@ function Cancelled() {
 /** Ping, jitter, download, upload: filled in as each phase finishes, a dash until then. */
 function Tiles({ state, large = false }: { state: SpeedState; large?: boolean }) {
   const ping = livePing(state);
-  const jitterMs = state.result?.latency.jitterMs ?? jitter(state.latencySamples);
+  const jitterMs = state.result?.latency.jitterMs ?? state.liveJitterMs;
   const tiles: { key: string; icon: React.ReactNode; label: React.ReactNode; value: string | null; unit: string; live: boolean }[] = [
     { key: 'down', icon: <ArrowDown className="h-3.5 w-3.5" />, label: 'Download', value: state.downloadMbps === null ? null : formatMbps(state.downloadMbps), unit: 'Mb/s', live: state.phase === 'download' },
     { key: 'up', icon: <ArrowUp className="h-3.5 w-3.5" />, label: 'Upload', value: state.uploadMbps === null ? null : formatMbps(state.uploadMbps), unit: 'Mb/s', live: state.phase === 'upload' },

@@ -19,7 +19,7 @@ import https from 'node:https';
 import { randomBytes } from 'node:crypto';
 import {
   bloatGrade, DOWNLOAD_CAP_BYTES, DOWNLOAD_REQUEST_BYTES, jitter, LATENCY_SAMPLES, LOADED_PROBE_MS,
-  median, netLatency, RAMP_EVERY_MS, RAMP_STEP, shouldRamp, SliceCounter, SLICE_MS, START_CONNECTIONS,
+  median, netLatency, serverRttVarMs, RAMP_EVERY_MS, RAMP_STEP, shouldRamp, SliceCounter, SLICE_MS, START_CONNECTIONS,
   transferFigure, TRANSFER_MS, UPLOAD_CAP_BYTES, UPLOAD_REQUEST_BYTES, WARMUP_MS, type TransferFigure,
 } from '../../src/services/speedTest/method';
 import type { SpeedEvent, SpeedPhase, SpeedServer } from '../../src/services/speedTest/protocol';
@@ -103,7 +103,7 @@ export async function runSpeedTest(
 
     phase = 'latency';
     emit({ type: 'phase', phase });
-    const idle = await run.idleLatency();
+    const { samples: idle, jitterMs } = await run.idleLatency();
 
     phase = 'download';
     emit({ type: 'phase', phase });
@@ -120,7 +120,7 @@ export async function runSpeedTest(
       result: {
         at: Date.now(),
         server: { ...server, colo: server.colo ?? run.colo },
-        latency: { idleMs, jitterMs: jitter(idle) ?? 0, samples: idle.length },
+        latency: { idleMs, jitterMs, samples: idle.length },
         download: down,
         upload: up,
         grade: bloatGrade(idleMs, loaded),
@@ -265,19 +265,28 @@ class Run {
     }
   }
 
-  /** Idle latency: empty requests on one warm connection, the first dropped. */
-  async idleLatency(): Promise<number[]> {
+  /**
+   * Idle latency: empty requests on one warm connection, the first dropped.
+   * Jitter is the server's RTT variation when it reports one (`serverRttVarMs`
+   * says why), the mean successive difference otherwise.
+   */
+  async idleLatency(): Promise<{ samples: number[]; jitterMs: number }> {
     const agent = this.agent(1);
     const samples: number[] = [];
+    const variation: number[] = [];
     const count = this.options.latencySamples ?? LATENCY_SAMPLES;
+    const estimate = (): number | null => (variation.length > 0 ? median(variation) : jitter(samples));
     for (let i = 0; i <= count; i++) {
       const res = await this.request(agent, 'GET', '/__down?bytes=0');
       if (i === 0) continue; // the TCP and TLS handshakes, not a round trip
-      const ms = netLatency(res.firstByteMs, header(res.headers['server-timing']));
+      const timing = header(res.headers['server-timing']);
+      const ms = netLatency(res.firstByteMs, timing);
       samples.push(ms);
-      this.emit({ type: 'latency', ms });
+      const rttVar = serverRttVarMs(timing);
+      if (rttVar !== null) variation.push(rttVar);
+      this.emit({ type: 'latency', ms, jitterMs: estimate() });
     }
-    return samples;
+    return { samples, jitterMs: estimate() ?? 0 };
   }
 
   /**
