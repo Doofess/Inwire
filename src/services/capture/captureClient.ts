@@ -35,6 +35,22 @@ import type { ToCapture, FromCapture, CaptureStorageState } from './captureProto
 import { freshCaptureStorageState } from './captureProtocol';
 import { MatchSet } from './matchSet';
 import { plainForStore } from './storePacket';
+import type { StreamSummary } from '../conversation/streamDigest';
+
+/** What a `streamDigest` poll gets back (ADR 0055). */
+export interface StreamDigestAnswer {
+  /** The capture the version belongs to; null when none is open. */
+  captureId: string | null;
+  version: number;
+  summaries: StreamSummary[];
+  rebuilding: { done: number; total: number } | null;
+}
+
+/** One page of a stream's frame positions. `nextChunk` null at the end. */
+export interface StreamOrdinalsPage {
+  ordinals: number[];
+  nextChunk: number | null;
+}
 
 /** One decoded chunk, and where it starts in the capture. */
 export interface RowBlock {
@@ -143,6 +159,8 @@ function requestStorePort(): Promise<MessagePort> {
 const NONE = new Map<number, Uint8Array>();
 /** The same, for rows. */
 const NO_ROWS = new Map<number, Packet>();
+/** The same, for a stream's positions. */
+const NO_ORDINALS: StreamOrdinalsPage = { ordinals: [], nextChunk: null };
 
 class CaptureClient {
   /**
@@ -169,6 +187,8 @@ class CaptureClient {
   private readonly pendingBlocks = new Map<number, (blocks: RowBlock[]) => void>();
   private readonly pendingScattered = new Map<number, (rows: Map<number, Packet>) => void>();
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
+  private readonly pendingDigest = new Map<number, (answer: StreamDigestAnswer) => void>();
+  private readonly pendingStreamOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
   /** The scan in flight. At most one - the store enforces the same. */
   private readonly pendingScan = new Map<number, {
     onProgress?: (progress: ScanProgressUpdate) => void;
@@ -297,6 +317,25 @@ class CaptureClient {
         if (settle === undefined) break;
         this.pendingLocate.delete(message.requestId);
         settle(message.ordinal);
+        break;
+      }
+      case 'streamDigest': {
+        const settle = this.pendingDigest.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingDigest.delete(message.requestId);
+        settle({
+          captureId: message.captureId,
+          version: message.version,
+          summaries: message.summaries,
+          rebuilding: message.rebuilding,
+        });
+        break;
+      }
+      case 'streamOrdinals': {
+        const settle = this.pendingStreamOrdinals.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingStreamOrdinals.delete(message.requestId);
+        settle({ ordinals: message.ordinals, nextChunk: message.nextChunk });
         break;
       }
       case 'scanProgress': {
@@ -559,6 +598,42 @@ class CaptureClient {
   }
 
   /**
+   * The TCP streams whose summaries changed after digest version `since`, and
+   * the version to ask from next (ADR 0055). `since: 0` is every stream.
+   *
+   * The answer names the capture it is about, and a caller that polls keeps
+   * the id beside the version: a version means nothing across captures, and
+   * the first answer after a reopen can arrive before `ready` does
+   * (`hooks/useStreamDigest.ts`). With no store there is nothing to ask, and
+   * the fallback hands the caller's own version back so it asks the same
+   * question next time.
+   */
+  streamDigest(since: number): Promise<StreamDigestAnswer> {
+    return this.request(
+      this.pendingDigest as never,
+      (requestId) => ({ type: 'streamDigest', requestId, since }),
+      { captureId: null, version: since, summaries: [], rebuilding: null } as StreamDigestAnswer,
+    );
+  }
+
+  /**
+   * The positions of stream `streamId`'s frames with ids in `[fromId, toId]`,
+   * from chunk `startChunk` onward - one page of chunks, and where to ask from
+   * next, or null once the stream's range has been read to its end.
+   *
+   * Read from the prefix blocks on the store's side, never from rows, so it
+   * neither waits for nor cancels a running scan. An empty page with no next
+   * chunk is the end, or no store at all.
+   */
+  streamOrdinals(streamId: number, fromId: number, toId: number, startChunk: number): Promise<StreamOrdinalsPage> {
+    return this.request(
+      this.pendingStreamOrdinals as never,
+      (requestId) => ({ type: 'streamOrdinals', requestId, streamId, fromId, toId, startChunk }),
+      NO_ORDINALS,
+    );
+  }
+
+  /**
    * Runs a display filter over the whole capture on disk.
    *
    * The expression travels, not a predicate - a compiled filter is a closure.
@@ -632,6 +707,16 @@ class CaptureClient {
     this.pendingScattered.clear();
     for (const settle of this.pendingLocate.values()) settle(-1);
     this.pendingLocate.clear();
+    // Version 0 and no capture: whatever this was asked about is no longer
+    // the capture that is open, and a version against it means nothing. A
+    // poller reads the null id as "start again" and asks the next capture
+    // from zero.
+    for (const settle of this.pendingDigest.values()) {
+      settle({ captureId: null, version: 0, summaries: [], rebuilding: null });
+    }
+    this.pendingDigest.clear();
+    for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);
+    this.pendingStreamOrdinals.clear();
     // `failed` rather than `cancelled`: the store went away, which is not the
     // user's doing and is worth saying.
     for (const waiting of this.pendingScan.values()) {
