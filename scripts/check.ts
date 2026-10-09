@@ -33,6 +33,9 @@ const repoRoot = join(here, '..');
  */
 const NOT_TESTS: Record<string, string> = {
   'gen-oui.ts': 'generator; downloads ~5MB from IEEE',
+  'electron/launchApp.ts':
+    'helper; the one way a script starts the app, in the background (INWIRE_BACKGROUND_WINDOW); '
+    + 'every script that launches Electron imports it',
   'parity/treeOracle.ts': 'helper; every script that imports it is run instead',
   'agent/sync-version.ts':
     'generator; WRITES local-agent/agent_version.py, agent-rs/Cargo.toml and Cargo.lock '

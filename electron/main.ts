@@ -66,6 +66,13 @@ import {
  * script exists because otherwise the protocol handler, the MIME table, the
  * 404 rule and the CSP would only ever be exercised in a packaged build.
  */
+/**
+ * `INWIRE_BACKGROUND_WINDOW=1` keeps the window from ever being shown, so a
+ * test launch does not take focus from the person working on this machine.
+ * Set by `scripts/electron/launchApp.ts` for every script that starts the app.
+ */
+const BACKGROUND_WINDOW = process.env.INWIRE_BACKGROUND_WINDOW === '1';
+const BACKGROUND_PARK = -20000;
 const DEV_SERVER_URL = process.env.INWIRE_DEV_SERVER ?? '';
 
 /**
@@ -512,7 +519,19 @@ async function createWindow(): Promise<BrowserWindow> {
   window.on('blur', announce);
   window.webContents.once('did-finish-load', () => sendWindowState(window));
 
-  window.once('ready-to-show', () => window.show());
+  if (BACKGROUND_WINDOW) {
+    // A test launch: shown without activation and parked outside every
+    // display, so nobody sees it or loses focus to it, and out of the taskbar.
+    // It is *shown* because a hidden window gets no animation frames from
+    // Chromium - measured, 2 in a second - which stalls every rAF-driven wait.
+    window.setSkipTaskbar(true);
+    window.once('ready-to-show', () => {
+      window.setBounds({ ...window.getBounds(), x: BACKGROUND_PARK, y: BACKGROUND_PARK });
+      window.showInactive();
+    });
+  } else {
+    window.once('ready-to-show', () => window.show());
+  }
 
   if (DEV_SERVER_URL) await window.loadURL(DEV_SERVER_URL);
   else await window.loadURL(`${APP_ORIGIN}/index.html`);

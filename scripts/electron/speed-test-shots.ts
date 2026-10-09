@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent } from './stubAgent';
 import { startSpeedStub } from '../speed-test/stubServer';
+import { launchApp } from './launchApp';
 
 const OUT = process.argv[2];
 if (!OUT) { console.log('usage: speed-test-shots.ts <out-dir>'); process.exit(2); }
@@ -29,7 +30,6 @@ const WIDTHS = arg('widths', '1024,1600').split(',').map(Number);
 const THEMES = arg('themes', 'dark,light').split(',');
 mkdirSync(OUT, { recursive: true });
 
-const { _electron: electron } = await import('playwright');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PIPE = String.raw`\\.\pipe\inwire-speedshots-` + process.pid;
 const agent = await startStubAgent(PIPE, 5);
@@ -39,7 +39,7 @@ for (const theme of THEMES) {
   for (const width of WIDTHS) {
     const height = width <= 1024 ? 700 : 1000;
     const profile = mkdtempSync(path.join(tmpdir(), 'inwire-speedshots-'));
-    const app = await electron.launch({
+    const app = await launchApp({
       args: ['.'],
       env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE, INWIRE_SPEEDTEST_TARGET: stub.url },
     });
@@ -155,7 +155,7 @@ for (const theme of THEMES) {
 
     // A fresh launch with history: the sheet idle, GO and the past results.
     {
-      const again = await electron.launch({
+      const again = await launchApp({
         args: ['.'],
         env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE, INWIRE_SPEEDTEST_TARGET: stub.url },
       });

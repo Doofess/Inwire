@@ -43,6 +43,7 @@ import { dataFilesOf } from '../../src/services/capture/captureWriter';
 import { CaptureReader } from '../../src/services/capture/captureReader';
 import { FRAME_JSON, FrameReader, encodeFrame } from '../../src/services/agentFraming';
 import { findWiresharkTool } from '../export/realCaptures';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -212,7 +213,7 @@ try {
 
 const profile = mkdtempSync(path.join(tmpdir(), 'inwire-capture-file-'));
 const copyRoot = mkdtempSync(path.join(tmpdir(), 'inwire-capture-file-copy-'));
-const app = await playwright._electron.launch({
+const app = await launchApp({
   args: ['.'],
   env: { ...process.env, INWIRE_USER_DATA: profile } as Record<string, string>,
 });

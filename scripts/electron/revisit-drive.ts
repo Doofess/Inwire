@@ -38,6 +38,7 @@ import { arrive, FIXTURES, type Arrived } from '../pipeline/arrival';
 import { keyLog } from '../../src/services/tls/keyLog';
 import { installWorkerSpy, openFrames, sentToWorker, type FrameCase } from './openFrame';
 import type { ProtocolField, ProtocolLayer } from '../../src/types/packet';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -89,9 +90,8 @@ if (process.platform !== 'win32') skip('the desktop app is Windows-only');
 if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-electron', 'main.cjs'))) {
   skip('no build to launch - run `npm run build` first');
 }
-let electron: typeof import('playwright')['_electron'];
 try {
-  ({ _electron: electron } = await import('playwright'));
+  await import('playwright');
 } catch {
   skip('playwright is not installed');
 }
@@ -179,7 +179,7 @@ async function drive(name: string, capture: string, keysPath: string | null, pic
   const cases = pick(arrived);
 
   const profile = mkdtempSync(path.join(tmpdir(), 'inwire-revisit-drive-'));
-  const app = await electron.launch({
+  const app = await launchApp({
     args: ['.'],
     // The key log goes in the way a person's does: main follows the file its
     // own SSLKEYLOGFILE names, when asked to (ADR 0045).

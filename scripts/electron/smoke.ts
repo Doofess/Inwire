@@ -42,6 +42,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -87,9 +88,8 @@ if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-
   }
 }
 
-let electron: typeof import('playwright')['_electron'];
 try {
-  ({ _electron: electron } = await import('playwright'));
+  await import('playwright');
 } catch {
   skip('playwright is not installed');
 }
@@ -154,7 +154,7 @@ let keyLogFile: string | null = null;
  */
 const keyLogLine = (random: string) =>
   `CLIENT_TRAFFIC_SECRET_0 ${random.repeat(32)} ${'ee'.repeat(32)}`;
-let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
+let app: Awaited<ReturnType<typeof launchApp>> | null = null;
 /**
  * Hoisted out of the try, because the cleanup below has to talk to it.
  *
@@ -162,7 +162,7 @@ let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
  * below are written against, and every one of them silently starts reading
  * this Playwright handle instead of the page's own `window`.
  */
-let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof electron.launch>>['firstWindow']>> | null = null;
+let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof launchApp>>['firstWindow']>> | null = null;
 
 /**
  * A pipe of this run's own, rather than the name the installed service holds.
@@ -213,7 +213,7 @@ try {
   writeFileSync(keyLogFile, `${keyLogLine('a1')}\n`);
   writeFileSync(path.join(profile, 'keylog.json'), JSON.stringify({ path: keyLogFile }));
   const launchedAt = Date.now();
-  app = await electron.launch({
+  app = await launchApp({
     args: ['.'],
     // `INWIRE_AGENT_PIPE` points the app at this run's stub instead of the
     // installed service's pipe - the other half of the SKIP this deleted.

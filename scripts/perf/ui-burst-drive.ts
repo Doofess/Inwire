@@ -43,6 +43,7 @@ import path from 'node:path';
 import { BATCH_HEADER_BYTES, BATCH_RECORD_BYTES, BATCH_VERSION } from '../../src/services/agentBinary';
 import { FRAME_BINARY, FRAME_JSON, FrameReader, encodeFrame, encodeJsonFrame, frameText } from '../../src/services/agentFraming';
 import { REQUIRED_AGENT_VERSION } from '../../src/services/agentProtocol';
+import { launchApp } from '../electron/launchApp';
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf('--' + name);
@@ -372,9 +373,8 @@ const say = (line = '') => { console.log(line); report.push(line); };
 const frames = readPcapng(PCAP);
 say(`frames loaded from ${path.basename(PCAP)}: ${frames.length.toLocaleString()}`);
 const agent = await startAgent(frames);
-const { _electron: electron } = await import('playwright');
 const profile = mkdtempSync(path.join(tmpdir(), 'inwire-uiburst-'));
-const app = await electron.launch({
+const app = await launchApp({
   args: ['.', `--remote-debugging-port=${DEVTOOLS_PORT}`],
   ...(APP ? { cwd: APP } : {}),
   env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE },

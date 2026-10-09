@@ -40,7 +40,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { _electron as electron, type ElectronApplication, type Page } from 'playwright';
+import type { ElectronApplication, Page } from 'playwright';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -63,7 +64,7 @@ try {
   // A temporary profile, for the reason `smoke.ts` gives: the app prunes its
   // capture directory at startup and would otherwise delete a stored capture.
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-gpu-'));
-  app = await electron.launch({
+  app = await launchApp({
     args: [repoRoot], cwd: repoRoot,
     env: { ...process.env, INWIRE_USER_DATA: profile },
   });
