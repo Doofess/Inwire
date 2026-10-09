@@ -33,6 +33,11 @@ type NumericArray = Uint8Array | Uint16Array | Uint32Array | Float64Array;
 
 interface Column {
   width: ColumnWidth;
+  /** `width`'s place in `ORDER`, so a widening test is a comparison of two numbers. */
+  rank: number;
+  /** This key's presence bit: the byte within a row's stride, and the bit in it. */
+  presenceByte: number;
+  presenceMask: number;
   /** The values, or - for a `str` column - indices into `table`. */
   values: NumericArray;
   /** Distinct strings, for a `str` column only. */
@@ -53,13 +58,13 @@ function allocate(width: ColumnWidth, rows: number): NumericArray {
   }
 }
 
-/** The narrowest width that holds `value` exactly. */
-function widthFor(value: number): ColumnWidth {
-  if (!Number.isInteger(value) || value < 0) return 'f64';
-  if (value <= 0xff) return 'u8';
-  if (value <= 0xffff) return 'u16';
-  if (value <= 0xffffffff) return 'u32';
-  return 'f64';
+/** The narrowest width that holds `value` exactly, as its place in `ORDER`. */
+function rankFor(value: number): number {
+  if (!Number.isInteger(value) || value < 0) return 3;
+  if (value <= 0xff) return 0;
+  if (value <= 0xffff) return 1;
+  if (value <= 0xffffffff) return 2;
+  return 3;
 }
 
 export class FieldBlock {
@@ -67,7 +72,6 @@ export class FieldBlock {
   /** One bit per declared key per row; see the constructor. */
   private readonly presence: Uint8Array;
   private readonly presenceStride: number;
-  private readonly bitOf = new Map<string, number>();
   private rows = 0;
 
   constructor(keys: readonly DenseKey[], readonly capacity: number) {
@@ -80,9 +84,11 @@ export class FieldBlock {
     this.presence = new Uint8Array(this.presenceStride * capacity);
 
     keys.forEach((key, i) => {
-      this.bitOf.set(key.abbrev, i);
       const column: Column = {
         width: key.width,
+        rank: ORDER.indexOf(key.width),
+        presenceByte: i >> 3,
+        presenceMask: 1 << (i & 7),
         // A string column holds indices into its own table, so it is 2 B a row
         // rather than the 8 a reference costs.
         values: key.width === 'str' ? new Uint16Array(capacity) : allocate(key.width, capacity),
@@ -104,8 +110,18 @@ export class FieldBlock {
   has(abbrev: string): boolean { return this.columns.has(abbrev); }
 
   write(row: number, abbrev: string, value: string | number): void {
+    this.tryWrite(row, abbrev, value);
+  }
+
+  /**
+   * `write`, answering whether this block has a column for `abbrev` - one
+   * lookup where `has` then `write` took two, and `absorb` asks it of every
+   * field of every frame that joins the buffer: 7% of the renderer's main
+   * thread at 60,000 frames a second, measured, with `write` inlined into it.
+   */
+  tryWrite(row: number, abbrev: string, value: string | number): boolean {
     const column = this.columns.get(abbrev);
-    if (column === undefined) return;
+    if (column === undefined) return false;
 
     if (column.width === 'str') {
       const text = String(value);
@@ -125,22 +141,21 @@ export class FieldBlock {
       }
       column.values[row] = at;
     } else {
-      const needed = widthFor(value as number);
-      if (ORDER.indexOf(needed) > ORDER.indexOf(column.width)) this.widen(column, needed);
+      const needed = rankFor(value as number);
+      if (needed > column.rank) this.widen(column, ORDER[needed]);
       column.values[row] = value as number;
     }
 
-    const bit = this.bitOf.get(abbrev)!;
-    this.presence[row * this.presenceStride + (bit >> 3)] |= 1 << (bit & 7);
+    this.presence[row * this.presenceStride + column.presenceByte] |= column.presenceMask;
+    return true;
   }
 
   read(row: number, abbrev: string): string | number | undefined {
-    const bit = this.bitOf.get(abbrev);
-    if (bit === undefined) return undefined;
-    if ((this.presence[row * this.presenceStride + (bit >> 3)] & (1 << (bit & 7))) === 0) {
+    const column = this.columns.get(abbrev);
+    if (column === undefined) return undefined;
+    if ((this.presence[row * this.presenceStride + column.presenceByte] & column.presenceMask) === 0) {
       return undefined;
     }
-    const column = this.columns.get(abbrev)!;
     const raw = column.values[row];
     return column.width === 'str' ? column.table![raw] : raw;
   }
@@ -161,6 +176,7 @@ export class FieldBlock {
     grown.set(column.values as unknown as ArrayLike<number>);
     column.values = grown;
     column.width = to;
+    column.rank = ORDER.indexOf(to);
   }
 
   /** Bytes held, for the measurement scripts. Excludes the string tables. */

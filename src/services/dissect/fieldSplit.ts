@@ -13,9 +13,6 @@ import type { Packet } from '../../types/packet';
  */
 const BLOCK_ROWS = 4096;
 
-/** A Set, because `absorb` asks it once per field of every frame. */
-const DENSE_ABBREVS = new Set(DENSE_FIELDS.map((k) => k.abbrev));
-
 /**
  * Moves each frame's dense fields out of its bag and into a shared block.
  *
@@ -60,10 +57,16 @@ export class FieldBlockWriter {
       // 33 declared - building the sparse remainder as it goes. Rebuilt rather
       // than deleted from: `delete` leaves V8's dictionary carrying the removed
       // slots, which is most of what this is trying to give back.
+      //
+      // `for...in` rather than `Object.keys`, which built an array per frame
+      // to walk once; a bag is a plain object off a structured clone, with
+      // nothing enumerable on its prototype. And one lookup per field: the
+      // block answers whether it holds the key as it writes it.
       const sparse: Record<string, string | number> = {};
-      for (const abbrev of Object.keys(bag)) {
-        if (DENSE_ABBREVS.has(abbrev)) this.block.write(row, abbrev, bag[abbrev]);
-        else sparse[abbrev] = bag[abbrev];
+      const block = this.block;
+      for (const abbrev in bag) {
+        const value = bag[abbrev];
+        if (!block.tryWrite(row, abbrev, value)) sparse[abbrev] = value;
       }
 
       packet.fields = sparse;
