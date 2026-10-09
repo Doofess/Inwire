@@ -3,7 +3,10 @@
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
 > **Must not come back.** These were deleted deliberately and re-adding any of
-> them undoes a decision, not a cleanup:
+> them undoes a decision, not a cleanup. Product scope, the vision beyond
+> Wireshark parity and the bar for issues live in `SCOPE.md`; each rejected
+> product concept has a file in `.out-of-scope/`. This list is the code-level
+> remainder:
 >
 > - the **pairing token**, `authenticate`, `authRequired`, `auth_required` /
 >   `auth_failed`, in the app or the Windows agent. The pipe's ACL is the
