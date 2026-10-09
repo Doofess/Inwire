@@ -31,7 +31,9 @@ export interface SpeedStub {
   close(): Promise<void>;
 }
 
-const CHUNK = Buffer.alloc(64 * 1024, 0x5a);
+// 256 KB a piece: paced by setTimeout, and at 64 KB the timer's granularity on
+// Windows capped the stub near 130 Mb/s whatever it was asked for.
+const CHUNK = Buffer.alloc(256 * 1024, 0x5a);
 
 export async function startSpeedStub(initial: StubOptions = {}): Promise<SpeedStub> {
   let o: Required<StubOptions> = { downMbps: 400, upMbps: 60, idleMs: 8, loadedExtraMs: 25, mode: 'ok', ...initial };
@@ -96,7 +98,13 @@ export async function startSpeedStub(initial: StubOptions = {}): Promise<SpeedSt
           left -= n;
           // Drain or close, whichever comes: a write waiting on a response
           // the client cut would otherwise wait for ever.
-          if (!res.write(CHUNK.subarray(0, n))) await new Promise((r) => { res.once('drain', r); res.once('close', r); });
+          if (!res.write(CHUNK.subarray(0, n))) {
+            await new Promise<void>((r) => {
+              const done = (): void => { res.off('drain', done); res.off('close', done); r(); };
+              res.on('drain', done);
+              res.on('close', done);
+            });
+          }
         }
         res.end();
       } finally { activeTransfers--; }
