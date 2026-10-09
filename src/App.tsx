@@ -17,7 +17,7 @@ import {
   performanceStore,
 } from "./services/interfacePrefs";
 import { NameResolutionMap, snapshot as nameSnapshot } from "./services/nameResolution";
-import { targetForPacket, type StreamTarget } from "./services/followStream";
+import { summaryIsTarget, targetForPacket, type StreamTarget } from "./services/followStream";
 import { ExpertLog, expertSnapshot } from "./services/expertInfo";
 import { useIncrementalAggregate } from "./lib/useIncrementalAggregate";
 import { useWindowOrdinal } from "./lib/useWindowOrdinal";
@@ -65,6 +65,7 @@ import {
   type CaptureSchedule,
 } from './services/captureSchedule';
 import { useAgentConnection } from './hooks/useAgentConnection';
+import { useStreamDigest } from './hooks/useStreamDigest';
 import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
 import { emptyNetworkFacts, NetworkFactsCollector, type NetworkFacts } from './services/networkFacts';
@@ -2046,6 +2047,24 @@ export default function App() {
   }, [setView]);
 
   /**
+   * The store's stream digest (ADR 0055): one summary per TCP stream over the
+   * whole capture, polled while a view that reads it is showing. The Follow
+   * Stream pane reads its own stream's summary from it; the Conversations
+   * table reads all of them.
+   *
+   * Looked up by the tracker's stream index and then checked against the
+   * target's five-tuple, because an index is unique within one capture only:
+   * `streamToFollow` outlives the capture it was chosen in, and a new capture
+   * numbers its first connection 0 as well.
+   */
+  const streamDigest = useStreamDigest(view === 'stream' || view === 'statistics');
+  const streamSummary = useMemo(() => {
+    if (streamToFollow === null || streamToFollow.streamId === undefined) return null;
+    const summary = streamDigest.summaries.get(streamToFollow.streamId);
+    return summary !== undefined && summaryIsTarget(summary, streamToFollow) ? summary : null;
+  }, [streamDigest.summaries, streamToFollow]);
+
+  /**
    * The rail's Follow Stream button, which is a verb and was reading as a place.
    *
    * ## What was broken
@@ -3449,6 +3468,9 @@ export default function App() {
               <StreamFollowerPane
                 target={streamToFollow}
                 packets={packets}
+                summary={streamSummary}
+                colorEngine={colorEngine}
+                packetTheme={packetTheme}
                 initialTab={streamView}
                 selectedId={selectedPacket?.id}
                 // The pane stays open. Selecting a frame from in here is usually

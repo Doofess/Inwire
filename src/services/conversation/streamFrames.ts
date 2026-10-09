@@ -33,10 +33,15 @@ const ROW_PAGE = 256;
  *
  * A row the store could not answer (an ordinal in a hole, or one the ring
  * deleted between the two requests) is skipped rather than invented.
+ *
+ * `onProgress` is handed the count and the array being filled, by reference,
+ * after each page of rows - so a view can draw the stream from its first page
+ * rather than after its last. A caller that keeps what it was handed copies
+ * it; the next page is appended to the same array.
  */
 export async function loadStreamFrames(
   summary: StreamSummary, ram: readonly Packet[], source: StreamFrameSource,
-  onProgress?: (loaded: number) => void, signal?: { cancelled: boolean },
+  onProgress?: (loaded: number, soFar: readonly Packet[]) => void, signal?: { cancelled: boolean },
 ): Promise<Packet[]> {
   const frames: Packet[] = [];
   let chunk: number | null = 0;
@@ -49,7 +54,7 @@ export async function loadStreamFrames(
         const row = rows.get(ordinal);
         if (row !== undefined) frames.push(row);
       }
-      onProgress?.(frames.length);
+      onProgress?.(frames.length, frames);
     }
     chunk = page.nextChunk;
   }

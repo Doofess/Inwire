@@ -14,7 +14,7 @@
  */
 
 import { Packet } from '../types/packet';
-import { chooseClient, type ClientEndBasis } from './conversation/clientSide';
+import { chooseClient, type ClientEndBasis, type Endpoint } from './conversation/clientSide';
 
 export interface StreamTarget {
   /** Which transport, so a UDP flow on the same ports as a TCP one stays apart. */
@@ -91,4 +91,24 @@ export function clientEnd(
 /** True when this frame travelled from the client to the server. */
 export function isFromClient(packet: Packet, client: { address: string; port: number }): boolean {
   return packet.source === client.address && packet.sourcePort === client.port;
+}
+
+/**
+ * True when a stream digest summary describes this target's conversation.
+ *
+ * The digest is looked up by the tracker's stream index, and an index is only
+ * unique within one capture: a new capture numbers its first connection 0 as
+ * well, and a target that outlives the capture it came from would otherwise be
+ * handed another conversation's summary under its own number. The five-tuple
+ * is the check, either way round, because the summary names its ends by role
+ * and the target names them by which was selected.
+ */
+export function summaryIsTarget(
+  summary: { client: Endpoint; server: Endpoint }, target: StreamTarget,
+): boolean {
+  if (target.kind !== 'tcp' || target.streamId === undefined) return false;
+  const is = (end: Endpoint, address: string, port: number): boolean =>
+    end.address === address && end.port === port;
+  return (is(summary.client, target.addressA, target.portA) && is(summary.server, target.addressB, target.portB))
+    || (is(summary.client, target.addressB, target.portB) && is(summary.server, target.addressA, target.portA));
 }
