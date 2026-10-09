@@ -120,7 +120,7 @@ try {
   const before = agent.received.length;
   p = await launch();
   checkTrue('the app connected again', await until(async () => agent!.received.length > before));
-  const offered = await until(async () => (await p.getByText(/Last capture:/).count()) > 0);
+  const offered = await until(async () => (await p.getByText(/is still on disk/).count()) > 0);
   checkTrue('the empty list offers the last capture', offered);
   // Long enough for the old restore to have filled the list.
   await sleep(3_000);
@@ -133,7 +133,7 @@ try {
   checkTrue('Reopen brings the frames back', await until(async () => (await counted(p)) > 0, 30_000));
   checkTrue('...as many as were captured', await until(async () => (await counted(p)) === firstCount, 30_000),
     `captured ${firstCount}, reopened ${await counted(p)}`);
-  checkTrue('...and the offer is gone', (await p.getByText(/Last capture:/).count()) === 0);
+  checkTrue('...and the offer is gone', (await p.getByText(/is still on disk/).count()) === 0);
   checkTrue('...and still no capture was started', !agent.received.slice(before).some((m) => m.includes('start_capture')));
 } finally {
   await close();
