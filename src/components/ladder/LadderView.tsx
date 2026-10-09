@@ -273,18 +273,23 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // open, so this asks rather than folding differently.
   //
   // Once per id, not once per fold: the ref remembers the last id each source
-  // was opened for, so a band the user then closes over the selected frame
-  // stays closed until the selection moves. An id whose frame is not here
-  // yet is not remembered, so the page that brings it opens its band.
-  const autoOpened = useRef<(number | null | undefined)[]>([undefined, undefined, undefined]);
+  // opened a band for, so a band the user then closes over the selected frame
+  // stays closed until the selection moves. Only an opening is remembered. An
+  // id held by a row clears the slot rather than filling it, so the band a
+  // later fold puts that frame into opens the moment it exists, and an id
+  // opened once, closed, and selected again after a row was selected between
+  // opens again. An id whose frame is not here yet leaves the slot alone, so
+  // the page that brings it opens its band.
+  const autoOpened = useRef<(number | undefined)[]>([undefined, undefined, undefined]);
   useEffect(() => {
     [selectedId, highlightFrameId, scrollToFrameId].forEach((id, source) => {
       if (id === autoOpened.current[source]) return;
-      if (id === undefined || id === null) { autoOpened.current[source] = id; return; }
+      if (id === undefined || id === null) { autoOpened.current[source] = undefined; return; }
       const holder = holding(items, id);
       if (holder === null) return;
+      if (holder === 'row') { autoOpened.current[source] = undefined; return; }
       autoOpened.current[source] = id;
-      if (holder !== 'row') onOpenBand(holder.first.id);
+      onOpenBand(holder.first.id);
     });
   }, [items, selectedId, highlightFrameId, scrollToFrameId, onOpenBand]);
 

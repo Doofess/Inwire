@@ -68,7 +68,17 @@ export function useStreamDigest(enabled: boolean) {
       timer = window.setTimeout(poll, POLL_MS);
     };
     void poll();
-    return () => { alive = false; window.clearTimeout(timer); };
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+      // Nothing is kept across a disable. A reader mounted after the next
+      // enable would otherwise see the last capture's digest for one poll -
+      // long enough to start reading a stream through a summary of frames
+      // that no longer exist.
+      setSummaries(new Map());
+      setCaptureId(null);
+      setRebuilding(null);
+    };
   }, [enabled]);
 
   return { summaries, rebuilding, captureId };

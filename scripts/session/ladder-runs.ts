@@ -656,7 +656,13 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
     checkTrue(`...which drops the per-stream state: ${call}`, reset.includes(call));
   }
   checkTrue('...declared before the load, so a commit that does both resets first',
-    pane.indexOf('}, [captureId]);') < pane.indexOf('}, [summaryId]);'));
+    pane.indexOf('}, [captureId]);') < pane.indexOf('}, [captureId, summaryId]);'));
+  // A load begun against a stale digest must not outlive the capture it was
+  // begun under: the effect's cleanup cancels it when the capture id changes.
+  checkTrue('the load is cancelled and begun again when the capture changes',
+    pane.includes('}, [captureId, summaryId]);'));
+  checkTrue('the digest hook keeps nothing across a disable',
+    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*\};/.test(hook));
 
   // A page of a stream that was left is never published, and the summary goes
   // only with the frames it describes.
@@ -667,9 +673,12 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('a failed read falls back to the buffer rather than reading "Reading 0 of N" for good',
     /\.catch\(\(error: unknown\) => \{[\s\S]*?setStream\(null\);/.test(pane));
 
-  // A band closed over the selected frame stays closed until the selection moves.
+  // A band closed over the selected frame stays closed until the selection
+  // moves; a selected row that a later fold puts into a band opens it.
   checkTrue('the ladder opens a band for an id once, not once per fold',
     view.includes('const autoOpened = useRef') && view.includes('if (id === autoOpened.current[source]) return;'));
+  checkTrue('...remembering only an id it opened a band for',
+    view.includes("if (holder === 'row') { autoOpened.current[source] = undefined; return; }"));
   // The ladder draws nothing by direction, so the direction legend is the dialogue's alone.
   checkTrue('the direction legend is not shown over the ladder', /\{tab !== 'ladder' && \([\s\S]*?Client Traffic/.test(pane));
 }

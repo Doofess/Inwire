@@ -306,8 +306,12 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     });
     return () => { signal.cancelled = true; };
     // `summary` and `packets` are read as they were when the stream changed;
-    // see above for why neither is a dependency.
-  }, [summaryId]);
+    // see above for why neither is a dependency. The capture id is one: a
+    // load begun against a stale digest - the view re-enabled after a restart,
+    // the new capture numbering a stream the same - must be cancelled when the
+    // capture answering changes, or it would finish and cache the old
+    // capture's frames under the new one's stream.
+  }, [captureId, summaryId]);
 
   // What was loaded counts only for the stream on screen: the target can
   // change under a load, and the fallback below answers until the new one is
