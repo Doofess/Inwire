@@ -250,6 +250,13 @@ export type FromPipeline =
       infoPatches: InfoPatch[];
       /** Frames released behind one that had already left the ordering window. */
       lateCount: number;
+      /**
+       * The Worker has already sent these rows and patches to the capture
+       * store on its own port, so the app must not send them again. False
+       * when it has no port to the store, and the app persists as it always
+       * did.
+       */
+      stored: boolean;
     }
   | { type: 'detail'; id: number; layers: Packet['layers'] }
   /**

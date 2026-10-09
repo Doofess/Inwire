@@ -86,7 +86,8 @@ process.parentPort.on('message', (event) => {
   if (!incoming) return;
   const role = (event.data as { role?: string } | null)?.role ?? 'client';
   if (role === 'ingest') {
-    // The pipeline Worker's port. Frames and records in; and the two kinds of
+    // The pipeline Worker's port. Frames, records, and a live capture's rows
+    // and patches in (the window no longer sends those); and the two kinds of
     // answer that belong here, each to something the Worker sent on it: a
     // revisit kit (ADR 0049), and `bytesTaken` for an append it counts as
     // owed (ADR 0053). The answer travels with the message rather than this

@@ -566,6 +566,51 @@ console.log('\n--- a filter that does not compile ---\n');
   check('...and is not reported as a store failure', h.of('failure'), []);
 }
 
+console.log('\n--- rows from the Worker that wrote their bytes (bytesSent) ---\n');
+
+{
+  // A live capture's rows come from the pipeline Worker on its own port, after
+  // the bytes it posted there, and without them (ADR 0053): the same rows as
+  // an `append` with bytes, the same bytes on disk, and an empty `rawBytes`
+  // never written as a frame.
+  const packets = traffic(5000);
+  const withBytes = host();
+  await fill(withBytes, 'cap-20261009-010000-0001', packets);
+  const split = host();
+  split.send({ type: 'open', captureId: 'cap-20261009-010000-0002' });
+  for (let i = 0; i < packets.length; i += 700) {
+    const group = packets.slice(i, i + 700);
+    split.send({ type: 'appendBytes', frames: group.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes })) });
+    split.send({ type: 'append', bytesSent: true, packets: crossed(group.map((p) => ({ ...p, rawBytes: new Uint8Array(0) }))) });
+  }
+  // A row this sender never wrote bytes for, which must not become a frame.
+  split.send({ type: 'append', bytesSent: true, packets: crossed([frame(9_999, { rawBytes: new Uint8Array(0) })]) });
+  split.send({ type: 'finish' });
+  await split.store.drain();
+  for (const h of [withBytes, split]) {
+    h.send({ type: 'chunk', requestId: 1, chunk: 0 });
+    h.send({ type: 'chunk', requestId: 2, chunk: 1 });
+    h.send({ type: 'read', requestId: 3, ids: [1, 4097, 5000] });
+    h.send({ type: 'locate', requestId: 4, id: 9_999 });
+    h.send({ type: 'stats' });
+  }
+  await withBytes.store.drain();
+  await split.store.drain();
+  const rowsOf = (h: ReturnType<typeof host>) => h.of('rows').flatMap((m) => m.packets);
+  check('the rows on disk are the rows an append with bytes writes',
+    JSON.stringify(rowsOf(split)), JSON.stringify(rowsOf(withBytes)));
+  check('...5,000 of them', rowsOf(split).length, 5000);
+  check('...and the bytes are the bytes',
+    split.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]),
+    withBytes.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]));
+  check('a row whose bytes never came is not stored as a frame', split.of('located')[0]?.ordinal, -1);
+  check('...nor counted as one',
+    split.of('stats').at(-1)?.stats.framesWritten, withBytes.of('stats').at(-1)?.stats.framesWritten);
+  check('...and nothing failed', split.of('failure').length, 0);
+  withBytes.store.close();
+  split.store.close();
+}
+
 console.log('\n--- progress ---\n');
 
 {

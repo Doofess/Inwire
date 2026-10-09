@@ -161,13 +161,22 @@ export function usePacketBuffer({
   const pendingIcmpRepliesRef = useRef<{ requestFrameId: number; replyId: number }[]>([]);
   /** Info suffixes for earlier frames, learned by later ones (reassembly); applied on the next flush. */
   const pendingInfoPatchesRef = useRef<InfoPatch[]>([]);
+  /**
+   * The frames and patches this window still has to send to the capture
+   * store: those from a batch the Worker did not send itself (`stored`), which
+   * is a Worker with no port to the store. A live capture's go from the Worker
+   * and never through here - a fifth of this thread at 60,000 frames a second
+   * was cloning them a second time (ADR 0053).
+   */
+  const pendingPersistRef = useRef<Packet[]>([]);
+  const pendingStorePatchesRef = useRef<InfoPatch[]>([]);
 
   /**
    * Queues a Worker batch. Cheap on purpose: it appends and returns, and the
    * flush below commits the whole batch in one state update, which is what
    * keeps ingest cost independent of buffer size.
    */
-  const queueFrames = useCallback(({ packets, icmpReplies, infoPatches }: FrameBatch) => {
+  const queueFrames = useCallback(({ packets, icmpReplies, infoPatches, stored }: FrameBatch) => {
       if (packets.length > 0) {
         // The relative-time origin and the last frame's stamp are written into
         // the stored session so a restore can carry on from them. They used to
@@ -182,9 +191,11 @@ export function usePacketBuffer({
         // batch large enough to throw, losing the batch and every frame queued
         // behind it. See the sibling pushes below.
         for (const packet of packets) pendingPacketsRef.current.push(packet);
+        if (!stored) for (const packet of packets) pendingPersistRef.current.push(packet);
       }
       for (const reply of icmpReplies) pendingIcmpRepliesRef.current.push(reply);
       for (const patch of infoPatches) pendingInfoPatchesRef.current.push(patch);
+      if (!stored) for (const patch of infoPatches) pendingStorePatchesRef.current.push(patch);
   }, []);
 
   /** The flush below, for a caller that cannot wait for its next tick. */
@@ -206,6 +217,10 @@ export function usePacketBuffer({
       pendingPacketsRef.current = [];
       pendingIcmpRepliesRef.current = [];
       pendingInfoPatchesRef.current = [];
+      const toPersist = pendingPersistRef.current;
+      const storePatches = pendingStorePatchesRef.current;
+      pendingPersistRef.current = [];
+      pendingStorePatchesRef.current = [];
 
       // The half that must happen exactly once - the store write, the
       // dense-field split, the byte count - outside the updater because React
@@ -214,7 +229,8 @@ export function usePacketBuffer({
         // Inside `persist` deliberately - that is the half of the flush that
         // runs exactly once even under StrictMode's double invoke, and writing
         // a frame twice is exactly what it exists to prevent.
-        persist: (frames) => captureStore.append(frames as Packet[]),
+        // Only what the Worker did not already send (`toPersist`).
+        persist: () => captureStore.append(toPersist),
         absorb: (frames) => fieldWriter.current.absorb(frames),
       });
 
@@ -223,7 +239,7 @@ export function usePacketBuffer({
       // reassembled across a dozen segments, an ICMP reply seconds later. The
       // writer's staging ring is what holds those rows back long enough to
       // receive them; see services/capture/captureWriter.ts.
-      if (patches.length > 0) captureStore.patch(patches);
+      if (storePatches.length > 0) captureStore.patch(storePatches);
 
       // Snapshotted here, outside the updater, because React may run that twice
       // and the trim plan must not be computed from a number the first run
