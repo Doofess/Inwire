@@ -28,11 +28,17 @@ function emptyData(): DataFiles {
 
 interface StoredCapture {
   files: CaptureFiles;
+  /** The stream digest's snapshot: the capture's, beside the index, never a segment's. */
+  digest: MemoryBlockFile;
   segments: Map<number, DataFiles>;
 }
 
 function emptyCapture(): StoredCapture {
-  return { files: { index: new MemoryBlockFile(), ...emptyData() }, segments: new Map() };
+  return {
+    files: { index: new MemoryBlockFile(), ...emptyData() },
+    digest: new MemoryBlockFile(),
+    segments: new Map(),
+  };
 }
 
 export class MemoryVolume implements CaptureVolume {
@@ -65,6 +71,7 @@ export class MemoryVolume implements CaptureVolume {
     };
     return {
       ...capture.files,
+      digest: capture.digest,
       segments: segmentFiles,
       close: () => {
         if (closed) return;

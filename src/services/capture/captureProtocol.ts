@@ -9,6 +9,7 @@
 import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
 import type { RawFrame, WriterStats } from './captureWriter';
+import type { StreamSummary } from '../conversation/streamDigest';
 
 export type ToCapture =
   /**
@@ -153,6 +154,27 @@ export type ToCapture =
    * nothing above that seam.
    */
   | { type: 'read'; requestId: number; ids: number[] }
+  /**
+   * The TCP streams whose summaries changed after digest version `since`
+   * (ADR 0055). Answered with `streamDigest`, even when no capture is open,
+   * because the caller holds a promise. `since: 0` asks for every stream.
+   */
+  | { type: 'streamDigest'; requestId: number; since: number }
+  /**
+   * The positions of stream `streamId`'s frames, ids `[fromId, toId]`, from
+   * chunk `startChunk` onward. Answered with `streamOrdinals`, a page of
+   * chunks at a time, even when no capture is open, because the caller holds
+   * a promise. Read from the prefix blocks, never from rows, so it neither
+   * waits for nor cancels a running scan.
+   */
+  | {
+      type: 'streamOrdinals';
+      requestId: number;
+      streamId: number;
+      fromId: number;
+      toId: number;
+      startChunk: number;
+    }
   | { type: 'stats' };
 
 export type FromCapture =
@@ -264,6 +286,30 @@ export type FromCapture =
   | { type: 'rowsByOrdinal'; requestId: number; rows: [number, Packet][] }
   /** Where a `locate`'s frame sits, or -1 when it is not addressable yet. */
   | { type: 'located'; requestId: number; ordinal: number }
+  /**
+   * The summaries a `streamDigest` asked for, and the digest's version to ask
+   * from next time.
+   *
+   * `captureId` is the capture the digest belongs to, null when none is open:
+   * a version means nothing across captures, so the caller starts again from
+   * 0 when it changes. `rebuilding` is non-null while the store is folding
+   * the digest again from the capture's rows - a snapshot that was missing or
+   * stale (ADR 0055) - and the summaries until then are a partial answer.
+   */
+  | {
+      type: 'streamDigest';
+      requestId: number;
+      captureId: string | null;
+      version: number;
+      summaries: StreamSummary[];
+      rebuilding: { done: number; total: number } | null;
+    }
+  /**
+   * One page of a `streamOrdinals`. `nextChunk` is where to ask from next,
+   * or null when the capture, or the stream's id range, has been read to its
+   * end. Empty and null when the read failed, which is reported separately.
+   */
+  | { type: 'streamOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null }
   /**
    * How far a scan has got. Sent every `SCAN_PROGRESS_FRAMES`, not per slice.
    *

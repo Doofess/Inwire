@@ -23,6 +23,10 @@ const FILES = {
   // (ADR 0049). Absent from a capture written before it existed, and opened
   // (and so created) empty for one: a version 1 index never points into it.
   rec: 'records.iwrec',
+  // The stream digest's snapshot (ADR 0055): one per capture, beside the
+  // index and never in a segment. A cache - absent or stale, the store folds
+  // it again from the rows - so a capture from before it opens it empty.
+  digest: 'streams.iwdig',
 } as const;
 
 type OpenData = DataFiles & { close(): void };
@@ -104,13 +108,16 @@ export function captureVolume(directory: string): CaptureVolume {
     open(captureId: string): OpenVolume {
       const dir = path.join(directory, captureId);
       const index = NodeBlockFile.open(path.join(dir, FILES.index));
+      const digest = NodeBlockFile.open(path.join(dir, FILES.digest));
       const data = openData(dir);
       const segments = segmentsOf(dir);
       return {
         index, pfx: data.pfx, sum: data.sum, byt: data.byt, rec: data.rec,
+        digest,
         segments,
         close() {
           try { index.close(); } catch { /* already gone */ }
+          try { digest.close(); } catch { /* already gone */ }
           data.close();
           segments.closeAll();
         },

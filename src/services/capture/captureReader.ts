@@ -36,7 +36,7 @@
  * and lives in the storage Worker, outside the main thread's byte budget
  * entirely.
  */
-import { ChunkDirectory, applyPrefixes, chunkStoresLinkType, decodeChunk, prefixBlockBytes } from './chunkCodec';
+import { ChunkDirectory, PrefixBlock, applyPrefixes, chunkStoresLinkType, decodeChunk, prefixBlockBytes } from './chunkCodec';
 import type { CaptureIndex } from './captureIndex';
 import { readExact, type BlockFile } from './blockFile';
 import { dataFilesOf, type CaptureFiles, type DataFiles } from './captureWriter';
@@ -271,6 +271,34 @@ export class CaptureReader {
       }
     }
     return out;
+  }
+
+  /**
+   * Positions of the frames on TCP stream `streamId`, read from the prefix's
+   * stream id and never from rows (ADR 0055), so it is cheap and never waits
+   * for or cancels a scan. Paged by chunk: a long-lived connection spans the
+   * whole capture, and one answer per page keeps the store's queue moving.
+   */
+  streamOrdinals(
+    streamId: number, fromId: number, toId: number, startChunk: number, maxChunks: number,
+  ): { ordinals: number[]; nextChunk: number | null } {
+    const ordinals: number[] = [];
+    let chunk = Math.max(startChunk, this.index.floorChunk);
+    const stop = Math.min(this.index.chunkCount, chunk + maxChunks);
+    for (; chunk < stop; chunk++) {
+      const record = this.index.record(chunk);
+      if (record.firstId > toId) return { ordinals, nextChunk: null };
+      if (record.lastId < fromId) continue;
+      const data = this.dataOf(chunk);
+      if (data === null) continue;
+      const packed = this.readClamped(data.pfx, record.pfxOffset, record.pfxLength);
+      if (packed === null) continue;
+      const block = new PrefixBlock(this.inflate(packed), record.frameCount);
+      for (let i = 0; i < record.frameCount; i++) {
+        if (block.streamId(i) === streamId && block.hasLayer(i, 'tcp')) ordinals.push(record.firstOrdinal + i);
+      }
+    }
+    return { ordinals, nextChunk: chunk < this.index.chunkCount ? chunk : null };
   }
 
   /**

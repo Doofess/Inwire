@@ -49,13 +49,22 @@ import { planPrune } from './captureDirectory';
 import { serialQueue } from './serialQueue';
 import { CaptureScan, DEFAULT_SLICE_MS } from './captureScan';
 import { compile } from '../filter/compile';
-import { inflateSync } from 'fflate';
+import { deflateSync, inflateSync } from 'fflate';
 import type { FromCapture, ToCapture } from './captureProtocol';
 import type { Packet } from '../../types/packet';
 import { recordRefs } from '../dissect/recordHeader';
+import { readExact, type BlockFile } from './blockFile';
+import { StreamDigest, type StreamSummary } from '../conversation/streamDigest';
+import { decodeDigest, encodeDigest } from '../conversation/digestCodec';
 
 /** A capture's files - its index, its data, its segments - and the handles behind them. */
 export interface OpenVolume extends CaptureFiles {
+  /**
+   * `streams.iwdig`, the stream digest's snapshot (ADR 0055). One per
+   * capture, beside the index: a cache of what the rows say, so a capture
+   * without one - or with one that does not match - is folded again.
+   */
+  digest: BlockFile;
   /** Closes every handle, the segments' included. */
   close(): void;
 }
@@ -87,7 +96,43 @@ interface OpenCapture {
   reader: CaptureReader;
   /** The floor the app was last told of. */
   floorChunk: number;
+  /** One summary per TCP stream, folded from every row this capture stores (ADR 0055). */
+  digest: StreamDigest;
+  /**
+   * A fold of the stored rows, under way: the snapshot was missing or did not
+   * match the capture. Rows that arrive meanwhile wait in `deferred` and are
+   * fed once the stored ones have been, so the digest still sees ids in order.
+   */
+  rebuild: DigestRebuild | null;
+  /**
+   * The digest is missing rows - a rebuild dropped some - and must not be
+   * written as a snapshot, or the next open would trust it.
+   */
+  digestPartial: boolean;
 }
+
+interface DigestRebuild {
+  /** The next chunk to fold. */
+  next: number;
+  /** One past the last chunk to fold: the chunks the capture had when it opened. */
+  total: number;
+  deferred: Packet[];
+  overflowed: boolean;
+  /** `protocolLabel` patches that arrived meanwhile, applied after `deferred`. */
+  labels: Map<number, string>;
+}
+
+/**
+ * Rows held back while a rebuild runs. Past it they are dropped and the digest
+ * says so, rather than the store's heap growing at the capture's arrival rate.
+ */
+export const DIGEST_DEFERRED_MAX = 200_000;
+
+/**
+ * Level 1, as the store's native zlib is (`electron/store/entry.ts`): the
+ * snapshot is written on every finish, and it is a cache.
+ */
+const defaultDeflate = (bytes: Uint8Array): Uint8Array => deflateSync(bytes, { level: 1 });
 
 /**
  * Frames between progress messages.
@@ -128,6 +173,11 @@ export interface CaptureHostOptions {
    */
   deflate?: (bytes: Uint8Array) => Uint8Array;
   inflate?: (bytes: Uint8Array) => Uint8Array;
+  /**
+   * Chunks one `streamOrdinals` answer may cover. Default 32. Settable so a
+   * test can see the paging on a capture of a few chunks.
+   */
+  streamOrdinalChunks?: number;
 }
 
 export class CaptureHost {
@@ -149,6 +199,7 @@ export class CaptureHost {
   private readonly scanSliceMs: number;
   private readonly deflate: ((bytes: Uint8Array) => Uint8Array) | undefined;
   private readonly inflate: (bytes: Uint8Array) => Uint8Array;
+  private readonly streamOrdinalChunks: number;
 
   constructor(
     private readonly volume: CaptureVolume,
@@ -158,6 +209,7 @@ export class CaptureHost {
     this.scanSliceMs = options.scanSliceMs ?? DEFAULT_SLICE_MS;
     this.deflate = options.deflate;
     this.inflate = options.inflate ?? inflateSync;
+    this.streamOrdinalChunks = options.streamOrdinalChunks ?? 32;
   }
 
   /**
@@ -218,13 +270,43 @@ export class CaptureHost {
     this.abandonScan();
     if (this.open === null) return;
     try { this.open.writer.finish(); } catch { /* a failed finish must not leak handles */ }
+    this.trySnapshot(this.open);
     try { this.open.volume.close(); } catch { /* already gone */ }
     this.open = null;
   }
 
+  /**
+   * Writes the digest beside the index, so the next open restores it rather
+   * than folding every row again.
+   *
+   * Not while a rebuild is unfinished, nor once one has dropped rows: a
+   * partial digest written as if it were whole is a wrong answer the next open
+   * would trust. The file was emptied when the rebuild began, so that open
+   * folds again instead.
+   */
+  private writeSnapshot(open: OpenCapture): void {
+    if (open.rebuild !== null || open.digestPartial) return;
+    const bytes = encodeDigest(open.digest.snapshot(), this.deflate ?? defaultDeflate);
+    open.volume.digest.truncate(0);
+    open.volume.digest.write(0, bytes);
+  }
+
+  /**
+   * `writeSnapshot`, reported rather than thrown: a snapshot that could not be
+   * written costs the next open a rebuild, and must not cost this finish its
+   * stats or this close its handles - but it is still never silent.
+   */
+  private trySnapshot(open: OpenCapture): void {
+    try {
+      this.writeSnapshot(open);
+    } catch (error) {
+      this.fail(`the stream digest's snapshot could not be written: ${describe(error)}`, false);
+    }
+  }
+
   private bytesOnDisk(capture: OpenCapture): number {
     const { volume } = capture;
-    let total = volume.index.size();
+    let total = volume.index.size() + volume.digest.size();
     for (const segment of [0, ...(volume.segments?.list() ?? [])]) {
       const data = dataFilesOf(volume, segment);
       if (data !== null) total += data.pfx.size() + data.sum.size() + data.byt.size() + data.rec.size();
@@ -257,6 +339,13 @@ export class CaptureHost {
         case 'revisitKit': return this.onRevisitKit(message, reply);
         case 'patches': {
           this.open?.writer.applyPatches(message.patches);
+          for (const p of message.patches) {
+            if (p.protocolLabel === undefined || this.open === null) continue;
+            // A row deferred behind a rebuild is not folded yet, so its label
+            // waits with it; the writer patched a copy, not the deferred row.
+            if (this.open.rebuild !== null) this.open.rebuild.labels.set(p.frameId, p.protocolLabel);
+            else this.open.digest.relabel(p.frameId, p.protocolLabel);
+          }
           return;
         }
         case 'ringDeleted': {
@@ -266,6 +355,7 @@ export class CaptureHost {
         case 'finish': {
           if (this.open === null) return;
           this.open.writer.finish();
+          this.trySnapshot(this.open);
           this.reportStats();
           return;
         }
@@ -279,6 +369,8 @@ export class CaptureHost {
         case 'prune': return this.onPrune(message);
         case 'discard': return this.onDiscard(message);
         case 'stats': return this.reportStats();
+        case 'streamDigest': return this.onStreamDigest(message);
+        case 'streamOrdinals': return this.onStreamOrdinals(message);
       }
     } catch (error) {
       // The stack goes to stderr as well as the message to the app, and that
@@ -325,7 +417,27 @@ export class CaptureHost {
     // The reader shares the writer's index, so a chunk is readable the moment
     // its record is appended rather than only after the file is re-read.
     const reader = new CaptureReader(volume, writer.index, this.inflate);
-    this.open = { id: message.captureId, volume, writer, reader, floorChunk: writer.index.floorChunk };
+    // The newest chunk's, held or not: numbering resumes past every id the
+    // capture ever used, even when a ring has taken all of them.
+    const lastId = writer.index.chunkCount === 0 ? 0 : writer.index.record(writer.index.chunkCount - 1).lastId;
+    const restored = this.restoreDigest(volume.digest, lastId);
+    const open: OpenCapture = {
+      id: message.captureId, volume, writer, reader, floorChunk: writer.index.floorChunk,
+      digest: restored ?? new StreamDigest(),
+      rebuild: restored !== null ? null : {
+        next: writer.index.floorChunk, total: writer.index.chunkCount,
+        deferred: [], overflowed: false, labels: new Map(),
+      },
+      digestPartial: false,
+    };
+    this.open = open;
+    if (open.rebuild !== null) {
+      // Emptied before the fold starts: a stale snapshot left in place could
+      // come to match the capture as it grows, and be trusted by a later open
+      // while this digest was still partial.
+      volume.digest.truncate(0);
+      this.stepRebuild(open);
+    }
 
     if (plan.framesLost > 0) {
       this.fail(`${plan.framesLost} frames were lost to a torn tail and have been discarded`, false);
@@ -342,9 +454,7 @@ export class CaptureHost {
       floorOrdinal: writer.index.floorOrdinal,
       floorId: floorIdOf(writer.index),
       storedRange: range,
-      // The newest chunk's, held or not: numbering resumes past every id the
-      // capture ever used, even when a ring has taken all of them.
-      lastId: writer.index.chunkCount === 0 ? 0 : writer.index.record(writer.index.chunkCount - 1).lastId,
+      lastId,
       ...(message.requestId === undefined ? {} : { requestId: message.requestId }),
     });
   }
@@ -366,6 +476,129 @@ export class CaptureHost {
     // like any other (`attachRows`).
     if (message.bytesSent) this.open.writer.attachRows(message.packets);
     else this.open.writer.append(message.packets);
+    // Both paths, after the writer: an import's rows and the live Worker's.
+    for (const p of message.packets) this.feedDigest(this.open, p);
+  }
+
+  /** One row into the digest, or into the queue behind a rebuild. */
+  private feedDigest(open: OpenCapture, row: Packet): void {
+    const rebuild = open.rebuild;
+    if (rebuild === null) {
+      open.digest.feed(row);
+      return;
+    }
+    if (rebuild.deferred.length < DIGEST_DEFERRED_MAX) rebuild.deferred.push(row);
+    else rebuild.overflowed = true;
+  }
+
+  /**
+   * The digest from `streams.iwdig`, or null when it must be folded again.
+   *
+   * Used only when it is exact - folded through the newest id the capture
+   * holds. Missing, torn, a format this build does not read, or folded
+   * through some other id, it is a cache that does not match. The codec's
+   * shape check is shallow, so a malformed one can still throw in `restore`,
+   * and that must never fail the open either.
+   */
+  private restoreDigest(file: BlockFile, lastId: number): StreamDigest | null {
+    try {
+      const size = file.size();
+      if (size === 0) return null;
+      const snap = decodeDigest(readExact(file, 0, size), this.inflate);
+      if (snap === null || snap.throughId !== lastId) return null;
+      return StreamDigest.restore(snap);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One slice of a rebuild, then back through the queue - sliced like the
+   * scan's `step`, so the reads the app is still asking for are served in
+   * between, and at least one chunk a slice whatever the budget.
+   *
+   * Guarded by identity rather than by id: closing the capture, or reopening
+   * the same one, leaves this `open` stale and the slice does nothing.
+   */
+  private stepRebuild(open: OpenCapture): void {
+    const rebuild = open.rebuild;
+    if (this.open !== open || rebuild === null) return;
+    const until = Date.now() + this.scanSliceMs;
+    try {
+      do {
+        if (rebuild.next >= rebuild.total) break;
+        for (const p of open.reader.readRows(rebuild.next)) open.digest.feed(p);
+        rebuild.next += 1;
+      } while (Date.now() < until);
+    } catch (error) {
+      // A chunk that will not decode is a hole in the digest, not a reason to
+      // stop folding the rest: reported, skipped, and never written as whole.
+      rebuild.next += 1;
+      open.digestPartial = true;
+      this.fail(`the stream digest could not read a chunk while rebuilding: ${describe(error)}`, false);
+    }
+    if (rebuild.next < rebuild.total) {
+      setTimeout(() => this.queue.run(() => this.stepRebuild(open)), 0);
+      return;
+    }
+    for (const p of rebuild.deferred) open.digest.feed(p);
+    for (const [frameId, label] of rebuild.labels) open.digest.relabel(frameId, label);
+    open.rebuild = null;
+    if (rebuild.overflowed) {
+      open.digestPartial = true;
+      this.fail('the stream digest missed rows while it was rebuilding; reopen the capture to rebuild it', false);
+    }
+  }
+
+  /**
+   * What changed in the digest since `since`. Answered even when nothing is
+   * open, because the caller holds a promise - and down the client port, as
+   * every answer the renderer asked for is (`scripts/electron/store-ports.ts`).
+   */
+  private onStreamDigest(message: Extract<ToCapture, { type: 'streamDigest' }>): void {
+    const open = this.open;
+    let summaries: StreamSummary[] = [];
+    let version = 0;
+    let rebuilding: { done: number; total: number } | null = null;
+    try {
+      if (open !== null) {
+        summaries = open.digest.changedSince(message.since);
+        version = open.digest.version;
+        const rebuild = open.rebuild;
+        if (rebuild !== null) {
+          // From the floor, which a ring can raise while the fold runs.
+          const floor = open.writer.index.floorChunk;
+          rebuilding = { done: Math.max(0, rebuild.next - floor), total: Math.max(0, rebuild.total - floor) };
+        }
+      }
+    } catch (error) {
+      this.fail(describe(error), false);
+      summaries = [];
+    }
+    this.post({
+      type: 'streamDigest', requestId: message.requestId, captureId: open?.id ?? null,
+      version, summaries, rebuilding,
+    });
+  }
+
+  /**
+   * A page of one stream's positions, read from the prefix blocks. Like
+   * `onRowsForOrdinals`, a throw is reported and still answered, on the
+   * client port.
+   */
+  private onStreamOrdinals(message: Extract<ToCapture, { type: 'streamOrdinals' }>): void {
+    let page: { ordinals: number[]; nextChunk: number | null } = { ordinals: [], nextChunk: null };
+    try {
+      if (this.open !== null) {
+        page = this.open.reader.streamOrdinals(
+          message.streamId, message.fromId, message.toId, message.startChunk, this.streamOrdinalChunks,
+        );
+      }
+    } catch (error) {
+      this.fail(describe(error), false);
+      page = { ordinals: [], nextChunk: null };
+    }
+    this.post({ type: 'streamOrdinals', requestId: message.requestId, ...page });
   }
 
   /**
