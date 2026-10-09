@@ -11,6 +11,7 @@ import {
   windowAround, zoomWindow,
   type LadderArrow, type LadderWindow,
 } from './ladderLayout';
+import { foldRuns, itemPacket } from './ladderRuns';
 
 /**
  * One conversation as a ladder: two lanes, time running down, an arrow per
@@ -25,9 +26,14 @@ import {
  * ## Only what is on screen exists
  *
  * A stream can be a hundred thousand frames. `streamPackets` selects them once
- * - one pass over the buffer, returning references - and `layoutLadder`
- * positions only those inside the current time window, a few hundred at most.
- * Zooming and panning re-run the layout, never the selection.
+ * - one pass over the buffer, returning references - `foldRuns` folds the
+ * quiet runs into bands (ADR 0055), and `layoutLadder` positions only the
+ * items inside the current time window, a few hundred at most. Zooming and
+ * panning re-run the layout, never the selection or the fold.
+ *
+ * The fold runs with no colour rule yet - every quiet frame matches the one
+ * empty rule - so a band breaks only on direction, a flag, a finding or its
+ * size. The chips painted by the packet list's own rules are the next step.
  *
  * ## Why SVG and why D3 for one thing
  *
@@ -64,6 +70,10 @@ const CATEGORY_STROKE: Partial<Record<ExpertCategory, string>> = {
   Loss: 'var(--color-amber-500, #f59e0b)',
 };
 
+/** No colour rule yet: every quiet frame matches the one empty key. */
+const NO_RULE = (): string => '';
+const NONE_EXPANDED: ReadonlySet<number> = new Set();
+
 interface LadderViewProps {
   target: StreamTarget;
   packets: Packet[];
@@ -81,7 +91,19 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // nothing else.
   const frames = useMemo(() => streamPackets(packets, target), [packets, target]);
   const client = useMemo(() => clientEnd(frames, target), [frames, target]);
-  const extent = useMemo(() => ladderExtent(frames), [frames]);
+  // Bands the user opened, by their first frame's id - an id rather than an
+  // index because a live stream grows under the fold, and the band somebody
+  // opened must stay open across the next flush.
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(NONE_EXPANDED);
+  const items = useMemo(() => foldRuns(frames, client, NO_RULE, expanded), [frames, client, expanded]);
+  const extent = useMemo(() => ladderExtent(items), [items]);
+  const toggleBand = useCallback((firstId: number) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(firstId)) next.add(firstId);
+      return next;
+    });
+  }, []);
 
   const [window, setWindow] = useState<LadderWindow>(extent);
   const [size, setSize] = useState({ width: 720, height: 480 });
@@ -96,9 +118,12 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // It also has to be reset per stream: opening a second one would otherwise
   // inherit the first's window, which is a range of seconds that may not exist
   // in the new one - an empty ladder that looks broken.
+  //
+  // Keyed on the frames and not the items: opening a band changes the items
+  // and must not reset the window the band was opened in.
   useEffect(() => {
-    setWindow(initialWindow(frames, plotHeightRef.current));
-  }, [frames]);
+    setWindow(initialWindow(foldRuns(frames, client, NO_RULE, NONE_EXPANDED), plotHeightRef.current));
+  }, [frames, client]);
 
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -124,8 +149,8 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // ninety seconds wide, and ninety seconds later in the same conversation
   // holds a thousand. See `layoutLadder`.
   const layout = useMemo(
-    () => layoutLadder(frames, client, window, plotHeight, arrowsThatFit(plotHeight)),
-    [frames, client, window, plotHeight],
+    () => layoutLadder(items, window, plotHeight, arrowsThatFit(plotHeight)),
+    [items, window, plotHeight],
   );
 
   /**
@@ -184,7 +209,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
           {client.address}:{client.port}
         </span>
         <span className="text-muted-foreground">
-          {layout.arrows.length} of {frames.length} frames
+          {layout.arrows.length} of {items.length} rows · {frames.length} frames
           {zoomed && ' · wheel to zoom, shift-wheel to pan'}
         </span>
         <span className="text-sky-500 font-semibold truncate text-right" style={{ maxWidth: 260 }}>
@@ -200,7 +225,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
         <button onClick={() => setWindow((c) => panWindow(c, extent, -0.5))}
           className="text-[11px] py-0.5 text-muted-foreground hover:text-foreground
             border-b border-border shrink-0">
-          ↑ {layout.before} earlier {layout.before === 1 ? 'frame' : 'frames'}
+          ↑ {layout.before} earlier {layout.before === 1 ? 'row' : 'rows'}
         </button>
       )}
 
@@ -242,10 +267,10 @@ export const LadderView: React.FC<LadderViewProps> = ({
             ))}
 
             {layout.arrows.map((arrow) => (
-              <Arrow key={arrow.packet.id} arrow={arrow}
+              <Arrow key={itemPacket(arrow.item).id} arrow={arrow}
                 clientX={clientX} serverX={serverX}
-                selected={arrow.packet.id === selectedId}
-                onSelect={onSelectFrame} />
+                selected={arrow.item.kind === 'frame' && arrow.item.packet.id === selectedId}
+                onSelect={onSelectFrame} onToggleBand={toggleBand} />
             ))}
           </g>
         </svg>
@@ -255,7 +280,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
         <button onClick={() => setWindow((c) => panWindow(c, extent, 0.5))}
           className="text-[11px] py-0.5 text-muted-foreground hover:text-foreground
             border-t border-border shrink-0">
-          ↓ {layout.after} later {layout.after === 1 ? 'frame' : 'frames'}
+          ↓ {layout.after} later {layout.after === 1 ? 'row' : 'rows'}
         </button>
       )}
 
@@ -270,12 +295,20 @@ const Arrow: React.FC<{
   serverX: number;
   selected: boolean;
   onSelect?: (id: number) => void;
-}> = ({ arrow, clientX, serverX, selected, onSelect }) => {
+  /** A band opens and closes on a click; a frame selects. */
+  onToggleBand: (firstId: number) => void;
+}> = ({ arrow, clientX, serverX, selected, onSelect, onToggleBand }) => {
   const toServer = arrow.from === 'client';
   const x1 = toServer ? clientX : serverX;
   const x2 = toServer ? serverX : clientX;
   const colour = (arrow.category !== null ? CATEGORY_STROKE[arrow.category] : undefined)
     ?? (toServer ? 'var(--color-rose-500, #f43f5e)' : 'var(--color-sky-500, #0ea5e9)');
+  const { item } = arrow;
+  const packet = itemPacket(item);
+  const onClick = item.kind === 'band'
+    ? () => onToggleBand(item.first.id)
+    : onSelect === undefined ? undefined : () => onSelect(packet.id);
+  const number = item.kind === 'band' ? `#${item.first.id}–#${item.last.id}` : `#${packet.id}`;
 
   // Thickness carries the frame's size, which is what makes a bulk transfer
   // look different from an exchange of acknowledgements at a glance. Capped
@@ -286,8 +319,8 @@ const Arrow: React.FC<{
 
   return (
     <g
-      onClick={() => onSelect?.(arrow.packet.id)}
-      className={onSelect ? 'cursor-pointer' : undefined}
+      onClick={onClick}
+      className={onClick ? 'cursor-pointer' : undefined}
       opacity={selected ? 1 : 0.92}
     >
       {/* An invisible fat line under the visible one: a 1px arrow is almost
@@ -318,11 +351,13 @@ const Arrow: React.FC<{
         fontSize={9} className="font-mono"
         fill="currentColor" fillOpacity={0.4}
       >
-        #{arrow.packet.id} · {arrow.length} B
+        {number} · {Math.round(arrow.length)} B
         {arrow.crowded ? ' · ordered, not to scale' : ''}
       </text>
       <title>
-        {`Frame ${arrow.packet.id} at ${arrow.time.toFixed(6)}s, ${arrow.length} bytes\n`}
+        {item.kind === 'band'
+          ? `Frames ${item.first.id} to ${item.last.id} from ${arrow.time.toFixed(6)}s, click to open\n`
+          : `Frame ${packet.id} at ${arrow.time.toFixed(6)}s, ${arrow.length} bytes\n`}
         {`${arrow.from === 'client' ? 'client → server' : 'server → client'}\n`}
         {arrow.info}
       </title>

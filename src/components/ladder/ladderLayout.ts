@@ -1,11 +1,18 @@
 /**
- * Placing one conversation's frames on a ladder: two lanes, time running down.
+ * Placing one conversation's items on a ladder: two lanes, time running down.
  *
  * Pure, and separate from the component that draws it, for the reason every
  * other layout in this app is: the arithmetic is where the bugs live and the
  * SVG is where they are invisible. An arrow pointing the wrong way, or a frame
  * silently dropped at a window edge, looks exactly like a conversation that
  * really did that.
+ *
+ * ## Items, not frames
+ *
+ * What is laid out is `foldRuns`'s output (`ladderRuns.ts`, ADR 0055): a frame
+ * that says something is an item of its own, and a quiet run is one band. The
+ * layout places either by the time it starts and reads nothing else from it,
+ * so a band costs one row where its frames would have cost thousands.
  *
  * ## Only the visible window is materialised
  *
@@ -14,46 +21,48 @@
  * hundred, on every zoom and every scroll. `layoutLadder` takes a time window
  * and returns only what falls inside it.
  *
- * The frames themselves are **not** copied - `streamPackets` already returns
- * references into the buffer, and the arrows carry the same references. The
- * only thing this allocates is the positions.
+ * The items themselves are **not** copied - a frame item holds a reference
+ * into the buffer or the store's answer, and the arrows carry the same
+ * references. The only thing this allocates is the positions.
  *
  * ## A note on where the frames come from
  *
  * The specification for this view said to request a time-windowed slice from
  * the Worker. The Worker has no buffer to slice: it drains `pendingPackets` on
  * every flush and keeps only a tree cache (`docs/decisions/0007`). The frames
- * live on the main thread, which is where the packet list, the filter and the
- * statistics all read them from. The concern behind that instruction is real,
- * and this is what answers it - the window, not the boundary.
+ * come from the store and the main thread's buffer (`streamFrames.ts`), which
+ * is where the packet list, the filter and the statistics all read them from.
+ * The concern behind that instruction is real, and this is what answers it -
+ * the window, not the boundary.
  */
 import type { Packet } from '../../types/packet';
 import { fieldValue } from '../../services/dissect/fieldAccess';
-import { isFromClient } from '../../services/followStream';
 import { categoryOfPacket } from '../../services/expertInfo';
+import { formatBytes } from '../../lib/formatBytes';
 import type { ExpertCategory } from '../../types/packet';
+import { itemTime, type LadderItem } from './ladderRuns';
 
 /** Which lane a frame leaves from. */
 export type Lane = 'client' | 'server';
 
 export interface LadderArrow {
-  /** The frame itself, by reference. Never a copy. */
-  packet: Packet;
+  /** The frame or the band, by reference. Never a copy. */
+  item: LadderItem;
   /** Where it starts, so an arrow knows which way to point. */
   from: Lane;
   /** Vertical position in the laid-out area, in pixels from the top. */
   y: number;
   /** Seconds since the capture started, for the axis. */
   time: number;
-  /** The frame's own length, for the thickness. */
+  /** The frame's own length, for the thickness; a band's mean frame length. */
   length: number;
-  /** TCP flags as they read in the list - "SYN, ACK" - or empty. */
+  /** TCP flags as they read in the list - "SYN, ACK" - or empty. Empty for a band. */
   flags: string;
-  /** The Info line, which is what a ladder is actually read for. */
+  /** The Info line, which is what a ladder is actually read for. A band's says what it holds. */
   info: string;
-  /** The expert category this frame reads as, or null. */
+  /** The expert category this frame reads as, or null. Null for a band, whose frames have none. */
   category: ExpertCategory | null;
-  /** True when two or more frames share this row because they are too close. */
+  /** True when two or more items share this row because they are too close. */
   crowded: boolean;
 }
 
@@ -77,7 +86,7 @@ export interface LadderLayout {
    * stop, which is a thing conversations really do and so must never be faked.
    */
   contentHeight: number;
-  /** Frames on the stream before and after the window, for the scroll hints. */
+  /** Items on the stream before and after the window, for the scroll hints. */
   before: number;
   after: number;
   /** The whole stream's extent, which is what the minimap draws. */
@@ -115,37 +124,45 @@ function flagsOf(packet: Packet): string {
   return set.join(', ');
 }
 
+/** What a band's label says: how many frames, how many bytes, how long. */
+function bandInfo(count: number, bytes: number, time: number, endTime: number): string {
+  return `${count.toLocaleString()} frames · ${formatBytes(bytes)} · ${(endTime - time).toFixed(3)} s`;
+}
+
 /**
  * The time span of a stream, which is what the minimap and the initial view
- * are both scaled to.
+ * are both scaled to. A band counts to its end, or a stream closing on a long
+ * quiet run would have an extent its last band runs past.
  *
  * A stream of one frame has no span. Returning a zero-width window would make
  * every scale divide by zero, so it is widened to a second around the frame -
  * arbitrary, but it puts the single arrow in the middle of a readable axis
  * instead of at a coordinate that is NaN.
  */
-export function ladderExtent(frames: readonly Packet[]): LadderWindow {
-  if (frames.length === 0) return { from: 0, to: 1 };
+export function ladderExtent(items: readonly LadderItem[]): LadderWindow {
+  if (items.length === 0) return { from: 0, to: 1 };
   let from = Infinity;
   let to = -Infinity;
-  for (const frame of frames) {
-    if (frame.relativeTime < from) from = frame.relativeTime;
-    if (frame.relativeTime > to) to = frame.relativeTime;
+  for (const item of items) {
+    const start = itemTime(item);
+    const end = item.kind === 'band' ? item.endTime : start;
+    if (start < from) from = start;
+    if (end > to) to = end;
   }
   if (!(to > from)) return { from: from - 0.5, to: from + 0.5 };
   return { from, to };
 }
 
 /**
- * Lays out the frames that fall inside a time window.
+ * Lays out the items that fall inside a time window.
  *
- * `frames` must be in capture order, which is what `streamPackets` returns.
- * Frames outside the window are counted rather than positioned, so the view
- * can say what is above and below without walking the stream again.
+ * `items` must be in capture order, which is what `foldRuns` returns from
+ * frames in capture order. An item is inside the window by the time it
+ * starts. Items outside the window are counted rather than positioned, so the
+ * view can say what is above and below without walking the stream again.
  */
 export function layoutLadder(
-  frames: readonly Packet[],
-  client: { address: string; port: number },
+  items: readonly LadderItem[],
   window: LadderWindow,
   height: number,
   /**
@@ -165,7 +182,7 @@ export function layoutLadder(
    */
   maxArrows = Number.MAX_SAFE_INTEGER,
 ): LadderLayout {
-  const extent = ladderExtent(frames);
+  const extent = ladderExtent(items);
   const span = window.to - window.from;
   // A window with no width would put every arrow at the same coordinate and
   // divide by zero on the way. Treated as the whole extent instead, which is
@@ -177,8 +194,8 @@ export function layoutLadder(
   let after = 0;
   let lastY = -Infinity;
 
-  for (const packet of frames) {
-    const time = packet.relativeTime;
+  for (const item of items) {
+    const time = itemTime(item);
     if (time < window.from) { before++; continue; }
     if (time > window.to) { after++; continue; }
     // Past the cap everything else is "later", which is exactly what it is:
@@ -186,24 +203,36 @@ export function layoutLadder(
     if (arrows.length >= maxArrows) { after++; continue; }
 
     const exact = scale > 0 ? (time - window.from) * scale : height / 2;
-    // Order is preserved by construction: frames arrive in capture order and
+    // Order is preserved by construction: items arrive in capture order and
     // `y` never decreases, so an arrow nudged down pushes the next one down
     // too rather than being overtaken by it.
     const y = Math.max(exact, lastY + MIN_ROW_GAP);
     const crowded = y > exact + 0.5;
     lastY = y;
 
-    arrows.push({
-      packet,
-      from: isFromClient(packet, client) ? 'client' : 'server',
-      y,
-      time,
-      length: packet.length,
-      flags: flagsOf(packet),
-      info: packet.info,
-      category: categoryOfPacket(packet) ?? null,
-      crowded,
-    });
+    if (item.kind === 'frame') {
+      const { packet } = item;
+      arrows.push({
+        item, from: item.from, y, time,
+        length: packet.length,
+        flags: flagsOf(packet),
+        info: packet.info,
+        category: categoryOfPacket(packet) ?? null,
+        crowded,
+      });
+    } else {
+      // A band's frames carry no flag and no finding, or they would not be in
+      // one, so its row has neither. Its thickness is its mean frame length,
+      // which is what makes a band of ACKs and a band of data differ.
+      arrows.push({
+        item, from: item.from, y, time,
+        length: item.bytes / item.count,
+        flags: '',
+        info: bandInfo(item.count, item.bytes, item.time, item.endTime),
+        category: null,
+        crowded,
+      });
+    }
   }
 
   return {
@@ -240,15 +269,15 @@ export function arrowsThatFit(height: number): number {
  * part that explains the rest: the handshake, the request, who spoke first.
  */
 export function initialWindow(
-  frames: readonly Packet[], height: number,
+  items: readonly LadderItem[], height: number,
 ): LadderWindow {
-  const extent = ladderExtent(frames);
+  const extent = ladderExtent(items);
   const fits = arrowsThatFit(height);
-  if (frames.length <= fits) return extent;
-  // The time at which the last frame that fits arrived, so the opening view is
+  if (items.length <= fits) return extent;
+  // The time at which the last item that fits starts, so the opening view is
   // full rather than merely bounded - a window sized by time would be empty on
   // a conversation that starts with a long pause.
-  const last = frames[fits - 1].relativeTime;
+  const last = itemTime(items[fits - 1]);
   // A burst can put `fits` frames inside a microsecond, which would open on a
   // window too narrow to read a time from. Never less than a millisecond.
   return { from: extent.from, to: Math.max(last, extent.from + 0.001) };
