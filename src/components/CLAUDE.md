@@ -206,6 +206,14 @@ undo by accident: every other tab is a table and wants `overflow-y-auto`, but
 `TrafficTimelineChart` measures its own container, so a parent that grows to fit
 its child would size the SVG from a box the SVG is itself defining.
 
+**The speed test's server is an overlay on the map, not traffic** (ADR 0054):
+a DOM marker and one arc, read from the speed test's history, never from
+`packets` - so it is in no route, pin, count, legend or export, and the arc
+joins `ArcLayer` only at `syncConnectionsLayer`'s final `setArcs`.
+`scripts/speed-test/map-overlay.ts` reads GeoMap's source to hold that. Its
+two colours are tokens, `--speed-download` (the accent) and `--speed-upload`
+(purple), which the dial, the tiles, the history and the tooltip all share.
+
 **Exactly one MapLibre instance is ever live** — a fact about the component tree
 rather than a condition somebody keeps true, since the Routing Map is a view and
 there is no second copy. `display: none` hides a MapLibre instance without

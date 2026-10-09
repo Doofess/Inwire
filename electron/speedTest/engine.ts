@@ -382,11 +382,12 @@ class Run {
         mbps: counter.mbpsOver(Math.max(0, t - 1000), t), elapsedMs: Math.round(t),
       });
     }, SLICE_MS);
-    // More connections while the total still rises.
+    // More connections while the total still rises: each step compares the
+    // last half second with the one before it.
     const ramp = setInterval(() => {
       const t = elapsed();
       if (stopped || t < 2 * RAMP_EVERY_MS) return;
-      if (shouldRamp(connections, counter.mbpsOver(t - 1000, t), counter.mbpsOver(t - 2000, t - 1000))) {
+      if (shouldRamp(connections, counter.mbpsOver(t - RAMP_EVERY_MS, t), counter.mbpsOver(t - 2 * RAMP_EVERY_MS, t - RAMP_EVERY_MS))) {
         spawn(RAMP_STEP);
       }
     }, RAMP_EVERY_MS);
@@ -445,7 +446,10 @@ class Run {
 function writeRandom(
   req: http.ClientRequest, payload: Buffer, size: number, count: (bytes: number) => void, stopped: () => boolean,
 ): void {
-  const CHUNK = 64 * 1024;
+  // 16 KB a write: bytes are counted as each write is taken, so the write is
+  // the upload's unit of measure - at 64 KB a 100 ms slice moved in steps of
+  // 5.24 Mb/s, and three real tests all read exactly 241.2 (46 steps).
+  const CHUNK = 16 * 1024;
   let sent = 0;
   const pump = (): void => {
     while (sent < size) {

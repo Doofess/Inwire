@@ -29,7 +29,7 @@ host is recorded in `MAIN_OUTBOUND_HOSTS.speedTest` with its purpose and held
 absent from the renderer's CSP (`scripts/electron/shell.ts`, which also holds
 that the engine dials exactly that host and that the renderer's two calls carry
 no argument). The press of Run or GO is the consent; the copy beside it says
-Cloudflare sees this machine's address and that a test moves up to 800 MB.
+Cloudflare sees this machine's address and that a test moves up to 2 GB.
 History is a local preference (`inwire.speedTestHistory`), never uploaded, and
 clearable from the sheet.
 
@@ -53,10 +53,11 @@ messages a second, unread.
 |---|---|
 | Idle latency | 21 empty requests on one warm connection, the first (the handshakes) dropped; the median, and jitter as the mean successive difference |
 | Latency source | **the server's own TCP RTT** from `Server-Timing: cfL4 …rtt=<µs>`, idle and loaded alike; elsewhere time to first byte net of the server time it reports. Measured: TTFB net of `cfSpeedEdge`+`cfSpeedWorker` still read 5-15 ms over a 3 ms round trip |
-| Transfers | download, then upload; 4 connections, +2 each second the total rose ≥10%, up to 8; 10 s each |
+| Transfers | download, then upload; **12 connections** from the start, +2 each half second the total rose ≥5%, up to 24; 10 s each |
 | Requests | 5 MB each - Cloudflare refuses a limited address its large requests first (5 MB answered 200 where 10 and 25 MB answered 429) |
-| Caps | 600 MB down, 200 MB up - a 429 was measured after about a gigabyte in a few minutes |
-| Figure | bytes in 100 ms slices, the first 2 s (slow start) and the partial last slice dropped, the **median** slice with p10/p90 kept |
+| Caps | **1.6 GB down, 400 MB up** - "up to 2 GB" in the consent line; a 429 was measured after about a gigabyte in a few minutes, and the engine fails fast and says so |
+| Figure | bytes in 100 ms slices, the first **1.5 s** (slow start) and the partial last slice dropped, the **median** slice with p10/p90 kept; uploads counted per 16 KB write |
+| Jitter | the server's `rtt_var` from `cfL4` (RFC 6298's RTTVAR) - the `rtt` beside it is smoothed, and successive values read 0.0 ms |
 | Loaded latency | an empty request every 150 ms on a connection of its own during each transfer |
 | Bufferbloat | the grade from loaded minus idle: A+ <5 ms, A <30, B <60, C <200, D <400, F |
 | Upload body | one random megabyte, repeated - incompressible, and TLS hides the repetition |
@@ -69,13 +70,78 @@ leaving does not stop a test - its state is a module store
 (`services/speedTest/state.ts`), so App does not re-render at the dial's ten
 updates a second. The rail gets nothing; it is full by design.
 
+## Measured against Ookla, on the owner's machine (2026-10-09)
+
+The owner ran Ookla on the same machine (Intel I225-V, 2.5 GbE, Bezeq) and
+called the first build's figures "very different". They were, and most of the
+difference was ours:
+
+| | download Mb/s | upload Mb/s | ping ms (idle / loaded ↓ / loaded ↑) |
+|---|---|---|---|
+| Ookla, Bezeq International, Petah Tikva (on-net), "Multi" | 2,157.20 | 251.67 | 1 / 10 / 8 |
+| Inwire, first build (4→8 connections, 600 MB cap) | 1,507 | 241 | 1.8 / 3.2 / 4.6 |
+| Inwire, 6 connections (experiment) | 1,866 | 230 | 2.2 / 7.3 / 23.8 |
+| Inwire, 12 connections (experiment) | 2,106 | 236 | 2.0 / 4.7 / 19.8 |
+| **Inwire as built, three runs in the app** | **2,133 · 2,087 · 2,083** | **241.2 · 241.2 · 241.2** | 2.7 · 2.0 · 1.8 / 8.2 · 7.3 · 8.5 / 21 · 17 · 26 |
+
+- **The engine was never the ceiling.** Against a loopback server in its own
+  process it counts 11.6 Gb/s down and 15.2 up over plain HTTP, 7.1-8.0 down
+  and 9.3-9.4 up over TLS - three times the link. Main's event loop sat at its
+  15.6 ms timer floor through every real test (p99 16.5 ms): the test's own
+  process is doing the TLS.
+- **The method was.** The 600 MB cap ended a 2 Gb/s download at 3.4 s,
+  fourteen slices past warm-up, and the ramp (from 2 s, every second, +10%) had
+  not fired - the whole download ran on four connections. The ramp alone could
+  not fix it: on a fast link one half second differs from the next by noise,
+  not by 5%. So a transfer opens on twelve.
+- **What is left is the route, and it is genuine.** Ookla chose a server inside
+  Bezeq, a millisecond away; this test crosses from Bezeq to Cloudflare's Tel
+  Aviv data centre, 2 ms away. The results carry a hint saying so on demand,
+  *Comparing with another test?*, rather than a banner.
+- **The three identical uploads were a unit, not a coincidence**: counted per
+  64 KB write, a 100 ms slice moved in steps of 5.24 Mb/s and 241.2 is 46 of
+  them. Counted per 16 KB write now.
+- **speed.cloudflare.com in a browser could not be driven**: its Turnstile
+  check refuses an automated browser ("Verification failed"), and getting round
+  a bot check is not something this build does. The owner can run it by hand
+  for the third column.
+
+## The server on the globe, the colours, the ISP
+
+- **The latest test's data centre is on the Routing Map** as a labelled chip -
+  *Speed test · Cloudflare Tel Aviv*, the result on hover - with an arc from
+  this machine's network when the map knows where that is. Placed from the
+  test itself: `/meta`'s own coordinates, or the colo code against a table of
+  Cloudflare's 309 data centres generated from its `/locations`
+  (`scripts/speed-test/gen-colos.ts`), used by the engine's process only. No
+  lookup, nothing new outbound; a server neither places has no pin, and the
+  results say *Server location unknown*. **An overlay, not traffic**: read
+  from history, never from `packets`, the arc joining the arc layer only at its
+  final `setArcs` - in no route, pin, count or export
+  (`scripts/speed-test/map-overlay.ts`). A DOM marker, so `setStyle` and a lost
+  GPU context leave it standing; the arc rides the routes' own re-add
+  (`gpu-restore-drive.ts` passes). *Show the server on the map* opens the map
+  and flies there, jumping under reduced motion.
+- **Upload is purple, download the accent**, as speed tests draw them: tokens
+  `--speed-download` (held equal to `--primary`) and `--speed-upload` in both
+  theme blocks, measured by `scripts/themes/registry.ts` - #7c3aed on Day
+  (5.70:1 on a card, 5.32 on the ground), #c084fc on Night (7.76, 7.95). The
+  dial changes colour in 250 ms as it resets; arrows and labels stay, so colour
+  is never the only signal.
+- **The ISP stands beside the server** - "Cloudflare · Tel Aviv (TLV) —
+  Bezeq" - in the running view, the results, each history row, the panel and
+  the globe's tooltip: Cloudflare's own AS organisation for this address, from
+  `/meta`, and nothing when it is absent.
+
 ## Consequences
 
 - **Cloudflare's limits are the product's limits.** A test from an address
   that has just tested may be refused; the sheet says so in those words with
   Try again, and the engine fails fast rather than waiting out the transfer.
-- **A link faster than about 1 Gb/s reaches the cap in under five seconds**,
-  and its figure is then the cap's.
+- **A link faster than about 2.5 Gb/s reaches the download cap in under five
+  seconds**, and its figure stands on fewer slices; still past warm-up.
+- **A test moves up to 2 GB.** Cloudflare's rate limit means a second test
+  straight after the first can be refused; the sheet says so.
 - **The drives run against a loopback server.** `INWIRE_SPEEDTEST_TARGET`
   points the engine at `http://127.0.0.1:<port>` (loopback only, held by
   `shell.ts`), the precedent being `INWIRE_UPDATE_FEED`;
