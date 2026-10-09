@@ -2,7 +2,7 @@
  * What a high-rate live capture costs the window: frames per second, long
  * tasks, where the main thread's time goes, how far the list falls behind.
  *
- *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25] [--threads auto|1]
+ *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25] [--threads auto|1] [--no-file]
  *       [--app <dir>] [--out report.txt] [--profile <prefix>] [--follow-only]
  *
  * `--profile` also writes each phase's raw CPU profiles, the main thread's as
@@ -36,7 +36,7 @@
  * when it answers, and the Worker's heap and profile are skipped when not.
  */
 import { createServer, type Socket } from 'node:net';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { SourceMapConsumer } from 'source-map-js';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -57,6 +57,8 @@ const APP = arg('app', '');
 const THREADS = arg('threads', 'auto');
 const PROFILE_PREFIX = arg('profile', '');
 const FOLLOW_ONLY = process.argv.includes('--follow-only');
+/** Whether the agent writes the capture's pcapng, as the real one does - what the view catches up from. */
+const FILE = !process.argv.includes('--no-file');
 const DEVTOOLS_PORT = 9339;
 if (!PCAP) { console.log('usage: --pcap file.pcapng'); process.exit(2); }
 
@@ -145,12 +147,74 @@ const INTERFACES = [{ id: 0, name: '\\Device\\NPF_{STUB-0}', label: 'Ethernet (s
 
 interface Agent { received: string[]; sent(): number; setRate(fps: number): void; close(): Promise<void> }
 
+/**
+ * The capture's own pcapng, as the real agent writes it (ADR 0052): into
+ * `<root>/<captureId>/pcapng/capture.pcapng`, every frame before it goes on
+ * the pipe, flushed once a second - which is what the live view catches up
+ * from after the stream skipped (ADR 0053 phase 4). `--no-file` leaves it
+ * out, to measure the app as it was without one.
+ */
+class CaptureFileWriter {
+  private pending: Uint8Array[] = [];
+  private timer: ReturnType<typeof setInterval>;
+  constructor(private readonly file: string) {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, pcapngHeader(INTERFACES[0].name));
+    this.timer = setInterval(() => this.flush(), 1000);
+  }
+  add(seqFrame: { tsNs: bigint; bytes: Uint8Array }): void {
+    this.pending.push(pcapngPacket(seqFrame.tsNs, seqFrame.bytes));
+  }
+  flush(): void {
+    if (this.pending.length === 0) return;
+    const parts = this.pending;
+    this.pending = [];
+    appendFileSync(this.file, Buffer.concat(parts));
+  }
+  close(): void {
+    clearInterval(this.timer);
+    this.flush();
+  }
+}
+
+function pcapngHeader(name: string): Uint8Array {
+  const text = new TextEncoder().encode(name);
+  const pad = (4 - (text.length % 4)) % 4;
+  const idbLength = 16 + 4 + text.length + pad + 8 + 4 + 4;
+  const out = new Uint8Array(28 + idbLength);
+  const v = new DataView(out.buffer);
+  v.setUint32(0, 0x0a0d0d0a, true); v.setUint32(4, 28, true); v.setUint32(8, 0x1a2b3c4d, true);
+  v.setUint16(12, 1, true); v.setBigInt64(16, -1n, true); v.setUint32(24, 28, true);
+  v.setUint32(28, 1, true); v.setUint32(32, idbLength, true); v.setUint16(36, 1, true);
+  let o = 44;
+  v.setUint16(o, 2, true); v.setUint16(o + 2, text.length, true); out.set(text, o + 4); o += 4 + text.length + pad;
+  v.setUint16(o, 9, true); v.setUint16(o + 2, 1, true); v.setUint8(o + 4, 9); o += 8;
+  o += 4; // opt_endofopt
+  v.setUint32(o, idbLength, true);
+  return out;
+}
+
+function pcapngPacket(tsNs: bigint, bytes: Uint8Array): Uint8Array {
+  const pad = (4 - (bytes.length % 4)) % 4;
+  const length = 32 + bytes.length + pad;
+  const out = new Uint8Array(length);
+  const v = new DataView(out.buffer);
+  v.setUint32(0, 6, true); v.setUint32(4, length, true);
+  v.setUint32(12, Number(tsNs >> 32n), true); v.setUint32(16, Number(tsNs & 0xffffffffn), true);
+  v.setUint32(20, bytes.length, true); v.setUint32(24, bytes.length, true);
+  out.set(bytes, 28);
+  v.setUint32(length - 4, length, true);
+  return out;
+}
+
 async function startAgent(frames: Uint8Array[]): Promise<Agent> {
   const received: string[] = [];
   let seq = 0; let rate = 0; let cursor = 0; let pass = 0;
   let pump: ReturnType<typeof setInterval> | null = null;
+  let captureRoot: string | null = null;
+  let writer: CaptureFileWriter | null = null;
   const clients = new Set<Socket>();
-  const stop = () => { if (pump) clearInterval(pump); pump = null; };
+  const stop = () => { if (pump) clearInterval(pump); pump = null; writer?.close(); writer = null; };
   const server = createServer((socket) => {
     clients.add(socket);
     const reader = new FrameReader();
@@ -162,9 +226,18 @@ async function startAgent(frames: Uint8Array[]): Promise<Agent> {
         if (frame.kind !== FRAME_JSON) continue;
         const text = frameText(frame);
         received.push(text);
-        const message = JSON.parse(text) as { type?: string };
+        const message = JSON.parse(text) as { type?: string; dir?: string; captureId?: string };
+        if (message.type === 'set_capture_root' && typeof message.dir === 'string') captureRoot = message.dir;
         if (message.type === 'start_capture') {
           stop();
+          // The file, and where it begins, before the first frame - the real
+          // agent's order (`runtime.rs`).
+          if (FILE && captureRoot !== null && typeof message.captureId === 'string') {
+            const name = 'capture.pcapng';
+            writer = new CaptureFileWriter(path.join(captureRoot, message.captureId, 'pcapng', name));
+            tell({ type: 'capture_file', index: 1, name, state: 'open', firstSeq: null, lastSeq: null, frames: 0, bytes: 0 });
+            tell({ type: 'capture_boundary', index: 1, firstSeq: seq + 1 });
+          }
           // 10 ms ticks, so a 40,000 frame-a-second rate is 400 frames a
           // message - the real agent's pump is batched about that finely.
           let owed = 0;
@@ -187,7 +260,9 @@ async function startAgent(frames: Uint8Array[]): Promise<Agent> {
               for (let i = 0; i < take; i++) {
                 seq++;
                 const bytes = shiftTcp(frames[cursor], pass * 0x1000_0000);
-                batch.push({ seq, tsNs: base + BigInt(i * 1000), bytes });
+                const frame = { seq, tsNs: base + BigInt(i * 1000), bytes };
+                writer?.add(frame);
+                batch.push(frame);
                 if (++cursor === frames.length) { cursor = 0; pass++; }
               }
               send(encodeFrame(FRAME_BINARY, encodeBatch(batch)));
@@ -306,6 +381,11 @@ const app = await electron.launch({
 });
 const page = await app.firstWindow();
 page.setDefaultTimeout(30_000);
+// The pipeline's failures reach only the console (`useAgentConnection.ts`).
+const pipelineWarnings: string[] = [];
+page.on('console', (message) => {
+  if (/packet pipeline/.test(message.text())) pipelineWarnings.push(message.text());
+});
 // tsx compiles with keepNames, which wraps functions in a `__name` helper the
 // page does not have; a string evaluate goes through CDP and defines it.
 await page.evaluate('window.__name = (f) => f');
@@ -489,7 +569,7 @@ for (const [phaseIndex, phase] of phases.entries()) {
       lagSamples.push(await behindLive());
       workerHeapSamples.push((await heap()).worker);
       const text = (await statusText()).replace(/\s+/g, ' ').trim();
-      const live = /(behind live [^·]*|[\d,]+ skipped)/g;
+      const live = /(catching up|behind live [^·]*|[\d,]+ to go|[\d,]+ skipped)/g;
       statusSamples.push((text.match(live) ?? []).join(' · ') || 'live');
     }
   })();
@@ -541,7 +621,31 @@ for (const [phaseIndex, phase] of phases.entries()) {
   }
 }
 
+// After the burst: the agent stops sending, and the view either catches up
+// with every frame it was sent - read back from the capture file where the
+// stream skipped (ADR 0053 phase 4) - or says how many it skipped. How long
+// that takes is the time to rejoin.
 agent.setRate(0);
+{
+  const t0 = Date.now();
+  let left = await behindLive();
+  let text = await statusText();
+  while (Date.now() - t0 < 180_000 && (left > 0 || /catching up/.test(text))) {
+    await sleep(500);
+    left = await behindLive();
+    text = await statusText();
+  }
+  const settled = left <= 0 && !/catching up/.test(text);
+  say('');
+  say(`=== after the burst ===`);
+  say(`  capture file written by the agent: ${FILE ? 'yes' : 'no (--no-file)'}`);
+  say(`  sent ${agent.sent().toLocaleString()}; shown ${(await shown()).toLocaleString()}; skipped ${(await skipped()).toLocaleString()}`);
+  say(settled
+    ? `  level with live ${((Date.now() - t0) / 1000).toFixed(1)} s after the agent stopped sending`
+    : `  NOT level with live 180 s after the agent stopped: ${left.toLocaleString()} frames behind; status "${text.replace(/\s+/g, ' ').trim()}"`);
+  say(`  pipeline warnings: ${pipelineWarnings.length}`);
+  for (const line of [...new Set(pipelineWarnings)].slice(0, 5)) say(`    ${line.slice(0, 300)}`);
+}
 await page.getByLabel(/Stop capture|Pause capture/).first().click().catch(() => {});
 await sleep(1000);
 await page.evaluate(() => (window as unknown as { inwire?: { setUnsavedCapture?(v: boolean): void } }).inwire?.setUnsavedCapture?.(false)).catch(() => {});

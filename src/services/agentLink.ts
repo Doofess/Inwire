@@ -86,7 +86,14 @@ export type FromAgentLink =
    * each of the last few connections lasted. See `services/agentHealth.ts` for
    * what is made of them - this message carries facts and no conclusion.
    */
-  | { type: 'service'; facts: AgentServiceFacts; shortConnections: number };
+  | { type: 'service'; facts: AgentServiceFacts; shortConnections: number }
+  /**
+   * A piece of the capture's own pcapng, answering `readCaptured` (ADR 0053
+   * phase 4): the bytes from the offset asked, fewer at the file's end and
+   * none when nothing new has been written; `gone` when a ring deleted the
+   * file. Opaque here - the Worker parses them.
+   */
+  | { type: 'capturedBytes'; requestId: number; bytes: Uint8Array | null; gone: boolean; error?: string };
 
 /** What main reports about the live stream (`electron/pipeCredit.ts`). */
 export interface LiveBacklog {
@@ -123,6 +130,13 @@ export type ToAgentLink =
    * flush with whatever completed in it.
    */
   | { type: 'drained'; batches: number[] }
+  /**
+   * Read part of the capture's own pcapng, to catch the live view up after
+   * the stream skipped (ADR 0053 phase 4). A capture id and the name the
+   * agent gave the file - **never a path**: main checks both and reads from
+   * its own folder (`electron/capturedRead.ts`).
+   */
+  | { type: 'readCaptured'; requestId: number; captureId: string; name: string; offset: number; length: number }
   /**
    * Ask Windows to start the agent's service.
    *

@@ -163,6 +163,14 @@ export class LiveFlow {
     }
   }
 
+  /**
+   * The next sequence number the stream owes, or null before the first frame
+   * of a capture. A frame numbered well past it is the far side of a hole.
+   */
+  get expectedSeq(): number | null {
+    return this.firstSeq === null ? null : this.nextSeq;
+  }
+
   /** Frames the agent numbered and the live stream has not delivered. */
   get skippedFrames(): number {
     if (this.firstSeq === null) return 0;

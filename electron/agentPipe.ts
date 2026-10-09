@@ -44,6 +44,7 @@ import { classifyStart, MAX_AUTO_START_ATTEMPTS, worthStarting } from './service
 import { AGENT_PIPE_PATH, PipeTransport } from './pipeTransport';
 import { AGENT_PORT_CHANNEL } from './channels';
 import { PipeCredit } from './pipeCredit';
+import { readCaptured } from './capturedRead';
 
 /**
  * How often the service's registry key is re-read while the link is down.
@@ -97,7 +98,7 @@ export class AgentPipeLink {
    *   a capture's pcapng under (ADR 0052). Main's to say, because main made
    *   the folder; the renderer names a capture, never a path.
    */
-  constructor(pipePath: string = AGENT_PIPE_PATH, captureRoot: string | null = null) {
+  constructor(pipePath: string = AGENT_PIPE_PATH, private readonly captureRoot: string | null = null) {
     this.pipe = new PipeTransport({
       status: (status) => {
         // Every change of connection is a new stream: nothing the Worker was
@@ -191,7 +192,16 @@ export class AgentPipeLink {
       case 'send': this.pipe.send(message.text); break;
       case 'startService': void this.startService(); break;
       case 'drained': this.credit.drained(message.batches); break;
+      case 'readCaptured': void this.readCaptured(message); break;
     }
+  }
+
+  /** A piece of the agent's pcapng for the Worker's catch-up (`capturedRead.ts`). */
+  private async readCaptured(message: Extract<ToAgentLink, { type: 'readCaptured' }>): Promise<void> {
+    const answer = this.captureRoot === null
+      ? { bytes: null, gone: false, error: 'no capture folder' }
+      : await readCaptured(this.captureRoot, message.captureId, message.name, message.offset, message.length);
+    this.tell({ type: 'capturedBytes', requestId: message.requestId, ...answer });
   }
 
   /**

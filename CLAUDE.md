@@ -1191,6 +1191,20 @@ sheds whole batches past 256 MB the Worker owes it (`electron/pipeCredit.ts`)
 holds every frame, and the status bar says by how much. The heap guard stays
 as a backstop that should no longer fire.
 
+**And what the stream skips is read back from that file** (phase 4,
+`pipeline/catchUp.ts`). A hole - main shedding, or a jump in the agent's
+numbering - makes the Worker ask main for the capture's pcapng from the frame
+before it (`electron/capturedRead.ts`: a capture id and the agent's own file
+name, never a path), dissect it through the ordinary path, drop the live
+copies, and rejoin the stream at a held live frame the file has reached. The
+file's EPBs carry no sequence numbers, so **a file frame is numbered by
+counting from its `capture_boundary`** - and the count is checked against a
+live frame on each side of the hole, because a frame the agent's writer
+refused would shift every number after it. Where there is no file, or the
+count does not check, the hole is marked as it was before.
+`scripts/pipeline/catch-up.ts` holds the result to an uninterrupted run, frame
+for frame and hash for hash.
+
 ## 8. Status
 
 The Electron migration is done, bar the offline basemap and signing for any

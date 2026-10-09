@@ -19,9 +19,17 @@ export interface LiveLag {
   shedding: boolean;
   /** The store's backlog is holding frames back. */
   storeBehind: boolean;
+  /**
+   * The view is reading what the stream skipped back out of the capture file
+   * (ADR 0053 phase 4); `behindFrames` and `behindMs` are then how far that
+   * reading is from the newest live frame.
+   */
+  catchingUp: boolean;
 }
 
-export const NO_LAG: LiveLag = { behindFrames: 0, behindMs: 0, skippedFrames: 0, shedding: false, storeBehind: false };
+export const NO_LAG: LiveLag = {
+  behindFrames: 0, behindMs: 0, skippedFrames: 0, shedding: false, storeBehind: false, catchingUp: false,
+};
 
 /**
  * Below this the view is "live": the ordering window alone holds frames for a
@@ -37,7 +45,7 @@ export function publishLiveLag(next: LiveLag): void {
   if (
     next.behindFrames === current.behindFrames && next.behindMs === current.behindMs
     && next.skippedFrames === current.skippedFrames && next.shedding === current.shedding
-    && next.storeBehind === current.storeBehind
+    && next.storeBehind === current.storeBehind && next.catchingUp === current.catchingUp
   ) return;
   current = next;
   for (const listener of listeners) listener();
@@ -58,6 +66,21 @@ export function useLiveLag(): LiveLag {
  * Pure, so `scripts/session/live-lag.ts` can hold the wording.
  */
 export function liveLagLabel(lag: LiveLag): { text: string; title: string } | null {
+  if (lag.catchingUp) {
+    // Said as what it is: behind, and getting there, with nothing lost - the
+    // frames the stream skipped are being read back out of the capture file.
+    const seconds = Math.round(lag.behindMs / 1000);
+    const frames = lag.behindFrames.toLocaleString('en-US');
+    const text = ['catching up', seconds > 0 ? `behind live ${seconds} s` : '', `${frames} to go`]
+      .concat(lag.skippedFrames > 0 ? [`${lag.skippedFrames.toLocaleString('en-US')} skipped`] : [])
+      .filter(Boolean).join(' · ');
+    const title = [
+      `Behind live by ${seconds} s, ${frames} frames to go, nothing lost: the live stream ran faster than the view, `
+        + 'and the frames it skipped are being read back from the capture file, in order.',
+      lag.skippedFrames > 0 ? `${lag.skippedFrames.toLocaleString('en-US')} frames could not be read back and are marked where they were skipped; they are in the capture file.` : '',
+    ].filter(Boolean).join(' ');
+    return { text, title };
+  }
   const behind = lag.behindMs >= BEHIND_SHOWN_MS && lag.behindFrames > 0;
   if (!behind && lag.skippedFrames === 0) return null;
   const parts: string[] = [];

@@ -115,6 +115,13 @@ console.log('\n--- what the status bar says ---\n');
   const skipped = liveLagLabel({ ...NO_LAG, skippedFrames: 18_000, shedding: true });
   check('skipped: said as not lost, and in the capture file',
     skipped?.text === '18,000 skipped' && /nothing was lost/.test(skipped.title) && /capture file/.test(skipped.title));
+  // ADR 0053 phase 4: reading the skipped frames back out of the file.
+  const catching = liveLagLabel({ ...NO_LAG, catchingUp: true, behindFrames: 410_000, behindMs: 12_400 });
+  check('catching up: said in the cell, with how far and how many',
+    catching?.text === 'catching up · behind live 12 s · 410,000 to go'
+    && /Behind live by 12 s, 410,000 frames to go, nothing lost/.test(catching.title) && /capture file/.test(catching.title));
+  const closeNow = liveLagLabel({ ...NO_LAG, catchingUp: true, behindFrames: 900, behindMs: 300 });
+  check('...and still said when nearly there, which the plain lag would not', closeNow?.text === 'catching up · 900 to go');
 }
 
 console.log('\n--- a burst, end to end ---\n');

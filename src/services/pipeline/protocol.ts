@@ -291,6 +291,12 @@ export type FromPipeline =
       shedding: boolean;
       /** The store's backlog is holding frames back. */
       storeBehind: boolean;
+      /**
+       * The view is reading what the stream skipped back out of the capture
+       * file (ADR 0053 phase 4); `behindFrames`/`behindMs` are then the
+       * file's distance from the newest live frame.
+       */
+      catchingUp?: boolean;
     }
   /** Something went wrong that the user should be told about, not swallowed. */
   | { type: 'failure'; message: string };
