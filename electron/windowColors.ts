@@ -76,37 +76,6 @@ export function resolveWindowBackground(resolvedTheme: string | undefined): stri
 }
 
 /**
- * Whether that ground is a dark one.
- *
- * Derived from the colour rather than from a second table of theme names. The
- * app already declares each theme's mode in `src/lib/themeOptions.ts`, but that
- * module imports React and `lucide-react`, and main is not dragging a component
- * library in to answer a yes/no question. A duplicated list here would be the
- * other option, and it would be one more thing to forget when a theme is added
- * or retired - which has happened twice.
- *
- * Luminance cannot drift out of agreement with the palette, because it IS the
- * palette. The two grounds are nowhere near the threshold: Day's `#f6f7f9`
- * reads 0.93 and Night's `#161616` reads 0.008, so a 0.5 cut is not a close
- * call for any theme this app could plausibly ship.
- *
- * Its one consumer is `nativeTheme.themeSource` around the quit confirm - see
- * `guardClose` in `main.ts` for why that is set for the dialog and put back
- * immediately afterwards.
- */
-export function resolveWindowIsDark(resolvedTheme: string | undefined): boolean {
-  const hex = resolveWindowBackground(resolvedTheme);
-  const channel = (pair: string): number => {
-    const c = Number.parseInt(pair, 16) / 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  };
-  const luminance = 0.2126 * channel(hex.slice(1, 3))
-    + 0.7152 * channel(hex.slice(3, 5))
-    + 0.0722 * channel(hex.slice(5, 7));
-  return luminance < 0.5;
-}
-
-/**
  * Whether a value off the disk is a colour this can hand to Electron.
  *
  * Validated rather than trusted for the reason the bounds are: this value is

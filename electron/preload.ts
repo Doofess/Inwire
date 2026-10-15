@@ -31,8 +31,10 @@ import {
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
   SPEEDTEST_CANCEL_CHANNEL, SPEEDTEST_EVENT_CHANNEL, SPEEDTEST_START_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
+  QUIT_CONFIRM_CHANNEL, QUIT_CONFIRM_REPLY_CHANNEL,
   type WindowControl,
 } from './channels';
+import type { QuitConfirmAnswer } from '../src/lib/quitConfirm';
 
 /**
  * The one line of DOM in the Electron half of this app.
@@ -352,6 +354,27 @@ const api = {
     const handler = (_event: unknown, state: unknown): void => listener(state);
     ipcRenderer.on(WINDOW_STATE_CHANNEL, handler);
     return () => { ipcRenderer.removeListener(WINDOW_STATE_CHANNEL, handler); };
+  },
+
+  /**
+   * Subscribes to main's "Quit Inwire?" requests, and returns the unsubscribe.
+   *
+   * The payload is `unknown` and narrowed on the page's side by
+   * `readQuitConfirmRequest`, like every other value from main.
+   */
+  onQuitConfirm(listener: (request: unknown) => void): () => void {
+    const handler = (_event: unknown, request: unknown): void => listener(request);
+    ipcRenderer.on(QUIT_CONFIRM_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(QUIT_CONFIRM_CHANNEL, handler); };
+  },
+
+  /**
+   * Answers one confirm. `shown` first, as soon as it is on screen - main falls
+   * back to the OS's box if that does not arrive within a second
+   * (`electron/quitConfirm.ts`) - and then `quit` or `keep`.
+   */
+  answerQuitConfirm(id: number, answer: QuitConfirmAnswer): void {
+    ipcRenderer.send(QUIT_CONFIRM_REPLY_CHANNEL, { id, answer });
   },
 } as const;
 

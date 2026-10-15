@@ -509,6 +509,12 @@ about. `scripts/session/byte-range.ts` asserts the last three.
 resolved theme and the window title to main, and subscribes once at module scope
 to maximized/focused.
 
+**`common/QuitConfirmDialog.tsx` swallows every `keydown` while it is open**,
+with one capture-phase listener on `window` that calls
+`stopImmediatePropagation` - which only silences listeners added after it, so it
+works because the dialog is mounted **before `<App/>`** in `main.tsx`. Move it
+inside App and Escape navigates the view behind the confirm.
+
 The React app never dissects and never parses an agent message. That is
 `src/workers/pipeline.worker.ts`, which holds the ordering window, the trackers,
 and `pcapParser.ts`.

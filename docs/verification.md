@@ -425,23 +425,32 @@ the target size and spacing are what muscle memory aims at.
 - [ ] **Each is actually clickable.** A control that lost `.app-no-drag` drags
       the window instead, and the only symptom is a click that does nothing — on
       close, a window that cannot be closed.
-- [ ] **With frames in the buffer, press close.** `guardClose`'s native "Quit
-      Inwire?" box appears. Cancel → the window stays and the capture is intact.
-      The button calls `window.close()`, never `destroy()`; destroying would skip
-      this box and discard a capture on one click. (No automated test can answer
-      it, which is why `smoke.ts` clears `setUnsavedCapture` before closing.)
+- [ ] **With frames in the buffer, press close.** The "Quit Inwire?" confirm
+      appears, drawn by the app. Keep capturing → the window stays and the
+      capture is intact. The button calls `window.close()`, never `destroy()`;
+      destroying would skip the confirm and discard a capture on one click.
+      (`smoke.ts` clears `setUnsavedCapture` before closing, or its
+      `app.close()` would wait on the confirm for ever.)
 - [ ] In **Settings → Appearance**, switch through both themes — Day and Night.
       The buttons follow, because they are CSS. Paper and Graphite are gone; the
       picker's third entry is System, which is a rule rather than a palette.
 - [ ] **The quit confirm is drawn in the app's theme.** With frames in the
-      buffer, in **Night**, press close: the "Quit Inwire?" box is **dark**. In
-      **Day** it is light. It is a native dialog, so it follows `nativeTheme`
-      rather than the cascade, and nothing in the suite can see it.
-- [ ] **...and System still follows the OS afterwards.** Turn System on, cancel a
-      quit confirm, then change Windows' own app theme (Settings → Personalisation
-      → Colours). Inwire follows within a second. `guardClose` holds the
-      `themeSource` override only while the box is up for exactly this reason: a
-      standing one pins `prefers-color-scheme` in the renderer, which is what
+      buffer, in **Night**, press close: the "Quit Inwire?" confirm is **dark**;
+      in **Day** it is light. It is the renderer's own dialog
+      (`QuitConfirmDialog.tsx`), because `showMessageBox` on Windows is a task
+      dialog the OS paints light whatever the app's theme. Keep capturing has
+      focus; Tab moves between the two buttons only; Enter and Escape keep.
+- [ ] **...and a hung renderer still cannot trap the window.** The OS's own box
+      is the fallback when the renderer does not acknowledge within a second
+      (`electron/quitConfirm.ts`). It is drawn in the OS's theme, not the app's,
+      and that is accepted: it only appears when the page cannot answer.
+      `scripts/electron/quit-confirm.ts` drives every case of that decision; the
+      box itself is only seen by hand.
+- [ ] **...and System still follows the OS.** Turn System on, cancel a quit
+      confirm, then change Windows' own app theme (Settings → Personalisation →
+      Colours). Inwire follows within a second. Main never sets
+      `nativeTheme.themeSource`: a standing override pins
+      `prefers-color-scheme` in the renderer, which is what
       `useSystemThemePreference` reads, and the app would be following itself.
 - [ ] **Hover close** → Windows' red `#c42b1c`, white glyph, in every theme.
       Hover the other two → the theme's accent.

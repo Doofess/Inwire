@@ -194,3 +194,16 @@ export const KEYLOG_TEXT_CHANNEL = 'inwire:keylog-text';
 
 /** Main -> renderer: the follower's status whenever it changes. */
 export const KEYLOG_STATUS_CHANNEL = 'inwire:keylog-status';
+
+/**
+ * Main -> renderer: show the quit confirm, or withdraw it
+ * (`QuitConfirmRequest` in `src/lib/quitConfirm.ts`).
+ *
+ * The renderer draws it rather than the OS, because the OS's box on Windows is
+ * a task dialog Windows paints light whatever theme the app is in. Main still
+ * owns the decision and the fallback - see `electron/quitConfirm.ts`.
+ */
+export const QUIT_CONFIRM_CHANNEL = 'inwire:quit-confirm';
+
+/** Renderer -> main: `shown`, `quit` or `keep`, for one confirm by id. */
+export const QUIT_CONFIRM_REPLY_CHANNEL = 'inwire:quit-confirm-reply';

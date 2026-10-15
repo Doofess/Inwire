@@ -765,9 +765,10 @@ try {
     console.log('      no console errors');
   }
 } finally {
-  // Closing with frames in the buffer opens `guardClose`'s native "Quit
-  // Inwire?" message box, and a native modal is not in the page: Playwright
-  // cannot see it, cannot answer it, and `app.close()` waits for ever - with
+  // Closing with frames in the buffer opens the "Quit Inwire?" confirm - the
+  // page's own dialog, or the OS's box when the page does not answer within a
+  // second, which Playwright cannot see or answer - and `app.close()` waits
+  // for ever on either - with
   // the output buffered, so the script looks busy long after its last
   // assertion. That is what used to hang this.
   //

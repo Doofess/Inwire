@@ -23,7 +23,7 @@
  * files into it.
  */
 import {
-  app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell,
+  app, BrowserWindow, dialog, ipcMain, Menu, protocol, session, shell,
 } from 'electron';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -36,7 +36,10 @@ import {
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
   SPEEDTEST_CANCEL_CHANNEL, SPEEDTEST_START_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
+  QUIT_CONFIRM_CHANNEL, QUIT_CONFIRM_REPLY_CHANNEL,
 } from './channels';
+import { QuitConfirm } from './quitConfirm';
+import { QUIT_CONFIRM_TEXT, readQuitConfirmReply } from '../src/lib/quitConfirm';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
 import { registerSaveStream } from './saveStream';
 import { registerSaveCaptured } from './saveCaptured';
@@ -49,7 +52,7 @@ import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
 import { loadWindowState, rememberBackground, trackWindowState } from './windowState';
-import { resolveWindowBackground, resolveWindowIsDark } from './windowColors';
+import { resolveWindowBackground } from './windowColors';
 import {
   COMMAND_LINE_SWITCHES,
   MIN_WINDOW_HEIGHT,
@@ -162,14 +165,6 @@ if (!app.requestSingleInstanceLock()) {
 let unsavedCapture = false;
 /** Set once the reader has said yes, so the guard does not ask twice. */
 let quitConfirmed = false;
-/**
- * Whether the renderer's current theme is a dark one, as last reported.
- *
- * Only `guardClose` reads it. Defaults to true for the reason
- * `DEFAULT_WINDOW_THEME` does: guessing light and being wrong is a white
- * flash, and nobody reports the other way round.
- */
-let windowIsDark = true;
 /** The capture store, forked on the renderer's first request for its port. */
 const store = new CaptureStoreHost(captureDirectory());
 /**
@@ -233,9 +228,6 @@ async function start(): Promise<void> {
   ipcMain.on(WINDOW_THEME_CHANNEL, (_event, theme: unknown) => {
     const name = typeof theme === 'string' ? theme : undefined;
     rememberBackground(resolveWindowBackground(name));
-    // Not applied here. It is read by `guardClose`, which is the only thing in
-    // main that draws in the OS's colours rather than the app's.
-    windowIsDark = resolveWindowIsDark(name);
   });
 
   // The three buttons the app draws for itself, now that the window is
@@ -559,47 +551,73 @@ async function createWindow(): Promise<BrowserWindow> {
  * The wording is ours, which is the improvement over what this replaces. A
  * `beforeunload` could not supply its own text - the old comment said so - and
  * in Electron it would not have shown a dialog at all.
+ *
+ * **The renderer draws the confirm, and the OS's box is only the fallback.**
+ * `showMessageBox` on Windows is a Win32 task dialog, and Windows paints it
+ * light whatever `nativeTheme.themeSource` says - this used to set
+ * `themeSource` around the box in the belief that it followed, and the box
+ * stayed white over a window in Night. The renderer's dialog takes the app's
+ * own tokens like every other surface. When the renderer does not acknowledge
+ * within a second - hung, crashed, not loaded - the OS's box asks instead, in
+ * the OS's own theme, because a confirm in the wrong colours beats a close
+ * button that does nothing. `quitConfirm.ts` is the decision, and says why a
+ * second close re-asks rather than being ignored.
+ *
+ * **Nothing overrides `nativeTheme.themeSource` here, and nothing should.**
+ * It never reached the task dialog, and a standing override would pin
+ * `prefers-color-scheme` in the renderer, which `useSystemThemePreference`
+ * reads - so under System the app would be following itself and never see an
+ * OS theme change. `scripts/electron/window-chrome.ts` holds main to that.
  */
 function guardClose(window: BrowserWindow): void {
-  window.on('close', (event) => {
-    if (quitConfirmed || !unsavedCapture) return;
-    event.preventDefault();
-    void (async () => {
-      /**
-       * The one place the app's theme has to reach a window it does not paint.
-       *
-       * `showMessageBox` is drawn by the OS and follows `nativeTheme`, which
-       * follows the OS by default - so on a machine set to light, the app in
-       * Night threw a white box over a dark window on the way out.
-       *
-       * **Set for the dialog and put straight back**, rather than tracked for
-       * the life of the app, and that is not caution - a standing override
-       * would break System. `themeSource` drives `prefers-color-scheme` in the
-       * renderer too, and `useSystemThemePreference` reads exactly that media
-       * query: pinned to the app's own theme, the app would be following
-       * itself, and an OS theme change would never be seen at all. Held only
-       * while a modal is up, it cannot: when following is on the app's theme
-       * already equals the OS's, so the override is a no-op, and when it is off
-       * the hook does not run.
-       */
-      const restore = nativeTheme.themeSource;
-      nativeTheme.themeSource = windowIsDark ? 'dark' : 'light';
+  // Taken now: in `closed`, `window.webContents` is already being torn down.
+  const contents = window.webContents;
+  const confirm = new QuitConfirm({
+    send: (request) => {
+      if (window.isDestroyed() || contents.isDestroyed() || contents.isCrashed()) return false;
+      contents.send(QUIT_CONFIRM_CHANNEL, request);
+      return true;
+    },
+    showNative: async () => {
+      if (window.isDestroyed()) return false;
       const { response } = await dialog.showMessageBox(window, {
         type: 'warning',
-        buttons: ['Quit', 'Keep capturing'],
+        buttons: [QUIT_CONFIRM_TEXT.quit, QUIT_CONFIRM_TEXT.keep],
         defaultId: 1,
         cancelId: 1,
         noLink: true,
-        title: 'Quit Inwire?',
-        message: 'Quit while a capture is in the buffer?',
-        detail:
-          'Frames already written to the capture store are kept and will be '
-          + 'restored next time. Anything still in memory is discarded.',
-      }).finally(() => { nativeTheme.themeSource = restore; });
-      if (response !== 0) return;
+        title: QUIT_CONFIRM_TEXT.title,
+        message: QUIT_CONFIRM_TEXT.message,
+        detail: QUIT_CONFIRM_TEXT.detail,
+      });
+      return response === 0;
+    },
+    quit: () => {
       quitConfirmed = true;
-      window.close();
-    })();
+      if (!window.isDestroyed()) window.close();
+    },
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (handle) => { clearTimeout(handle as ReturnType<typeof setTimeout> | undefined); },
+  });
+
+  // Only this window's page may answer this window's confirm.
+  const onReply = (event: Electron.IpcMainEvent, value: unknown): void => {
+    if (event.sender !== contents) return;
+    const reply = readQuitConfirmReply(value);
+    if (reply !== null) confirm.replied(reply);
+  };
+  ipcMain.on(QUIT_CONFIRM_REPLY_CHANNEL, onReply);
+  window.once('closed', () => ipcMain.removeListener(QUIT_CONFIRM_REPLY_CHANNEL, onReply));
+  contents.on('render-process-gone', () => confirm.rendererGone());
+  // A reload takes the page's dialog with it; see `rendererReset`.
+  contents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) confirm.rendererReset();
+  });
+
+  window.on('close', (event) => {
+    if (quitConfirmed || !unsavedCapture) return;
+    event.preventDefault();
+    confirm.requested();
   });
 }
 
