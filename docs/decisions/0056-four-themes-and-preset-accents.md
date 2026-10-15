@@ -1,7 +1,7 @@
 # 0056 — Four themes, Follow Windows with High Contrast, and preset accents
 
-**Status:** accepted 2026-10-16. The themes and Follow Windows have landed; the
-accent swatches are in progress on the same branch.
+**Status:** accepted 2026-10-16. The themes, Follow Windows and the accent
+swatches have landed.
 
 ## Context
 
@@ -84,11 +84,39 @@ same reason: a Light tile inside a dark document needs a selector to match.
 
 ### Accents are presets, and the mark stays fixed
 
-To be completed with the swatches: seven preset swatches, each checked in every
-theme, chosen over a free colour picker. The setting is `accentColor` and it
-is applied as `data-accent-color` on `<html>`. It is not called "accent"
-because shadcn's `--accent` already means the hover fill. An accent overrides
-only `--primary`, `--primary-foreground`, `--ring` and `--speed-download`.
+Seven swatches: Blue, Teal, Green, Violet, Rose, Amber and Graphite. **Presets,
+not a free colour picker,** because an accent is the selected row's text, the
+rail's active fill, the focus ring and the download trace, and a colour nobody
+checked fails one of those in one theme without saying so. With seven, every
+one is checked in every theme: `scripts/themes/registry.ts` loops swatches ×
+themes for the foreground on the fill, primary on background, card, secondary
+and the selected row (7:1 in High Contrast), the rail's active fill, distance
+from `--destructive` and `--warning`, and download against upload.
+
+The setting is `accentColor`, applied as `data-accent-color` on `<html>` at
+module scope in `main.tsx`, so there is no default flash. It is not called
+"accent" because shadcn's `--accent` already means the hover fill.
+
+**An accent overrides four tokens and nothing else:** `--primary`,
+`--primary-foreground`, `--ring` and `--speed-download`. The one exception is
+Violet, which would be upload's own purple, so it moves `--speed-upload` to the
+theme's orange.
+
+**One table, one generated copy.** `src/lib/accents.ts` is the table. Blue is
+the theme blocks' own values and gets no rule, so the stylesheet is right before
+any module runs. The other six are printed by `scripts/themes/accent-css.ts` and
+pasted between markers in `src/index.css`, and `scripts/themes/accents.ts` fails
+if the two drift - the same arrangement as the status colours.
+
+Two starting values were tuned against the checks rather than by eye. Light
+Green went from `#15803d` to `#16763a` and light Amber from `#b45309` to
+`#a54d07`: both failed primary on `--secondary` (4.43) or on the selected row
+(4.34).
+
+**The picker** is a row of round swatches under the theme tiles, a
+`radiogroup` with a roving tab stop. The arrow keys move and apply, and the
+focus outline sits outside the checked ring so the two never coincide. The theme
+tiles draw the chosen accent by carrying `data-accent-color` themselves.
 
 **The brand mark is not themed by the accent.** It is identity, and the same
 ramp produces the icon, the PDF and the xlsx (`src/lib/brandMark.ts`).

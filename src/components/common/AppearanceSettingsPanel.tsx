@@ -6,9 +6,11 @@ import { Switch } from '../ui/switch';
 import { Segmented } from '../ui/segmented';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import {
+  accentColorStore,
   followSystemThemeStore,
   packetColorSetStore,
 } from '../../services/themePrefs';
+import { ACCENTS, type AccentId } from '../../lib/accents';
 import {
   PACKET_COLOR_SET_SPECS,
   PACKET_COLOR_SETS,
@@ -25,16 +27,17 @@ import { Section, SettingRow } from './settingsLayout';
  * else about the UI - what is on screen, how dense it is, how often it redraws.
  * A control belongs here if the answer it changes is a hex value.
  *
- * Four decisions, in the order they matter:
+ * Five decisions, in the order they matter:
  *
  *   1. The app theme, which is the ground everything else is derived from.
- *   2. Which of three colour sets the packet list derives its fills with.
- *   3. Whether the map's connection arcs encode protocol.
- *   4. Which of two basemap skins the map is painted in.
+ *   2. The accent, one of seven swatches (`lib/accents.ts`, ADR 0056).
+ *   3. Which of three colour sets the packet list derives its fills with.
+ *   4. Whether the map's connection arcs encode protocol.
+ *   5. Which of two basemap skins the map is painted in.
  *
  * Nothing here has a Save button, for the same reason the Interface tab does
  * not: settings apply as they are changed. It matters more on this tab than
- * anywhere else, because two of these four controls change something the modal
+ * anywhere else, because most of these controls change something the modal
  * is currently covering, and the swatch strip below is what answers for the
  * one that is not visible at all.
  */
@@ -69,10 +72,15 @@ const PREVIEW_RULES: { id: string; label: string }[] = [
  * which is why the light block is selected by `.light` as well as `:root`, and
  * why `theme-scope` exists (index.css says what it fixes).
  */
-const ThemeMiniature: React.FC<{ theme: string; style?: React.CSSProperties }> = ({ theme, style }) => (
+const ThemeMiniature: React.FC<{ theme: string; accent: AccentId; style?: React.CSSProperties }> = ({
+  theme,
+  accent,
+  style,
+}) => (
   <div
     aria-hidden
     style={style}
+    data-accent-color={accent}
     className={`${theme} theme-scope absolute inset-0 flex flex-col overflow-hidden bg-background`}
   >
     <div className="h-[6px] shrink-0 bg-secondary border-b border-border" />
@@ -103,6 +111,52 @@ const ThemeMiniature: React.FC<{ theme: string; style?: React.CSSProperties }> =
 /** System is Light and Dark at once, so its tile is both, cut on the diagonal. */
 const SYSTEM_SPLIT: React.CSSProperties = { clipPath: 'polygon(100% 0, 100% 100%, 0 100%)' };
 
+/**
+ * The accent swatches, a radiogroup with a roving tab stop: one Tab reaches
+ * the group, arrows move the choice and apply it, as the APG radio pattern
+ * does. Each dot is painted from the table for the theme that is live, not
+ * from `--primary`, because the dots are seven accents at once and the token
+ * is only ever one.
+ */
+const AccentPicker: React.FC<{ theme: string }> = ({ theme }) => {
+  const [accent, setAccent] = usePreferenceValue(accentColorStore);
+  const refs = React.useRef<(HTMLButtonElement | null)[]>([]);
+  const move = (from: number, step: number) => {
+    const next = (from + step + ACCENTS.length) % ACCENTS.length;
+    setAccent(ACCENTS[next].id);
+    refs.current[next]?.focus();
+  };
+  return (
+    <div role="radiogroup" aria-label="Accent colour" className="flex items-center gap-2.5">
+      {ACCENTS.map((a, i) => {
+        const checked = a.id === accent;
+        return (
+          <button
+            key={a.id}
+            ref={(el) => { refs.current[i] = el; }}
+            role="radio"
+            aria-checked={checked}
+            aria-label={a.label}
+            title={a.label}
+            tabIndex={checked ? 0 : -1}
+            onClick={() => setAccent(a.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); move(i, 1); }
+              else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); move(i, -1); }
+            }}
+            style={{ background: a.primary[theme] ?? a.primary.light }}
+            className={`grid place-items-center w-5 h-5 rounded-full transition-shadow focus-visible:outline-2 focus-visible:outline-offset-[5px] focus-visible:outline-ring ${
+              checked ? 'ring-2 ring-offset-2 ring-offset-background ring-foreground/70' : 'hover:ring-2 hover:ring-offset-2 hover:ring-offset-background hover:ring-border'
+            }`}
+          >
+            {checked && <Check className="w-3 h-3" strokeWidth={3} style={{ color: a.primaryForeground[theme] ?? a.primaryForeground.light }} />}
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+
 const MAP_SKIN_OPTIONS = [
   { value: 'colorful' as const, label: 'Colourful' },
   { value: 'muted' as const, label: 'Theme-synced' },
@@ -114,6 +168,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
   const [colorSet, setColorSet] = usePreferenceValue(packetColorSetStore);
   const [arcProtocolColors, setArcProtocolColors] = usePreferenceValue(arcProtocolColorStore);
   const [mapSkin, setMapSkin] = usePreferenceValue(mapSkinStore);
+  const [accent] = usePreferenceValue(accentColorStore);
 
   // The same derivation the packet list runs, against the theme that is live
   // right now - so the strip shows the chosen set on the chosen theme rather
@@ -158,11 +213,11 @@ export const AppearanceSettingsPanel: React.FC = () => {
                   <div className="relative w-[72px] h-[44px] rounded-[5px] overflow-hidden ring-1 ring-border">
                     {isSystem ? (
                       <>
-                        <ThemeMiniature theme="light" />
-                        <ThemeMiniature theme="dark" style={SYSTEM_SPLIT} />
+                        <ThemeMiniature theme="light" accent={accent} />
+                        <ThemeMiniature theme="dark" accent={accent} style={SYSTEM_SPLIT} />
                       </>
                     ) : (
-                      <ThemeMiniature theme={value} />
+                      <ThemeMiniature theme={value} accent={accent} />
                     )}
                   </div>
                   <span className="flex items-center gap-1 leading-tight">
@@ -173,6 +228,13 @@ export const AppearanceSettingsPanel: React.FC = () => {
               );
             })}
           </div>
+        </div>
+        <div className="py-2.5">
+          <div className="text-xs font-semibold text-foreground">Accent colour</div>
+          <p className="text-[11px] text-muted-foreground mt-0.5 mb-2.5 leading-snug">
+            The selected row, the active rail button, focus rings and the download trace. Each one is checked for contrast in every theme.
+          </p>
+          <AccentPicker theme={resolvedTheme ?? 'light'} />
         </div>
       </Section>
 

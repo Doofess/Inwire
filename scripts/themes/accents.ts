@@ -122,6 +122,17 @@ checkTrue('main.tsx stamps the accent on <html> at module scope, before render',
 checkTrue('...and re-stamps when the setting changes',
   /accentColorStore\.subscribe\(stampAccentColor\)/.test(main));
 
+// --- the picker ----------------------------------------------------------------
+
+const panel = fs.readFileSync(path.join(root, 'src/components/common/AppearanceSettingsPanel.tsx'), 'utf8');
+checkTrue('Appearance renders a swatch per ACCENTS entry', /ACCENTS\.map\(/.test(panel));
+checkTrue('...inside a radiogroup named "Accent colour"',
+  /role="radiogroup"/.test(panel) && /aria-label="Accent colour"/.test(panel));
+checkTrue('...each swatch a radio carrying aria-checked and its label',
+  /role="radio"/.test(panel) && /aria-checked=\{/.test(panel) && /aria-label=\{\s*(a|accent|swatch)\.label\s*\}/.test(panel));
+checkTrue('...whose value is the accent setting', /usePreferenceValue\(accentColorStore\)/.test(panel));
+checkTrue('...and the theme tiles draw the chosen accent', /data-accent-color=\{/.test(panel));
+
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
   process.exit(1);

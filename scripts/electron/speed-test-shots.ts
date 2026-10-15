@@ -1,7 +1,12 @@
 /**
  * Every state of the speed test, photographed - for looking at, not asserting.
  *
- *   npx tsx scripts/electron/speed-test-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light]
+ *   npx tsx scripts/electron/speed-test-shots.ts <out-dir> [--widths 1024,1600]
+ *     [--themes light,dark,dim,contrast] [--accent rose] [--scale 1.5]
+ *
+ * `--accent` stores an accent swatch the way the setting does (ADR 0056), and
+ * `--scale` launches with Chromium's device scale factor forced, for the 150%
+ * pass. Both are part of every file name, so passes can share a directory.
  *
  * Launches the built app against the stub agent and a local speed server
  * (`scripts/speed-test/stubServer.ts`, through `INWIRE_SPEEDTEST_TARGET`), so
@@ -28,6 +33,9 @@ const arg = (name: string, fallback: string) => {
 };
 const WIDTHS = arg('widths', '1024,1600').split(',').map(Number);
 const THEMES = arg('themes', 'dark,light').split(',');
+const ACCENT = arg('accent', 'blue');
+const SCALE = arg('scale', '1');
+const SCALE_ARGS = SCALE === '1' ? [] : [`--force-device-scale-factor=${SCALE}`];
 mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -40,13 +48,17 @@ for (const theme of THEMES) {
     const height = width <= 1024 ? 700 : 1000;
     const profile = mkdtempSync(path.join(tmpdir(), 'inwire-speedshots-'));
     const app = await launchApp({
-      args: ['.'],
+      args: ['.', ...SCALE_ARGS],
       env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE, INWIRE_SPEEDTEST_TARGET: stub.url },
     });
     const p = await app.firstWindow();
     p.setDefaultTimeout(30_000);
     await p.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
-    await p.evaluate((t) => localStorage.setItem('theme', t), theme);
+    await p.evaluate(([t, a]) => {
+      localStorage.setItem('theme', t);
+      // createPreferenceStore keeps every value as JSON (loadPreference parses it).
+      localStorage.setItem('inwire.accentColor', JSON.stringify(a));
+    }, [theme, ACCENT] as [string, string]);
     await p.reload();
     await p.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
     await app.evaluate(({ BrowserWindow }, [w, h]) => {
@@ -56,7 +68,7 @@ for (const theme of THEMES) {
     }, [width, height] as [number, number]);
     await sleep(800);
     await p.getByRole('button', { name: 'Skip' }).click({ timeout: 3000 }).catch(() => {});
-    const tag = `${theme}-${width}`;
+    const tag = `${theme}-${ACCENT}-${width}${SCALE === '1' ? '' : `@${SCALE}x`}`;
     const shot = async (name: string) => {
       await p.screenshot({ path: path.join(OUT, `${tag}-${name}.png`) });
       console.log(`  ${tag}-${name}`);
@@ -157,7 +169,7 @@ for (const theme of THEMES) {
     // A fresh launch with history: the sheet idle, Run test and the past results.
     {
       const again = await launchApp({
-        args: ['.'],
+        args: ['.', ...SCALE_ARGS],
         env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE, INWIRE_SPEEDTEST_TARGET: stub.url },
       });
       const q = await again.firstWindow();

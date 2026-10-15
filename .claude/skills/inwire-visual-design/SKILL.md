@@ -64,6 +64,17 @@ dark theme's `--card` stays under about `#222`, every pair of themes stays 5 ΔE
 apart, and High Contrast text is 7:1. The selected row mixes `--primary` into
 `--background` at a share set per theme (`SELECTION_SHARE` in the registry).
 
+**The accent is one of seven swatches, never a free colour.** `src/lib/accents.ts`
+is the table - a `--primary`, foreground and ring per theme - and an accent
+overrides only `--primary`, `--primary-foreground`, `--ring` and
+`--speed-download` (Violet also moves `--speed-upload` to orange, since purple
+is upload's). Blue is the theme blocks' own values and gets no rule. The other
+rules sit between the `accent-css` markers in `index.css`, printed by
+`scripts/themes/accent-css.ts`; `scripts/themes/accents.ts` fails on drift and
+`registry.ts` checks every swatch in every theme. Edit the table, re-run the
+generator, paste. The setting is `accentColor` / `data-accent-color`, never
+"accent", which is shadcn's hover fill. **The brand mark does not follow it.**
+
 **A theme drawn inside another needs `.theme-scope`.** `@theme` resolves every
 `--color-*` on `:root` against the document's theme, so a wrapper carrying only
 a theme class still paints the document's colours. The Appearance tiles carry
