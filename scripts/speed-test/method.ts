@@ -1,5 +1,5 @@
 /**
- * The speed test's arithmetic, its history and the state its surfaces draw.
+ * The speed test's arithmetic and its history; the state is `state.ts`.
  *
  *   npx tsx scripts/speed-test/method.ts
  */
@@ -7,9 +7,8 @@ import {
   bloatGrade, formatMbps, GAUGE_MARKS, gaugeFraction, jitter, median, netLatency, quantile, rpm,
   serverRttVarMs, serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB, TEST_CAP_TEXT,
 } from '../../src/services/speedTest/method';
-import { HISTORY_LIMIT, historyEntry, normalizeHistory } from '../../src/services/speedTest/history';
-import { IDLE, livePing, reduceSpeed, STARTING, type SpeedState } from '../../src/services/speedTest/state';
-import type { SpeedEvent, SpeedResult } from '../../src/services/speedTest/protocol';
+import { HISTORY_LIMIT, historyEntry, normalizeHistory, normalizeLastTrace } from '../../src/services/speedTest/history';
+import type { SpeedResult } from '../../src/services/speedTest/protocol';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -111,6 +110,7 @@ const result: SpeedResult = {
 const entry = historyEntry(result);
 check('a result as history keeps it', entry, {
   at: result.at, downMbps: 940, upMbps: 41, pingMs: 3.2, jitterMs: 0.4, grade: 'A', server: 'Tel Aviv', isp: 'Bezeq', colo: 'TLV', lat: 32.01, lon: 34.89,
+  rpm: 2000, loadedDownMs: 12, loadedUpMs: 30,
 });
 check('history keeps no address', JSON.stringify(entry).includes('192.0.2.1'), false);
 check('a stored history reads back', normalizeHistory([entry]), [entry]);
@@ -119,38 +119,15 @@ check('a damaged entry is dropped, not zeroed', normalizeHistory([entry, { at: 5
 check('an unknown grade reads as ?', normalizeHistory([{ ...entry, grade: 'Z' }])![0].grade, '?');
 check('not a list, no history', normalizeHistory({}), null);
 check('no more than the limit', normalizeHistory(Array.from({ length: 80 }, (_, i) => ({ ...entry, at: i })))!.length, HISTORY_LIMIT);
-
-console.log('\n--- the state the surfaces draw ---');
-{
-  const events: SpeedEvent[] = [
-    { type: 'phase', phase: 'connecting' },
-    { type: 'server', server: result.server },
-    { type: 'phase', phase: 'latency' },
-    { type: 'latency', ms: 4, jitterMs: null, ttfbMs: 4, tMs: 0 }, { type: 'latency', ms: 2, jitterMs: 2, ttfbMs: 2, tMs: 5 },
-    { type: 'latency', ms: 3, jitterMs: 1.5, ttfbMs: 3, tMs: 10 },
-    { type: 'phase', phase: 'download' },
-    { type: 'progress', phase: 'download', mbps: 500, sliceMbps: 500, elapsedMs: 100, connections: 4 },
-    { type: 'progress', phase: 'download', mbps: 900, sliceMbps: 1300, elapsedMs: 200, connections: 6 },
-  ];
-  let s: SpeedState = STARTING;
-  for (const e of events) s = reduceSpeed(s, e);
-  check('running, in the download, with the server', [s.status, s.phase, s.server?.isp], ['running', 'download', 'Bezeq']);
-  check('the ping tile shows the median so far', livePing(s), 3);
-  check('...and the jitter tile the engine\'s estimate', s.liveJitterMs, 1.5);
-  check('the dial follows the last progress', [s.liveMbps, s.connections, s.spark], [900, 6, [500, 900]]);
-  s = reduceSpeed(s, { type: 'figure', phase: 'download', figure: result.download });
-  check('a finished download fills its tile', s.downloadMbps, 940);
-  s = reduceSpeed(s, { type: 'phase', phase: 'upload' });
-  check('the upload starts its dial and sparkline from nothing', [s.liveMbps, s.spark.length], [0, 0]);
-  s = reduceSpeed(s, { type: 'done', result });
-  check('done', [s.status, s.phase, s.result?.grade], ['done', null, 'A']);
-  check('the ping tile shows the result once there is one', livePing(s), 3.2);
-  check('a failure says which phase and whether it was the rate limit',
-    reduceSpeed(STARTING, { type: 'failed', phase: 'download', message: 'x', rateLimited: true }).error,
-    { phase: 'download', message: 'x', rateLimited: true });
-  check('cancelled', reduceSpeed(s, { type: 'cancelled' }).status, 'cancelled');
-  check('idle before anything', IDLE.status, 'idle');
-}
+check('old entry keeps no rpm, and no loaded latency: a dash, never a zero',
+  (({ rpm, loadedDownMs, loadedUpMs }) => [rpm, loadedDownMs, loadedUpMs])(normalizeHistory([{ at: 1, downMbps: 10, upMbps: 2, pingMs: 5 }])![0]),
+  [null, null, null]);
+check('a result as history carries its responsiveness and loaded medians',
+  [entry.rpm, entry.loadedDownMs, entry.loadedUpMs], [2000, 12, 30]);
+check('damaged last trace is dropped', normalizeLastTrace({ at: 1, download: [1, 'x'], upload: [], warmupMs: 1500 }), null);
+check('...a sound one reads back', normalizeLastTrace({ at: 1, download: [1, 2], upload: [3], warmupMs: 1500 }),
+  { at: 1, download: [1, 2], upload: [3], warmupMs: 1500 });
+check('...and an overlong one is refused', normalizeLastTrace({ at: 1, download: Array(401).fill(1), upload: [], warmupMs: 1500 }), null);
 
 console.log(failures === 0 ? '\nAll speed-test method checks passed.' : `\n${failures} check(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -131,7 +131,7 @@ function Running({ state, capturing }: { state: SpeedState; capturing: boolean }
         />
       </div>
       <div className="flex flex-col items-center gap-3">
-        <Sparkline values={transferring ? state.spark : []} tone={phase === 'upload' ? 'upload' : 'download'} />
+        <Sparkline values={transferring ? state.trace[phase === 'upload' ? 'upload' : 'download'].map((p) => p.mbps) : []} tone={phase === 'upload' ? 'upload' : 'download'} />
         <EmptyStateButton icon={Square} onClick={cancelSpeedTest}>Cancel</EmptyStateButton>
       </div>
       {capturing && (

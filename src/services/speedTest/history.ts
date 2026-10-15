@@ -7,6 +7,7 @@
  * way in: a damaged entry is dropped, never shown as a zero.
  */
 import { createPreferenceStore } from '../preferenceStore';
+import { WARMUP_MS } from './method';
 import type { SpeedResult } from './protocol';
 
 /** One remembered test: the four numbers and where it ran. */
@@ -23,6 +24,10 @@ export interface SpeedHistoryEntry {
   colo?: string | null;
   lat?: number | null;
   lon?: number | null;
+  /** Responsiveness and the loaded medians; absent on an entry older than them, shown as a dash. */
+  rpm?: number | null;
+  loadedDownMs?: number | null;
+  loadedUpMs?: number | null;
 }
 
 /** The most kept; the oldest goes first. */
@@ -47,6 +52,9 @@ export function normalizeHistory(raw: unknown): SpeedHistoryEntry[] | null {
       colo: typeof v.colo === 'string' && /^[A-Za-z]{3}$/.test(v.colo) ? v.colo : null,
       lat: typeof v.lat === 'number' && Math.abs(v.lat) <= 90 ? v.lat : null,
       lon: typeof v.lon === 'number' && Math.abs(v.lon) <= 180 ? v.lon : null,
+      rpm: isNum(v.rpm) ? v.rpm : null,
+      loadedDownMs: isNum(v.loadedDownMs) ? v.loadedDownMs : null,
+      loadedUpMs: isNum(v.loadedUpMs) ? v.loadedUpMs : null,
     });
   }
   // Newest first, and no more than the limit, however it was stored.
@@ -73,11 +81,50 @@ export function historyEntry(result: SpeedResult): SpeedHistoryEntry {
     colo: result.server.colo,
     lat: result.server.coloLat,
     lon: result.server.coloLon,
+    rpm: result.summary.rpm,
+    loadedDownMs: result.download.loadedLatencyMs,
+    loadedUpMs: result.upload.loadedLatencyMs,
   };
 }
 
+/**
+ * The last run's traces, for the next run's ghost. A key of its own rather
+ * than a field of every history entry: one run's slices, not fifty.
+ */
+export interface LastTrace { at: number; download: number[]; upload: number[]; warmupMs: number }
+
+/** Two transfers' slices with room to spare; past it the value is not one this build wrote. */
+const LAST_TRACE_POINTS = 400;
+
+const isTrace = (v: unknown): v is number[] =>
+  Array.isArray(v) && v.length <= LAST_TRACE_POINTS && v.every(isNum);
+
+export function normalizeLastTrace(raw: unknown): LastTrace | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  if (!isNum(v.at) || !isNum(v.warmupMs) || !isTrace(v.download) || !isTrace(v.upload)) return null;
+  return { at: v.at, download: [...v.download], upload: [...v.upload], warmupMs: v.warmupMs };
+}
+
+export const lastTraceStore = createPreferenceStore<LastTrace | null>(
+  'inwire.speedTestLastTrace.v1',
+  normalizeLastTrace,
+  null,
+);
+
+/**
+ * Keeps a finished test: its entry, and its traces as the next run's ghost.
+ * The sheet has already read the previous ghost - it takes it when a run
+ * starts - so overwriting it here never draws a run against itself.
+ */
 export function recordResult(result: SpeedResult): void {
   speedHistoryStore.set([historyEntry(result), ...speedHistoryStore.get()].slice(0, HISTORY_LIMIT));
+  lastTraceStore.set({
+    at: result.at,
+    download: result.download.trace.slice(-LAST_TRACE_POINTS / 2),
+    upload: result.upload.trace.slice(-LAST_TRACE_POINTS / 2),
+    warmupMs: WARMUP_MS,
+  });
 }
 
 /**
