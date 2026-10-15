@@ -67,11 +67,13 @@ try {
   checkTrue('the Network panel offers the speed test', await until(() => visible('Run test'), 10_000));
   checkTrue('...and says who sees the address before the first test', await visible(/Cloudflare sees this machine/));
   await p.getByRole('button', { name: 'Run test' }).click();
-  checkTrue('running a test opens the sheet with the dial', await until(() => p.locator('svg[role="img"][aria-label]').count().then((n) => n > 0), 10_000));
+  checkTrue('running a test opens the sheet with its charts', await until(() => p.locator('svg[role="img"][aria-label]').count().then((n) => n > 0), 10_000));
   checkTrue('the server and ISP show before the numbers', await until(() => visible(/Example Networks/), 10_000));
-  checkTrue('the download reaches the dial', await until(() => p.locator('svg[aria-label^="Download:"]').count().then((n) => n > 0), 15_000));
-  checkTrue('the upload follows it', await until(() => p.locator('svg[aria-label^="Upload:"]').count().then((n) => n > 0), 20_000));
+  checkTrue('the download trace draws', await until(() => p.locator('svg[aria-label^="Download trace:"]').count().then((n) => n > 0), 15_000));
+  checkTrue('the upload follows it', await until(() => p.locator('svg[aria-label^="Upload trace:"]').count().then((n) => n > 0), 20_000));
   checkTrue('the test finishes with a result and Test again', await until(() => visible('Test again'), 30_000));
+  checkTrue('the latency boxes draw', await p.locator('svg[aria-label^="Latency:"]').count() > 0);
+  checkTrue('responsiveness is labelled approximate', await visible(/Responsiveness \(approx\.\)/));
   // The history is written as the result lands, and read back here off the
   // same storage the app restores it from.
   const stored = () => p.evaluate(() => {
@@ -86,14 +88,14 @@ try {
 
   // A cancel mid-download records nothing and leaves the app able to test again.
   await p.getByRole('button', { name: 'Test again' }).click();
-  await until(() => p.locator('svg[aria-label^="Download:"]').count().then((n) => n > 0), 15_000);
+  await until(() => p.locator('svg[aria-label^="Download trace:"]').count().then((n) => n > 0), 15_000);
   await sleep(1000);
   await p.getByRole('button', { name: 'Cancel' }).click();
   checkTrue('Cancel ends the test', await until(() => visible('Test cancelled'), 10_000));
   const afterCancel = await p.evaluate(() => JSON.parse(localStorage.getItem('inwire.speedTestHistory') ?? '[]').length);
   checkTrue('...and records nothing', afterCancel === 1, `${afterCancel} entries`);
 
-  // A refusal is said, with a way to try again - never a dial left spinning.
+  // A refusal is said, with a way to try again - never a trace left hanging.
   stub.set({ mode: 'down429' });
   await p.getByRole('button', { name: 'Start the speed test' }).click();
   checkTrue('a rate limit is said as one', await until(() => visible(/limiting tests/), 15_000));

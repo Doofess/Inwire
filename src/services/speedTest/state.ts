@@ -4,7 +4,7 @@
  * A module-level store rather than App state, for the reason `byteRange.ts`
  * is one: the Network panel's section and the workspace sheet both read it, a
  * test keeps running when the sheet is closed, and progress arrives ten times a
- * second - App re-rendering at that rate for a dial nobody may be looking at is
+ * second - App re-rendering at that rate for a trace nobody may be looking at is
  * the regression `packetCounts.ts` exists to prevent. The reducer is pure so
  * `scripts/speed-test/state.ts` can drive it.
  */

@@ -67,10 +67,11 @@ for (const theme of THEMES) {
       return false;
     };
     const text = (t: string | RegExp) => p.getByText(t).first().isVisible().catch(() => false);
-    // Which transfer the dial is on, by its own label - the tiles carry the
-    // words "Download" and "Upload" all the time.
-    const dialOn = (phase: 'Download' | 'Upload') =>
-      p.locator(`svg[aria-label^="${phase}:"]`).count().then((n) => n > 0).catch(() => false);
+    // Which phase is running, by the phase strip's current step - the traces
+    // carry the words "Download" and "Upload" all the time.
+    const phaseOn = (phase: 'Latency' | 'Download' | 'Upload') =>
+      p.locator('ol[aria-label="Test progress"] [aria-current="step"]').first().textContent()
+        .then((t) => (t ?? '').includes(phase)).catch(() => false);
 
     stub.set({ mode: 'ok' });
     await p.getByRole('button', { name: 'Network' }).click();
@@ -78,12 +79,12 @@ for (const theme of THEMES) {
     await shot('01-panel-never-tested');
 
     await p.getByRole('button', { name: 'Run test' }).click();
-    await until(() => text('Measuring ping'), 10_000);
+    await until(() => phaseOn('Latency'), 10_000);
     await shot('02-ping');
-    await until(() => dialOn('Download'), 15_000);
+    await until(() => phaseOn('Download'), 15_000);
     await sleep(4_000);
     await shot('03-download');
-    await until(() => dialOn('Upload'), 20_000);
+    await until(() => phaseOn('Upload'), 20_000);
     await sleep(4_000);
     await shot('04-upload');
     await until(() => text('Test again'), 30_000);
@@ -102,7 +103,7 @@ for (const theme of THEMES) {
 
     // A cancel, mid-download.
     await p.getByRole('button', { name: 'Test again' }).click();
-    await until(() => dialOn('Download'), 15_000);
+    await until(() => phaseOn('Download'), 15_000);
     await sleep(1500);
     await p.getByRole('button', { name: 'Cancel' }).click();
     await until(() => text('Test cancelled'), 10_000);
@@ -135,7 +136,7 @@ for (const theme of THEMES) {
     await p.getByRole('button', { name: 'Network' }).click();
     await sleep(400);
     await p.getByRole('button', { name: 'Run again' }).click();
-    await until(() => dialOn('Download'), 15_000);
+    await until(() => phaseOn('Download'), 15_000);
     await sleep(2500);
     await shot('11-running-beside-capture');
     await p.getByRole('button', { name: 'Cancel' }).click();
@@ -153,7 +154,7 @@ for (const theme of THEMES) {
     }
     await sleep(500);
 
-    // A fresh launch with history: the sheet idle, GO and the past results.
+    // A fresh launch with history: the sheet idle, Run test and the past results.
     {
       const again = await launchApp({
         args: ['.'],

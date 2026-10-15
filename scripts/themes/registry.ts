@@ -379,8 +379,8 @@ const CHROME_PAIRS: readonly [string, string, string][] = [
   // continuous chrome - so its quiet items ride the two pairs above. Its
   // elapsed clock is its own, and it clears the text floor on both themes.
   ['--primary', '--secondary', 'StatusBar capture elapsed'],
-  // The speed test's upload colour is on its figures' icons, the dial's label
-  // and the live tile's edge, on the card and on the ground (ADR 0054).
+  // The speed test's upload colour is on its figures' arrows, its trace and
+  // its latency box, on the card and on the ground (ADR 0054).
   ['--speed-upload', '--card', 'speed test upload, on a card'],
   ['--speed-upload', '--background', 'speed test upload, on the ground'],
   ['--speed-download', '--card', 'speed test download, on a card'],

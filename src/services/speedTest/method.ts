@@ -215,7 +215,7 @@ export function gaugeFraction(mbps: number): number {
   return 1;
 }
 
-/** A speed as the dial and the tiles print it: three significant figures, never an exponent. */
+/** A speed as the headline and the history print it: three significant figures, never an exponent. */
 export function formatMbps(mbps: number): string {
   if (!(mbps > 0)) return '0';
   if (mbps >= 100) return mbps.toFixed(0);

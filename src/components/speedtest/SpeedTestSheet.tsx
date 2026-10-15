@@ -1,23 +1,32 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowDown, ArrowUp, Globe, History, MapPin, Network, RotateCcw, Server, ShieldAlert, Square,
+  AlertTriangle, ArrowDown, ArrowUp, History, MapPin, Network, Play, RotateCcw, Server, ShieldAlert, Square,
   WifiOff, Wifi,
 } from 'lucide-react';
 import { requestMapFocus } from '../../services/speedTest/mapOverlay';
 import { PaneHeader } from '../common/PaneHeader';
 import { EmptyStateButton } from '../common/EmptyState';
-import { SpeedGauge, Sparkline } from './SpeedGauge';
-import { formatMbps, TEST_CAP_TEXT, type BloatGrade } from '../../services/speedTest/method';
+import { SpeedHeadline } from './SpeedHeadline';
+import { LatencyBoxes } from './LatencyBoxes';
+import { ThroughputTrace } from './ThroughputTrace';
+import { PhaseStrip } from './PhaseStrip';
+import { fmtMsValue, Hint } from './Hint';
+import { formatMbps, median, SLICE_MS, TEST_CAP_TEXT, TRANSFER_MS, WARMUP_MS } from '../../services/speedTest/method';
+import { spread } from '../../services/speedTest/stats';
 import {
-  cancelSpeedTest, livePing, startSpeedTest, useSpeedTest, type SpeedState,
+  cancelSpeedTest, livePing, startSpeedTest, useSpeedTest, type SpeedState, type SpeedStatus,
 } from '../../services/speedTest/state';
-import { changeText, shortIsp, speedHistoryStore, whenText, type SpeedHistoryEntry } from '../../services/speedTest/history';
+import {
+  changeText, lastTraceStore, shortIsp, speedHistoryStore, whenText, type LastTrace, type SpeedHistoryEntry,
+} from '../../services/speedTest/history';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import type { SpeedPhase, SpeedServer } from '../../services/speedTest/protocol';
 
 /**
- * The speed test's workspace sheet (ADR 0054): a big GO, a live dial, and the
- * results with their history - Ookla's shape, in this app's tokens and faces.
+ * The speed test's workspace sheet (ADR 0054 and its amendment): an
+ * instrument for the question a network person asks - how does this link
+ * behave under load? Two figures, latency per phase on one axis, and each
+ * transfer's trace with the last run's behind it.
  *
  * A sheet like Settings: it takes the workspace card, the view underneath is
  * untouched, and the back step, Escape or any view on the rail leaves it. The
@@ -39,16 +48,20 @@ export function SpeedTestSheet({ capturing, onShowOnMap }: {
 }) {
   const state = useSpeedTest();
   const [history, setHistory] = usePreferenceValue(speedHistoryStore);
+  const ghost = useGhost(state.status);
 
   return (
     <div className="flex h-full flex-col bg-background font-sans">
       <PaneHeader title="Speed test" detail={<ServerLine server={state.server} running={state.status === 'running'} />} />
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-[46rem] flex-col items-center gap-6 px-6 py-8">
+        <div className="mx-auto flex w-full max-w-[46rem] flex-col gap-6 px-6 py-8">
           <Announcer state={state} />
           {state.status === 'idle' && <Idle last={history[0] ?? null} />}
-          {state.status === 'running' && <Running state={state} capturing={capturing} />}
-          {state.status === 'done' && state.result && <Done state={state} previous={history[1] ?? null} onShowOnMap={onShowOnMap} />}
+          {state.status === 'running' && <Running state={state} capturing={capturing} ghost={ghost} />}
+          {state.status === 'done' && state.result && (
+            <Done state={state} previous={history[1] ?? null}
+              ghost={ghost?.at === state.result.at ? null : ghost} onShowOnMap={onShowOnMap} />
+          )}
           {state.status === 'failed' && state.error && <Failed error={state.error} />}
           {state.status === 'cancelled' && <Cancelled />}
           {state.status !== 'running' && history.length > 0 && (
@@ -60,28 +73,41 @@ export function SpeedTestSheet({ capturing, onShowOnMap }: {
   );
 }
 
+/**
+ * The last run's trace, read when a test starts and held until the next one,
+ * because the run in progress replaces it in the store the moment it finishes.
+ */
+function useGhost(status: SpeedStatus): LastTrace | null {
+  const ghost = useRef<LastTrace | null>(lastTraceStore.get());
+  const was = useRef(status);
+  if (status === 'running' && was.current !== 'running') ghost.current = lastTraceStore.get();
+  was.current = status;
+  return ghost.current;
+}
+
 // --- the states ------------------------------------------------------------------
 
-/** The round GO - Ookla's one big control, and the only primary action on the page. */
-function GoButton({ label = 'GO' }: { label?: string }) {
+/** The page's one primary action: 40px like the app's other primary buttons, with its words. */
+function RunButton() {
   return (
     <button
       type="button"
       onClick={startSpeedTest}
       autoFocus
       aria-label="Start the speed test"
-      className="group relative flex h-40 w-40 items-center justify-center rounded-full border-2 border-primary
-        bg-primary/5 text-primary transition-colors duration-200 hover:bg-primary hover:text-primary-foreground
-        focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/50 cursor-pointer"
+      className="inline-flex h-10 items-center gap-2 self-start rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground
+        transition-colors duration-150 hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+        focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
     >
-      <span className="text-4xl font-bold tracking-wide">{label}</span>
+      <Play className="h-4 w-4" fill="currentColor" aria-hidden />
+      Run test
     </button>
   );
 }
 
 function ConsentLine() {
   return (
-    <p className="max-w-[26rem] text-center text-xs leading-relaxed text-muted-foreground">
+    <p className="max-w-[34rem] text-xs leading-relaxed text-muted-foreground">
       Runs against Cloudflare, which sees this machine&rsquo;s public address. Uses up to {TEST_CAP_TEXT} of data.
       Results stay on this machine.
     </p>
@@ -90,97 +116,117 @@ function ConsentLine() {
 
 function Idle({ last }: { last: SpeedHistoryEntry | null }) {
   return (
-    <>
-      <GoButton />
+    <div className="flex flex-col gap-3">
+      <p className="max-w-[34rem] text-[13px] leading-relaxed text-foreground">
+        Measures download and upload, and how much the round trip rises while the link is busy.
+      </p>
+      <RunButton />
       <ConsentLine />
       {last && (
         <p className="text-xs text-muted-foreground">
           Last test {whenText(last.at, Date.now())}:{' '}
-          <span className="tabular-nums text-foreground">
+          <span className="font-mono tabular-nums text-foreground">
             <span className="text-speed-download">↓</span> {formatMbps(last.downMbps)} ·{' '}
-            <span className="text-speed-upload">↑</span> {formatMbps(last.upMbps)} Mb/s · {Math.round(last.pingMs)} ms
+            <span className="text-speed-upload">↑</span> {formatMbps(last.upMbps)} Mb/s
+            {typeof last.rpm === 'number' && <> · {last.rpm} RPM</>}
           </span>
           {last.server && <> · <ServerIsp city={last.server} colo={null} isp={last.isp} inline /></>}
         </p>
       )}
-    </>
+    </div>
   );
 }
 
-function Running({ state, capturing }: { state: SpeedState; capturing: boolean }) {
-  const ping = livePing(state);
-  const transferring = state.phase === 'download' || state.phase === 'upload';
+function Running({ state, capturing, ghost }: { state: SpeedState; capturing: boolean; ghost: LastTrace | null }) {
   const phase = state.phase ?? 'connecting';
-  const icon = phase === 'upload' ? <ArrowUp className="h-3.5 w-3.5" />
-    : phase === 'download' ? <ArrowDown className="h-3.5 w-3.5" />
-      : phase === 'latency' ? <Activity className="h-3.5 w-3.5" /> : <Globe className="h-3.5 w-3.5" />;
+  const live = phase === 'download' || phase === 'upload' ? phase : null;
+  const rttOf = (xs: SpeedState['loaded']['download']) => median(xs.map((s) => s.rttMs));
   return (
-    <>
-      <Tiles state={state} />
-      <div className="w-full">
-        <SpeedGauge
-          mbps={transferring ? state.liveMbps : 0}
-          label={transferring ? PHASE_LABEL[phase] : phase === 'latency' ? 'Measuring ping' : 'Connecting to Cloudflare'}
-          icon={icon}
-          active={transferring}
-          tone={phase === 'upload' ? 'upload' : 'download'}
-          readout={transferring ? null : {
-            value: ping === null ? '–' : fmtMsValue(ping),
-            unit: 'ms',
-          }}
-        />
-      </div>
-      <div className="flex flex-col items-center gap-3">
-        <Sparkline values={transferring ? state.trace[phase === 'upload' ? 'upload' : 'download'].map((p) => p.mbps) : []} tone={phase === 'upload' ? 'upload' : 'download'} />
+    <div className="flex w-full flex-col gap-5">
+      <PhaseStrip phase={phase} done={false} rampsAtMs={state.rampsAtMs} durationMs={TRANSFER_MS} />
+      <SpeedHeadline down={state.downloadMbps} up={state.uploadMbps} live={live} liveMbps={state.liveMbps} rpm={null} grade={null} />
+      <LatencyBoxes
+        idle={spread(state.loaded.idle.map((s) => s.ttfbMs))}
+        download={spread(state.loaded.download.map((s) => s.ttfbMs))}
+        upload={spread(state.loaded.upload.map((s) => s.ttfbMs))}
+        rtt={{ idle: livePing(state), download: rttOf(state.loaded.download), upload: rttOf(state.loaded.upload) }}
+        live={phase}
+      />
+      <Traces
+        download={{ points: state.trace.download, p90: null, mean: null, loaded: state.loaded.download, live: phase === 'download' }}
+        upload={{ points: state.trace.upload, p90: null, mean: null, loaded: state.loaded.upload, live: phase === 'upload' }}
+        ghost={ghost}
+      />
+      <div className="flex flex-wrap items-center gap-4">
         <EmptyStateButton icon={Square} onClick={cancelSpeedTest}>Cancel</EmptyStateButton>
-      </div>
-      {capturing && (
-        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Wifi className="h-3.5 w-3.5" aria-hidden />
-          A capture is running, so this test&rsquo;s traffic will appear in it.
-        </p>
-      )}
-    </>
-  );
-}
-
-function Done({ state, previous, onShowOnMap }: {
-  state: SpeedState; previous: SpeedHistoryEntry | null; onShowOnMap?: () => void;
-}) {
-  const r = state.result!;
-  return (
-    <>
-      <Tiles state={state} large />
-      <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2">
-        <Detail
-          label={<Hint term="Loaded latency" explain="Ping while the connection is busy downloading or uploading. The closer to the idle ping, the better calls and games hold up during a download." />}
-          value={
-            <span className="tabular-nums">
-              <span className="text-speed-download">↓</span> {fmtMs(r.download.loadedLatencyMs)} ·{' '}
-              <span className="text-speed-upload">↑</span> {fmtMs(r.upload.loadedLatencyMs)}
-            </span>
-          }
-        />
-        <Detail
-          label={<Hint term="Bufferbloat" explain="How much the ping rises when the connection is busy. A+ means it barely moves; F means calls and games stutter while anything downloads." />}
-          value={<GradeBadge grade={r.grade} />}
-        />
-        {previous && (
-          <Detail
-            wide
-            label={<span>Compared with the test {whenText(previous.at, Date.now())}</span>}
-            value={
-              <span className="tabular-nums">
-                <span className="text-speed-download">↓</span> {changeText(r.download.mbps, previous.downMbps)} ·{' '}
-                <span className="text-speed-upload">↑</span> {changeText(r.upload.mbps, previous.upMbps)} · ping {changeText(r.latency.idleMs, previous.pingMs)}
-              </span>
-            }
-          />
+        {capturing && (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Wifi className="h-3.5 w-3.5" aria-hidden />
+            A capture is running, so this test&rsquo;s traffic will appear in it.
+          </p>
         )}
       </div>
-      <EmptyStateButton icon={RotateCcw} primary onClick={startSpeedTest}>Test again</EmptyStateButton>
-      <ServerFooter server={r.server} onShowOnMap={onShowOnMap} />
-    </>
+    </div>
+  );
+}
+
+type TraceInput = Pick<Parameters<typeof ThroughputTrace>[0], 'points' | 'p90' | 'mean' | 'loaded' | 'live'>;
+
+function Traces({ download, upload, ghost }: { download: TraceInput; upload: TraceInput; ghost: LastTrace | null }) {
+  return (
+    <section aria-label="Throughput" className="flex flex-col gap-3">
+      <ThroughputTrace direction="download" durationMs={TRANSFER_MS} warmupMs={WARMUP_MS} ghost={ghost?.download ?? null} {...download} />
+      <ThroughputTrace direction="upload" durationMs={TRANSFER_MS} warmupMs={WARMUP_MS} ghost={ghost?.upload ?? null} showTime {...upload} />
+      {ghost && (
+        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span aria-hidden className="inline-block h-px w-4 bg-muted-foreground/60" />
+          The previous test, {whenText(ghost.at, Date.now())}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function Done({ state, previous, ghost, onShowOnMap }: {
+  state: SpeedState; previous: SpeedHistoryEntry | null; ghost: LastTrace | null; onShowOnMap?: () => void;
+}) {
+  const r = state.result!;
+  const points = (trace: number[]) => trace.map((mbps, i) => ({ tMs: (i + 1) * SLICE_MS, mbps }));
+  return (
+    <div className="flex w-full flex-col gap-5">
+      <PhaseStrip phase={null} done rampsAtMs={{ download: r.download.rampsAtMs, upload: r.upload.rampsAtMs }} durationMs={TRANSFER_MS} />
+      <SpeedHeadline down={r.download.mbps} up={r.upload.mbps} live={null} liveMbps={0} rpm={r.summary.rpm} grade={r.grade} />
+      <LatencyBoxes
+        idle={r.summary.idle} download={r.summary.download} upload={r.summary.upload}
+        rtt={{ idle: r.latency.idleMs, download: r.download.loadedLatencyMs, upload: r.upload.loadedLatencyMs }}
+        live={null}
+      />
+      <Traces
+        download={{ points: points(r.download.trace), p90: r.download.p90, mean: r.summary.downMeanMbps, loaded: r.download.loaded, live: false }}
+        upload={{ points: points(r.upload.trace), p90: r.upload.p90, mean: r.summary.upMeanMbps, loaded: r.upload.loaded, live: false }}
+        ghost={ghost}
+      />
+      <div className="flex flex-col gap-3 border-t border-border pt-4">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+          {previous && (
+            <>
+              <dt className="text-muted-foreground">Compared with the test {whenText(previous.at, Date.now())}</dt>
+              <dd className="font-mono tabular-nums text-foreground">
+                <span className="text-speed-download">↓</span> {changeText(r.download.mbps, previous.downMbps)} ·{' '}
+                <span className="text-speed-upload">↑</span> {changeText(r.upload.mbps, previous.upMbps)} · ping {changeText(r.latency.idleMs, previous.pingMs)}
+              </dd>
+            </>
+          )}
+          <dt className="text-muted-foreground">Connections</dt>
+          <dd className="font-mono tabular-nums text-foreground">
+            {r.download.connections} <span className="text-speed-download">↓</span> / {r.upload.connections}{' '}
+            <span className="text-speed-upload">↑</span>
+          </dd>
+        </dl>
+        <div><EmptyStateButton icon={RotateCcw} primary onClick={startSpeedTest}>Test again</EmptyStateButton></div>
+        <ServerFooter server={r.server} onShowOnMap={onShowOnMap} />
+      </div>
+    </div>
   );
 }
 
@@ -210,7 +256,7 @@ function Failed({ error }: { error: NonNullable<SpeedState['error']> }) {
         : { Icon: WifiOff, title: `The connection dropped during ${phase}`,
           body: 'This happens when the network changes mid-test. Nothing was recorded; try again.' };
   return (
-    <div role="alert" className="flex flex-col items-center gap-3 text-center">
+    <div role="alert" className="flex flex-col items-start gap-3">
       <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-secondary">
         <Icon className="h-5 w-5 text-warning" aria-hidden />
       </div>
@@ -226,97 +272,15 @@ function Failed({ error }: { error: NonNullable<SpeedState['error']> }) {
 
 function Cancelled() {
   return (
-    <div className="flex flex-col items-center gap-3 text-center">
+    <div className="flex flex-col items-start gap-3">
       <p className="text-[13px] font-semibold text-foreground">Test cancelled</p>
       <p className="text-xs text-muted-foreground">Nothing was recorded.</p>
-      <GoButton />
+      <RunButton />
     </div>
   );
 }
 
 // --- pieces ----------------------------------------------------------------------
-
-/** Ping, jitter, download, upload: filled in as each phase finishes, a dash until then. */
-function Tiles({ state, large = false }: { state: SpeedState; large?: boolean }) {
-  const ping = livePing(state);
-  const jitterMs = state.result?.latency.jitterMs ?? state.liveJitterMs;
-  const tiles: { key: string; icon: React.ReactNode; label: React.ReactNode; value: string | null; unit: string; live: boolean }[] = [
-    { key: 'down', icon: <ArrowDown className="h-3.5 w-3.5 text-speed-download" />, label: 'Download', value: state.downloadMbps === null ? null : formatMbps(state.downloadMbps), unit: 'Mb/s', live: state.phase === 'download' },
-    { key: 'up', icon: <ArrowUp className="h-3.5 w-3.5 text-speed-upload" />, label: 'Upload', value: state.uploadMbps === null ? null : formatMbps(state.uploadMbps), unit: 'Mb/s', live: state.phase === 'upload' },
-    { key: 'ping', icon: <Activity className="h-3.5 w-3.5" />, label: 'Ping', value: ping === null ? null : fmtMsValue(ping), unit: 'ms', live: state.phase === 'latency' },
-    {
-      key: 'jitter', icon: <Activity className="h-3.5 w-3.5 opacity-60" />,
-      label: <Hint term="Jitter" explain="How much the ping varies from one measurement to the next. Low jitter keeps calls and games smooth." />,
-      value: jitterMs === null ? null : fmtMsValue(jitterMs), unit: 'ms', live: state.phase === 'latency',
-    },
-  ];
-  return (
-    <div className="grid w-full grid-cols-2 gap-3 md:grid-cols-4">
-      {tiles.map((t) => (
-        <div key={t.key}
-          className={`rounded-lg border bg-card px-3 py-2.5 transition-colors duration-200 ${
-            !t.live ? 'border-border' : t.key === 'up' ? 'border-speed-upload/70' : t.key === 'down' ? 'border-speed-download/70' : 'border-primary/50'}`}>
-          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-            {t.icon}{t.label}
-          </div>
-          <div className="mt-1 flex items-baseline gap-1">
-            {/* A pending figure is a quiet dash at the figure's own height, with no
-                unit beside it - a long dash and "Mb/s" read as a rule with a label. */}
-            <span className={`${large ? 'text-3xl' : 'text-2xl'} font-semibold tabular-nums leading-none ${t.value === null ? 'text-muted-foreground/50' : 'text-foreground'}`}>
-              {t.value ?? '–'}
-            </span>
-            {t.value !== null && <span className="text-xs text-muted-foreground">{t.unit}</span>}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function Detail({ label, value, wide = false }: { label: React.ReactNode; value: React.ReactNode; wide?: boolean }) {
-  return (
-    <div className={`flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2 ${wide ? 'sm:col-span-2' : ''}`}>
-      <span className="shrink-0 text-xs text-muted-foreground">{label}</span>
-      <span className="min-w-0 text-sm text-foreground">{value}</span>
-    </div>
-  );
-}
-
-/** A term with a one-line explanation, on hover and on keyboard focus alike. */
-function Hint({ term, explain }: { term: string; explain: string }) {
-  return (
-    <span tabIndex={0} aria-label={`${term}: ${explain}`}
-      className="group relative cursor-help underline decoration-dotted underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm">
-      {term}
-      <span role="tooltip"
-        className="pointer-events-none absolute bottom-full left-0 z-20 mb-1.5 hidden w-64 rounded-md border border-border bg-popover px-2.5 py-1.5
-          text-[11px] font-normal leading-snug text-popover-foreground shadow-lg no-underline group-hover:block group-focus:block">
-        {explain}
-      </span>
-    </span>
-  );
-}
-
-const GRADE_TONE: Record<BloatGrade, string> = {
-  'A+': 'bg-success/15 text-success border-success/40',
-  A: 'bg-success/15 text-success border-success/40',
-  B: 'bg-warning/15 text-warning border-warning/40',
-  C: 'bg-warning/15 text-warning border-warning/40',
-  D: 'bg-danger/15 text-danger border-danger/40',
-  F: 'bg-danger/15 text-danger border-danger/40',
-};
-const GRADE_WORD: Record<BloatGrade, string> = {
-  'A+': 'barely moves', A: 'small rise', B: 'some rise', C: 'noticeable', D: 'large', F: 'severe',
-};
-
-function GradeBadge({ grade }: { grade: BloatGrade }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={`rounded border px-1.5 py-px text-xs font-bold ${GRADE_TONE[grade]}`}>{grade}</span>
-      <span className="text-xs text-muted-foreground">{GRADE_WORD[grade]}</span>
-    </span>
-  );
-}
 
 /**
  * The server and the network the test ran from, as one line: "Cloudflare ·
@@ -364,7 +328,7 @@ function ServerLine({ server, running }: { server: SpeedServer | null; running: 
 function ServerFooter({ server, onShowOnMap }: { server: SpeedServer; onShowOnMap?: () => void }) {
   const placed = server.coloLat !== null && server.coloLon !== null;
   return (
-    <div className="flex flex-col items-center gap-1.5">
+    <div className="flex flex-col items-start gap-1.5">
     {onShowOnMap && (placed ? (
       <button type="button"
         onClick={() => { requestMapFocus([server.coloLon!, server.coloLat!]); onShowOnMap(); }}
@@ -377,7 +341,7 @@ function ServerFooter({ server, onShowOnMap }: { server: SpeedServer; onShowOnMa
         <MapPin className="h-3.5 w-3.5" aria-hidden /> Server location unknown
       </span>
     ))}
-    <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+    <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
       <ServerIsp city={server.coloCity} colo={server.colo} isp={server.isp} inline />
       {server.ip && <span>{'·'} Your address <span className="font-mono">{server.ip}</span></span>}
     </p>
@@ -398,6 +362,10 @@ function ServerFooter({ server, onShowOnMap }: { server: SpeedServer; onShowOnMa
 function HistoryTable({ history, onClear }: { history: SpeedHistoryEntry[]; onClear: () => void }) {
   const [confirming, setConfirming] = useState(false);
   const now = Date.now();
+  const shown = history.slice(0, 10);
+  const lat = shown.flatMap((h) => [h.pingMs, h.loadedDownMs ?? null, h.loadedUpMs ?? null])
+    .filter((v): v is number => typeof v === 'number' && v > 0);
+  const domain: [number, number] = lat.length ? [Math.min(...lat), Math.max(...lat)] : [1, 100];
   return (
     <section className="w-full" aria-label="Previous tests">
       <div className="mb-2 flex items-center justify-between">
@@ -420,25 +388,34 @@ function HistoryTable({ history, onClear }: { history: SpeedHistoryEntry[]; onCl
         )}
       </div>
       <div className="overflow-hidden rounded-lg border border-border">
-        <table className="w-full text-xs">
+        <table className="w-full whitespace-nowrap text-xs">
           <thead className="bg-secondary text-muted-foreground">
             <tr>
               <th className="px-3 py-1.5 text-left font-medium">When</th>
               <th className="px-3 py-1.5 text-right font-medium"><span className="inline-flex items-center gap-1"><ArrowDown className="h-3 w-3 text-speed-download" aria-hidden />Download</span></th>
               <th className="px-3 py-1.5 text-right font-medium"><span className="inline-flex items-center gap-1"><ArrowUp className="h-3 w-3 text-speed-upload" aria-hidden />Upload</span></th>
-              <th className="px-3 py-1.5 text-right font-medium">Ping</th>
+              <th className="px-3 py-1.5 text-right font-medium" title="Idle ping. The strip runs from idle (hollow) to the worse loaded round trip (solid)">Ping</th>
+              <th className="hidden px-3 py-1.5 text-right font-medium sm:table-cell">RPM</th>
               <th className="hidden px-3 py-1.5 text-center font-medium sm:table-cell">Grade</th>
               <th className="hidden px-3 py-1.5 text-left font-medium md:table-cell">Server and ISP</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border bg-card">
-            {history.slice(0, 10).map((h) => (
+            {shown.map((h) => (
               <tr key={h.at}>
                 <td className="px-3 py-1.5 text-muted-foreground" title={new Date(h.at).toLocaleString()}>{whenText(h.at, now)}</td>
-                <td className="px-3 py-1.5 text-right tabular-nums text-foreground">{formatMbps(h.downMbps)} <span className="text-muted-foreground">Mb/s</span></td>
-                <td className="px-3 py-1.5 text-right tabular-nums text-foreground">{formatMbps(h.upMbps)} <span className="text-muted-foreground">Mb/s</span></td>
-                <td className="px-3 py-1.5 text-right tabular-nums text-foreground">{fmtMsValue(h.pingMs)} <span className="text-muted-foreground">ms</span></td>
-                <td className="hidden px-3 py-1.5 text-center sm:table-cell">{h.grade}</td>
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums text-foreground">{formatMbps(h.downMbps)} <span className="font-sans text-muted-foreground">Mb/s</span></td>
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums text-foreground">{formatMbps(h.upMbps)} <span className="font-sans text-muted-foreground">Mb/s</span></td>
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums text-foreground">
+                  <span className="inline-flex items-center justify-end gap-2">
+                    <PingStrip idle={h.pingMs} loaded={loadedOf(h)} domain={domain} />
+                    <span>{fmtMsValue(h.pingMs)} <span className="font-sans text-muted-foreground">ms</span></span>
+                  </span>
+                </td>
+                <td className="hidden px-3 py-1.5 text-right font-mono tabular-nums text-foreground sm:table-cell">
+                  {typeof h.rpm === 'number' ? h.rpm : <span className="text-muted-foreground">–</span>}
+                </td>
+                <td className="hidden px-3 py-1.5 text-center font-mono sm:table-cell">{h.grade}</td>
                 <td className="hidden max-w-[14rem] truncate px-3 py-1.5 text-muted-foreground md:table-cell"
                   title={[h.server, h.isp].filter(Boolean).join(' — ')}>
                   {h.server ?? '—'}{h.isp && <> — {shortIsp(h.isp)}</>}
@@ -449,6 +426,26 @@ function HistoryTable({ history, onClear }: { history: SpeedHistoryEntry[]; onCl
         </table>
       </div>
     </section>
+  );
+}
+
+function loadedOf(h: SpeedHistoryEntry): number | null {
+  const v = [h.loadedDownMs, h.loadedUpMs].filter((x): x is number => typeof x === 'number');
+  return v.length ? Math.max(...v) : null;
+}
+
+/** Idle (hollow) to loaded (solid) on a log track shared by the visible rows. */
+function PingStrip({ idle, loaded, domain }: { idle: number; loaded: number | null; domain: [number, number] }) {
+  const [lo, hi] = domain;
+  const span = Math.log10(hi) - Math.log10(lo);
+  const x = (v: number) => 4 + (span > 0 ? ((Math.log10(Math.max(lo, v)) - Math.log10(lo)) / span) * 40 : 0);
+  return (
+    <svg width={48} height={8} viewBox="0 0 48 8" aria-hidden className="hidden shrink-0 sm:block">
+      <line x1={0} x2={48} y1={4} y2={4} className="stroke-border" />
+      {loaded !== null && <line x1={x(idle)} x2={x(loaded)} y1={4} y2={4} className="stroke-muted-foreground" strokeWidth={1.5} />}
+      <circle cx={x(idle)} cy={4} r={2.5} className="fill-card stroke-muted-foreground" strokeWidth={1.2} />
+      {loaded !== null && <circle cx={x(loaded)} cy={4} r={2.5} className="fill-foreground" />}
+    </svg>
   );
 }
 
@@ -474,13 +471,3 @@ function Announcer({ state }: { state: SpeedState }) {
   }, [state.status, state.phase, state.result]);
   return <div aria-live="polite" className="sr-only">{text}</div>;
 }
-
-// --- formatting --------------------------------------------------------------------
-
-function fmtMsValue(ms: number): string {
-  return ms < 10 ? ms.toFixed(1) : Math.round(ms).toString();
-}
-function fmtMs(ms: number | null): string {
-  return ms === null ? '—' : `${fmtMsValue(ms)} ms`;
-}
-

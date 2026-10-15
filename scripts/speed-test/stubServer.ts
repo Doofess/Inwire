@@ -22,6 +22,8 @@ export interface StubOptions {
   /** Idle round trip, and what a busy link adds to it. */
   idleMs?: number;
   loadedExtraMs?: number;
+  /** Mean of an exponential delay added to every ping, so a box has width. */
+  jitterMs?: number;
   mode?: StubMode;
 }
 
@@ -36,7 +38,7 @@ export interface SpeedStub {
 const CHUNK = Buffer.alloc(256 * 1024, 0x5a);
 
 export async function startSpeedStub(initial: StubOptions = {}): Promise<SpeedStub> {
-  let o: Required<StubOptions> = { downMbps: 400, upMbps: 60, idleMs: 8, loadedExtraMs: 25, mode: 'ok', ...initial };
+  let o: Required<StubOptions> = { downMbps: 400, upMbps: 60, idleMs: 8, loadedExtraMs: 25, jitterMs: 4, mode: 'ok', ...initial };
   let activeTransfers = 0;
   /**
    * When bytes last moved. "Busy" is judged from this rather than from
@@ -77,7 +79,7 @@ export async function startSpeedStub(initial: StubOptions = {}): Promise<SpeedSt
       const bytes = Number(url.searchParams.get('bytes') ?? 0);
       if (bytes === 0) {
         const busy = performance.now() - lastMovedAt < 300;
-        await sleep(o.idleMs + (busy ? o.loadedExtraMs : 0) + Math.random() * 1.5);
+        await sleep(o.idleMs + (busy ? o.loadedExtraMs : 0) + o.jitterMs * -Math.log(1 - Math.random()));
         res.writeHead(200, { 'Content-Length': '0', colo: 'TLV' });
         res.end();
         return;
