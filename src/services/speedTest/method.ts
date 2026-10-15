@@ -177,8 +177,23 @@ export function bloatGrade(idleMs: number, loadedMs: number): BloatGrade {
   return 'F';
 }
 
-/** Responsiveness in round trips per minute, as Apple's `networkQuality` reports it. */
+/**
+ * Responsiveness in round trips per minute: a minute over one loaded round
+ * trip. **Approximate**, and labelled so: Apple's `networkQuality` and the
+ * IETF responsiveness draft (draft-ietf-ippm-responsiveness) count every
+ * round trip a fresh request makes - DNS, TCP, TLS, HTTP - on new and loaded
+ * connections alike, where this is one empty request on a warm connection.
+ */
 export const rpm = (latencyMs: number): number => (latencyMs > 0 ? Math.round(60_000 / latencyMs) : 0);
+
+export type RpmBand = 'Low' | 'Medium' | 'High';
+/** The draft's bands, as `networkQuality` prints them: Low under 300, High over 1000. */
+export const RPM_BANDS = { mediumFrom: 300, highAbove: 1000 } as const;
+
+export function rpmBand(value: number): RpmBand {
+  if (value < RPM_BANDS.mediumFrom) return 'Low';
+  return value > RPM_BANDS.highAbove ? 'High' : 'Medium';
+}
 
 /**
  * The gauge's marks: Ookla's non-linear scale, each mark an equal step of arc,

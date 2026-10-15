@@ -118,7 +118,18 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
     check('...and uploading, no more than the server received plus what was in flight',
       r.upload.bytes > 0 && r.upload.bytes <= s.uploaded() + 8 * 4_000_000, `${r.upload.bytes} vs ${s.uploaded()}`);
     check('...and a grade', /^(A\+|[A-DF])$/.test(r.grade));
+    const slices = (quick(s.port).transferMs ?? 0) / 100;
+    check('...the trace has a point a slice, warm-up included',
+      r.download.trace.length > 0 && Math.abs(r.download.trace.length - slices) <= 3, `${r.download.trace.length} of ~${slices}`);
+    check('...loaded samples, each inside its transfer', r.download.loaded.length > 0
+      && r.download.loaded.every((x) => x.tMs >= 0 && x.tMs <= (quick(s.port).transferMs ?? 0) + 200));
+    check('...summarised: the spread counts every loaded sample', r.summary.download?.n === r.download.loaded.length);
+    check('...and a responsiveness', (r.summary.rpm ?? 0) > 0, String(r.summary.rpm));
+    check('...idle samples kept, time to first byte no less than the round trip (no cfL4 here)',
+      r.latency.idle.length === 5 && r.latency.idle.every((x) => x.ttfbMs >= x.rttMs));
   }
+  check('progress carries the slice speed for the trace',
+    events.some((e) => e.type === 'progress' && typeof e.sliceMbps === 'number'));
   const phases = events.filter((e) => e.type === 'phase').map((e) => (e as { phase: string }).phase);
   check('the phases come in order', JSON.stringify(phases) === JSON.stringify(['connecting', 'latency', 'download', 'upload']), phases.join(','));
   check('progress is reported while transferring', events.filter((e) => e.type === 'progress').length >= 20);

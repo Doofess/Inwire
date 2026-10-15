@@ -19,10 +19,11 @@ import https from 'node:https';
 import { randomBytes } from 'node:crypto';
 import {
   bloatGrade, DOWNLOAD_CAP_BYTES, DOWNLOAD_REQUEST_BYTES, jitter, LATENCY_SAMPLES, LOADED_PROBE_MS,
-  median, netLatency, serverRttVarMs, RAMP_EVERY_MS, RAMP_STEP, shouldRamp, SliceCounter, SLICE_MS, START_CONNECTIONS,
-  transferFigure, TRANSFER_MS, UPLOAD_CAP_BYTES, UPLOAD_REQUEST_BYTES, WARMUP_MS, type TransferFigure,
+  median, netLatency, serverRttVarMs, serverTimeMs, RAMP_EVERY_MS, RAMP_STEP, shouldRamp, SliceCounter, SLICE_MS,
+  START_CONNECTIONS, toMbps, transferFigure, TRANSFER_MS, UPLOAD_CAP_BYTES, UPLOAD_REQUEST_BYTES, WARMUP_MS,
 } from '../../src/services/speedTest/method';
-import type { SpeedEvent, SpeedPhase, SpeedServer } from '../../src/services/speedTest/protocol';
+import type { LatencySample, SpeedEvent, SpeedPhase, SpeedServer, SpeedTransfer } from '../../src/services/speedTest/protocol';
+import { summarise } from '../../src/services/speedTest/stats';
 import { coloPlace } from '../../src/services/speedTest/colos';
 
 /**
@@ -128,17 +129,18 @@ export async function runSpeedTest(
     emit({ type: 'phase', phase });
     const up = await run.transfer('upload');
 
-    const idleMs = median(idle)!;
+    const idleMs = median(idle.map((s) => s.rttMs))!;
     const loaded = Math.max(down.loadedLatencyMs ?? idleMs, up.loadedLatencyMs ?? idleMs);
     emit({
       type: 'done',
       result: {
         at: Date.now(),
         server: placeServer(server, run.colo),
-        latency: { idleMs, jitterMs, samples: idle.length },
+        latency: { idleMs, jitterMs, samples: idle.length, idle },
         download: down,
         upload: up,
         grade: bloatGrade(idleMs, loaded),
+        summary: summarise({ idle, download: down, upload: up }, run.warmupMs),
         bytesMoved: down.bytes + up.bytes,
       },
     });
@@ -164,7 +166,7 @@ class Run {
   /** The data centre, from any response's `colo` header, if `/meta` said nothing. */
   colo: string | null = null;
   private readonly transferMs: number;
-  private readonly warmupMs: number;
+  readonly warmupMs: number;
   private readonly idleTimeoutMs: number;
 
   constructor(
@@ -294,21 +296,22 @@ class Run {
    * Jitter is the server's RTT variation when it reports one (`serverRttVarMs`
    * says why), the mean successive difference otherwise.
    */
-  async idleLatency(): Promise<{ samples: number[]; jitterMs: number }> {
+  async idleLatency(): Promise<{ samples: LatencySample[]; jitterMs: number }> {
     const agent = this.agent(1);
-    const samples: number[] = [];
+    const startedAt = now();
+    const samples: LatencySample[] = [];
     const variation: number[] = [];
     const count = this.options.latencySamples ?? LATENCY_SAMPLES;
-    const estimate = (): number | null => (variation.length > 0 ? median(variation) : jitter(samples));
+    const estimate = (): number | null => (variation.length > 0 ? median(variation) : jitter(samples.map((s) => s.rttMs)));
     for (let i = 0; i <= count; i++) {
       const res = await this.request(agent, 'GET', '/__down?bytes=0');
       if (i === 0) continue; // the TCP and TLS handshakes, not a round trip
       const timing = header(res.headers['server-timing']);
-      const ms = netLatency(res.firstByteMs, timing);
-      samples.push(ms);
+      const sample = probeSample(res, timing, now() - startedAt);
+      samples.push(sample);
       const rttVar = serverRttVarMs(timing);
       if (rttVar !== null) variation.push(rttVar);
-      this.emit({ type: 'latency', ms, jitterMs: estimate() });
+      this.emit({ type: 'latency', ms: sample.rttMs, jitterMs: estimate(), ttfbMs: sample.ttfbMs, tMs: sample.tMs });
     }
     return { samples, jitterMs: estimate() ?? 0 };
   }
@@ -318,7 +321,7 @@ class Run {
    * cap, bytes counted into slices, ramping while the total still rises, and
    * a loaded-latency probe on a connection of its own throughout.
    */
-  async transfer(direction: 'download' | 'upload'): Promise<TransferFigure & { loadedLatencyMs: number | null; connections: number }> {
+  async transfer(direction: 'download' | 'upload'): Promise<SpeedTransfer> {
     const counter = new SliceCounter(SLICE_MS);
     const cap = direction === 'download'
       ? this.options.downloadCapBytes ?? DOWNLOAD_CAP_BYTES
@@ -335,7 +338,8 @@ class Run {
     let stopped = false;
     let failure: unknown = null;
     let connections = 0;
-    const loaded: number[] = [];
+    const loaded: LatencySample[] = [];
+    const rampsAtMs: number[] = [];
     const count = (bytes: number): void => {
       if (stopped) return;
       counter.add(elapsed(), bytes);
@@ -379,7 +383,9 @@ class Run {
       const t = elapsed();
       this.emit({
         type: 'progress', phase: direction, connections,
-        mbps: counter.mbpsOver(Math.max(0, t - 1000), t), elapsedMs: Math.round(t),
+        mbps: counter.mbpsOver(Math.max(0, t - 1000), t),
+        sliceMbps: counter.mbpsOver(Math.max(0, t - SLICE_MS), t),
+        elapsedMs: Math.round(t),
       });
     }, SLICE_MS);
     // More connections while the total still rises: each step compares the
@@ -388,6 +394,7 @@ class Run {
       const t = elapsed();
       if (stopped || t < 2 * RAMP_EVERY_MS) return;
       if (shouldRamp(connections, counter.mbpsOver(t - RAMP_EVERY_MS, t), counter.mbpsOver(t - 2 * RAMP_EVERY_MS, t - RAMP_EVERY_MS))) {
+        rampsAtMs.push(Math.round(t));
         spawn(RAMP_STEP);
       }
     }, RAMP_EVERY_MS);
@@ -398,9 +405,9 @@ class Run {
         try {
           const res = await this.request(probeAgent, 'GET', '/__down?bytes=0', { stopped: () => stopped });
           if (res.status === 200) {
-            const ms = netLatency(res.firstByteMs, header(res.headers['server-timing']));
-            loaded.push(ms);
-            this.emit({ type: 'loaded', phase: direction, ms });
+            const sample = probeSample(res, header(res.headers['server-timing']), elapsed());
+            loaded.push(sample);
+            this.emit({ type: 'loaded', phase: direction, ms: sample.rttMs, ttfbMs: sample.ttfbMs, tMs: sample.tMs });
           }
         } catch {
           // A probe that fails under load is a lost sample, not a failed test.
@@ -438,8 +445,26 @@ class Run {
     const figure = transferFigure(counter, this.warmupMs, elapsed());
     if (figure === null) throw new Error(`the ${direction} moved no data`);
     this.emit({ type: 'figure', phase: direction, figure });
-    return { ...figure, loadedLatencyMs: median(loaded), connections };
+    // Every whole slice, warm-up included - the trace shows what the figure left out.
+    const trace = counter.slices.slice(0, -1).map((b) => toMbps(b, SLICE_MS));
+    return {
+      ...figure, loadedLatencyMs: median(loaded.map((s) => s.rttMs)), connections, trace, loaded, rampsAtMs,
+    };
   }
+}
+
+/**
+ * One probe as a sample: the round trip the figures compare, and the client's
+ * own time to first byte net of the server's time, which the boxes draw -
+ * the smoothed `cfL4` rtt moves an eighth of the way a sample and hides the
+ * spread.
+ */
+function probeSample(res: Response, timing: string | undefined, tMs: number): LatencySample {
+  return {
+    tMs: Math.round(tMs),
+    rttMs: netLatency(res.firstByteMs, timing),
+    ttfbMs: Math.max(0.1, res.firstByteMs - serverTimeMs(timing)),
+  };
 }
 
 /** Writes `size` bytes of `payload`, repeated, honouring backpressure and counting what the socket took. */

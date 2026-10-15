@@ -101,10 +101,11 @@ console.log('\n--- history ---');
 const result: SpeedResult = {
   at: 1_791_550_000_000,
   server: { colo: 'TLV', coloCity: 'Tel Aviv', coloLat: 32.01, coloLon: 34.89, isp: 'Bezeq', asn: 6810, ip: '192.0.2.1', city: 'Petah Tikva' },
-  latency: { idleMs: 3.2, jitterMs: 0.4, samples: 20 },
-  download: { mbps: 940, p10: 900, p90: 960, slices: 80, bytes: 1e9, loadedLatencyMs: 12, connections: 6 },
-  upload: { mbps: 41, p10: 38, p90: 43, slices: 80, bytes: 5e7, loadedLatencyMs: 30, connections: 4 },
+  latency: { idleMs: 3.2, jitterMs: 0.4, samples: 20, idle: [] },
+  download: { mbps: 940, p10: 900, p90: 960, slices: 80, bytes: 1e9, loadedLatencyMs: 12, connections: 6, trace: [], loaded: [], rampsAtMs: [] },
+  upload: { mbps: 41, p10: 38, p90: 43, slices: 80, bytes: 5e7, loadedLatencyMs: 30, connections: 4, trace: [], loaded: [], rampsAtMs: [] },
   grade: 'A',
+  summary: { idle: null, download: null, upload: null, rpm: 2000, downMeanMbps: 935, upMeanMbps: 40 },
   bytesMoved: 1.05e9,
 };
 const entry = historyEntry(result);
@@ -125,10 +126,11 @@ console.log('\n--- the state the surfaces draw ---');
     { type: 'phase', phase: 'connecting' },
     { type: 'server', server: result.server },
     { type: 'phase', phase: 'latency' },
-    { type: 'latency', ms: 4, jitterMs: null }, { type: 'latency', ms: 2, jitterMs: 2 }, { type: 'latency', ms: 3, jitterMs: 1.5 },
+    { type: 'latency', ms: 4, jitterMs: null, ttfbMs: 4, tMs: 0 }, { type: 'latency', ms: 2, jitterMs: 2, ttfbMs: 2, tMs: 5 },
+    { type: 'latency', ms: 3, jitterMs: 1.5, ttfbMs: 3, tMs: 10 },
     { type: 'phase', phase: 'download' },
-    { type: 'progress', phase: 'download', mbps: 500, elapsedMs: 100, connections: 4 },
-    { type: 'progress', phase: 'download', mbps: 900, elapsedMs: 200, connections: 6 },
+    { type: 'progress', phase: 'download', mbps: 500, sliceMbps: 500, elapsedMs: 100, connections: 4 },
+    { type: 'progress', phase: 'download', mbps: 900, sliceMbps: 1300, elapsedMs: 200, connections: 6 },
   ];
   let s: SpeedState = STARTING;
   for (const e of events) s = reduceSpeed(s, e);
