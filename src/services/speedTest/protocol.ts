@@ -74,7 +74,8 @@ export interface SpeedResult {
   latency: { idleMs: number; jitterMs: number; samples: number; idle: LatencySample[] };
   download: SpeedTransfer;
   upload: SpeedTransfer;
-  grade: BloatGrade;
+  /** Null when no loaded probe answered in either phase: nothing to grade. */
+  grade: BloatGrade | null;
   summary: SpeedSummary;
   /** Every byte both directions moved, for the "transfers up to" promise. */
   bytesMoved: number;

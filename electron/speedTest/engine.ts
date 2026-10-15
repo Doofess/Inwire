@@ -18,8 +18,8 @@ import http from 'node:http';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
 import {
-  bloatGrade, DOWNLOAD_CAP_BYTES, DOWNLOAD_REQUEST_BYTES, jitter, LATENCY_SAMPLES, LOADED_PROBE_MS,
-  median, netLatency, serverRttVarMs, serverTimeMs, RAMP_EVERY_MS, RAMP_STEP, shouldRamp, SliceCounter, SLICE_MS,
+  DOWNLOAD_CAP_BYTES, DOWNLOAD_REQUEST_BYTES, jitter, LATENCY_SAMPLES, LOADED_PROBE_MS,
+  median, netLatency, resultGrade, serverRttVarMs, serverTimeMs, RAMP_EVERY_MS, RAMP_STEP, shouldRamp, SliceCounter, SLICE_MS,
   START_CONNECTIONS, toMbps, transferFigure, TRANSFER_MS, UPLOAD_CAP_BYTES, UPLOAD_REQUEST_BYTES, WARMUP_MS,
 } from '../../src/services/speedTest/method';
 import type { LatencySample, SpeedEvent, SpeedPhase, SpeedServer, SpeedTransfer } from '../../src/services/speedTest/protocol';
@@ -130,7 +130,6 @@ export async function runSpeedTest(
     const up = await run.transfer('upload');
 
     const idleMs = median(idle.map((s) => s.rttMs))!;
-    const loaded = Math.max(down.loadedLatencyMs ?? idleMs, up.loadedLatencyMs ?? idleMs);
     emit({
       type: 'done',
       result: {
@@ -139,7 +138,7 @@ export async function runSpeedTest(
         latency: { idleMs, jitterMs, samples: idle.length, idle },
         download: down,
         upload: up,
-        grade: bloatGrade(idleMs, loaded),
+        grade: resultGrade(idleMs, down.loadedLatencyMs, up.loadedLatencyMs),
         summary: summarise({ idle, download: down, upload: up }, run.warmupMs),
         bytesMoved: down.bytes + up.bytes,
       },

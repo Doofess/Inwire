@@ -178,6 +178,17 @@ export function bloatGrade(idleMs: number, loadedMs: number): BloatGrade {
 }
 
 /**
+ * A finished test's grade: idle against the worse loaded median, or the one
+ * phase that has one. When no loaded probe answered at all there is no
+ * grade - falling back to idle would compare idle with itself and print a
+ * green A+ the test has no evidence for.
+ */
+export function resultGrade(idleMs: number, loadedDownMs: number | null, loadedUpMs: number | null): BloatGrade | null {
+  if (loadedDownMs === null && loadedUpMs === null) return null;
+  return bloatGrade(idleMs, Math.max(loadedDownMs ?? -Infinity, loadedUpMs ?? -Infinity));
+}
+
+/**
  * Responsiveness in round trips per minute: a minute over one loaded round
  * trip. **Approximate**, and labelled so: Apple's `networkQuality` and the
  * IETF responsiveness draft (draft-ietf-ippm-responsiveness) count every

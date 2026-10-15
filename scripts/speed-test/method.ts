@@ -4,7 +4,7 @@
  *   npx tsx scripts/speed-test/method.ts
  */
 import {
-  bloatGrade, formatMbps, jitter, median, netLatency, quantile, rpm,
+  bloatGrade, formatMbps, resultGrade, jitter, median, netLatency, quantile, rpm,
   serverRttVarMs, serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB, TEST_CAP_TEXT,
 } from '../../src/services/speedTest/method';
 import { HISTORY_LIMIT, historyEntry, normalizeHistory, normalizeLastTrace } from '../../src/services/speedTest/history';
@@ -87,6 +87,9 @@ console.log('\n--- bufferbloat ---');
 check('the bands', [[10, 12], [10, 30], [10, 60], [10, 150], [10, 300], [10, 500]].map(([i, l]) => bloatGrade(i, l)),
   ['A+', 'A', 'B', 'C', 'D', 'F']);
 check('latency that fell under load is A+', bloatGrade(20, 10), 'A+');
+check('a test graded on the worse loaded phase', resultGrade(10, 25, 80), 'C');
+check('...or the one phase that answered', [resultGrade(10, null, 80), resultGrade(10, 80, null)], ['C', 'C']);
+check('no loaded probe answered: no grade, not idle against idle', resultGrade(10, null, null), null);
 
 console.log('\n--- formatting ---');
 check('three significant figures', [0, 0.456, 5.678, 56.78, 567.8, 1234.5].map(formatMbps), ['0', '0.46', '5.68', '56.8', '568', '1235']);

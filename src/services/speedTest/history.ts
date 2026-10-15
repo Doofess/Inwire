@@ -75,7 +75,7 @@ export function historyEntry(result: SpeedResult): SpeedHistoryEntry {
     upMbps: result.upload.mbps,
     pingMs: result.latency.idleMs,
     jitterMs: result.latency.jitterMs,
-    grade: result.grade,
+    grade: result.grade ?? '?',
     server: result.server.coloCity ?? result.server.colo ?? null,
     isp: result.server.isp,
     colo: result.server.colo,

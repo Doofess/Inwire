@@ -1,4 +1,4 @@
-import { bloatGrade, type BloatGrade } from '../../services/speedTest/method';
+import { resultGrade, type BloatGrade } from '../../services/speedTest/method';
 import type { Spread, SpeedPhase } from '../../services/speedTest/protocol';
 import { latencyDomain, logScale } from '../../services/speedTest/stats';
 import { fmtMsValue } from './Hint';
@@ -58,7 +58,7 @@ export function LatencyBoxes({ idle, download, upload, rtt, live }: {
 
   const loaded = rtt.download === null && rtt.upload === null ? null
     : Math.max(rtt.download ?? -Infinity, rtt.upload ?? -Infinity);
-  const grade = rtt.idle !== null && loaded !== null ? bloatGrade(rtt.idle, loaded) : null;
+  const grade = rtt.idle === null ? null : resultGrade(rtt.idle, rtt.download, rtt.upload);
   const liveAt = live === null ? ORDER.length : ORDER.indexOf(live);
 
   const said = (r: Row) => {

@@ -117,7 +117,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
       r.download.bytes > 0 && r.download.bytes <= s.downloaded(), `${r.download.bytes} vs ${s.downloaded()}`);
     check('...and uploading, no more than the server received plus what was in flight',
       r.upload.bytes > 0 && r.upload.bytes <= s.uploaded() + 8 * 4_000_000, `${r.upload.bytes} vs ${s.uploaded()}`);
-    check('...and a grade', /^(A\+|[A-DF])$/.test(r.grade));
+    check('...and a grade, since every loaded probe answered', r.grade !== null && /^(A\+|[A-DF])$/.test(r.grade));
     const slices = (quick(s.port).transferMs ?? 0) / 100;
     check('...the trace has a point a slice, warm-up included',
       r.download.trace.length > 0 && Math.abs(r.download.trace.length - slices) <= 3, `${r.download.trace.length} of ~${slices}`);
