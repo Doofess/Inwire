@@ -605,10 +605,24 @@ export default function App() {
     patchSideBar({ panel: next, open: true });
   }, [patchSideBar]);
 
-  /** A rail button opens its own panel, and closes it when it is already up. */
-  const toggleSideBar = useCallback((which: SideBarPanel) => {
-    showSideBar(sideBar === which ? null : which);
-  }, [showSideBar, sideBar]);
+  /**
+   * A rail button shows its own panel, opening the column if it is closed, and
+   * never closes it. Closing is the title row's toggle and `Ctrl+B` - one
+   * control for "is the column there", and the rail only says WHICH panel. It
+   * used to toggle, so pressing the lit icon to look again hid the column.
+   */
+  const openSideBarPanel = useCallback((which: SideBarPanel) => {
+    showSideBar(which);
+  }, [showSideBar]);
+
+  /**
+   * Opens or closes the column, on the panel that was last open - and
+   * `interfaces` on a fresh profile, never "nothing". The title row's button
+   * and `Ctrl+B` are this one handler.
+   */
+  const toggleSideBar = useCallback(() => {
+    showSideBar(sideBarOpen ? null : sideBarPanel);
+  }, [showSideBar, sideBarOpen, sideBarPanel]);
 
   // **The status bar's byte readout, cleared on a view change.**
   //
@@ -2168,14 +2182,8 @@ export default function App() {
   useKeyboardNavigation({
     canCapture: permissions.canCapture,
     onViewShortcut: handleViewChange,
-    /**
-     * `Ctrl+B` reopens the panel that was last open, and `interfaces` on a
-     * fresh profile that has never opened one - never "nothing", which would
-     * make the key do nothing on the one press where it most needs to work.
-     */
-    // The last panel, which is now a thing the preference still knows when the
-    // column is closed - the whole reason `panel` and `open` are two fields.
-    onToggleSideBar: () => showSideBar(sideBarOpen ? null : sideBarPanel),
+    // The title row's toggle, by key. See `toggleSideBar`.
+    onToggleSideBar: toggleSideBar,
     filteredPacketsRef,
     selectedPacketRef,
     isCapturingRef,
@@ -2750,6 +2758,8 @@ export default function App() {
         maximized={windowMaximized}
         panesVisible={showPanes}
         onTogglePanes={togglePanes}
+        sideBarOpen={sideBarOpen}
+        onToggleSideBar={toggleSideBar}
         backLabel={backLabel}
         onBack={goBack}
         center={
@@ -2809,7 +2819,7 @@ export default function App() {
           onOpenSettings={() => setSheet('settings')}
           sideBarOpen={sideBarOpen}
           sideBarPanel={sideBar}
-          onOpenSideBar={toggleSideBar}
+          onOpenSideBar={openSideBarPanel}
           schedule={schedule}
           scheduleSummary={scheduleSummary}
           scheduleArmed={scheduleArmed}

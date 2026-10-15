@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronLeft, PanelBottom } from 'lucide-react';
+import { ChevronLeft, PanelBottom, PanelLeft } from 'lucide-react';
 import { BrandMark } from './BrandMark';
 import { WindowControls } from './WindowControls';
 
@@ -132,6 +132,13 @@ export interface TitleRowProps {
   panesVisible: boolean;
   onTogglePanes: () => void;
   /**
+   * Whether the side bar is open, and the one control that opens and closes
+   * it. The rail's panel icons only choose WHICH panel; `Ctrl+B` is this
+   * button by key.
+   */
+  sideBarOpen: boolean;
+  onToggleSideBar: () => void;
+  /**
    * The name of the view a back step lands on, or null at a root.
    *
    * The LABEL rather than the view id, because this row has no business
@@ -157,7 +164,8 @@ export interface TitleRowProps {
  * would have to carry its own.
  */
 export const TitleRow: React.FC<TitleRowProps> = ({
-  focused, maximized, panesVisible, onTogglePanes, backLabel, onBack, center,
+  focused, maximized, panesVisible, onTogglePanes, sideBarOpen, onToggleSideBar,
+  backLabel, onBack, center,
 }) => (
   <header
     className={`h-8 shrink-0 flex items-center
@@ -213,6 +221,27 @@ export const TitleRow: React.FC<TitleRowProps> = ({
         <BrandMark className="w-6 h-6 shrink-0" size={24} />
       </div>
 
+      {/* **The side bar, open and closed.** The rail's panel icons used to
+          toggle it, so pressing the lit icon to look at a panel again hid the
+          column. Now those icons only pick a panel and this is the one control
+          for whether the column is there - where Codex and VS Code put it,
+          beside the app's corner and over the column it opens. The mirror of
+          the panes toggle at the row's other end: same `w-9`, same glyph
+          family, same dim when off. 48 + 36 fits the 138px corner, so the
+          corner's width - and the centring it buys - does not move. */}
+      <button
+        type="button"
+        onClick={onToggleSideBar}
+        aria-pressed={sideBarOpen}
+        title={sideBarOpen ? 'Hide side bar (Ctrl+B)' : 'Show side bar (Ctrl+B)'}
+        aria-label="Toggle side bar"
+        className={`w-9 h-8 shrink-0 inline-flex items-center justify-center rounded
+          app-no-drag cursor-pointer transition-colors hover:bg-accent
+          focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring
+          focus-visible:ring-inset ${sideBarOpen ? 'text-foreground' : 'text-foreground/60'}`}
+      >
+        <PanelLeft className="w-4 h-4" />
+      </button>
     </div>
 
     {/* Empty, and that is the finished state.

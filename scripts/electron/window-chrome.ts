@@ -198,9 +198,9 @@ console.log('\n--- the controls cannot be pressed unless they opt out of the dra
   // is the one this whole section exists for - a press that drags the window
   // and never fires.
   const own = titleRow.match(/<button[\s\S]*?<\/button>/g) ?? [];
-  // Two: the back step and the detail-panes toggle. Both are glyphs and both
-  // sit beside `WindowControls` rather than inside it.
-  check('the title row carries two controls of its own', own.length, 2);
+  // Three: the side bar's toggle beside the mark, the back step and the
+  // detail-panes toggle. All are glyphs and all sit outside `WindowControls`.
+  check('the title row carries three controls of its own', own.length, 3);
   checkTrue('...and every one opts out of the drag region',
     own.every((b) => b.includes('app-no-drag')));
   // Either a literal or an expression - the back control's name says where it

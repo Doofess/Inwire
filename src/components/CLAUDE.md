@@ -83,8 +83,8 @@ refuses.
 
 #### The title row
 
-The mark, a back step, the filter field, the detail panes' toggle, the caption
-buttons. No navigation and no packet count; `useWindowTitle` still sends
+The mark, the side bar's toggle, a back step, the filter field, the detail
+panes' toggle, the caption buttons. No navigation and no packet count; `useWindowTitle` still sends
 `windowTitleFor(...)` to main, so the taskbar and Alt-Tab are unchanged.
 
 **The display filter is in the centre** because it belongs to the app rather
@@ -284,8 +284,13 @@ never has a seam: a 4px gap always runs to its left.
 
 #### The side bar
 
-**A resizable column between the rail and `<main>`**, opened by four of the
-rail's buttons, and it **pushes** rather than overlays. `components/sidebar/` is
+**A resizable column between the rail and `<main>`**, and it **pushes** rather
+than overlays. **The title row's `PanelLeft` button, right of the mark, is the
+one control that opens and closes it**; `Ctrl+B` is the same handler
+(`toggleSideBar` in `App.tsx`). Four rail buttons pick WHICH panel, opening
+the column if it is closed, and never close it - they used to toggle, so
+pressing the lit icon to look at a panel again hid the column (owner's report,
+2026-10-15). `components/sidebar/` is
 the directory, `SideBar.tsx` is the card, `sideBarPrefs.ts` is the state. The
 four panels are Interfaces, Schedule, Export/Import and Network.
 `ImportErrorDialog` **stays a modal**: a refusal that must be acknowledged is a
