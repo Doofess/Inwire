@@ -195,26 +195,6 @@ export function rpmBand(value: number): RpmBand {
   return value > RPM_BANDS.highAbove ? 'High' : 'Medium';
 }
 
-/**
- * The gauge's marks: Ookla's non-linear scale, each mark an equal step of arc,
- * so 5 Mb/s and 500 Mb/s are both readable on one dial.
- */
-export const GAUGE_MARKS = [0, 5, 10, 50, 100, 250, 500, 750, 1000] as const;
-
-/** Where `mbps` sits on the dial, 0..1, interpolated linearly between marks and pinned past the last. */
-export function gaugeFraction(mbps: number): number {
-  if (!(mbps > 0)) return 0;
-  const steps = GAUGE_MARKS.length - 1;
-  for (let i = 1; i < GAUGE_MARKS.length; i++) {
-    if (mbps <= GAUGE_MARKS[i]) {
-      const lo = GAUGE_MARKS[i - 1];
-      const hi = GAUGE_MARKS[i];
-      return (i - 1 + (mbps - lo) / (hi - lo)) / steps;
-    }
-  }
-  return 1;
-}
-
 /** A speed as the headline and the history print it: three significant figures, never an exponent. */
 export function formatMbps(mbps: number): string {
   if (!(mbps > 0)) return '0';

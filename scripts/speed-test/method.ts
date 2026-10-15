@@ -4,7 +4,7 @@
  *   npx tsx scripts/speed-test/method.ts
  */
 import {
-  bloatGrade, formatMbps, GAUGE_MARKS, gaugeFraction, jitter, median, netLatency, quantile, rpm,
+  bloatGrade, formatMbps, jitter, median, netLatency, quantile, rpm,
   serverRttVarMs, serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB, TEST_CAP_TEXT,
 } from '../../src/services/speedTest/method';
 import { HISTORY_LIMIT, historyEntry, normalizeHistory, normalizeLastTrace } from '../../src/services/speedTest/history';
@@ -88,11 +88,7 @@ check('the bands', [[10, 12], [10, 30], [10, 60], [10, 150], [10, 300], [10, 500
   ['A+', 'A', 'B', 'C', 'D', 'F']);
 check('latency that fell under load is A+', bloatGrade(20, 10), 'A+');
 
-console.log('\n--- the gauge ---');
-check('every mark is an equal step of arc', GAUGE_MARKS.map((m) => Math.round(gaugeFraction(m) * 8 * 1000) / 1000), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
-check('between marks is linear', near(gaugeFraction(75), 3.5 / 8), true);
-check('past the last mark the needle is pinned', gaugeFraction(2500), 1);
-check('nothing, or nonsense, is zero', [0, -5, NaN].map(gaugeFraction), [0, 0, 0]);
+console.log('\n--- formatting ---');
 check('three significant figures', [0, 0.456, 5.678, 56.78, 567.8, 1234.5].map(formatMbps), ['0', '0.46', '5.68', '56.8', '568', '1235']);
 check('the cap the consent copy quotes', [TEST_CAP_MB, TEST_CAP_TEXT], [2000, '2 GB']);
 
