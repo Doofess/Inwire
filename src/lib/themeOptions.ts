@@ -1,4 +1,4 @@
-import { Sun, Moon, Monitor } from 'lucide-react';
+import { Sun, Moon, CloudMoon, Contrast, Monitor } from 'lucide-react';
 
 /**
  * Every app theme, and whether it is a light or a dark one.
@@ -37,20 +37,28 @@ export interface ThemeOption {
 }
 
 export const THEME_OPTIONS: ThemeOption[] = [
-  { value: 'light', label: 'Day', icon: Sun, mode: 'light' },
-  { value: 'dark', label: 'Night', icon: Moon, mode: 'dark' },
+  { value: 'light', label: 'Light', icon: Sun, mode: 'light' },
+  { value: 'dark', label: 'Dark', icon: Moon, mode: 'dark' },
+  { value: 'dim', label: 'Dim', icon: CloudMoon, mode: 'dark' },
+  { value: 'contrast', label: 'High Contrast', icon: Contrast, mode: 'dark' },
 ];
 
 /**
- * Two themes and a rule, where there were four and a rule.
+ * Four themes and a rule (ADR 0056).
  *
- * Paper and Graphite are gone. Paper was the warm light one and Graphite the
- * warm dark one, and each existed as a counterweight to the other survivor -
- * "one warm and one cool is a real choice" was the argument, and it was a good
- * argument for four. It is not an argument for keeping a second of each when
- * what is wanted is Day, Night and System.
+ * There were four once before - Day, Paper, Night and Graphite - and two of
+ * them were cut because each was only the other survivor's counterweight, one
+ * warm and one cool. The four now are four different answers rather than two
+ * pairs: Light; Dark, a near-black instrument panel; Dim, a grey ground for
+ * long sessions, as Codex and GitHub's dimmed theme have beside their dark
+ * one; and High Contrast, an accessibility theme held to 7:1 by
+ * `scripts/themes/registry.ts`, which "follow Windows" lands on when Windows
+ * asks for more contrast.
  *
- * **Night took the `dark` id from Graphite, and that is the part worth
+ * **Light and Dark keep the ids `light` and `dark`**, whatever they are
+ * labelled, and that is the part worth knowing.
+ *
+ * **Dark took the `dark` id from Graphite, and that is the part worth
  * knowing.** next-themes writes `color-scheme` onto the document only for the
  * literal strings `"light"` and `"dark"`, which is what keeps native
  * scrollbars, text selection and form controls on the right side of the

@@ -61,18 +61,19 @@ function tokensIn(selector: string): string[] {
 const light = THEME_OPTIONS.filter((t) => t.mode === 'light');
 const dark = THEME_OPTIONS.filter((t) => t.mode === 'dark');
 
-// One of each, and that is the whole set. Paper and Graphite were the second
-// light and the second dark; each existed as the other survivor's counterweight
-// - one warm, one cool - which was an argument for four and not an argument for
-// keeping a spare of each once the answer wanted is Day, Night and System.
+// One light and three dark, and that is the whole set (ADR 0056). Paper and
+// Graphite were cut because each was only the other survivor's warm-or-cool
+// counterweight; Dim and High Contrast are not spares of Dark - Dim is a grey
+// ground beside a near-black one, and High Contrast is an accessibility theme
+// held to 7:1 below.
 //
 // Pinned as exact counts rather than as `>= 1`, because the cost of a theme is
 // not in this file: it is a complete token block in index.css, a palette, and
 // every pairwise contrast and deltaE check below. A theme added without that
 // deliberation should fail here first.
 check('one light theme', light.length, 1);
-check('one dark theme', dark.length, 1);
-check('two themes, both of them real', THEME_NAMES.length, 2);
+check('three dark themes', dark.length, 3);
+check('four themes, all of them real', THEME_NAMES.length, 4);
 // `system` is gone, so there is no longer a picker entry that resolves to
 // something else at runtime. Every option now names a palette directly, which
 // is what let `mode` become required rather than optional.
