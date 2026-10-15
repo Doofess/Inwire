@@ -470,6 +470,32 @@ function selectionHex(theme: string, primary: string): string {
   return mixHex(primary, hexIn(theme, '--background'), SELECTION_SHARE[theme] / 100);
 }
 
+// The Appearance tiles wrap each miniature in a div of that theme's class, so
+// Light has to be reachable by `.light` as well as by `:root` - or the Light
+// tile inside any dark document would draw in the document's colours.
+checkTrue('the light block is selected by .light as well as :root',
+  /(^|\n)\.light, :root \{/.test(css));
+
+// And a theme class is not enough on its own: Tailwind declares every
+// `--color-*` on :root, where it resolves to the DOCUMENT's theme and is
+// inherited already resolved, so `bg-background` under `.light` inside `.dark`
+// paints dark. `.theme-scope` re-points each one at the scope's own token -
+// and every colour utility a miniature uses must be among them, or that part
+// of the tile quietly draws in the wrong theme.
+{
+  const panel = fs.readFileSync(
+    path.join(process.cwd(), 'src/components/common/AppearanceSettingsPanel.tsx'), 'utf8');
+  const mini = panel.slice(panel.indexOf('const ThemeMiniature'), panel.indexOf('const SYSTEM_SPLIT'));
+  const scope = /(^|\n)\.theme-scope \{([^}]*)\}/.exec(css)?.[2] ?? '';
+  const used = [...new Set([...mini.matchAll(/\b(?:bg|ring|border)-([a-z]+(?:-[a-z]+)*)/g)]
+    .map((m) => m[1]).filter((n) => !['inset', 'r', 'b', 'l', 't'].includes(n)))];
+  checkTrue('the theme miniature carries .theme-scope', /theme-scope/.test(mini));
+  for (const name of used) {
+    checkTrue(`.theme-scope re-points --color-${name}`,
+      scope.includes(`--color-${name}: var(--${name});`));
+  }
+}
+
 for (const theme of realThemes) {
   const share = SELECTION_SHARE[theme];
   checkTrue(`${theme}: --selection mixes ${share}% of the accent into the ground`,

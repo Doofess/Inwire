@@ -1555,8 +1555,8 @@ without them.
 Moved to the `inwire-visual-design` skill (`.claude/skills/inwire-visual-design/`),
 which loads when you work on fonts, colours or the mark rather than every session.
 The short version: the faces are **the host OS's own** and no webfont is imported;
-there are **two themes**, Day and Night, and Night holds the `dark` id for
-`color-scheme`; and the brand mark is **five plates of `--primary` at different
+there are **four themes**, Light, Dark, Dim and High Contrast, and Dark holds the
+`dark` id for `color-scheme` (ADR 0056); and the brand mark is **five plates of `--primary` at different
 lightnesses**, generated from `src/lib/brandMark.ts` and never committed as art.
 Run `npm run check` after any colour edit.
 ### Vite config quirks — read the inline comments before touching

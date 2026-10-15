@@ -851,6 +851,23 @@ html[data-platform="win32"] {
   outline-offset: -1px;
 }
 
+/* A subtree drawn in a theme other than the document's - the Appearance
+   tab's miniatures. A theme class on it re-declares `--background` and the
+   rest, but @theme declared every `--color-*` on :root, where it resolved
+   against the DOCUMENT's theme and is inherited already resolved. Pointing
+   them again here makes them resolve against this element's own tokens.
+   Only the colours a miniature paints; registry.ts holds the list to them. */
+.theme-scope {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-secondary: var(--secondary);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-selection: var(--selection);
+}
+
 /* maplibre-gl ships its own stylesheet, and it sets a hard
    `"Helvetica Neue", Arial, Helvetica` on the map container. That is the one
    place in the app the --font-sans token cannot reach on its own: the rule

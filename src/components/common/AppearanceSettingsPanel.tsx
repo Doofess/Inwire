@@ -61,6 +61,48 @@ const PREVIEW_RULES: { id: string; label: string }[] = [
   { id: 'color-broadcast', label: 'Broadcast' },
 ];
 
+/**
+ * A theme drawn small: the title row and rail in the chrome colour, the rail's
+ * active cell, a side bar strip, and three packet rows with the middle one
+ * selected. The wrapper carries the theme's own class and `theme-scope`, so
+ * every colour inside resolves to that theme whatever the document is in -
+ * which is why the light block is selected by `.light` as well as `:root`, and
+ * why `theme-scope` exists (index.css says what it fixes).
+ */
+const ThemeMiniature: React.FC<{ theme: string; style?: React.CSSProperties }> = ({ theme, style }) => (
+  <div
+    aria-hidden
+    style={style}
+    className={`${theme} theme-scope absolute inset-0 flex flex-col overflow-hidden bg-background`}
+  >
+    <div className="h-[6px] shrink-0 bg-secondary border-b border-border" />
+    <div className="flex flex-1 min-h-0">
+      <div className="w-[9px] shrink-0 flex flex-col items-center gap-[2px] pt-[3px] bg-secondary border-r border-border">
+        <div className="w-[6px] h-[5px] rounded-[1px] bg-primary/20" />
+        <div className="w-[3px] h-[3px] rounded-full bg-muted-foreground/60" />
+      </div>
+      <div className="w-[17px] shrink-0 flex flex-col gap-[3px] p-[3px] bg-card border-r border-border">
+        <div className="h-[2px] w-full rounded-full bg-muted-foreground/50" />
+        <div className="h-[2px] w-2/3 rounded-full bg-muted-foreground/50" />
+      </div>
+      <div className="flex-1 flex flex-col gap-[2px] py-[4px]">
+        <div className="h-[6px] flex items-center px-[3px]">
+          <div className="h-[2px] w-3/5 rounded-full bg-foreground/50" />
+        </div>
+        <div className="h-[6px] flex items-center px-[3px] bg-selection ring-1 ring-inset ring-primary">
+          <div className="h-[2px] w-1/2 rounded-full bg-primary" />
+        </div>
+        <div className="h-[6px] flex items-center px-[3px]">
+          <div className="h-[2px] w-2/5 rounded-full bg-foreground/50" />
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+/** System is Light and Dark at once, so its tile is both, cut on the diagonal. */
+const SYSTEM_SPLIT: React.CSSProperties = { clipPath: 'polygon(100% 0, 100% 100%, 0 100%)' };
+
 const MAP_SKIN_OPTIONS = [
   { value: 'colorful' as const, label: 'Colourful' },
   { value: 'muted' as const, label: 'Theme-synced' },
@@ -86,35 +128,47 @@ export const AppearanceSettingsPanel: React.FC = () => {
           <p className="text-[11px] text-muted-foreground mt-0.5 mb-2 leading-snug">
             The window, panels and charts. System follows Windows: Light or Dark, and High Contrast when Windows asks for it.
           </p>
-          {/* Three across: the two themes plus System, which is a mode over
-              them rather than a third palette - see useSystemThemePreference.
+          {/* Five across: the four themes plus System, which is a mode over
+              them rather than a fifth palette - see useSystemThemePreference.
               Picking a theme by name turns following off, because choosing one
               IS saying "not whatever the OS says".
 
               The count tracks THEME_OPTIONS and has to be corrected by hand
-              when that list changes: it was `grid-cols-5` for four themes, and
-              cutting two left three buttons laid out across five columns, so
-              the right 40% of a `max-w-5xl` row was empty. */}
-          <div className="grid grid-cols-3 gap-2">
+              when that list changes: cutting four themes to two once left
+              three buttons laid out across five columns, so the right 40% of a
+              `max-w-5xl` row was empty. */}
+          <div className="grid grid-cols-5 gap-2">
             {[...THEME_OPTIONS, SYSTEM_THEME_OPTION].map(({ value, label, icon: Icon }) => {
               const isSystem = value === SYSTEM_THEME_OPTION.value;
               const isActive = isSystem ? followsSystem : !followsSystem && theme === value;
               return (
                 <button
                   key={value}
+                  aria-pressed={isActive}
                   onClick={() => {
                     setFollowsSystem(isSystem);
                     if (!isSystem) setTheme(value);
                   }}
-                  className={`relative flex flex-col items-center gap-1.5 py-3 px-1 rounded-lg border text-[11px] font-medium transition-colors ${
+                  className={`flex flex-col items-center gap-2 pt-2.5 pb-2 px-1 rounded-lg border text-[11px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring ${
                     isActive
                       ? 'border-primary bg-primary/10 text-primary'
                       : 'border-border bg-muted/40 text-muted-foreground hover:bg-accent hover:text-foreground'
                   }`}
                 >
-                  {isActive && <Check className="w-3.5 h-3.5 absolute top-1.5 right-1.5" />}
-                  <Icon className="w-5 h-5" />
-                  <span className="text-center leading-tight">{label}</span>
+                  <div className="relative w-[72px] h-[44px] rounded-[5px] overflow-hidden ring-1 ring-border">
+                    {isSystem ? (
+                      <>
+                        <ThemeMiniature theme="light" />
+                        <ThemeMiniature theme="dark" style={SYSTEM_SPLIT} />
+                      </>
+                    ) : (
+                      <ThemeMiniature theme={value} />
+                    )}
+                  </div>
+                  <span className="flex items-center gap-1 leading-tight">
+                    {isActive ? <Check className="w-3.5 h-3.5" /> : <Icon className="w-3.5 h-3.5" />}
+                    {label}
+                  </span>
                 </button>
               );
             })}

@@ -463,6 +463,8 @@ mono.
 
 ### Four themes became two
 
+*And then four again, for different reasons: ADR 0056 answers this section by name.*
+
 Day, Night, **Paper** and **Graphite**. Paper and Graphite were cut because each
 existed as the other survivor's warm counterweight, which was an argument for
 four and not one for keeping a spare of each.
