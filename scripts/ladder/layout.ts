@@ -26,6 +26,8 @@ import {
   initialWindow, ladderExtent, layoutLadder, panWindow, windowAround, zoomWindow,
   type LadderWindow,
 } from '../../src/components/ladder/ladderLayout';
+import { itemPacket, type LadderItem } from '../../src/components/ladder/ladderRuns';
+import { isFromClient } from '../../src/services/followStream';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -57,24 +59,46 @@ function frame(id: number, time: number, fromClient: boolean,
 
 const WHOLE: LadderWindow = { from: 0, to: 10 };
 
+/**
+ * Every frame as its own item, which is what the geometry is held on: the
+ * folding is `scripts/session/ladder-runs.ts`'s question, and this file's is
+ * where an item lands once it exists.
+ */
+function items(frames: readonly Packet[]): LadderItem[] {
+  return frames.map((packet) => ({
+    kind: 'frame', packet, from: isFromClient(packet, CLIENT) ? 'client' : 'server',
+  }));
+}
+
+/** A band over `frames`, as `foldRuns` would build it. */
+function band(frames: readonly Packet[]): LadderItem {
+  let bytes = 0;
+  for (const f of frames) bytes += f.length;
+  return {
+    kind: 'band', from: isFromClient(frames[0], CLIENT) ? 'client' : 'server',
+    first: frames[0], last: frames[frames.length - 1], count: frames.length, bytes,
+    time: frames[0].relativeTime, endTime: frames[frames.length - 1].relativeTime, ruleKey: '',
+  };
+}
+
 // --- Which way each arrow points ------------------------------------------------
 {
   const frames = [frame(1, 0, true), frame(2, 1, false), frame(3, 2, true)];
-  const { arrows } = layoutLadder(frames, CLIENT, WHOLE, 600);
+  const { arrows } = layoutLadder(items(frames), WHOLE, 600);
   check('every frame in the window is placed', arrows.length, 3);
   check('arrows leave the lane that sent them',
     arrows.map((a) => a.from), ['client', 'server', 'client']);
   check('...and carry the frame itself, not a copy',
-    arrows[0].packet === frames[0], true);
-  check('the frame numbers survive in order', arrows.map((a) => a.packet.id), [1, 2, 3]);
+    itemPacket(arrows[0].item) === frames[0], true);
+  check('the frame numbers survive in order', arrows.map((a) => itemPacket(a.item).id), [1, 2, 3]);
 }
 
 // --- The window is a window --------------------------------------------------------
 {
   const frames = Array.from({ length: 11 }, (_, i) => frame(i + 1, i, i % 2 === 0));
-  const layout = layoutLadder(frames, CLIENT, { from: 3, to: 6 }, 600);
+  const layout = layoutLadder(items(frames), { from: 3, to: 6 }, 600);
   check('only frames inside the window are placed',
-    layout.arrows.map((a) => a.packet.id), [4, 5, 6, 7]);
+    layout.arrows.map((a) => itemPacket(a.item).id), [4, 5, 6, 7]);
   // The counts are what the scroll hints read. If they did not add up, the
   // view would tell the user there is nothing above when there is.
   check('frames above the window are counted', layout.before, 3);
@@ -84,7 +108,7 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
 
   // Both edges inclusive: a frame exactly on the boundary belongs to the view
   // rather than falling between two windows and never being drawn at all.
-  const edge = layoutLadder([frame(1, 3, true), frame(2, 6, true)], CLIENT,
+  const edge = layoutLadder(items([frame(1, 3, true), frame(2, 6, true)]),
     { from: 3, to: 6 }, 600);
   check('a frame on either boundary is inside the window', edge.arrows.length, 2);
 }
@@ -92,7 +116,7 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
 // --- Time maps to position ----------------------------------------------------------
 {
   const frames = [frame(1, 0, true), frame(2, 5, true), frame(3, 10, true)];
-  const { arrows } = layoutLadder(frames, CLIENT, WHOLE, 600);
+  const { arrows } = layoutLadder(items(frames), WHOLE, 600);
   check('the first frame is at the top', arrows[0].y, 0);
   check('the middle frame is halfway down', arrows[1].y, 300);
   check('the last frame is at the bottom', arrows[2].y, 600);
@@ -106,7 +130,7 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
 // reads as a single frame.
 {
   const burst = Array.from({ length: 20 }, (_, i) => frame(i + 1, 5 + i * 0.00001, true));
-  const { arrows } = layoutLadder(burst, CLIENT, WHOLE, 600);
+  const { arrows } = layoutLadder(items(burst), WHOLE, 600);
   check('every frame in a burst is still placed', arrows.length, 20);
 
   // The property that matters. A ladder may compress time; it may never show
@@ -132,20 +156,20 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
 // --- Degenerate inputs -------------------------------------------------------------------
 {
   check('an empty stream lays out to nothing',
-    layoutLadder([], CLIENT, WHOLE, 600).arrows.length, 0);
+    layoutLadder(items([]), WHOLE, 600).arrows.length, 0);
   check('...and has a usable extent rather than an infinite one',
-    ladderExtent([]), { from: 0, to: 1 });
+    ladderExtent(items([])), { from: 0, to: 1 });
 
   // One frame has no span. A zero-width extent would divide by zero in every
   // scale built from it, so it is widened around the frame.
-  const single = ladderExtent([frame(1, 4, true)]);
+  const single = ladderExtent(items([frame(1, 4, true)]));
   check('a one-frame stream is given a span', [single.from, single.to], [3.5, 4.5]);
   checkTrue('...and its arrow has a real position',
-    Number.isFinite(layoutLadder([frame(1, 4, true)], CLIENT, single, 600).arrows[0].y));
+    Number.isFinite(layoutLadder(items([frame(1, 4, true)]), single, 600).arrows[0].y));
 
   // A view that has not been measured yet asks for zero height, and a window
   // with no width is what an unsized caller passes.
-  const unsized = layoutLadder([frame(1, 1, true)], CLIENT, { from: 1, to: 1 }, 0);
+  const unsized = layoutLadder(items([frame(1, 1, true)]), { from: 1, to: 1 }, 0);
   checkTrue('a zero-width window produces a number, not NaN',
     Number.isFinite(unsized.arrows[0].y));
 }
@@ -208,8 +232,8 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
 // which is not a dense view of the conversation, it is an unreadable one.
 {
   const many = Array.from({ length: 1362 }, (_, i) => frame(i + 1, i * 0.076, i % 3 === 0));
-  const opening = initialWindow(many, 300);
-  const laid = layoutLadder(many, CLIENT, opening, 300);
+  const opening = initialWindow(items(many), 300);
+  const laid = layoutLadder(items(many), opening, 300);
   checkTrue('a busy conversation does not open on all of it',
     laid.arrows.length < many.length);
   checkTrue('...but on enough to fill the view', laid.arrows.length >= 10);
@@ -220,12 +244,12 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
   // A short conversation is shown whole rather than artificially windowed.
   const few = [frame(1, 0, true), frame(2, 0.5, false)];
   check('a short conversation opens on all of it',
-    layoutLadder(few, CLIENT, initialWindow(few, 300), 300).arrows.length, 2);
+    layoutLadder(items(few), initialWindow(items(few), 300), 300).arrows.length, 2);
 
   // A burst can put a viewport's worth of frames inside a microsecond, and a
   // window that narrow has no readable time axis.
   const burst = Array.from({ length: 200 }, (_, i) => frame(i + 1, i * 1e-7, true));
-  const tight = initialWindow(burst, 300);
+  const tight = initialWindow(items(burst), 300);
   checkTrue('a window is never narrower than a millisecond',
     tight.to - tight.from >= 0.001 - 1e-9);
 }
@@ -237,13 +261,13 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
 // do, so it must never be faked.
 {
   const burst = Array.from({ length: 60 }, (_, i) => frame(i + 1, 5 + i * 1e-6, true));
-  const laid = layoutLadder(burst, CLIENT, WHOLE, 200);
+  const laid = layoutLadder(items(burst), WHOLE, 200);
   check('every frame is still laid out', laid.arrows.length, 60);
   checkTrue('the content is taller than the viewport', laid.contentHeight > 200);
   checkTrue('...tall enough for the last arrow',
     laid.contentHeight >= laid.arrows[laid.arrows.length - 1].y);
   // And an uncrowded layout needs no extra room at all.
-  const sparse = layoutLadder([frame(1, 0, true), frame(2, 10, true)], CLIENT, WHOLE, 600);
+  const sparse = layoutLadder(items([frame(1, 0, true), frame(2, 10, true)]), WHOLE, 600);
   check('an uncrowded layout asks for no more than the viewport',
     sparse.contentHeight, 600);
 }
@@ -263,25 +287,84 @@ const WHOLE: LadderWindow = { from: 0, to: 10 };
     // ...then a thousand inside the next ninety.
     ...Array.from({ length: 1000 }, (_, i) => frame(100 + i, 95 + i * 0.09, i % 2 === 0)),
   ];
-  const extent = ladderExtent(quietThenBusy);
-  const opening = initialWindow(quietThenBusy, 300);
+  const extent = ladderExtent(items(quietThenBusy));
+  const opening = initialWindow(items(quietThenBusy), 300);
   check('the opening window really does hold what fits',
-    layoutLadder(quietThenBusy, CLIENT, opening, 300).arrows.length,
-    layoutLadder(quietThenBusy, CLIENT, opening, 300, 11).arrows.length);
+    layoutLadder(items(quietThenBusy), opening, 300).arrows.length,
+    layoutLadder(items(quietThenBusy), opening, 300, 11).arrows.length);
 
   // The same span, moved to where the traffic is.
   const moved = windowAround(140, opening, extent);
-  const uncapped = layoutLadder(quietThenBusy, CLIENT, moved, 300);
+  const uncapped = layoutLadder(items(quietThenBusy), moved, 300);
   checkTrue('...but the same span elsewhere would draw far too many',
     uncapped.arrows.length > 500);
 
-  const capped = layoutLadder(quietThenBusy, CLIENT, moved, 300, 11);
+  const capped = layoutLadder(items(quietThenBusy), moved, 300, 11);
   check('the cap holds it to what the viewport can show', capped.arrows.length, 11);
   // Not silently dropped: the view offers to pan to them.
   check('...and the rest are reported as later frames',
     capped.before + capped.arrows.length + capped.after, quietThenBusy.length);
   checkTrue('...counted as later rather than earlier',
     capped.after > uncapped.after);
+}
+
+// --- A band is one row ---------------------------------------------------------------------
+//
+// A quiet run of a thousand frames is one item (ADR 0055), placed where it
+// starts and labelled with what it holds. The layout reads nothing else from
+// it - the folding is `scripts/session/ladder-runs.ts`'s question.
+{
+  const quiet = Array.from({ length: 1000 }, (_, i) => frame(10 + i, 2 + i * 0.004, true));
+  const stream: LadderItem[] = [
+    ...items([frame(1, 0, true), frame(2, 1, false)]),
+    band(quiet),
+    ...items([frame(2000, 9, true)]),
+  ];
+  const laid = layoutLadder(stream, WHOLE, 600);
+  check('a band is one arrow, not a thousand', laid.arrows.length, 4);
+  const row = laid.arrows[2];
+  check('...placed where it starts', row.time, 2);
+  check('...from the lane its frames left', row.from, 'client');
+  check('...with no flags', row.flags, '');
+  check('...and no category', row.category, null);
+  // 1,000 frames of `100 + id` with ids 10..1009: 609,500 B. The count is
+  // formatted by the locale, so the expectation is too.
+  check('...labelled with what it holds', row.info, `${(1000).toLocaleString()} frames · 595.2 KB · 3.996 s`);
+  check('...as thick as its mean frame', row.length, quiet.reduce((n, f) => n + f.length, 0) / 1000);
+  checkTrue('...and carrying the band itself', row.item === stream[2]);
+
+  // The extent runs to the band's END. A stream closing on a long quiet run
+  // would otherwise have an extent its last band runs past, and the minimap
+  // would show the band ending where it began.
+  const closing: LadderItem[] = [...items([frame(1, 0, true)]), band(quiet)];
+  check('the extent runs to a band\'s end', ladderExtent(closing), { from: 0, to: 2 + 999 * 0.004 });
+
+  // A band is an interval, and it is in the window when any of it is. The
+  // failure this guards: zoom into the middle of a long band and the ladder
+  // goes empty, saying there is one row above.
+  const bandEnd = 2 + 999 * 0.004;
+  const left = layoutLadder(stream, { from: 5, to: 10 }, 600);
+  check('a band straddling the window\'s top edge is drawn',
+    [left.before, left.arrows.map((a) => itemPacket(a.item).id), left.after], [2, [10, 2000], 0]);
+  check('...placed at the edge', left.arrows[0].y, 0);
+  check('...and still saying where it really started', left.arrows[0].time, 2);
+  const right = layoutLadder(stream, { from: 0, to: 3 }, 600);
+  check('a band straddling the window\'s bottom edge is drawn',
+    [right.before, right.arrows.map((a) => itemPacket(a.item).id), right.after], [0, [1, 2, 10], 1]);
+  check('...where it starts', right.arrows[2].y, 600 * 2 / 3);
+  const inside = layoutLadder(stream, { from: 3, to: 4 }, 600);
+  check('a band covering the whole window is the whole window',
+    [inside.before, inside.arrows.map((a) => itemPacket(a.item).id), inside.after], [2, [10], 1]);
+  const past = layoutLadder(stream, { from: bandEnd + 0.5, to: 10 }, 600);
+  check('a band wholly before the window is counted above it',
+    [past.before, past.arrows.map((a) => itemPacket(a.item).id), past.after], [3, [2000], 0]);
+  const ahead = layoutLadder(stream, { from: 0, to: 1.5 }, 600);
+  check('...and wholly after it, below', [ahead.before, ahead.arrows.length, ahead.after], [0, 2, 2]);
+
+  // The opening window is sized by items, so a band that would have been a
+  // thousand rows counts as one.
+  const opening = initialWindow(stream, 300);
+  check('the opening window holds the band as one row', layoutLadder(stream, opening, 300).arrows.length, 4);
 }
 
 console.log();

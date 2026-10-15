@@ -196,7 +196,7 @@ function openLog(record: Uint8Array): { reader: ValueReader; refs: number[] } | 
 }
 
 /** FNV-1a, 32 bits: whether a referenced piece is still the piece it was. */
-function fnv1a(bytes: Uint8Array): number {
+export function fnv1a(bytes: Uint8Array): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < bytes.length; i++) {
     h ^= bytes[i];

@@ -117,7 +117,7 @@ try {
   check('removing a segment removes exactly that directory',
     readdirSync(dir).sort(),
     ['frames.iwbyt', 'index.iwidx', 'pcapng', 'prefix.iwpfx', 'records.iwrec', 'seg-000002',
-      'seg-000003.txt', 'seg-1', 'summary.iwsum']);
+      'seg-000003.txt', 'seg-1', 'streams.iwdig', 'summary.iwsum']);
   check('a removed segment is not found again', segments.find(1), null);
   let refused = false;
   try { segments.remove(0); } catch { refused = true; }

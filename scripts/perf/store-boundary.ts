@@ -25,7 +25,9 @@
  * Four costs, separately, so the answer names one of them:
  *
  *   1. **The writer.** `CaptureWriter` over `NodeBlockFile`, in this process,
- *      no boundary at all. The floor.
+ *      no boundary at all. The floor. Measured again with the store's
+ *      `StreamDigest.feed` after each batch, as `CaptureHost.onAppend` does it
+ *      (ADR 0055), which the ADR expects to cost about a map lookup a row.
  *   2. **The per-frame `writeSync`.** The writer writes each frame's raw bytes
  *      on its own, which is one syscall a frame; compared against the same
  *      bytes in one write per batch. This one is a **trap**, and it is left in
@@ -58,6 +60,7 @@ import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { CaptureWriter } from '../../src/services/capture/captureWriter';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
+import { StreamDigest } from '../../src/services/conversation/streamDigest';
 import type { Packet } from '../../src/types/packet';
 
 /**
@@ -70,9 +73,15 @@ import type { Packet } from '../../src/types/packet';
  */
 function frame(id: number): Packet {
   const fields: Record<string, string | number> = {};
-  for (let i = 0; i < 25; i++) fields[`proto.field${i}`] = i % 3 === 0 ? `v${id % 97}` : id + i;
+  for (let i = 0; i < 22; i++) fields[`proto.field${i}`] = i % 3 === 0 ? `v${id % 97}` : id + i;
+  // Three of the 25 are the ones the stream digest reads, so its fold does the
+  // work a real TCP row asks of it rather than returning early.
+  fields['tcp.flags.ack'] = 1;
+  fields['tcp.seq'] = id * 1100;
+  fields['tcp.len'] = 1040;
   return {
     id,
+    streamId: id & 0x0fff,
     tsUs: 1_788_000_000_000_000 + id * 300,
     timeDelta: 0.0003,
     relativeTime: id / 3000,
@@ -156,6 +165,33 @@ if (!isMainThread) {
     writer.finish();
   });
   for (const f of Object.values(files)) f.close();
+  const digestFiles = {
+    index: NodeBlockFile.open(path.join(dir, 'd-index.iwidx')),
+    pfx: NodeBlockFile.open(path.join(dir, 'd-prefix.iwpfx')),
+    sum: NodeBlockFile.open(path.join(dir, 'd-summary.iwsum')),
+    byt: NodeBlockFile.open(path.join(dir, 'd-frames.iwbyt')),
+    rec: NodeBlockFile.open(path.join(dir, 'd-records.iwrec')),
+  };
+  const digestWriter = new CaptureWriter(digestFiles, { deflate: nativeDeflate });
+  const digest = new StreamDigest();
+  const digestMs = await time('the same, plus StreamDigest.feed a frame', () => {
+    for (const b of work) {
+      digestWriter.append(b);
+      for (const p of b) digest.feed(p);
+    }
+    digestWriter.finish();
+  });
+  for (const f of Object.values(digestFiles)) f.close();
+  // The fold on its own as well: the two rows above differ by less than the
+  // JIT warm-up the first one pays for the second, so their difference alone
+  // read as a negative cost once the fold was cheap.
+  const foldMs = await time('StreamDigest.feed alone, the same frames', () => {
+    const alone = new StreamDigest();
+    for (const b of work) for (const p of b) alone.feed(p);
+  });
+  console.log(`     -> the fold is ${(foldMs * 1000 / TOTAL).toFixed(2)} us a frame over `
+    + `${digest.size.toLocaleString()} streams; the rows above differ by `
+    + `${((digestMs - writerMs) * 1000 / TOTAL).toFixed(2)}`);
   const fflateFiles = {
     index: NodeBlockFile.open(path.join(dir, 'f-index.iwidx')),
     pfx: NodeBlockFile.open(path.join(dir, 'f-prefix.iwpfx')),

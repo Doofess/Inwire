@@ -14,8 +14,7 @@
  */
 
 import { Packet } from '../types/packet';
-import { isWellKnownPort } from './portServices';
-import { fieldValue } from './dissect/fieldAccess';
+import { chooseClient, type ClientEndBasis, type Endpoint } from './conversation/clientSide';
 
 export interface StreamTarget {
   /** Which transport, so a UDP flow on the same ports as a TCP one stays apart. */
@@ -56,23 +55,7 @@ export function streamPackets(packets: readonly Packet[], target: StreamTarget):
   });
 }
 
-/**
- * How well the client end is known.
- *
- *  - `well-known-port` - one end is a port nothing dials out FROM. Close to
- *    conclusive, and it holds on a capture that started mid-connection.
- *  - `syn` - the first frame on the stream is a SYN, so its sender opened the
- *    connection and is the client by definition.
- *  - `first-speaker` - neither of the above. This is a **guess**: whoever
- *    happened to speak first in what was captured, which is the client only if
- *    the capture caught the start.
- *
- * The distinction is the point. Getting the ends backwards mislabels the whole
- * conversation and reverses its colours - the module's own comment calls it
- * "the kind of wrong that reads as a fact" - and the only defence against that
- * is for the guess to be labelled as one where it is shown.
- */
-export type ClientEndBasis = 'well-known-port' | 'syn' | 'first-speaker';
+export type { ClientEndBasis } from './conversation/clientSide';
 
 export interface ClientEnd {
   address: string;
@@ -90,41 +73,42 @@ export interface ClientEnd {
  * a first frame carrying SYN and not ACK is the connection being opened, and
  * its sender is the client by definition.
  *
- * What is left is the guess, and it is returned as one.
+ * What is left is the guess, and it is returned as one. The decision itself
+ * lives in `conversation/clientSide.ts`, shared with the stream digest.
  */
 export function clientEnd(
   frames: readonly Packet[],
   target: StreamTarget,
 ): ClientEnd {
-  const a = { address: target.addressA, port: target.portA };
-  const b = { address: target.addressB, port: target.portB };
-
-  const aWellKnown = isWellKnownPort(target.portA);
-  const bWellKnown = isWellKnownPort(target.portB);
-  if (aWellKnown !== bWellKnown) {
-    return { ...(aWellKnown ? b : a), basis: 'well-known-port' };
-  }
-
-  // Neither end or both ends look like a server: fall back to who spoke first,
-  // and say whether that was the handshake or merely the earliest frame left.
-  const first = frames[0];
-  if (first?.sourcePort !== undefined) {
-    // SYN without ACK is the opening of a connection rather than the answer to
-    // one, which is what makes its sender the client rather than the server.
-    const opensConnection = fieldValue(first, 'tcp.flags.syn') === 1
-      && fieldValue(first, 'tcp.flags.ack') !== 1;
-    return {
-      address: first.source,
-      port: first.sourcePort,
-      basis: opensConnection ? 'syn' : 'first-speaker',
-    };
-  }
-  // A conversation with no frames has no client; A keeps the label so the
-  // window still renders rather than throwing.
-  return { ...a, basis: 'first-speaker' };
+  const { client, basis } = chooseClient(
+    { address: target.addressA, port: target.portA },
+    { address: target.addressB, port: target.portB },
+    frames[0],
+  );
+  return { ...client, basis };
 }
 
 /** True when this frame travelled from the client to the server. */
 export function isFromClient(packet: Packet, client: { address: string; port: number }): boolean {
   return packet.source === client.address && packet.sourcePort === client.port;
+}
+
+/**
+ * True when a stream digest summary describes this target's conversation.
+ *
+ * The digest is looked up by the tracker's stream index, and an index is only
+ * unique within one capture: a new capture numbers its first connection 0 as
+ * well, and a target that outlives the capture it came from would otherwise be
+ * handed another conversation's summary under its own number. The five-tuple
+ * is the check, either way round, because the summary names its ends by role
+ * and the target names them by which was selected.
+ */
+export function summaryIsTarget(
+  summary: { client: Endpoint; server: Endpoint }, target: StreamTarget,
+): boolean {
+  if (target.kind !== 'tcp' || target.streamId === undefined) return false;
+  const is = (end: Endpoint, address: string, port: number): boolean =>
+    end.address === address && end.port === port;
+  return (is(summary.client, target.addressA, target.portA) && is(summary.server, target.addressB, target.portB))
+    || (is(summary.client, target.addressB, target.portB) && is(summary.server, target.addressA, target.portA));
 }

@@ -1,0 +1,183 @@
+# 0055 — A stream is told as its states, from a digest the store keeps
+
+**Status:** accepted 2026-10-09; nothing landed yet. Stage 1 (TCP) is planned in
+`docs/superpowers/plans/2026-10-09-stream-states-stage1.md`. The owner asked for
+a Conversations pane that shows "the networking that's going on" in a stream,
+pointing at the RFC 793 state diagram, and the same idea for UDP and for any
+other protocol that has a stream.
+
+## Context
+
+The pieces exist and none of them tell a connection's story:
+
+- **The Conversations tab** (Statistics, `Ctrl+3`) has counts, bytes and
+  timings for each pair. It has no state, no close reason and no RTT, and
+  clicking a row applies a filter.
+- **Follow Stream's ladder** (`components/ladder/`) has two lanes and an arrow
+  per frame. It colours direction rose and sky, and colours four expert
+  categories on top of that. The owner rejected those colours: arrows should
+  look like the packet list's rows.
+- **Both read only the RAM window.** On a long capture the table quietly
+  describes the newest frames, and a stream whose start has left memory cannot
+  be followed from its start. Only the PDF report folds conversations over the
+  whole capture, and it does that by reading every row off disk.
+- **The Worker knows most of a TCP connection's life and keeps it to itself.**
+  `TcpStreamTracker` notes SYN, SYN-ACK, FIN and RST per connection and who
+  sent the first FIN. That state sits per shard under multi-threaded capture
+  (ADR 0053) and is evicted at 16,384 connections. Imports do not use it at
+  all: they are dissected on the renderer's main thread with a tracker of
+  their own.
+
+The owner settled the design question by question (2026-10-09). The answers
+are the decisions below.
+
+## Decision
+
+**1. The view.** Follow Stream's ladder is the main view, and an **RFC 793
+state map** is docked beside it.
+
+- **Each lane writes its side's inferred state** as it changes (SYN_SENT,
+  ESTABLISHED, FIN_WAIT_1 and so on).
+- **The state map** is the whole RFC graph, simultaneous open and close
+  included, plus reset edges to CLOSED labelled with who sent the RST. States
+  not visited are dimmed. The path taken is drawn in the theme's accent
+  (`--primary`), one side at a time, chosen by a Client | Server switch.
+- **The two are linked both ways.** Hovering an arrow lights the transition it
+  caused, and clicking a state scrolls the ladder to the frame that entered it.
+- **Long quiet runs fold into one band**, for example "data ×12,400 · 18 MB ·
+  3.2 s". A band breaks on a SYN, FIN or RST, on any `tcp.analysis` flag, on a
+  gap, and on a change of matched colour rule. Clicking a band expands it.
+
+**2. Colour comes from the colour rules and nowhere else.** An arrow's label is
+a chip painted exactly like that frame's row in the packet list:
+`ColorRulesEngine.getPacketStyle` under the current `packetTheme`. Direction is
+shown by the lane and the arrowhead. The rose/sky pair and `CATEGORY_STROKE`
+are deleted. An expert finding becomes a small marker on the arrow. A band
+takes exactly one rule's colour because a change of rule breaks it, so its
+colour is never an average.
+
+**3. The list.** The conversation table gains an **outcome** column, and
+clicking a row opens the stream view. Filtering moves to the context menu and
+to a button on the row.
+
+The TCP outcomes are:
+
+| Outcome | What was seen |
+|---|---|
+| `closed cleanly` | FINs both ways, the last one ACKed |
+| `closing` | FINs both ways, the last ACK not seen |
+| `half-closed by client` / `by server` | one side's FIN, the other side still sending or silent |
+| `reset by client` / `by server` | an RST, with who sent it |
+| `refused` | SYN answered by RST |
+| `no reply` | SYN, and nothing back |
+| `handshake unfinished` | SYN and SYN-ACK, no final ACK and nothing after |
+| `open` | established, no FIN or RST before the capture stopped |
+
+Any outcome can carry **`joined mid-stream`**, meaning the handshake was not
+captured.
+
+For stages 2 and 3:
+
+- **Plain UDP** says what it saw: `one-way`, `request/response` or `two-way`,
+  plus `went quiet` when the flow stopped well before the capture did.
+- **Protocols that define phases** replace that with their own:
+  - DNS: `unanswered`
+  - QUIC: Initial → Handshake → 1-RTT → `closed by server` / stateless reset
+  - TLS over TCP: ClientHello → ServerHello → … → `close_notify` / alert
+  - DHCP: DORA
+- **QUIC gets its own level** in the table, because a QUIC connection is not a
+  five-tuple. Its connection IDs migrate. **TLS stays a phase** on top of TCP.
+
+**4. States are inferred, and the view says where they are not seen.** One
+vantage point sees segments, not either host's state.
+
+- The sender changes state when it sends. The receiver changes state when the
+  segment would have arrived, and that is assumed, never observed.
+- A stream that starts without a SYN begins in `unknown` and becomes
+  ESTABLISHED, marked "joined mid-stream (handshake not captured)".
+- A gap the analysis already names (`lost_segment`) is marked where it is.
+- A stream still open when the capture ended is marked "state unknown after
+  the capture ended".
+- TIME_WAIT is drawn as **expected**, never as observed.
+- LISTEN is never drawn as observed, because nothing on the wire shows a host
+  listening.
+
+This is the same discipline as the expert info's "previous segment not
+captured": the view never claims more than the capture holds.
+
+**5. The capture store builds the per-stream record: the stream digest.** Not
+the Worker and not the trackers.
+
+- **One place, every path.** Rows from a live capture (after the shards'
+  merge, in id order) and rows from an import both arrive at the store as
+  `append`. That is the only place every row of every capture passes in order.
+  The Worker would cover only live captures. The trackers are split across
+  shards, evict at 16,384, and are rebuilt for an import on another thread.
+- **It folds rows, not tracker state.** Everything it needs is already on a
+  row: the five-tuple, `tcp.stream` (`Packet.streamId`), `tcp.flags.*`,
+  `analysisFlags`, length, time and protocol label. So the digest needs no new
+  message from the dissector, and it is held to the same rows the list shows.
+  Of what `InfoPatch` changes, only `protocolLabel` matters to it, and the
+  store forwards that.
+- **A digest is derived data, and the rows are always its source.** It is
+  persisted as a snapshot in a sixth file, `streams.iwdig`. The snapshot is
+  written on `finish` (pause, stop and close), each time a capture's writer
+  seals everything. On `open` the snapshot is used only if it covers exactly
+  the frames recovery kept. Otherwise, after a crash or for a capture written
+  before this ADR, the store rebuilds the digest by folding the capture's rows
+  off disk in slices, the way a scan runs. Nothing about the five existing
+  files changes, and no index version moves.
+- **It is not deleted with a ring's segment.** A stream's summary outlives
+  frames the ring took, and the ladder marks "frames before #N were removed by
+  the ring". That deletes nothing the user asked to keep, which is what ADR
+  0012 is about. A rebuild after a crash covers only what is still on disk.
+- **The ladder reads a stream's frames from disk.** The prefix file already
+  stores each frame's `tcp.stream` at offset 12. A new `streamOrdinals`
+  request walks the prefix blocks between the stream's first and last chunk
+  (the digest knows both) and returns ordinals. It never cancels or waits for
+  the filter bar's scan, which `scan` would. Rows are then read with
+  `rowsForOrdinals` in pages.
+- **Colour and folding happen in the renderer.** The store does not know the
+  colour rules, so a band is cut where the rows say it should be: the matched
+  rule, as well as the flags and analysis. A stream of a hundred thousand
+  segments is read once when it opens, with progress shown, and its folded
+  bands are cached for the life of the view.
+
+**6. Order of work.**
+
+1. TCP end to end: the digest, the outcome column on the TCP level, ladder
+   states and bands, the state map, colour-rule chips.
+2. Generic UDP and the QUIC level.
+3. TLS, DNS and DHCP phases, each a small description of its phases plugged
+   into the same view.
+
+## Considered and rejected
+
+- **The state diagram on its own.** It explains why but leaves out when, who,
+  and what was in between. The owner took both views.
+- **A summary built in the pipeline Worker.** It misses every import, splits
+  across shards, and forgets at the tracker's cap.
+- **A re-scan from disk each time the pane opens**, as the PDF report does.
+  Correct, but it costs seconds on every open of a large capture. Folding at
+  arrival costs the store a map lookup a row. Task 4 of the plan measures it
+  against `scripts/perf/store-boundary.ts`.
+- **A per-chunk journal sealed with each chunk**, like `records.iwrec`. It is
+  durable through a crash. But the digest folds at `append` while rows seal up
+  to two seconds later, so a journal would have to hold each frame's
+  contribution until its chunk sealed, which is a second staging ring. A
+  snapshot plus a rebuild gets the same answer after a crash for the cost of
+  one read pass.
+- **Evaluating colour rules in the store**, so bands could be cut there. The
+  rules are renderer preferences and an edit would invalidate every band. Rows
+  are read anyway to draw arrows.
+
+## Consequences
+
+- **A capture directory has six files.** `planPrune` already removes whole
+  directories, so a prune needs no change. `bytesOnDisk` counts the new file.
+- **For one stage, Conversations has two scopes.** The TCP level is the whole
+  capture and the other levels are still the RAM window until stage 2. The
+  pane says which.
+- **Opening a capture after a crash rebuilds its digest.** This takes as long
+  as a scan of the whole capture. The TCP level shows the rebuild's progress
+  and is usable from its first slice.
