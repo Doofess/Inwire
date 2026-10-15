@@ -60,7 +60,7 @@ try {
   console.log(`outcome: ${outcome.replace(/\s+/g, ' ')} after ${((Date.now() - started) / 1000).toFixed(1)} s`);
   if (outcome === 'done') {
     // Written as the result lands, so read once it has.
-    let history: { downMbps: number; upMbps: number; pingMs: number; jitterMs: number; grade: string; server: string; isp: string }[] = [];
+    let history: { downMbps: number; upMbps: number; pingMs: number; jitterMs: number; grade: string; server: string; isp: string; rpm?: number; loadedDownMs?: number; loadedUpMs?: number }[] = [];
     for (let i = 0; i < 40 && history.length === 0; i++) {
       history = await p.evaluate(() => JSON.parse(localStorage.getItem('inwire.speedTestHistory') ?? '[]'));
       if (history.length === 0) await sleep(250);
@@ -68,8 +68,10 @@ try {
     const r = history[0];
     console.log(`download ${r.downMbps.toFixed(1)} Mb/s, upload ${r.upMbps.toFixed(1)} Mb/s, ping ${r.pingMs.toFixed(1)} ms, jitter ${r.jitterMs.toFixed(1)} ms, grade ${r.grade}`);
     console.log(`server: Cloudflare ${r.server}; ISP: ${r.isp}`);
-    const loaded = await p.getByText(/^↓ .* ms · ↑ .* ms$/).first().innerText().catch(() => '?');
-    console.log(`loaded latency: ${loaded}`);
+    // From the entry rather than the page: the sheet draws loaded latency as
+    // boxes now, and the figures are the history's own (ADR 0054's amendment).
+    const ms = (v: number | undefined) => (typeof v === 'number' ? `${v.toFixed(1)} ms` : '?');
+    console.log(`loaded latency: ↓ ${ms(r.loadedDownMs)} · ↑ ${ms(r.loadedUpMs)}; responsiveness ${r.rpm ?? '?'} RPM`);
   }
   console.log(`main's event-loop delay during the test: p50 ${lag.p50.toFixed(1)} ms, p99 ${lag.p99.toFixed(1)} ms, max ${lag.max.toFixed(1)} ms`);
 } finally {
