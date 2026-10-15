@@ -1,5 +1,6 @@
 import { createPreferenceStore } from './preferenceStore';
 import { packetColorSet, type PacketColorSet } from './packetThemes';
+import { DEFAULT_ACCENT, normalizeAccent, type AccentId } from '../lib/accents';
 
 /**
  * Whether the app theme follows the operating system.
@@ -39,5 +40,17 @@ export const packetColorSetStore = createPreferenceStore<PacketColorSet>(
   // id retired later degrades to Default rather than to an empty list.
   (raw) => (typeof raw === 'string' ? packetColorSet(raw) : null),
   'default',
+);
+
+/**
+ * Which accent swatch the app is painted in (ADR 0056, `lib/accents.ts`).
+ *
+ * A third axis over the theme, stored on its own key for the reason the two
+ * above are. A stored swatch that has since been removed loads as Blue.
+ */
+export const accentColorStore = createPreferenceStore<AccentId>(
+  'inwire.accentColor',
+  normalizeAccent,
+  DEFAULT_ACCENT,
 );
 

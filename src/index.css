@@ -842,6 +842,168 @@ html[data-platform="win32"] {
   --danger-strong-foreground: #0b0f14;
 }
 
+/* The accent swatches (ADR 0056), printed by scripts/themes/accent-css.ts from
+   src/lib/accents.ts - edit the table and paste again; scripts/themes/accents.ts
+   fails if this block is not exactly what it prints. Blue is the blocks above
+   and has no rule. Each swatch's light rule comes first, so on a dark <html>
+   (which :root also matches) the dark rule wins by order at equal specificity. */
+/* accent-css:begin */
+:root[data-accent-color="teal"],
+.light[data-accent-color="teal"] {
+  --primary: #0f766e;
+  --primary-foreground: #ffffff;
+  --ring: #0f766e;
+  --speed-download: #0f766e;
+}
+.dark[data-accent-color="teal"] {
+  --primary: #2dd4bf;
+  --primary-foreground: #000000;
+  --ring: #2dd4bf;
+  --speed-download: #2dd4bf;
+}
+.dim[data-accent-color="teal"] {
+  --primary: #3fb8a8;
+  --primary-foreground: #000000;
+  --ring: #3fb8a8;
+  --speed-download: #3fb8a8;
+}
+.contrast[data-accent-color="teal"] {
+  --primary: #5eead4;
+  --primary-foreground: #000000;
+  --ring: #5eead4;
+  --speed-download: #5eead4;
+}
+:root[data-accent-color="green"],
+.light[data-accent-color="green"] {
+  --primary: #16763a;
+  --primary-foreground: #ffffff;
+  --ring: #16763a;
+  --speed-download: #16763a;
+}
+.dark[data-accent-color="green"] {
+  --primary: #4ade80;
+  --primary-foreground: #000000;
+  --ring: #4ade80;
+  --speed-download: #4ade80;
+}
+.dim[data-accent-color="green"] {
+  --primary: #57b06f;
+  --primary-foreground: #000000;
+  --ring: #57b06f;
+  --speed-download: #57b06f;
+}
+.contrast[data-accent-color="green"] {
+  --primary: #86efac;
+  --primary-foreground: #000000;
+  --ring: #86efac;
+  --speed-download: #86efac;
+}
+:root[data-accent-color="violet"],
+.light[data-accent-color="violet"] {
+  --primary: #6d28d9;
+  --primary-foreground: #ffffff;
+  --ring: #6d28d9;
+  --speed-download: #6d28d9;
+  --speed-upload: #c2410c;
+}
+.dark[data-accent-color="violet"] {
+  --primary: #a78bfa;
+  --primary-foreground: #000000;
+  --ring: #a78bfa;
+  --speed-download: #a78bfa;
+  --speed-upload: #fb923c;
+}
+.dim[data-accent-color="violet"] {
+  --primary: #9b87e8;
+  --primary-foreground: #000000;
+  --ring: #9b87e8;
+  --speed-download: #9b87e8;
+  --speed-upload: #fb923c;
+}
+.contrast[data-accent-color="violet"] {
+  --primary: #c4b5fd;
+  --primary-foreground: #000000;
+  --ring: #c4b5fd;
+  --speed-download: #c4b5fd;
+  --speed-upload: #fdba74;
+}
+:root[data-accent-color="rose"],
+.light[data-accent-color="rose"] {
+  --primary: #be185d;
+  --primary-foreground: #ffffff;
+  --ring: #be185d;
+  --speed-download: #be185d;
+}
+.dark[data-accent-color="rose"] {
+  --primary: #f472b6;
+  --primary-foreground: #000000;
+  --ring: #f472b6;
+  --speed-download: #f472b6;
+}
+.dim[data-accent-color="rose"] {
+  --primary: #e07aa8;
+  --primary-foreground: #000000;
+  --ring: #e07aa8;
+  --speed-download: #e07aa8;
+}
+.contrast[data-accent-color="rose"] {
+  --primary: #f9a8d4;
+  --primary-foreground: #000000;
+  --ring: #f9a8d4;
+  --speed-download: #f9a8d4;
+}
+:root[data-accent-color="amber"],
+.light[data-accent-color="amber"] {
+  --primary: #a54d07;
+  --primary-foreground: #ffffff;
+  --ring: #a54d07;
+  --speed-download: #a54d07;
+}
+.dark[data-accent-color="amber"] {
+  --primary: #fbbf24;
+  --primary-foreground: #000000;
+  --ring: #fbbf24;
+  --speed-download: #fbbf24;
+}
+.dim[data-accent-color="amber"] {
+  --primary: #e0a640;
+  --primary-foreground: #000000;
+  --ring: #e0a640;
+  --speed-download: #e0a640;
+}
+.contrast[data-accent-color="amber"] {
+  --primary: #fcd34d;
+  --primary-foreground: #000000;
+  --ring: #fcd34d;
+  --speed-download: #fcd34d;
+}
+:root[data-accent-color="graphite"],
+.light[data-accent-color="graphite"] {
+  --primary: #475569;
+  --primary-foreground: #ffffff;
+  --ring: #475569;
+  --speed-download: #475569;
+}
+.dark[data-accent-color="graphite"] {
+  --primary: #cbd5e1;
+  --primary-foreground: #000000;
+  --ring: #cbd5e1;
+  --speed-download: #cbd5e1;
+}
+.dim[data-accent-color="graphite"] {
+  --primary: #aab4c0;
+  --primary-foreground: #000000;
+  --ring: #aab4c0;
+  --speed-download: #aab4c0;
+}
+.contrast[data-accent-color="graphite"] {
+  --primary: #e2e8f0;
+  --primary-foreground: #000000;
+  --ring: #e2e8f0;
+  --speed-download: #e2e8f0;
+}
+/* accent-css:end */
+
 /* High Contrast states what it tints. A 20% fill is a hint at 7:1 and not a
    statement, so the rail's active button is outlined as well - the one named
    exception to the rail's single mark shape (`railButton`, held by

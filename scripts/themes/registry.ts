@@ -22,6 +22,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { contrastRatio, deltaE76, mixHex } from '../../src/lib/colorMix';
+import { ACCENTS } from '../../src/lib/accents';
+import { PALETTE_BY_THEME } from '../../src/services/themePalettes';
 import {
   RETIRED_THEMES,
   SYSTEM_THEME_PAIR,
@@ -517,6 +519,56 @@ for (const fg of ['--foreground', '--muted-foreground', '--primary']) {
   checkTrue(`contrast: --warning on --secondary is 4.5:1 (${warn.toFixed(2)})`, warn >= 4.5);
   const edge = contrastRatio(hexIn('contrast', '--border'), hexIn('contrast', '--background'));
   checkTrue(`contrast: --border on --background is 3:1, the structure on its own (${edge.toFixed(2)})`, edge >= 3);
+}
+
+console.log();
+// --- every accent swatch, in every theme (ADR 0056) ----------------------------
+// An accent replaces --primary, --primary-foreground, --ring and
+// --speed-download, so every pair above that reads --primary is asked again
+// with each swatch in its place. Blue is the theme blocks' own values, so it
+// repeats checks already made; it stays in the loop so the table cannot hold a
+// Blue that differs from them and pass.
+for (const theme of realThemes) {
+  const floor = theme === 'contrast' ? 7 : 4.5;
+  const chrome = hexIn(theme, '--secondary');
+  const hover = hexIn(theme, '--accent');
+  for (const a of ACCENTS) {
+    const primary = a.primary[theme];
+    const at = `${theme} / ${a.id}`;
+    const fill = contrastRatio(a.primaryForeground[theme], primary);
+    checkTrue(`${at}: text on the accent fill is 4.5:1 (${fill.toFixed(2)})`, fill >= 4.5);
+    for (const bg of ['--background', '--card', '--secondary']) {
+      const r = contrastRatio(primary, hexIn(theme, bg));
+      checkTrue(`${at}: the accent on ${bg} is ${floor}:1 (${r.toFixed(2)})`, r >= floor);
+    }
+    const sel = contrastRatio(primary, selectionHex(theme, primary));
+    checkTrue(`${at}: the selected row's text is ${floor}:1 (${sel.toFixed(2)})`, sel >= floor);
+
+    const railFill = mixHex(primary, chrome, activeAlpha);
+    const glyph = contrastRatio(hexIn(theme, '--foreground'), railFill);
+    checkTrue(`${at}: the rail's active glyph is 4.5:1 (${glyph.toFixed(2)})`, glyph >= 4.5);
+    const fromChrome = deltaE76(railFill, chrome);
+    const fromHover = deltaE76(railFill, hover);
+    checkTrue(`${at}: the rail's active fill reads against the rail (${fromChrome.toFixed(1)} deltaE)`,
+      fromChrome >= MIN_STATE_DELTA_E);
+    checkTrue(`${at}: ...and is not its hover (${fromHover.toFixed(1)} deltaE)`,
+      fromHover >= MIN_STATE_DELTA_E);
+
+    // An accent that reads as an error or a warning makes every selected row
+    // and focused control say something the app did not mean.
+    for (const status of ['--destructive', '--warning']) {
+      const d = deltaE76(primary, hexIn(theme, status));
+      checkTrue(`${at}: the accent is not ${status} (${d.toFixed(1)} deltaE)`, d >= 10);
+    }
+
+    // Download is the accent, upload is purple - unless the accent IS purple,
+    // when upload takes the theme's orange.
+    const upload = a.uploadHue ? PALETTE_BY_THEME[theme].hues[a.uploadHue] : hexIn(theme, '--speed-upload');
+    const apart = deltaE76(primary, upload);
+    checkTrue(`${at}: download and upload stay apart (${apart.toFixed(1)} deltaE)`, apart >= 15);
+    const onCard = contrastRatio(upload, hexIn(theme, '--card'));
+    checkTrue(`${at}: the upload colour on --card is 4.5:1 (${onCard.toFixed(2)})`, onCard >= 4.5);
+  }
 }
 
 if (failures) {

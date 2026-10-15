@@ -4,6 +4,7 @@ import {ThemeProvider, useTheme} from 'next-themes';
 import {MotionConfig} from 'motion/react';
 import {RETIRED_THEMES, THEME_NAMES, isDarkTheme, normalizeThemeName} from './lib/themeOptions';
 import {motionStore} from './services/interfacePrefs';
+import {accentColorStore} from './services/themePrefs';
 import {usePreferenceValue} from './services/preferenceStore';
 import App from './App.tsx';
 import {QuitConfirmDialog} from './components/common/QuitConfirmDialog';
@@ -56,6 +57,19 @@ function stampPlatform(): void {
 }
 
 stampPlatform();
+
+/**
+ * The accent swatch, as `data-accent-color` on <html> (ADR 0056). Module scope
+ * for the reason the platform is: the first paint is already in the chosen
+ * accent rather than Blue corrected a frame later. Re-stamped on change, so the
+ * picker needs no path of its own to the document.
+ */
+function stampAccentColor(): void {
+  document.documentElement.dataset.accentColor = accentColorStore.get();
+}
+
+stampAccentColor();
+accentColorStore.subscribe(stampAccentColor);
 
 /**
  * The app's motion setting, in the form motion/react wants.
