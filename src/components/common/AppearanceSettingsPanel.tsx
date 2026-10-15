@@ -84,7 +84,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
         <div className="py-2.5">
           <div className="text-xs font-semibold text-foreground">App theme</div>
           <p className="text-[11px] text-muted-foreground mt-0.5 mb-2 leading-snug">
-            The window, panels and charts. System follows your OS setting, choosing Day or Night.
+            The window, panels and charts. System follows Windows: Light or Dark, and High Contrast when Windows asks for it.
           </p>
           {/* Three across: the two themes plus System, which is a mode over
               them rather than a third palette - see useSystemThemePreference.

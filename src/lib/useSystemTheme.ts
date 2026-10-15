@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useTheme } from 'next-themes';
 import { useMediaQuery } from './useMediaQuery';
-import { SYSTEM_THEME_PAIR } from './themeOptions';
+import { systemThemeFor } from './themeOptions';
 import { followSystemThemeStore } from '../services/themePrefs';
 import { usePreferenceValue } from '../services/preferenceStore';
 import { usePreferenceSync } from '../services/preferences';
@@ -15,7 +15,7 @@ import { usePreferenceSync } from '../services/preferences';
  * it was the wrong answer outright when the `dark` id belonged to a warm theme
  * called Graphite, and it would be the wrong answer again the moment a third
  * theme arrives. Which pair System chooses between is a product decision, so it
- * is made in `SYSTEM_THEME_PAIR` and read here.
+ * is made in `systemThemeFor` and read here.
  *
  * Kept out of THEME_OPTIONS for the same reason. Everything downstream of that
  * list - the CSS class blocks, `isDarkTheme`, the palettes, the assertion
@@ -32,6 +32,10 @@ export function useSystemThemePreference(): void {
   );
 
   const prefersDark = useMediaQuery('(prefers-color-scheme: dark)');
+  // Windows' contrast themes set forced-colors; "more contrast" is the
+  // standard query for the same wish. Either sends System to High Contrast.
+  const prefersMoreContrast = useMediaQuery('(prefers-contrast: more)');
+  const forcedColors = useMediaQuery('(forced-colors: active)');
   const { setTheme } = useTheme();
 
   /**
@@ -56,9 +60,9 @@ export function useSystemThemePreference(): void {
       lastApplied.current = null;
       return;
     }
-    const wanted = prefersDark ? SYSTEM_THEME_PAIR.dark : SYSTEM_THEME_PAIR.light;
+    const wanted = systemThemeFor({ prefersDark, prefersMoreContrast, forcedColors });
     if (lastApplied.current === wanted) return;
     lastApplied.current = wanted;
     setTheme(wanted);
-  }, [follows, prefersDark, setTheme]);
+  }, [follows, prefersDark, prefersMoreContrast, forcedColors, setTheme]);
 }
