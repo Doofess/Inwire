@@ -16,15 +16,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent } from './stubAgent';
+import { launchApp } from './launchApp';
 
-const { _electron: electron } = await import('playwright');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PIPE = String.raw`\\.\pipe\inwire-speeddrive-` + process.pid;
 const agent = await startStubAgent(PIPE, 0);
 const profile = mkdtempSync(path.join(tmpdir(), 'inwire-speeddrive-'));
 const env: Record<string, string> = { ...process.env as Record<string, string>, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE };
 delete env.INWIRE_SPEEDTEST_TARGET;
-const app = await electron.launch({ args: ['.'], env });
+const app = await launchApp({ args: ['.'], env });
 try {
   const p = await app.firstWindow();
   p.setDefaultTimeout(30_000);

@@ -1073,6 +1073,20 @@ reintroduction. Four things about running it:
   is worse — `kill()` reaches main and orphans the GPU, renderer, store and
   crashpad children.
 
+**Every launch of the app by a script runs in the background.** The owner works
+on this machine while the suite runs, and a window that pops up on every
+`npm run check` is a window in front of their work. So scripts start the app
+through `scripts/electron/launchApp.ts` and never through Playwright directly,
+and the helper sets `INWIRE_BACKGROUND_WINDOW=1`, which `electron/main.ts` reads
+once: the window is shown with `showInactive()` parked at -20000,-20000 and
+kept out of the taskbar. **Not left hidden**, which was tried first - Chromium
+gives a hidden window two animation frames a second, and every rAF-driven wait
+stalls; parked, it paints normally (135 frames a second, a 1600x950 screenshot
+with thousands of colours). A visible launch is an explicit opt-out,
+`launchApp({ visible: true })`, and nothing uses it.
+`scripts/electron/background-launch.ts` fails any script that calls
+`_electron.launch` itself.
+
 **An import is not capped by memory.** `PcapService.streamCaptureFile` hands
 frames over as it dissects them; `App` writes each batch to the capture store
 and keeps the newest `framesForBudget(...)` in the buffer. What bounds the pass

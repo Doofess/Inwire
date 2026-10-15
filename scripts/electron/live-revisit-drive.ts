@@ -44,6 +44,7 @@ import { L3Tracker } from '../../src/services/l3Tracker';
 import { LINKTYPE } from '../../src/services/dissect/types';
 import type { Packet, ProtocolField, ProtocolLayer } from '../../src/types/packet';
 import { installWorkerSpy, openFrames, workerFailures, type FrameCase } from './openFrame';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -113,7 +114,7 @@ try {
 // --- capture ------------------------------------------------------------------
 const profile = mkdtempSync(path.join(tmpdir(), 'inwire-live-revisit-'));
 const copyRoot = mkdtempSync(path.join(tmpdir(), 'inwire-live-revisit-copy-'));
-const app = await playwright._electron.launch({
+const app = await launchApp({
   args: ['.'],
   env: { ...process.env, INWIRE_USER_DATA: profile } as Record<string, string>,
 });

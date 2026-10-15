@@ -20,6 +20,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function checkTrue(name: string, condition: boolean, detail = ''): void {
@@ -35,9 +36,8 @@ if (process.platform !== 'win32') skip('the desktop app is Windows-only - nothin
 if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-electron', 'main.cjs'))) {
   skip('no build to launch - run `npm run build` first');
 }
-let electron: typeof import('playwright')['_electron'];
 try {
-  ({ _electron: electron } = await import('playwright'));
+  await import('playwright');
 } catch {
   skip('playwright is not installed');
 }
@@ -64,13 +64,13 @@ async function clicks(what: string, act: () => Promise<void>): Promise<boolean> 
 const PIPE = `\\\\.\\pipe\\inwire-reopen-${process.pid}`;
 let agent: StubAgent | null = null;
 let profile: string | null = null;
-type App = Awaited<ReturnType<typeof electron.launch>>;
+type App = Awaited<ReturnType<typeof launchApp>>;
 type Page = Awaited<ReturnType<App['firstWindow']>>;
 let app: App | null = null;
 let page: Page | null = null;
 
 async function launch(): Promise<Page> {
-  app = await electron.launch({
+  app = await launchApp({
     args: ['.'],
     env: { ...process.env, INWIRE_USER_DATA: profile!, INWIRE_AGENT_PIPE: PIPE },
   });

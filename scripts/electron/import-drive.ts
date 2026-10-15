@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { dnsQuery } from './stubAgent';
 import { watchMainOutput } from './mainOutput';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -52,9 +53,8 @@ if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-
   skip('no build to launch - run `npm run build` first');
 }
 
-let electron: typeof import('playwright')['_electron'];
 try {
-  ({ _electron: electron } = await import('playwright'));
+  await import('playwright');
 } catch {
   skip('playwright is not installed');
 }
@@ -99,12 +99,12 @@ console.log(`      wrote ${FRAMES.toLocaleString()} frames to a ${
   (existsSync(pcapPath) ? Math.round(FRAMES * 87 / 1e6) : 0)} MB file\n`);
 
 let profile: string | null = null;
-let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
-let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof electron.launch>>['firstWindow']>> | null = null;
+let app: Awaited<ReturnType<typeof launchApp>> | null = null;
+let mainWindow: Awaited<ReturnType<Awaited<ReturnType<typeof launchApp>>['firstWindow']>> | null = null;
 
 try {
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-importp-'));
-  app = await electron.launch({ args: ['.'], env: { ...process.env, INWIRE_USER_DATA: profile } });
+  app = await launchApp({ args: ['.'], env: { ...process.env, INWIRE_USER_DATA: profile } });
   const page = await app.firstWindow();
   mainWindow = page;
   page.setDefaultTimeout(30_000);

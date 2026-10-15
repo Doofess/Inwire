@@ -53,6 +53,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -133,9 +134,8 @@ console.log(autoStart
   ? '      note: this machine still has the AUTO_START install (pre-ADR 0035)'
   : '      this machine has the demand-start install');
 
-let electron: typeof import('playwright')['_electron'];
 try {
-  ({ _electron: electron } = await import('playwright'));
+  await import('playwright');
 } catch {
   skip('playwright is not installed');
 }
@@ -150,7 +150,7 @@ async function until(condition: () => Promise<boolean>, ms = 25_000): Promise<bo
   }
 }
 
-let app: Awaited<ReturnType<typeof electron.launch>> | null = null;
+let app: Awaited<ReturnType<typeof launchApp>> | null = null;
 let profile: string | null = null;
 try {
   console.log('\n--- the app, against the real service ---\n');
@@ -159,7 +159,7 @@ try {
   // production pipe name on purpose.
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-live-'));
   const launchedAt = Date.now();
-  app = await electron.launch({
+  app = await launchApp({
     args: ['.'],
     env: { ...process.env, INWIRE_USER_DATA: profile },
   });

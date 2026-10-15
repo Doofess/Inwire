@@ -39,9 +39,10 @@ import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { _electron as electron, type ElectronApplication, type Page } from 'playwright';
+import type { ElectronApplication, Page } from 'playwright';
 import { normalizeSnapshot, type UpdateSnapshot } from '../../src/services/updateCenter';
 import { decideDriverAccess, driverAccessLabel } from '../../src/services/npcapAccess';
+import { launchApp } from './launchApp';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -107,7 +108,7 @@ try {
   console.log(`--- serving a feed at ${feed} ---\n`);
 
   profile = mkdtempSync(path.join(tmpdir(), 'inwire-updates-'));
-  app = await electron.launch({
+  app = await launchApp({
     args: ['.'],
     env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_UPDATE_FEED: feed },
   });
