@@ -164,7 +164,10 @@ const REQUIRED_TOKENS = tokensIn(':root');
 // value would not merely be a shade out, it would draw the line on the wrong
 // side of the ground - which is the state that shipped while this was a
 // fraction of white and every theme shared it.
-check('the :root baseline declares 33 tokens', REQUIRED_TOKENS.length, 33);
+//
+// `--selection` and `--handle-hover` made it 35 (ADR 0056): both are a share
+// that differs per theme, so both are declared in every block.
+check('the :root baseline declares 35 tokens', REQUIRED_TOKENS.length, 35);
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;
@@ -447,6 +450,49 @@ for (const t of THEME_OPTIONS) {
 }
 
 console.log();
+// --- selection, and High Contrast's 7:1 (ADR 0056) ----------------------------
+// The selected row is the accent mixed into the ground, and its text is the
+// accent itself, so the pair that has to hold is primary on that mix. The share
+// is per theme because it is the largest each ground allows: Light's accents
+// sit near 4.5:1 on the ground already, so 6% is all it has room for; the ring
+// and the weight carry the selection there, the tint only confirms it.
+const SELECTION_SHARE: Record<string, number> = { light: 6, dark: 22, dim: 13, contrast: 19 };
+
+function themeBlock(theme: string): string {
+  const selector = theme === 'light' ? ':root' : `.${theme}`;
+  const start = css.indexOf(`${selector} {`);
+  return start === -1 ? '' : css.slice(start, css.indexOf('\n}', start));
+}
+function hexIn(theme: string, token: string): string {
+  return new RegExp(`${token}:\\s*(#[0-9a-fA-F]{6})`).exec(themeBlock(theme))?.[1] ?? '#000000';
+}
+function selectionHex(theme: string, primary: string): string {
+  return mixHex(primary, hexIn(theme, '--background'), SELECTION_SHARE[theme] / 100);
+}
+
+for (const theme of realThemes) {
+  const share = SELECTION_SHARE[theme];
+  checkTrue(`${theme}: --selection mixes ${share}% of the accent into the ground`,
+    new RegExp(`--selection:\\s*color-mix\\(in srgb, var\\(--primary\\) ${share}%, var\\(--background\\)\\)`).test(themeBlock(theme)));
+  const primary = hexIn(theme, '--primary');
+  const floor = theme === 'contrast' ? 7 : 4.5;
+  const ratio = contrastRatio(primary, selectionHex(theme, primary));
+  checkTrue(`${theme}: the selected row's text (primary on the mix) is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
+}
+
+for (const fg of ['--foreground', '--muted-foreground', '--primary']) {
+  for (const bg of ['--background', '--card', '--secondary']) {
+    const ratio = contrastRatio(hexIn('contrast', fg), hexIn('contrast', bg));
+    checkTrue(`contrast: ${fg} on ${bg} is 7:1 (${ratio.toFixed(2)})`, ratio >= 7);
+  }
+}
+{
+  const warn = contrastRatio(hexIn('contrast', '--warning'), hexIn('contrast', '--secondary'));
+  checkTrue(`contrast: --warning on --secondary is 4.5:1 (${warn.toFixed(2)})`, warn >= 4.5);
+  const edge = contrastRatio(hexIn('contrast', '--border'), hexIn('contrast', '--background'));
+  checkTrue(`contrast: --border on --background is 3:1, the structure on its own (${edge.toFixed(2)})`, edge >= 3);
+}
+
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
   process.exit(1);

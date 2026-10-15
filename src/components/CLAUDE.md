@@ -349,9 +349,10 @@ legitimately contains `setSideBar`.
 
 **The sash is an in-flow `w-1` sibling and IS the 4px gap.** At rest it paints
 nothing, two card borders already drawing that edge. **Every resize handle in
-the app hovers to `bg-foreground/25`, not to the accent** - a neutral that
-follows Day and Night, because the accent blue reads as a stray line against
-Night's black (the owner's report). It carries the full
+the app hovers to `bg-handle-hover`, not to the accent** - a neutral that
+follows every theme, because the accent blue reads as a stray line against
+Dark's near-black (the owner's report). It is the foreground at 25%, and at 70%
+in High Contrast, where a quarter-strength line is not a statement. It carries the full
 divider vocabulary: `role="separator"`, `aria-valuenow/min/max` in px, arrows
 with Shift for bigger steps, Home/End, and a reset on double-click, right-click
 and Enter.

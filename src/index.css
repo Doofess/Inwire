@@ -82,6 +82,8 @@
   --muted: #eef1f5;
   --muted-foreground: #5b6470;
   --accent: #e1e5ea;
+  --selection: color-mix(in srgb, var(--primary) 6%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 25%, transparent);
   --accent-foreground: #1b1f24;
   --destructive: #d32f3f;
   --destructive-foreground: #ffffff;
@@ -134,6 +136,8 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-selection: var(--selection);
+  --color-handle-hover: var(--handle-hover);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
   --color-success-muted: var(--success-muted);
@@ -714,6 +718,8 @@ html[data-platform="win32"] {
      phrased against `--card`, which is where that chrome used to be; the
      relationship is the same one and the ground under it moved. */
   --accent: #252628;
+  --selection: color-mix(in srgb, var(--primary) 22%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 25%, transparent);
   --accent-foreground: #e4e4e4;
   --destructive: #fb7185;
   --destructive-foreground: #000000;
@@ -763,6 +769,8 @@ html[data-platform="win32"] {
   --muted: #272d35;
   --muted-foreground: #9aa4b0;
   --accent: #303742;
+  --selection: color-mix(in srgb, var(--primary) 13%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 25%, transparent);
   --accent-foreground: #d1d7e0;
   --destructive: #fb7185;
   --destructive-foreground: #000000;
@@ -809,6 +817,8 @@ html[data-platform="win32"] {
   --muted: #111111;
   --muted-foreground: #c4c7cc;
   --accent: #262626;
+  --selection: color-mix(in srgb, var(--primary) 19%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 70%, transparent);
   --accent-foreground: #ffffff;
   --destructive: #fda4af;
   --destructive-foreground: #000000;
@@ -830,6 +840,15 @@ html[data-platform="win32"] {
   --danger-muted: #da9190;
   --danger-strong: #ac6867;
   --danger-strong-foreground: #0b0f14;
+}
+
+/* High Contrast states what it tints. A 20% fill is a hint at 7:1 and not a
+   statement, so the rail's active button is outlined as well - the one named
+   exception to the rail's single mark shape (`railButton`, held by
+   scripts/session/view.ts). */
+.contrast .rail-active {
+  outline: 1px solid var(--primary);
+  outline-offset: -1px;
 }
 
 /* maplibre-gl ships its own stylesheet, and it sets a hard
