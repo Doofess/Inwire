@@ -70,8 +70,6 @@ export type AppView = 'packets' | 'detail' | 'statistics' | 'geo' | 'stream';
 export interface AppViewSpec {
   readonly id: AppView;
   readonly label: string;
-  /** Shown in the rail's tooltip, so the shortcut is discoverable from it. */
-  readonly shortcut: string;
 }
 
 /**
@@ -127,14 +125,14 @@ export function viewLabel(view: AppView): string {
 }
 
 export const APP_VIEWS: readonly AppViewSpec[] = [
-  { id: 'packets', label: 'Packets', shortcut: 'Ctrl+1' },
+  { id: 'packets', label: 'Packets' },
   // Directly after the list, because it is the list's own second half: a row
   // tells you a frame exists and this is where the frame is read. It was a
   // modal opened from a double-click, which meant the one surface that shows a
   // frame in full could only be reached from the one surface that shows frames
   // in summary - and was dismissed rather than left.
-  { id: 'detail', label: 'Frame Detail', shortcut: 'Ctrl+2' },
-  { id: 'statistics', label: 'Statistics', shortcut: 'Ctrl+3' },
+  { id: 'detail', label: 'Frame Detail' },
+  { id: 'statistics', label: 'Statistics' },
   // The map was a dock widget with a modal for its full size. It is a view
   // because it passes the test the view list applies and Network failed: it is a
   // way of looking at THE CAPTURE - every arc on it is a conversation in the
@@ -151,8 +149,8 @@ export const APP_VIEWS: readonly AppViewSpec[] = [
   // clamps an unknown id rather than keeping it. The name changed because
   // "geo map" describes the projection and "routing map" describes what is
   // drawn on it: arcs between the endpoints of conversations in the buffer.
-  { id: 'geo', label: 'Routing Map', shortcut: 'Ctrl+4' },
-  { id: 'stream', label: 'Follow Stream', shortcut: 'Ctrl+5' },
+  { id: 'geo', label: 'Routing Map' },
+  { id: 'stream', label: 'Follow Stream' },
 ];
 
 const VIEW_IDS: readonly string[] = APP_VIEWS.map((v) => v.id);

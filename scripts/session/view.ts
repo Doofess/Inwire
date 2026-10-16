@@ -64,11 +64,9 @@ const ids = APP_VIEWS.map((v) => v.id);
 console.log('--- the order IS the numbering ---\n');
 
 {
-  // The tie with teeth. `APP_VIEWS[at - 1]` is what the handler evaluates; this
-  // is what the tooltip says.
-  const declared = APP_VIEWS.map((v) => v.shortcut);
-  const byPosition = APP_VIEWS.map((_, i) => `Ctrl+${i + 1}`);
-  check('every view\'s tooltip names the key that actually opens it', declared, byPosition);
+  // The tooltip's key is the registry's, generated from this order, and
+  // scripts/commands/registry.ts holds it to Ctrl+1..5 - there is no second
+  // spelling here to drift.
 
   // `e.key` is one character, so a tenth view's `Ctrl+10` could be written in a
   // tooltip and could never fire. Asserted rather than commented because the
