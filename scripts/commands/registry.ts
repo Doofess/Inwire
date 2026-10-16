@@ -74,7 +74,15 @@ check('Ctrl+K opens the palette', matchChord(key('k', { ctrl: true }))?.id, 'pal
 check('an upper-case key still matches', matchChord(key('K', { ctrl: true }))?.id, 'palette.open');
 check('Meta counts as Ctrl', matchChord(key('k', { meta: true }))?.id, 'palette.open');
 check('Alt never matches', matchChord(key('k', { ctrl: true, alt: true })), undefined);
-check('Ctrl+Shift+P is the command list', matchChord(key('P', { ctrl: true, shift: true }))?.id, 'palette.commands');
+// A non-Latin layout: Hebrew types ל on the K key, so e.key never says 'k'.
+// The physical key decides then, and only then - a Latin letter a layout
+// types is still read as typed (AZERTY's A is on the Q key).
+const onKey = (k: string, code: string, mods: { ctrl?: boolean; shift?: boolean } = {}) => ({ ...key(k, mods), code });
+check('Ctrl+K on a Hebrew layout opens the palette', matchChord(onKey('ל', 'KeyK', { ctrl: true }))?.id, 'palette.open');
+check('Ctrl+Shift+P on a Russian layout lists commands', matchChord(onKey('З', 'KeyP', { ctrl: true, shift: true }))?.id, 'palette.commands');
+check('a Latin letter is read as typed, not by position', matchChord(onKey('a', 'KeyQ', { ctrl: true })), matchChord(key('a', { ctrl: true })));
+check('a non-Latin key with no code matches nothing', matchChord(key('ל', { ctrl: true })), undefined);
+check('Ctrl+Shift+P is the command list',matchChord(key('P', { ctrl: true, shift: true }))?.id, 'palette.commands');
 check('Ctrl+P alone is nothing', matchChord(key('p', { ctrl: true })), undefined);
 check('Ctrl+Shift+K is not Ctrl+K', matchChord(key('K', { ctrl: true, shift: true })), undefined);
 check('a bare k is nothing', matchChord(key('k')), undefined);

@@ -136,15 +136,27 @@ export function titleWithKeys(id: string, title?: string): string {
 
 /**
  * The command a keydown names, or undefined. Meta counts as Ctrl; Alt never
- * matches, because AltGr arrives as Ctrl+Alt on Windows and is how a German
- * keyboard types `/`. Shift must match exactly, so Ctrl+Shift+K is not Ctrl+K.
+ * matches, because AltGr arrives as Ctrl+Alt on Windows, and a chord that
+ * matched it would fire whenever a European layout typed `@`, `{` or `€`.
+ * Shift must match exactly, so Ctrl+Shift+K is not Ctrl+K.
+ *
+ * A key is read as the layout typed it. Only when that is not a printable
+ * ASCII character - Hebrew, Cyrillic, Greek - does the physical key decide, so
+ * Ctrl+K still opens the palette with a Hebrew layout active.
  */
 export function matchChord(e: {
-  key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean;
+  key: string; code?: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean;
 }): CommandSpec | undefined {
   if (e.altKey || !(e.ctrlKey || e.metaKey)) return undefined;
-  const key = e.key.toLowerCase();
+  const key = chordKey(e.key, e.code);
+  if (key === undefined) return undefined;
   return COMMANDS.find((c) => c.keys?.ctrl && c.keys.key === key && Boolean(c.keys.shift) === e.shiftKey);
+}
+
+function chordKey(key: string, code: string | undefined): string | undefined {
+  if (key.length !== 1 || /[\x20-\x7e]/.test(key)) return key.toLowerCase();
+  const m = code === undefined ? null : /^(?:Key([A-Z])|Digit([0-9]))$/.exec(code);
+  return m ? (m[1] ?? m[2]).toLowerCase() : undefined;
 }
 
 export function availableCommands(ctx: CommandContext): CommandSpec[] {
