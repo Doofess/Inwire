@@ -287,7 +287,7 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   // class rather than by grepping for a radius, because the pane's CONTENTS are
   // full of rounded things and always were - it is the shell that must be bare.
   checkTrue('...and draws no card of its own',
-    pane.includes('className="h-full min-h-0 flex flex-col bg-background text-foreground"'));
+    pane.includes('className="h-full min-h-0 flex flex-col bg-background text-foreground motion-sheet"'));
   checkTrue('it is rendered inside the workspace', app.includes("sheet === 'settings' ? ("));
 
   // **One slot, and it is down to one member.** Network joined Settings here

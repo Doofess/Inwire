@@ -1,4 +1,12 @@
 import React from 'react';
+import { usePreferenceValue } from '../../services/preferenceStore';
+import {
+  isModified,
+  resetSetting,
+  settingAnchorId,
+  settingByLabel,
+  type SettingEntry,
+} from '../../lib/settingsIndex';
 
 /**
  * The shape a Settings panel is built out of: sections of labelled rows.
@@ -17,29 +25,74 @@ import React from 'react';
 
 export const SECTION_CLASS = 'text-[10px] font-bold uppercase tracking-widest text-muted-foreground';
 
-/** One setting: name, explanation, control. */
-export function SettingRow({
-  label,
-  description,
-  htmlFor,
-  children,
-}: {
+interface SettingRowProps {
   label: string;
   description?: string;
   /** Set when the control is a single focusable element that can own the label. */
   htmlFor?: string;
   children: React.ReactNode;
-}) {
+}
+
+/**
+ * One setting: name, explanation, control.
+ *
+ * A row whose label is in the settings index with a preference behind it also
+ * says when its value is not the default - a 2px accent bar at the left edge
+ * and a Reset beside the label. Looked up by label, so the panels pass nothing
+ * extra and a row cannot be marked without being searchable.
+ */
+export function SettingRow(props: SettingRowProps) {
+  const entry = settingByLabel(props.label);
+  return entry?.pref
+    ? <TrackedSettingRow {...props} entry={entry} />
+    : <SettingRowShell {...props} modified={false} />;
+}
+
+/** The only place the store is subscribed to, so a row with no preference calls no hook. */
+function TrackedSettingRow({ entry, ...props }: SettingRowProps & { entry: SettingEntry }) {
+  usePreferenceValue(entry.pref!.store);
+  const modified = isModified(entry);
   return (
-    <div className="flex items-start justify-between gap-6 py-2.5">
+    <SettingRowShell {...props} modified={modified} onReset={() => resetSetting(entry)} />
+  );
+}
+
+function SettingRowShell({
+  label,
+  description,
+  htmlFor,
+  children,
+  modified,
+  onReset,
+}: SettingRowProps & { modified: boolean; onReset?: () => void }) {
+  return (
+    <div id={settingAnchorId(label)} className="relative flex items-start justify-between gap-6 py-2.5">
+      {/* Inside the pane's own padding (p-5), so it sits in the gutter rather
+          than pushing the row in. Decorative: the Reset beside the label is
+          what says the same thing to a screen reader. */}
+      {modified && (
+        <span aria-hidden className="absolute -left-3 inset-y-0 w-0.5 rounded-full bg-primary" />
+      )}
       <div className="min-w-0">
-        {htmlFor ? (
-          <label htmlFor={htmlFor} className="text-xs font-semibold text-foreground cursor-pointer">
-            {label}
-          </label>
-        ) : (
-          <div className="text-xs font-semibold text-foreground">{label}</div>
-        )}
+        <div className="flex items-baseline gap-2">
+          {htmlFor ? (
+            <label htmlFor={htmlFor} className="text-xs font-semibold text-foreground cursor-pointer">
+              {label}
+            </label>
+          ) : (
+            <div className="text-xs font-semibold text-foreground">{label}</div>
+          )}
+          {modified && onReset && (
+            <button
+              type="button"
+              onClick={onReset}
+              aria-label={`Reset ${label} to default`}
+              className="text-[11px] text-muted-foreground hover:text-foreground rounded-sm focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+            >
+              Reset
+            </button>
+          )}
+        </div>
         {description && (
           <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">{description}</p>
         )}

@@ -1,0 +1,301 @@
+/**
+ * What the Settings search knows about: one entry per setting, with the section
+ * it lives in, the words it can be found by, and the preference it writes.
+ *
+ * A hand-kept index rather than one derived from the panels, because the panels
+ * are JSX and a search cannot read JSX. `scripts/settings/settings-index.ts`
+ * is what stops the two drifting: it reads every `<SettingRow label=...>` out of
+ * the panels' source and fails on a row with no entry here, a row filed under
+ * the wrong section, or a description that has changed on one side only.
+ *
+ * Pure: no React, no Electron, no `node:*`. The stores are imported for their
+ * `defaults`, which is what "modified" is measured against.
+ */
+import { rankByFuzzy } from './fuzzy';
+import type { PreferenceStore } from '../services/preferenceStore';
+import {
+  layoutStore,
+  minimapStore,
+  motionStore,
+  nameResolutionStore,
+  packetListStore,
+  performanceStore,
+} from '../services/interfacePrefs';
+import { accentColorStore, packetColorSetStore } from '../services/themePrefs';
+import { arcProtocolColorStore, mapSkinStore } from '../services/mapPrefs';
+import { updateStore } from '../services/updatePrefs';
+
+export type SettingsSection =
+  | 'appearance'
+  | 'interface'
+  | 'accessibility'
+  | 'filters'
+  | 'decryption'
+  | 'driver'
+  | 'updates';
+
+/**
+ * The store a row's control writes, and the field of it when the store holds
+ * several settings. No `field` means the store's whole value is the setting.
+ */
+export interface SettingPref<T = unknown> {
+  store: PreferenceStore<T>;
+  field?: keyof T & string;
+}
+
+export interface SettingEntry {
+  section: SettingsSection;
+  label: string;
+  description?: string;
+  /** Words the label and description do not contain, such as the panel's own section heading. */
+  keywords?: readonly string[];
+  /** Absent for a row whose control is an action, or whose value no single store holds. */
+  pref?: SettingPref;
+}
+
+/** Types the pairing, so a field that is not in the store does not compile. */
+function pref<T>(store: PreferenceStore<T>, field?: keyof T & string): SettingPref {
+  return { store, field } as SettingPref;
+}
+
+/**
+ * In the order the panels show them. The descriptions are the panels' own text,
+ * and a row whose description is built at render time carries its fixed part.
+ */
+export const SETTINGS_INDEX: readonly SettingEntry[] = [
+  // --- Appearance --------------------------------------------------------------------
+  {
+    section: 'appearance',
+    label: 'App theme',
+    description: "The window, panels and charts. System follows Windows: Light or Dark, and High Contrast when Windows asks for it.",
+    keywords: ['theme', 'light', 'dark', 'dim', 'high contrast', 'system'],
+  },
+  {
+    section: 'appearance',
+    label: 'Accent colour',
+    description: "The selected row, the active rail button, focus rings and the download trace. Each one is checked for contrast in every theme.",
+    keywords: ['theme', 'color', 'swatch'],
+    pref: pref(accentColorStore),
+  },
+  {
+    section: 'appearance',
+    label: 'Colour set',
+    description: "How the packet list derives its row colours from the theme. Default is restrained and separates rows mostly by lightness; Vibrant is the same nine hues at roughly double the strength; Colourblind swaps in the Okabe-Ito set and leans on lightness harder still.",
+    keywords: ['packet colours', 'color', 'colorblind'],
+    pref: pref(packetColorSetStore),
+  },
+  {
+    section: 'appearance',
+    label: 'Colour arcs by protocol',
+    description: "On, each connection arc takes the hue of the protocol carrying most of its traffic, matching the protocol chart. Off, every arc is the theme's accent, and the map shows where traffic goes without also encoding what it is.",
+    keywords: ['map', 'color'],
+    pref: pref(arcProtocolColorStore),
+  },
+  {
+    section: 'appearance',
+    label: 'Basemap skin',
+    description: "Colourful draws a fixed globe - green land, blue sea - that stays the same under every theme. Theme-synced builds the map out of the app's own tokens instead, so it recedes into the panel around it and changes when the theme does.",
+    keywords: ['map', 'globe'],
+    pref: pref(mapSkinStore),
+  },
+
+  // --- Interface ---------------------------------------------------------------------
+  {
+    section: 'interface',
+    label: 'Pane arrangement',
+    description: "Whether the protocol tree and byte view sit beside each other or above and below.",
+    keywords: ['layout', 'stacked', 'side by side'],
+    pref: pref(layoutStore, 'arrangement'),
+  },
+  {
+    section: 'interface',
+    label: 'Follow live capture',
+    description: "Whether the list scrolls to keep the newest packet in view while capturing.",
+    keywords: ['packet list', 'autoscroll', 'scroll'],
+    pref: pref(packetListStore, 'follow'),
+  },
+  {
+    section: 'interface',
+    label: 'Packet list density',
+    description: "Row height and text size in the list. Does not affect the detail panes.",
+    keywords: ['packet list', 'compact', 'comfortable'],
+    pref: pref(packetListStore, 'density'),
+  },
+  {
+    section: 'interface',
+    label: 'Minimap',
+    description: "The overview strip beside the scrollbar. It redraws on every packet, so turning it off is the single largest saving available while capturing.",
+    keywords: ['packet list'],
+    pref: pref(minimapStore),
+  },
+  {
+    section: 'interface',
+    label: 'Dashboard refresh',
+    description: "How often the panels on the right recalculate. Relaxed is a quarter of the work for the same panels; Paused holds them at their last values until you change this back.",
+    keywords: ['performance'],
+    pref: pref(performanceStore, 'dashboardRefreshMs'),
+  },
+  {
+    section: 'interface',
+    label: 'Buffer size',
+    description: "Memory the captured frames may use before the oldest are dropped. A smaller buffer makes every calculation in the app proportionally cheaper.",
+    keywords: ['performance', 'memory', 'ram'],
+    pref: pref(performanceStore, 'packetBufferBytes'),
+  },
+  {
+    section: 'interface',
+    label: 'Multi Threaded Capture',
+    description: "How many threads dissect a live capture's TCP, which is what keeps the list live through a download faster than one core can read.",
+    keywords: ['performance', 'cores', 'workers'],
+    pref: pref(performanceStore, 'dissectionThreads'),
+  },
+  {
+    section: 'interface',
+    label: 'Resolve network addresses',
+    description: "Shows host names instead of IP addresses in the packet list's address columns and in the statistics tables, where the capture itself carried the name - from DNS responses, mDNS, NetBIOS and the like.",
+    keywords: ['name resolution', 'hostname'],
+    pref: pref(nameResolutionStore, 'network'),
+  },
+  {
+    section: 'interface',
+    label: 'Resolve transport ports',
+    description: "Shows service names beside port numbers in the statistics tables - 443 as https, 53 as domain. From a table built into Inwire.",
+    keywords: ['name resolution', 'service'],
+    pref: pref(nameResolutionStore, 'transport'),
+  },
+  {
+    section: 'interface',
+    label: 'Locate addresses',
+    description: "Sends the public IP addresses in your capture to get.geojs.io, in batches, as they first appear - and asks it once per launch where this machine is. Also lets the Network panel's Public identity section ask ipapi.co about this connection. Without this the map has nothing to plot.",
+    keywords: ['privacy', 'geoip', 'location', 'map'],
+    pref: pref(nameResolutionStore, 'geoIp'),
+  },
+  {
+    section: 'interface',
+    label: 'Reverse DNS',
+    description: "Sends each public IPv4 address in your capture to cloudflare-dns.com as a PTR query, one address per request, to find host names.",
+    keywords: ['privacy', 'ptr', 'hostname'],
+    pref: pref(nameResolutionStore, 'reverseDns'),
+  },
+
+  // --- Accessibility -----------------------------------------------------------------
+  {
+    section: 'accessibility',
+    label: 'Animations',
+    description: "Pulsing map markers, alert indicators, map camera movement and panel transitions.",
+    keywords: ['motion', 'reduce motion'],
+    pref: pref(motionStore),
+  },
+  {
+    // An action, not a value: the button replays a walkthrough, so there is
+    // nothing to be modified from or reset to.
+    section: 'accessibility',
+    label: 'Tutorial',
+    description: "The walkthrough that highlights the path from installing the driver to reading your first packet.",
+    keywords: ['getting started', 'tour', 'walkthrough'],
+  },
+
+  // --- Tabs with no row of their own, so that they can be found ----------------------
+  {
+    section: 'filters',
+    label: 'Display Filters',
+    description: "Saved display filters, in groups.",
+    keywords: ['presets', 'bookmarks', 'wireshark'],
+  },
+  {
+    section: 'decryption',
+    label: 'Decryption',
+    description: "TLS decryption from a key log file.",
+    keywords: ['tls', 'key log', 'sslkeylogfile'],
+  },
+  {
+    section: 'driver',
+    label: 'Capture Health',
+    description: "Frames the capture lost, at each stage, and the network changes that explain a gap.",
+    keywords: ['drops', 'dropped', 'driver', 'npcap', 'agent', 'buffer', 'log'],
+  },
+
+  // --- Updates -----------------------------------------------------------------------
+  {
+    section: 'updates',
+    label: 'Check automatically on launch',
+    description: "Asks the update feed once, shortly after Inwire starts. Off by default: an update check is an outbound request, and this app is the one that would show it to you.",
+    keywords: ['checking', 'update center'],
+    pref: pref(updateStore, 'automatic'),
+  },
+];
+
+const BY_LABEL = new Map(SETTINGS_INDEX.map((e) => [e.label, e]));
+
+export function settingByLabel(label: string): SettingEntry | undefined {
+  return BY_LABEL.get(label);
+}
+
+/**
+ * The entries a query finds, best first.
+ *
+ * The label is matched as a subsequence and ranked, which is the palette's own
+ * matcher. Entries it misses are then tried on their description and keywords:
+ * every word of the query must appear in one of them, in any order, so
+ * "ipapi" finds the row that sends addresses there although no label says so.
+ * An empty query finds nothing - the search box shows the tabs then, not a list.
+ */
+export function searchSettings(
+  query: string,
+  index: readonly SettingEntry[] = SETTINGS_INDEX,
+): SettingEntry[] {
+  const q = query.trim();
+  if (q === '') return [];
+  const byLabel = rankByFuzzy(q, index, (e) => e.label).map((r) => r.item);
+  const seen = new Set(byLabel);
+  const words = q.toLowerCase().split(/\s+/);
+  const byText = index.filter((e) => {
+    if (seen.has(e)) return false;
+    const haystack = `${e.description ?? ''} ${(e.keywords ?? []).join(' ')}`.toLowerCase();
+    return words.every((w) => haystack.includes(w));
+  });
+  return [...byLabel, ...byText];
+}
+
+function currentOf(p: SettingPref): unknown {
+  const value = p.store.get();
+  return p.field === undefined ? value : (value as Record<string, unknown>)[p.field];
+}
+
+function defaultOf(p: SettingPref): unknown {
+  const value = p.store.defaults;
+  return p.field === undefined ? value : (value as Record<string, unknown>)[p.field];
+}
+
+/** True when the setting's value differs from its default. An entry with no pref never is. */
+export function isModified(entry: SettingEntry): boolean {
+  if (!entry.pref) return false;
+  return JSON.stringify(currentOf(entry.pref)) !== JSON.stringify(defaultOf(entry.pref));
+}
+
+/**
+ * Puts one setting back to its default and leaves its siblings alone: three
+ * rows share `performanceStore`, and resetting one must not undo another.
+ */
+export function resetSetting(entry: SettingEntry): void {
+  const p = entry.pref;
+  if (!p) return;
+  if (p.field === undefined) {
+    p.store.set(p.store.defaults);
+    return;
+  }
+  p.store.set({ ...(p.store.get() as object), [p.field]: defaultOf(p) });
+}
+
+/**
+ * The id of a row's element, for the search to scroll to.
+ *
+ * Not `setting-<slug>` bare: the switches already own ids of that shape
+ * (`setting-minimap`), a label's `htmlFor` finds the FIRST element with its id,
+ * and a row wrapper comes before the control inside it - so the shared prefix
+ * would quietly stop the label from toggling its switch.
+ */
+export function settingAnchorId(label: string): string {
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return `setting-row-${slug}`;
+}

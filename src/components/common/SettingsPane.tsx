@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentHealth } from '../../services/agentHealth';
 import type { LinkChange } from '../../services/linkContext';
 import {
@@ -12,7 +12,13 @@ import {
   Accessibility,
   Key,
   Download,
+  Search,
 } from 'lucide-react';
+import {
+  searchSettings,
+  settingAnchorId,
+  type SettingsSection,
+} from '../../lib/settingsIndex';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { UpdateCenterPanel } from './UpdateCenterPanel';
 import { AppearanceSettingsPanel } from './AppearanceSettingsPanel';
@@ -39,8 +45,6 @@ import type { CaptureStorageState } from '../../services/capture/captureProtocol
  * Reading "the driver is capturing" and "the buffer is 99% full" as two
  * separate visits made a single story into two.
  */
-type SettingsSection = 'appearance' | 'interface' | 'accessibility' | 'filters'
-  | 'decryption' | 'driver' | 'updates';
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -85,6 +89,10 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // for "there is no driver" points from one to the other.
   { id: 'updates', label: 'Updates', icon: Download },
 ];
+
+/** How long a found setting keeps its ring. A ring, not an animation: it is on, then it is off. */
+const HIGHLIGHT_MS = 1200;
+const HIGHLIGHT_CLASSES = ['ring-1', 'ring-primary', 'rounded-md'];
 
 interface SettingsPaneProps {
   totalPacketsCount: number;
@@ -154,6 +162,45 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   onClearAgentLog,
 }) => {
   const [section, setSection] = useState<SettingsSection>('appearance');
+  const [query, setQuery] = useState('');
+  // The setting the search sent us to. Held in state and acted on in an effect,
+  // because the tab it lives on is not mounted until the render after the click.
+  const [reveal, setReveal] = useState<string | null>(null);
+  const hits = useMemo(() => searchSettings(query), [query]);
+  const searching = query.trim() !== '';
+
+  const pickHit = (hit: { label: string; section: SettingsSection }) => {
+    setQuery('');
+    setSection(hit.section);
+    setReveal(hit.label);
+  };
+
+  // The ring is added to the element directly and removed by a timer held in a
+  // ref, not tied to this effect: clearing `reveal` re-runs the effect, and a
+  // cleanup that took the ring off would take it off the moment it went on.
+  const lit = useRef<{ el: HTMLElement; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const unlight = () => {
+    if (!lit.current) return;
+    clearTimeout(lit.current.timer);
+    lit.current.el.classList.remove(...HIGHLIGHT_CLASSES);
+    lit.current = null;
+  };
+  useEffect(() => unlight, []);
+
+  useEffect(() => {
+    if (reveal === null || searching) return;
+    const frame = requestAnimationFrame(() => {
+      const el = document.getElementById(settingAnchorId(reveal));
+      setReveal(null);
+      if (!el) return;
+      unlight();
+      el.scrollIntoView({ block: 'center' });
+      el.classList.add(...HIGHLIGHT_CLASSES);
+      lit.current = { el, timer: setTimeout(unlight, HIGHLIGHT_MS) };
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [reveal, searching]);
+
   const bufferPercent = packetBufferBytes > 0
     ? Math.min(100, (bufferResidentBytes / packetBufferBytes) * 100)
     : 0;
@@ -182,7 +229,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
      * No border, no radius, no shadow and no ground of its own: `<main>` is the
      * card and draws all four, so anything here would be a second card inside
      * the first. */
-    <div className="h-full min-h-0 flex flex-col bg-background text-foreground">
+    <div className="h-full min-h-0 flex flex-col bg-background text-foreground motion-sheet">
       <>
         {/* No close button. Every other pane is left the same three ways - the
             back step in the title row, Escape, or the rail - and an X here
@@ -202,6 +249,30 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
         {/* Body: sidebar + section */}
         <div className="flex min-h-0 flex-1">
           <nav className="w-44 shrink-0 border-r border-border p-2 flex flex-col gap-1">
+            <div className="relative mb-1">
+              <Search aria-hidden className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground" />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && hits[0]) {
+                    e.preventDefault();
+                    pickHit(hits[0]);
+                  } else if (e.key === 'Escape' && query !== '') {
+                    // The first Escape clears the search; the sheet's own
+                    // Escape (back to the view underneath) is the next one.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setQuery('');
+                  }
+                }}
+                placeholder="Search settings"
+                aria-label="Search settings"
+                spellCheck={false}
+                className="w-full rounded border border-border bg-background pl-6 pr-1.5 py-1 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-primary"
+              />
+            </div>
             {SECTIONS.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -219,6 +290,39 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
           </nav>
 
           <div className="flex-1 min-w-0 p-5 overflow-y-auto">
+            {searching && (
+              /* Instead of the tab, not beside it: the answer to a search is a
+                 list of places, and a tab drawn under it would be a second
+                 answer to a question nobody asked. Each hit names its tab,
+                 because the same word can live in two. */
+              hits.length === 0 ? (
+                <p role="status" className="text-xs text-muted-foreground">
+                  No settings match &quot;{query.trim()}&quot;
+                </p>
+              ) : (
+                <ul className="divide-y divide-border/60">
+                  {hits.map((hit) => (
+                    <li key={hit.label}>
+                      <button
+                        type="button"
+                        onClick={() => pickHit(hit)}
+                        className="w-full text-left py-2.5 px-2 -mx-2 rounded-md hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+                      >
+                        <div className="text-xs font-semibold text-foreground">{hit.label}</div>
+                        <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug line-clamp-1">
+                          <span className="font-medium text-foreground/80">
+                            {SECTIONS.find((s) => s.id === hit.section)?.label}
+                          </span>
+                          {hit.description ? ` · ${hit.description}` : ''}
+                        </p>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )
+            )}
+
+            {!searching && <>
             {section === 'appearance' && <AppearanceSettingsPanel />}
 
             {section === 'interface' && <InterfaceSettingsPanel />}
@@ -385,6 +489,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                 }
               />
             )}
+            </>}
           </div>
         </div>
 
