@@ -137,9 +137,8 @@ import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
 import type { CaptureSource } from './services/export/captureMeta';
 import type { CaptureFileFacts } from './services/captureFileFacts';
 import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
-
-/** The palette's recent filters until they are stored; one identity, so its memo holds. */
-const NO_RECENT_FILTERS: string[] = [];
+import { FilterEngine } from './services/filterEngine';
+import { pushRecentFilter, recentFiltersStore } from './services/recentFilters';
 
 /**
  * How far back a socket-table DELTA is allowed to re-annotate.
@@ -556,6 +555,7 @@ export default function App() {
   const [palette, setPalette] = useState<string | null>(null);
   /** The display filter's input, for Ctrl+/ and the palette. */
   const filterInputRef = useRef<HTMLInputElement | null>(null);
+  const [recentFilters] = usePreferenceValue(recentFiltersStore);
 
   /**
    * Which of the five surfaces the rail says we are on.
@@ -2496,6 +2496,11 @@ export default function App() {
     // reachable while the sheet is open, and a navigation the sheet covers is a
     // control that looks broken. Clearing does not navigate and so does not.
     if (expression.trim() !== '') { setSheet(null); setView('packets'); }
+    // Only an expression that compiles is remembered: a recent list that
+    // offers back a typo offers back the same error.
+    if (expression.trim() !== '' && FilterEngine.validateFilter(expression).isValid) {
+      recentFiltersStore.set(pushRecentFilter(recentFiltersStore.get(), expression));
+    }
   }, [filterText, setView]);
 
   /**
@@ -2855,6 +2860,8 @@ export default function App() {
             onApplyFilter={applyFilter}
             filterPresetLibrary={filterPresetLibrary}
             onSaveCurrentFilter={handleSaveCurrentFilter}
+            appliedFilter={appliedFilter}
+            inputRef={filterInputRef}
           />
         }
       />
@@ -3651,7 +3658,7 @@ export default function App() {
           initialText={palette}
           ctx={commandContext}
           packets={packets}
-          recentFilters={NO_RECENT_FILTERS}
+          recentFilters={recentFilters}
           presetExpressions={presetExpressions}
           onRun={runCommand}
           onApplyFilter={(expression) => { setPalette(null); setFilterText(expression); applyFilter(expression); }}

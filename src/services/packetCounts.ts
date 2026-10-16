@@ -98,3 +98,14 @@ export function scanPercentage(scan: CaptureFilterState | null): number | null {
   if (scan === null || scan.status !== 'scanning' || scan.frameCount <= 0) return null;
   return Math.floor((scan.framesDone / scan.frameCount) * 100);
 }
+
+/**
+ * The filter field's match chip: "44 of 178,200", or null with no filter.
+ *
+ * The same two numbers as the status bar's counter, put where the filter is
+ * typed, because that is where "how much did this keep?" is asked.
+ */
+export function filterChipLabel(counts: PacketCounts, appliedFilter: string): string | null {
+  if (appliedFilter.trim() === '') return null;
+  return `${counts.filtered.toLocaleString()} of ${counts.total.toLocaleString()}`;
+}

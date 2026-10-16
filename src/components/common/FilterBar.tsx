@@ -4,6 +4,9 @@ import { FilterEngine, FilterValidationResult } from '../../services/filterEngin
 import { allPresets } from '../../services/filterPresets';
 import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
+import { filterChipLabel, scanPercentage, usePacketCounts } from '../../services/packetCounts';
+import { recentFiltersStore } from '../../services/recentFilters';
+import { usePreferenceValue } from '../../services/preferenceStore';
 
 /**
  * **There was a `variant`, and there is one filter field in this app.**
@@ -43,7 +46,40 @@ interface FilterBarProps {
   /** Omit to hide the bookmark button - saving a preset from a dialog would
    *  edit library state the dialog does not own. */
   onSaveCurrentFilter?: (filter: string) => void;
+  /** The filter in force, which is what the match chip counts - not the text
+   *  being typed, which has not been answered yet. */
+  appliedFilter: string;
+  /** The field itself, for Ctrl+/ and the palette's "Focus display filter". */
+  inputRef?: React.Ref<HTMLInputElement>;
 }
+
+/**
+ * The match chip: how many frames the applied filter kept, over the whole
+ * capture. Its own component so the ten-times-a-second count re-renders the
+ * chip and not the field.
+ */
+const MatchChip: React.FC<{ appliedFilter: string }> = ({ appliedFilter }) => {
+  const counts = usePacketCounts();
+  const label = filterChipLabel(counts, appliedFilter);
+  if (label === null) return null;
+  // Dim for the whole scan, and name the share only once it is knowable -
+  // `scanPercentage` is null for the first stretch of a large scan.
+  const scanning = counts.scan?.status === 'scanning';
+  const percent = scanPercentage(counts.scan);
+  return (
+    <span
+      aria-label={`Matches: ${label}`}
+      title={scanning
+        ? (percent === null ? 'Filtering the stored capture' : `Filtering the stored capture: ${percent}%`)
+        : undefined}
+      className={`text-[10px] leading-4 tabular-nums px-1.5 rounded bg-muted text-muted-foreground whitespace-nowrap shrink-0 ${
+        scanning ? 'opacity-60' : ''
+      }`}
+    >
+      {label}
+    </span>
+  );
+};
 
 export const FilterBar: React.FC<FilterBarProps> = ({
   filterText,
@@ -51,7 +87,10 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   onApplyFilter,
   filterPresetLibrary,
   onSaveCurrentFilter,
+  appliedFilter,
+  inputRef: externalInputRef,
 }) => {
+  const [recentFilters, setRecentFilters] = usePreferenceValue(recentFiltersStore);
   /*
    * Validation is DERIVED, not stored, and it is derived from the settled text.
    *
@@ -101,6 +140,12 @@ export const FilterBar: React.FC<FilterBarProps> = ({
    */
   const [highlighted, setHighlighted] = useState(-1);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // One element, two holders: this component's own ref and App's.
+  const setInputRef = (el: HTMLInputElement | null) => {
+    inputRef.current = el;
+    if (typeof externalInputRef === 'function') externalInputRef(el);
+    else if (externalInputRef) (externalInputRef as React.RefObject<HTMLInputElement | null>).current = el;
+  };
   const containerRef = useRef<HTMLDivElement | null>(null);
   /**
    * The word being typed, and where it starts.
@@ -178,6 +223,16 @@ export const FilterBar: React.FC<FilterBarProps> = ({
     setShowPresetsDropdown(false);
     onApplyFilter(preset.filter);
   };
+
+  const handleSelectRecent = (expression: string) => {
+    onFilterChange(expression);
+    setShowPresetsDropdown(false);
+    onApplyFilter(expression);
+  };
+
+  // Recents answer "what was I just doing", which is the question clicking
+  // into the field asks; the chevron asks for the presets and gets only them.
+  const showRecent = presetsSource === 'field' && recentFilters.length > 0;
 
   const handleSaveCurrentFilter = () => {
     if (!filterText.trim()) return;
@@ -271,7 +326,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             <Filter className="w-3 h-3 mr-1.5 shrink-0 text-primary" aria-hidden />
 
             <input
-              ref={inputRef}
+              ref={setInputRef}
               type="text"
               value={filterText}
               onChange={e => {
@@ -325,6 +380,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 had typed - and only appear once there is a filter to act on, so
                 the field is empty chrome until they have something to do. */}
             <div className="flex items-center gap-1 ml-2 shrink-0">
+              <MatchChip appliedFilter={appliedFilter} />
               {isNotEmpty && (
                 <button
                   onClick={() => {
@@ -424,6 +480,35 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                   it used to be: with user-defined groups the same badge would
                   have repeated on every row of a section. */}
               <div className="max-h-64 overflow-y-auto space-y-0.5 custom-scrollbar">
+                {showRecent && (
+                  <div>
+                    <div className="text-[10px] font-bold text-muted-foreground pl-2.5 pr-1 pt-2 pb-1 uppercase tracking-wider font-mono flex items-center justify-between">
+                      <span>Recent</span>
+                      <button
+                        type="button"
+                        // mousedown, so the field keeps focus and the list stays up.
+                        onMouseDown={e => { e.preventDefault(); setRecentFilters([]); }}
+                        className="normal-case tracking-normal font-sans font-normal px-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent/60 cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    {recentFilters.map(expression => (
+                      <button
+                        key={expression}
+                        onClick={() => handleSelectRecent(expression)}
+                        title={expression}
+                        className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors flex cursor-pointer ${
+                          filterText === expression
+                            ? 'bg-accent border border-border text-primary'
+                            : 'hover:bg-accent/60'
+                        }`}
+                      >
+                        <code className="text-[11px] text-primary font-mono truncate">{expression}</code>
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {presetCount === 0 && (
                   <div className="px-2.5 py-3 text-xs text-muted-foreground italic">
                     No presets. Add some in Settings &gt; Display Filters.
