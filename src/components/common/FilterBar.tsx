@@ -6,6 +6,7 @@ import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
 import { filterChipLabel, scanPercentage, usePacketCounts } from '../../services/packetCounts';
 import { titleWithKeys } from '../../lib/commands';
+import { suggestionsVisible } from '../../lib/filterSuggestions';
 import { recentFiltersStore } from '../../services/recentFilters';
 import { usePreferenceValue } from '../../services/preferenceStore';
 
@@ -167,11 +168,13 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   // The completions and the presets share the space under the field, so only
   // one can be up. Completing what is half-typed is the more immediate of the
   // two, and the presets are one Escape away.
-  const showSuggestions = suggestions.length > 0
-    && !(suggestions.length === 1 && suggestions[0] === token.text)
-    // ...except when the chevron asked for the presets, which is the one
-    // gesture that means "show me the list" rather than "help me finish this".
-    && presetsSource !== 'chevron';
+  // ...except when the chevron asked for the presets, which is the one gesture
+  // that means "show me the list" rather than "help me finish this", and for a
+  // word the list was dismissed on (Enter, Escape, a click elsewhere).
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const showSuggestions = suggestionsVisible({
+    suggestions, token: token.text, presetsSource, dismissedFor,
+  });
 
   /**
    * What is actually on screen, which is what the chevron toggles.
@@ -183,6 +186,9 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   const presetsVisible = showPresetsDropdown && !showSuggestions;
 
   useEffect(() => setHighlighted(-1), [token.text]);
+  // The click-outside listener is bound once, so it reads the word through a ref.
+  const tokenRef = useRef(token.text);
+  tokenRef.current = token.text;
 
   const acceptSuggestion = (name: string) => {
     const next = filterText.slice(0, token.start) + name + ' ';
@@ -212,9 +218,14 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         return;
       }
       setShowPresetsDropdown(false);
+      setDismissedFor(token.text);
       onApplyFilter();
     } else if (e.key === 'Escape') {
+      // One Escape dismisses one thing: with completions up, they are it, and
+      // the view behind the field does not change.
+      if (showSuggestions) e.stopPropagation();
       setShowPresetsDropdown(false);
+      setDismissedFor(token.text);
       setHighlighted(-1);
     }
   };
@@ -278,6 +289,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
     const handleClickOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setShowPresetsDropdown(false);
+        setDismissedFor(tokenRef.current);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
