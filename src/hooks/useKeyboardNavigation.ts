@@ -69,6 +69,8 @@ export interface KeyboardNavigationOptions {
    * would. Space then starts nothing: the rail says why, and a key cannot.
    */
   startBlocked: () => boolean;
+  /** Whether another client of the agent owns the running capture. */
+  ownedElsewhere: () => boolean;
   /**
    * The rail's own start and stop. **Space used to send its own
    * `start_capture`**, which started a capture with no id and no store of its
@@ -92,12 +94,13 @@ export function useKeyboardNavigation({
   selectedInterfacesRef,
   setSelectedPacket,
   startBlocked,
+  ownedElsewhere,
   onStartCapture,
   onStopCapture,
 }: KeyboardNavigationOptions): void {
   // Through a ref, for the reason `toggleSideBarRef` gives below.
-  const captureRef = useRef({ startBlocked, onStartCapture, onStopCapture });
-  captureRef.current = { startBlocked, onStartCapture, onStopCapture };
+  const captureRef = useRef({ startBlocked, ownedElsewhere, onStartCapture, onStopCapture });
+  captureRef.current = { startBlocked, ownedElsewhere, onStartCapture, onStopCapture };
   /**
    * `Ctrl+B`'s handler, held the way everything that changes is held here.
    *
@@ -130,6 +133,7 @@ export function useKeyboardNavigation({
         packetCount: packetCountRef.current,
         canCapture,
         blocked: captureRef.current.startBlocked(),
+        ownedElsewhere: captureRef.current.ownedElsewhere(),
       });
       if (action === 'stop') captureRef.current.onStopCapture();
       else if (action === 'start') captureRef.current.onStartCapture();

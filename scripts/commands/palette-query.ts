@@ -29,13 +29,15 @@ check('empty is search', parsePaletteQuery(''), { mode: 'search', query: '' });
 check('a prefix only counts first', parsePaletteQuery('a>b'), { mode: 'search', query: 'a>b' });
 check('the three prefixes, in order', PALETTE_PREFIXES.map((p) => p.prefix), ['>', ':', '?']);
 
-const ready: CaptureKeyState = { capturing: false, adapterCount: 1, packetCount: 0, canCapture: true, blocked: false };
+const ready: CaptureKeyState = { capturing: false, adapterCount: 1, packetCount: 0, canCapture: true, blocked: false, ownedElsewhere: false };
 check('ready starts', captureKeyAction(ready), 'start');
 check('capturing always stops, even with no adapter', captureKeyAction({ ...ready, capturing: true, adapterCount: 0, blocked: true }), 'stop');
 check('no adapter does nothing', captureKeyAction({ ...ready, adapterCount: 0 }), null);
 check('a full buffer is never discarded by a key', captureKeyAction({ ...ready, packetCount: 5 }), null);
 check('a blocked start does nothing', captureKeyAction({ ...ready, blocked: true }), null);
 check('no agent, no start', captureKeyAction({ ...ready, canCapture: false }), null);
+check('a capture another client owns is never started by a key', captureKeyAction({ ...ready, ownedElsewhere: true }), null);
+check('a capture owned elsewhere still lets a running one stop', captureKeyAction({ ...ready, capturing: true, ownedElsewhere: true }), 'stop');
 
 console.log(failures === 0 ? '\nAll palette-query checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

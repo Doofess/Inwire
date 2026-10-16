@@ -2231,6 +2231,9 @@ export default function App() {
     // An offered previous capture is deleted by Start, and Space has nowhere
     // to ask - the same rule as a buffer with frames in it.
     startBlocked: () => startBlockedRef.current !== null || lastCaptureRef.current !== null,
+    // The rail disables Start for this too; a key must not reach the start
+    // that clears the session before the agent refuses it.
+    ownedElsewhere: () => captureOwner !== null && captureOwner !== agentClientId,
     onStartCapture: () => { void handleStartCapture(); },
     onStopCapture: () => handlePauseCapture(),
   });
@@ -2516,12 +2519,13 @@ export default function App() {
       packetCount: packets.length,
       canCapture: permissions.canCapture,
       blocked: startBlockedReason !== null || lastCapture !== null,
+      ownedElsewhere: captureOwner !== null && captureOwner !== agentClientId,
     }) === 'start',
     packetCount: packets.length,
     filterApplied: appliedFilter.trim() !== '',
     sideBarOpen,
   }), [isCapturing, selectedInterfaces.length, packets.length, permissions.canCapture,
-    startBlockedReason, lastCapture, appliedFilter, sideBarOpen]);
+    startBlockedReason, lastCapture, captureOwner, agentClientId, appliedFilter, sideBarOpen]);
 
   const presetExpressions = useMemo(
     () => allPresets(filterPresetLibrary).map((p) => p.filter).filter((f) => f.trim() !== ''),

@@ -25,3 +25,12 @@ export function suggestionsVisible(input: SuggestionsInput): boolean {
   if (presetsSource === 'chevron') return false;
   return dismissedFor !== token;
 }
+
+/**
+ * A dismissal is for one word, once: as soon as the word under the caret moves
+ * off it, it lapses, so applying `dns`, clearing the field and typing `dns`
+ * again shows completions rather than remembering a dismissal from before.
+ */
+export function dismissalAfter(dismissedFor: string | null, token: string): string | null {
+  return dismissedFor !== null && dismissedFor !== token ? null : dismissedFor;
+}

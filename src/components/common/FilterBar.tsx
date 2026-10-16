@@ -6,7 +6,7 @@ import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
 import { filterChipLabel, scanPercentage, usePacketCounts } from '../../services/packetCounts';
 import { titleWithKeys } from '../../lib/commands';
-import { suggestionsVisible } from '../../lib/filterSuggestions';
+import { dismissalAfter, suggestionsVisible } from '../../lib/filterSuggestions';
 import { recentFiltersStore } from '../../services/recentFilters';
 import { usePreferenceValue } from '../../services/preferenceStore';
 
@@ -172,8 +172,11 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   // that means "show me the list" rather than "help me finish this", and for a
   // word the list was dismissed on (Enter, Escape, a click elsewhere).
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  // Spent once the word moves off it, so the same word typed later completes.
+  const liveDismissal = dismissalAfter(dismissedFor, token.text);
+  if (liveDismissal !== dismissedFor) setDismissedFor(liveDismissal);
   const showSuggestions = suggestionsVisible({
-    suggestions, token: token.text, presetsSource, dismissedFor,
+    suggestions, token: token.text, presetsSource, dismissedFor: liveDismissal,
   });
 
   /**

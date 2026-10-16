@@ -9,7 +9,7 @@
  * it. Dismissing now records the word it was dismissed for, and typing a
  * different word brings completions back.
  */
-import { suggestionsVisible } from '../../src/lib/filterSuggestions';
+import { dismissalAfter, suggestionsVisible } from '../../src/lib/filterSuggestions';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -30,6 +30,12 @@ check('the one completion that IS the word is not offered', suggestionsVisible({
 check('the chevron asking for presets hides completions', suggestionsVisible({ ...base, presetsSource: 'chevron' }), false);
 check('dismissed for this word: hidden', suggestionsVisible({ ...base, token: 'dns', dismissedFor: 'dns' }), false);
 check('dismissed for an earlier word: a new word shows again', suggestionsVisible({ ...base, token: 'dns.q', dismissedFor: 'dns' }), true);
+check('a dismissal holds while the word is unchanged', dismissalAfter('dns', 'dns'), 'dns');
+check('a dismissal lapses once the word changes', dismissalAfter('dns', 'dns '), null);
+// Apply `dns`, dismiss, clear the field, type `dns` again: the list must come back.
+let d: string | null = 'dns';
+for (const t of ['dn', 'd', '', 'd', 'dn', 'dns']) d = dismissalAfter(d, t);
+check('retyping a dismissed word later shows completions again', suggestionsVisible({ ...base, token: 'dns', dismissedFor: d }), true);
 
 if (failures > 0) {
   console.log(`\n${failures} failure(s)`);

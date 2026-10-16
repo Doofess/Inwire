@@ -10,7 +10,9 @@
  *  - frames in the buffer - a stopped capture cannot be resumed, so starting
  *    again clears it, which is the rail's confirm prompt and never a keystroke;
  *  - no agent, or Start blocked by a filter or ring settings the agent refused -
- *    the rail says why, and a key cannot.
+ *    the rail says why, and a key cannot;
+ *  - a capture another client of the agent owns - the rail disables Start, and
+ *    a start would clear this session before the agent refused it.
  */
 
 export interface CaptureKeyState {
@@ -19,10 +21,12 @@ export interface CaptureKeyState {
   packetCount: number;
   canCapture: boolean;
   blocked: boolean;
+  /** Another client of the agent owns the running capture. */
+  ownedElsewhere: boolean;
 }
 
 export function captureKeyAction(s: CaptureKeyState): 'start' | 'stop' | null {
   if (s.capturing) return 'stop';
-  if (s.adapterCount === 0 || s.packetCount > 0 || !s.canCapture || s.blocked) return null;
+  if (s.adapterCount === 0 || s.packetCount > 0 || !s.canCapture || s.blocked || s.ownedElsewhere) return null;
   return 'start';
 }
