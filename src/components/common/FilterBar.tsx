@@ -5,6 +5,7 @@ import { allPresets } from '../../services/filterPresets';
 import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterPreset, FilterPresetLibrary } from '../../types/packet';
 import { filterChipLabel, scanPercentage, usePacketCounts } from '../../services/packetCounts';
+import { titleWithKeys } from '../../lib/commands';
 import { recentFiltersStore } from '../../services/recentFilters';
 import { usePreferenceValue } from '../../services/preferenceStore';
 
@@ -352,6 +353,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               // clause rather than three, because the box is narrower now and
               // a truncated example is worse than a short one.
               placeholder='e.g. tcp.port == 443'
+              title={titleWithKeys('filter.focus', 'Display filter')}
               className="bg-transparent outline-none text-xs leading-4 font-mono w-full text-foreground placeholder:text-muted-foreground"
             />
 

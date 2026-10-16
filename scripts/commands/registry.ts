@@ -10,7 +10,8 @@
  * other two. The registry is data only, so this script can import it; the
  * `run` for each id is bound in `App.tsx`, which no script can reach.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   availableCommands, commandById, COMMANDS, formatChord, matchChord, titleWithKeys,
   type CommandContext,
@@ -111,6 +112,28 @@ for (const command of COMMANDS) {
   const needle = command.id.startsWith('view.') ? "case 'view'" : `case '${command.id}'`;
   checkTrue(`the hook dispatches ${command.id}`, hook.includes(needle));
 }
+
+// --- no component spells a key -----------------------------------------------
+// A tooltip's "(Ctrl+B)" is written once, in the registry, and read through
+// `titleWithKeys`. The title row's side-bar toggle kept its own copy of the
+// chord for as long as the key was a hook's private business, which is exactly
+// how a rebound key ends up advertised under its old name. Comments are
+// stripped first: prose explaining a shortcut is documentation, and the
+// literal that matters is the one a user can hover.
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) return sourceFiles(path);
+    return /\.tsx?$/.test(name) ? [path] : [];
+  });
+}
+// `(?<!:)` keeps the `//` of a URL from reading as the start of a comment.
+const stripComments = (code: string): string =>
+  code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(?<!:)\/\/.*$/gm, '');
+const spelledKeys = sourceFiles('src/components')
+  .filter((path) => stripComments(readFileSync(path, 'utf8')).includes('(Ctrl+'))
+  .map((path) => path.replaceAll('\\', '/'));
+check('no component spells a "(Ctrl+" tooltip itself', spelledKeys, []);
 
 console.log(failures === 0 ? '\nAll registry checks passed.' : `\n${failures} registry check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

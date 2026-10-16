@@ -20,6 +20,7 @@ import { isScheduleEmpty, type CaptureSchedule } from '../../services/captureSch
 import { selectionLabel } from '../../services/captureInterfaces';
 import type { Capabilities } from '../../types/packet';
 import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
+import { titleWithKeys } from '../../lib/commands';
 import type { SideBarPanel } from '../../services/sideBarPrefs';
 import { useRovingFocus } from './useRovingFocus';
 
@@ -639,14 +640,19 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
               captureOwnedElsewhere
                 ? 'Another Inwire window is capturing. Stop it there, or close that window.'
                 : isCapturing
-                  ? 'Stop capture. A stopped capture cannot be resumed.'
+                  // The key goes after the verb and before the warning, so the
+                  // parenthesis does not trail a full stop. Only these two
+                  // titles carry it: Ctrl+E starts only where `captureKeyAction`
+                  // allows, and every other branch below is a case where the
+                  // rail has to ASK something, which the key refuses to do.
+                  ? `${titleWithKeys('capture.stop', 'Stop capture')}. A stopped capture cannot be resumed.`
                   : startBlocked
                     ? startBlockedReason ?? 'Choose an interface first'
                     : discardsOffered
                       ? `Start a new capture - deletes ${previousCapture} from disk`
                       : restartDiscards
                         ? `Start a new capture - discards the ${bufferedPackets.toLocaleString()} packets in the buffer`
-                        : 'Start capture'
+                        : titleWithKeys('capture.start', 'Start capture')
             }
             className={`${railButton(false)} ${
               captureBlocked ? 'opacity-50 cursor-not-allowed' : ''
@@ -893,7 +899,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
           deleting the old anchor without moving the step fails the suite rather
           than leaving a step pointing at nothing. */}
       <div className={GROUP} role="group" aria-label="Views" data-tour="rail">
-        {APP_VIEWS.map(({ id, label, shortcut }) => {
+        {APP_VIEWS.map(({ id, label }) => {
           const Icon = VIEW_ICONS[id];
           // Not while Settings is up. The view underneath is kept, so `view`
           // still names it - but it is not on screen, and marking it beside
@@ -919,7 +925,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
               aria-label={label}
               title={unavailable
                 ? `${label} - select a frame on a TCP or UDP stream first`
-                : `${label} (${shortcut})`}
+                : titleWithKeys(`view.${id}`)}
               className={`${railButton(active)} ${
                 unavailable ? 'opacity-40 cursor-not-allowed' : ''
               }`}

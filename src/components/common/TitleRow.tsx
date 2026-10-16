@@ -1,5 +1,6 @@
 import React from 'react';
 import { ChevronLeft, PanelBottom, PanelLeft } from 'lucide-react';
+import { titleWithKeys } from '../../lib/commands';
 import { BrandMark } from './BrandMark';
 import { WindowControls } from './WindowControls';
 
@@ -233,7 +234,7 @@ export const TitleRow: React.FC<TitleRowProps> = ({
         type="button"
         onClick={onToggleSideBar}
         aria-pressed={sideBarOpen}
-        title={sideBarOpen ? 'Hide side bar (Ctrl+B)' : 'Show side bar (Ctrl+B)'}
+        title={titleWithKeys('sidebar.toggle', sideBarOpen ? 'Hide side bar' : 'Show side bar')}
         aria-label="Toggle side bar"
         className={`w-9 h-8 shrink-0 inline-flex items-center justify-center rounded
           app-no-drag cursor-pointer transition-colors hover:bg-accent
