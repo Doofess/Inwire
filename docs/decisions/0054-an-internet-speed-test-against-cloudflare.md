@@ -3,7 +3,8 @@
 **Status:** accepted 2026-10-09; landed the same day. The owner asked for a
 speed test "similar to Ookla", placed in the Network side panel with the dial
 taking the workspace as a sheet. The research behind it is Part 2 of
-`docs/ideas/network-monitoring-and-speed-test.md`.
+`docs/ideas/network-monitoring-and-speed-test.md`. **Amended 2026-10-15**: the
+dial is gone - see *Amendment: latency under load* below.
 
 ## Context
 
@@ -67,7 +68,7 @@ last result, Run, Results and history) and a second member of App's `sheet`
 union, `'speedtest'`, by Settings' rules: it takes the workspace card, the view
 underneath is untouched, the back step, Escape or any view leaves it, and
 leaving does not stop a test - its state is a module store
-(`services/speedTest/state.ts`), so App does not re-render at the dial's ten
+(`services/speedTest/state.ts`), so App does not re-render at the test's ten
 updates a second. The rail gets nothing; it is full by design.
 
 ## Measured against Ookla, on the owner's machine (2026-10-09)
@@ -126,8 +127,8 @@ difference was ours:
   `--speed-download` (held equal to `--primary`) and `--speed-upload` in both
   theme blocks, measured by `scripts/themes/registry.ts` - #7c3aed on Day
   (5.70:1 on a card, 5.32 on the ground), #c084fc on Night (7.76, 7.95). The
-  dial changes colour in 250 ms as it resets; arrows and labels stay, so colour
-  is never the only signal.
+  dial changed colour in 250 ms as it reset (gone since the amendment
+  below); arrows and labels stay, so colour is never the only signal.
 - **The ISP stands beside the server** - "Cloudflare · Tel Aviv (TLV) —
   Bezeq" - in the running view, the results, each history row, the panel and
   the globe's tooltip: Cloudflare's own AS organisation for this address, from
@@ -147,6 +148,62 @@ difference was ours:
   `shell.ts`), the precedent being `INWIRE_UPDATE_FEED`;
   `scripts/electron/speed-test-ui.ts` is in the gate on that basis, and
   `speed-test-drive.ts` runs the real thing by hand.
+
+## Amendment: latency under load (2026-10-15)
+
+The owner called the dial "too generic and generated", and it was: a consumer
+gauge answering "how fast", where the question a network person brings is *how
+does this link behave when it is busy?* The sheet is now laid out as an
+instrument, top to bottom (`components/speedtest/`):
+
+- **A phase strip** - connect, ping, download, upload - lit as the test moves.
+- **The headline**: download and upload as two figures, and under them
+  responsiveness in RPM with its band and the bufferbloat grade.
+- **Latency under load**, the centrepiece: one box per phase - idle,
+  downloading, uploading - on a shared **log** axis, because idle at 2 ms
+  beside upload at 26 ms is a 2 px box on a linear one. The grade's band
+  edges (5, 30, 60, 200, 400 ms of rise) are ticks on that axis, and a bracket
+  from the idle median to the worse loaded one says "+N ms under load", which
+  is exactly the input the grade is computed from.
+- **A throughput trace per direction**: the raw 100 ms slices as a step line,
+  the warm-up shaded and labelled *not counted*, the previous run behind it as
+  a ghost, and the loaded-latency probes as dots on the same time axis, so a
+  spike lines up with the slice it hit.
+- **A footer**: the change against the previous test, connections used, the
+  server with *Show on map*, and Test again.
+
+Four decisions inside that, each of which a later session could reasonably
+undo:
+
+- **The headline stays the median.** It is what *Measured against Ookla*
+  above calibrated, so a run here still reads beside Ookla's number. The P90
+  of the slices and the mean (bytes over time past the warm-up) are cursors on
+  the trace, never the headline - a P90 headline would read 10-20% above every
+  other tester and look like a bug in the other direction.
+- **RPM is labelled "Responsiveness (approx.)"**. `rpm()` is a minute over
+  the median loaded round trip of one empty request on a warm connection;
+  Apple's `networkQuality` and the IETF responsiveness draft
+  (draft-ietf-ippm-responsiveness) count every round trip a fresh request
+  makes. The bands are theirs - **Low under 300, Medium 300-1000, High over
+  1000** (`RPM_BANDS` in `services/speedTest/method.ts`) - and nothing here
+  says "as Apple computes it".
+- **The boxes are drawn from client-side time to first byte; the figures and
+  the grade from the server's RTT.** `cfL4`'s `rtt` is the server's smoothed
+  estimate, which is the right number to grade on - the grade compares medians
+  and smoothing does not move one - and the wrong one to draw a spread from:
+  it compresses the quartiles toward the median until every box is a line.
+  Each probe now records both (`LatencySample`), and the summary in
+  `SpeedResult` is built by the engine, so a run nobody watched still has it.
+- **The trace's y scale ignores the warm-up.** A first slice that bursts while
+  TCP's window opens would otherwise set a scale that flattens the ten seconds
+  that count. The warm-up is still drawn; it just does not size the plot.
+
+History gained optional fields (`rpm`, `loadedDownMs`, `loadedUpMs`) under the
+same key with no version bump, so an entry from before reads "–", never 0. The
+last run's trace is kept under its own key so the ghost survives a restart.
+`scripts/speed-test/stats.ts`, `state.ts` and `speed-test-ui.ts` hold the
+summaries, the reducer and the sheet; `GAUGE_MARKS` and `gaugeFraction` went
+with the dial.
 
 ## Next
 

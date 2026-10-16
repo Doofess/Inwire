@@ -50,9 +50,12 @@
    them would render its light treatment on a near-black canvas. Adding a dark
    theme means adding it to this list - scripts/themes/registry.ts fails if a
    registered dark theme is missing from it. */
-@custom-variant dark (&:where(.dark, .dark *));
+@custom-variant dark (&:where(.dark, .dim, .contrast, .dark *, .dim *, .contrast *));
 
-:root {
+/* Light. `.light` as well as `:root`, and first, so a `.light` element inside
+   a dark window - the Appearance panel's live tile - carries Light's own
+   tokens; the scripts that read this block by its `:root {` still find it. */
+.light, :root {
   /* How far a column separator moves from the background it is drawn on, in
      oklab lightness, SIGNED - see `.packet-grid` below. Positive here because
      Day's rows have room above them and none below that would not read as a
@@ -79,6 +82,8 @@
   --muted: #eef1f5;
   --muted-foreground: #5b6470;
   --accent: #e1e5ea;
+  --selection: color-mix(in srgb, var(--primary) 6%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 25%, transparent);
   --accent-foreground: #1b1f24;
   --destructive: #d32f3f;
   --destructive-foreground: #ffffff;
@@ -131,6 +136,8 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-selection: var(--selection);
+  --color-handle-hover: var(--handle-hover);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
   --color-success-muted: var(--success-muted);
@@ -634,7 +641,7 @@ html[data-platform="win32"] {
   border-bottom-color: var(--popover) !important;
 }
 
-/* Night - the dark theme, and the only one.
+/* Dark - the near-black one of the three dark themes (ADR 0056).
 
    It was `.midnight`, the cool counterweight to a warm dark called Graphite.
    Graphite is gone and this took the `.dark` class with its id, which is worth
@@ -643,18 +650,22 @@ html[data-platform="win32"] {
    native scrollbars, text selection and form controls stayed on the light side
    of the divide for the theme most people are on. They follow now.
 
-   The ground is pure black, #000000 - the owner's call, for an industrial
-   feel: an instrument panel rather than an editor. It was a neutral #161616
-   before that, and a blue-cast one before that while it had a warm dark to
-   be told apart from. */
+   The ground is near-black, #101112: the industrial feel the owner chose pure
+   black for - an instrument panel rather than an editor - lifted 16/255 off
+   #000, which is as little as leaves High Contrast's pure black reading as a
+   different theme (5 deltaE, scripts/themes/registry.ts; ADR 0056). It was
+   #000000 before that, a neutral #161616 before that, and a blue-cast one
+   before that while it had a warm dark to be told apart from. */
 .dark {
   /* See the note in `:root`. **Positive, and it was negative**: on a #161616
      ground a groove (-0.05) was the quiet line and a lighter one a cage, but a
      black ground has no lightness beneath it at all, so a darker line is no
      line. +0.18 on black is a hairline of about #111111 - a scored line on a
      black panel, which is the look the ground was chosen for. (+0.12 reads as
-     more than it is: oklch L 0.12 is #060606, which is no line at all.) */
-  --packet-gridline-step: 0.18;
+     more than it is: oklch L 0.12 is #060606, which is no line at all.) Lifting
+     the ground to #101112 lifted the line with it, so the step came down to
+     0.08 for a hairline of about #222222. */
+  --packet-gridline-step: 0.08;
   /* Neutral grey, not the blue-black this used to be.
 
      It was `#0d1219` with a `#dbe3ec` foreground - a cool cast on every surface,
@@ -663,8 +674,9 @@ html[data-platform="win32"] {
      is why `--card` is ABOVE `--background` here. Nothing else in the app assumes
      a direction; the rail and the title row just take `--card`.
 
-     The ground is pure black, and the ladder came down with it - ground,
-     card, secondary, muted and accent by the same 22/255. The border came down
+     The ground went to pure black, and the ladder came down with it - ground,
+     card, secondary, muted and accent by the same 22/255 - and then up again
+     by 16/255 together, to #101112, keeping every rung's delta. The border came down
      less (#343434 to #262626): on black the hairlines carry the structure, so
      they keep more of their contrast than the surfaces. Moving one rung alone
      would have been the visible change:
@@ -687,30 +699,32 @@ html[data-platform="win32"] {
      Only the surfaces went neutral. `--primary`, `--destructive`, `--ring` and
      the protocol hues in `themePalettes.ts` carry meaning rather than taste, and
      a blue accent on a grey ground is the point of an accent. */
-  --background: #000000;
+  --background: #101112;
   --foreground: #e4e4e4;
-  --card: #040404;
+  --card: #141516;
   --card-foreground: #e4e4e4;
-  --popover: #040404;
+  --popover: #141516;
   --popover-foreground: #e4e4e4;
   --primary: #38bdf8;
   --speed-download: #38bdf8;
   --speed-upload: #c084fc;
   --primary-foreground: #000000;
-  --secondary: #0d0d0d;
+  --secondary: #1d1e1f;
   --secondary-foreground: #e4e4e4;
-  --muted: #0d0d0d;
+  --muted: #1d1e1f;
   --muted-foreground: #a1a1a1;
   /* One step above `--secondary`, which is what the rail and the title row sit
      on - so the rail's hover is visible against its own ground. It used to be
      phrased against `--card`, which is where that chrome used to be; the
      relationship is the same one and the ground under it moved. */
-  --accent: #151515;
+  --accent: #252628;
+  --selection: color-mix(in srgb, var(--primary) 22%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 25%, transparent);
   --accent-foreground: #e4e4e4;
   --destructive: #fb7185;
   --destructive-foreground: #000000;
-  --border: #262626;
-  --input: #262626;
+  --border: #2e2f30;
+  --input: #2e2f30;
   --ring: #7dd3fc;
   /* Status colours - "fine", "check this", "wrong".
      GENERATED from this theme's own palette by src/services/statusColors.ts.
@@ -729,7 +743,296 @@ html[data-platform="win32"] {
   --danger-strong-foreground: #ffffff;
 }
 
+/* Dim - a grey ground for long sessions, beside Dark's near-black (ADR 0056).
 
+   Codex's and GitHub's dimmed dark: a cool slate rather than black, with the
+   same ladder as Dark - card a notch above the ground, chrome (`--secondary`)
+   above that, hover above the chrome. `--card` stays under the ~#222222
+   ceiling the note in `.dark` explains; this is as high as it goes. */
+.dim {
+  /* Positive, as in `.dark`. A grey ground has room on both sides; the line
+     goes up because every other edge in a dark theme is lighter than what it
+     bounds. */
+  --packet-gridline-step: 0.12;
+  --background: #1c2026;
+  --foreground: #d1d7e0;
+  --card: #20252b;
+  --card-foreground: #d1d7e0;
+  --popover: #20252b;
+  --popover-foreground: #d1d7e0;
+  --primary: #4a9ee8;
+  --speed-download: #4a9ee8;
+  --speed-upload: #c084fc;
+  --primary-foreground: #000000;
+  --secondary: #272d35;
+  --secondary-foreground: #d1d7e0;
+  --muted: #272d35;
+  --muted-foreground: #9aa4b0;
+  --accent: #303742;
+  --selection: color-mix(in srgb, var(--primary) 13%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 25%, transparent);
+  --accent-foreground: #d1d7e0;
+  --destructive: #fb7185;
+  --destructive-foreground: #000000;
+  --border: #353c46;
+  --input: #353c46;
+  --ring: #7ab8f0;
+  /* Status colours - "fine", "check this", "wrong".
+     GENERATED from this theme's own palette by src/services/statusColors.ts.
+     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
+     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
+  --success: #37b786;
+  --success-foreground: #0b0f14;
+  --success-muted: #37b786;
+  --warning: #d77f37;
+  --warning-foreground: #0b0f14;
+  --warning-muted: #d77f37;
+  --danger: #d26161;
+  --danger-foreground: #0b0f14;
+  --danger-muted: #db6968;
+  --danger-strong: #a2373c;
+  --danger-strong-foreground: #ffffff;
+}
+
+/* High Contrast - the accessibility theme (ADR 0056), and where "follow
+   Windows" lands when Windows asks for more contrast.
+
+   Black ground, white text, and borders bright enough to be the structure on
+   their own (3:1 against the ground, which no other theme asks of a hairline).
+   Every text pair is held to 7:1 by scripts/themes/registry.ts, not 4.5. */
+.contrast {
+  /* Windows' contrast themes turn on forced colours, which would repaint the
+     page in the system's colours while canvases, the map and the window ground
+     keep this palette. This one is audited at 7:1, so it is what shows. */
+  forced-color-adjust: none;
+  --packet-gridline-step: 0.30;
+  --background: #000000;
+  --foreground: #ffffff;
+  --card: #050505;
+  --card-foreground: #ffffff;
+  --popover: #050505;
+  --popover-foreground: #ffffff;
+  --primary: #4db2ff;
+  --speed-download: #4db2ff;
+  --speed-upload: #d8b4fe;
+  --primary-foreground: #000000;
+  --secondary: #111111;
+  --secondary-foreground: #ffffff;
+  --muted: #111111;
+  --muted-foreground: #c4c7cc;
+  --accent: #262626;
+  --selection: color-mix(in srgb, var(--primary) 19%, var(--background));
+  --handle-hover: color-mix(in srgb, var(--foreground) 70%, transparent);
+  --accent-foreground: #ffffff;
+  --destructive: #fda4af;
+  --destructive-foreground: #000000;
+  --border: #8a8f98;
+  --input: #8a8f98;
+  --ring: #8ccbff;
+  /* Status colours - "fine", "check this", "wrong".
+     GENERATED from this theme's own palette by src/services/statusColors.ts.
+     Run `npx tsx scripts/themes/status-css.ts` to regenerate;
+     `npx tsx scripts/themes/status.ts` fails if these have drifted. */
+  --success: #7bd39a;
+  --success-foreground: #0b0f14;
+  --success-muted: #7bd39a;
+  --warning: #dca469;
+  --warning-foreground: #0b0f14;
+  --warning-muted: #dca469;
+  --danger: #da9190;
+  --danger-foreground: #0b0f14;
+  --danger-muted: #da9190;
+  --danger-strong: #ac6867;
+  --danger-strong-foreground: #0b0f14;
+}
+
+/* The accent swatches (ADR 0056), printed by scripts/themes/accent-css.ts from
+   src/lib/accents.ts - edit the table and paste again; scripts/themes/accents.ts
+   fails if this block is not exactly what it prints. Blue is the blocks above
+   and has no rule. Each swatch's light rule comes first, so on a dark <html>
+   (which :root also matches) the dark rule wins by order at equal specificity. */
+/* accent-css:begin */
+:root[data-accent-color="teal"],
+.light[data-accent-color="teal"] {
+  --primary: #0f766e;
+  --primary-foreground: #ffffff;
+  --ring: #0f766e;
+  --speed-download: #0f766e;
+}
+.dark[data-accent-color="teal"] {
+  --primary: #2dd4bf;
+  --primary-foreground: #000000;
+  --ring: #2dd4bf;
+  --speed-download: #2dd4bf;
+}
+.dim[data-accent-color="teal"] {
+  --primary: #3fb8a8;
+  --primary-foreground: #000000;
+  --ring: #3fb8a8;
+  --speed-download: #3fb8a8;
+}
+.contrast[data-accent-color="teal"] {
+  --primary: #5eead4;
+  --primary-foreground: #000000;
+  --ring: #5eead4;
+  --speed-download: #5eead4;
+}
+:root[data-accent-color="green"],
+.light[data-accent-color="green"] {
+  --primary: #16763a;
+  --primary-foreground: #ffffff;
+  --ring: #16763a;
+  --speed-download: #16763a;
+}
+.dark[data-accent-color="green"] {
+  --primary: #4ade80;
+  --primary-foreground: #000000;
+  --ring: #4ade80;
+  --speed-download: #4ade80;
+}
+.dim[data-accent-color="green"] {
+  --primary: #57b06f;
+  --primary-foreground: #000000;
+  --ring: #57b06f;
+  --speed-download: #57b06f;
+}
+.contrast[data-accent-color="green"] {
+  --primary: #86efac;
+  --primary-foreground: #000000;
+  --ring: #86efac;
+  --speed-download: #86efac;
+}
+:root[data-accent-color="violet"],
+.light[data-accent-color="violet"] {
+  --primary: #6d28d9;
+  --primary-foreground: #ffffff;
+  --ring: #6d28d9;
+  --speed-download: #6d28d9;
+  --speed-upload: #c2410c;
+}
+.dark[data-accent-color="violet"] {
+  --primary: #a78bfa;
+  --primary-foreground: #000000;
+  --ring: #a78bfa;
+  --speed-download: #a78bfa;
+  --speed-upload: #fb923c;
+}
+.dim[data-accent-color="violet"] {
+  --primary: #9b87e8;
+  --primary-foreground: #000000;
+  --ring: #9b87e8;
+  --speed-download: #9b87e8;
+  --speed-upload: #fb923c;
+}
+.contrast[data-accent-color="violet"] {
+  --primary: #c4b5fd;
+  --primary-foreground: #000000;
+  --ring: #c4b5fd;
+  --speed-download: #c4b5fd;
+  --speed-upload: #fdba74;
+}
+:root[data-accent-color="rose"],
+.light[data-accent-color="rose"] {
+  --primary: #be185d;
+  --primary-foreground: #ffffff;
+  --ring: #be185d;
+  --speed-download: #be185d;
+}
+.dark[data-accent-color="rose"] {
+  --primary: #f472b6;
+  --primary-foreground: #000000;
+  --ring: #f472b6;
+  --speed-download: #f472b6;
+}
+.dim[data-accent-color="rose"] {
+  --primary: #e07aa8;
+  --primary-foreground: #000000;
+  --ring: #e07aa8;
+  --speed-download: #e07aa8;
+}
+.contrast[data-accent-color="rose"] {
+  --primary: #f9a8d4;
+  --primary-foreground: #000000;
+  --ring: #f9a8d4;
+  --speed-download: #f9a8d4;
+}
+:root[data-accent-color="amber"],
+.light[data-accent-color="amber"] {
+  --primary: #a54d07;
+  --primary-foreground: #ffffff;
+  --ring: #a54d07;
+  --speed-download: #a54d07;
+}
+.dark[data-accent-color="amber"] {
+  --primary: #fbbf24;
+  --primary-foreground: #000000;
+  --ring: #fbbf24;
+  --speed-download: #fbbf24;
+}
+.dim[data-accent-color="amber"] {
+  --primary: #e0a640;
+  --primary-foreground: #000000;
+  --ring: #e0a640;
+  --speed-download: #e0a640;
+}
+.contrast[data-accent-color="amber"] {
+  --primary: #fcd34d;
+  --primary-foreground: #000000;
+  --ring: #fcd34d;
+  --speed-download: #fcd34d;
+}
+:root[data-accent-color="graphite"],
+.light[data-accent-color="graphite"] {
+  --primary: #475569;
+  --primary-foreground: #ffffff;
+  --ring: #475569;
+  --speed-download: #475569;
+}
+.dark[data-accent-color="graphite"] {
+  --primary: #cbd5e1;
+  --primary-foreground: #000000;
+  --ring: #cbd5e1;
+  --speed-download: #cbd5e1;
+}
+.dim[data-accent-color="graphite"] {
+  --primary: #aab4c0;
+  --primary-foreground: #000000;
+  --ring: #aab4c0;
+  --speed-download: #aab4c0;
+}
+.contrast[data-accent-color="graphite"] {
+  --primary: #e2e8f0;
+  --primary-foreground: #000000;
+  --ring: #e2e8f0;
+  --speed-download: #e2e8f0;
+}
+/* accent-css:end */
+
+/* High Contrast states what it tints. A 20% fill is a hint at 7:1 and not a
+   statement, so the rail's active button is outlined as well - the one named
+   exception to the rail's single mark shape (`railButton`, held by
+   scripts/session/view.ts). */
+.contrast .rail-active {
+  outline: 1px solid var(--primary);
+  outline-offset: -1px;
+}
+
+/* A subtree drawn in a theme other than the document's - the Appearance
+   tab's miniatures. A theme class on it re-declares `--background` and the
+   rest, but @theme declared every `--color-*` on :root, where it resolved
+   against the DOCUMENT's theme and is inherited already resolved. Pointing
+   them again here makes them resolve against this element's own tokens.
+   Only the colours a miniature paints; registry.ts holds the list to them. */
+.theme-scope {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-secondary: var(--secondary);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-selection: var(--selection);
+}
 
 /* maplibre-gl ships its own stylesheet, and it sets a hard
    `"Helvetica Neue", Arial, Helvetica` on the map container. That is the one

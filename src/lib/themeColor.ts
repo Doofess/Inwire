@@ -74,10 +74,14 @@ export function useThemeToken(token: string, fallback: string): string {
       return true;
     };
 
-    // A theme switch swaps the class on <html>; that is the authoritative
-    // signal, and it does not depend on any React state having caught up.
+    // A theme switch swaps the class on <html> and an accent switch its
+    // data-accent-color; those are the authoritative signals, and they do not
+    // depend on any React state having caught up.
     const observer = new MutationObserver(() => apply());
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class', 'style', 'data-accent-color'],
+    });
 
     // Until the token reads for the first time, keep trying. Bounded, because
     // a token that genuinely does not exist should not spin forever - after

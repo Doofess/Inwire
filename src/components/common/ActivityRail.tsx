@@ -304,6 +304,11 @@ const RailDivider: React.FC = () => (
  * for the fill, `'toggle'` for an outline. The outline's last caller was the
  * adapter, which is a side bar panel now; the parameter went with the branch,
  * so there is nothing to pass wrongly and no second shape to reason about.
+ *
+ * The active branch also carries `rail-active`, which no theme but High
+ * Contrast styles: there a tint alone is not enough, so `index.css` outlines
+ * it. That is the one named exception to the single shape, and it lives in the
+ * theme rather than here.
  */
 function railButton(active: boolean): string {
   const base = `relative ${TARGET} flex items-center justify-center rounded-md `
@@ -313,7 +318,7 @@ function railButton(active: boolean): string {
   // The theme's own accent, at a fifth. See the note above the group for what
   // this replaced, why the edge went with it, and why the glyph is
   // `--foreground` rather than the accent itself.
-  return `${base} bg-primary/20 text-foreground`;
+  return `${base} rail-active bg-primary/20 text-foreground`;
 }
 
 const VIEW_ICONS: Record<AppView, React.ComponentType<{ className?: string }>> = {

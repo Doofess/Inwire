@@ -11,12 +11,13 @@ import { usePreferenceValue } from '../../services/preferenceStore';
  *
  * Here because the panel describes this machine's connection, and a speed test
  * is a measurement of exactly that - and because the rail is full. Running a
- * test opens the sheet, where the dial is; the section stays a summary.
+ * test opens the sheet, where the trace and the latency are; the section stays
+ * a summary.
  *
  * Sized for the panel's narrowest, 170 px (`MIN_SIDE_BAR_PX`): the numbers
  * stack rather than squeeze, and the button is full width. Its button is the
- * panel's one filled control and still smaller than the sheet's GO - it says
- * "run" without shouting over the facts around it.
+ * panel's one tinted control and still quieter than the sheet's Run test - it
+ * says "run" without shouting over the facts around it.
  */
 export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
   const state = useSpeedTest();
@@ -39,7 +40,7 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
           // and its unit.
           <div className="space-y-0.5">
             <div className="text-[11px] text-muted-foreground">
-              Testing {state.phase === 'upload' ? 'upload' : state.phase === 'download' ? 'download' : 'ping'}…
+              Testing {state.phase === 'upload' ? 'upload' : state.phase === 'download' ? 'download' : 'latency'}…
             </div>
             {(state.phase === 'download' || state.phase === 'upload') && (
               <div className="flex items-baseline gap-1 text-sm text-foreground">
@@ -58,7 +59,10 @@ export function SpeedTestSection({ onOpen }: { onOpen: () => void }) {
               <span className="inline-flex items-center gap-1"><ArrowUp className="h-3.5 w-3.5 text-speed-upload" aria-label="Upload" />{formatMbps(last.upMbps)}</span>
             </div>
             <div className="text-[11px] text-muted-foreground tabular-nums">
-              Mb/s · ping {Math.round(last.pingMs)} ms · {whenText(last.at, Date.now())}
+              {/* Responsiveness and the grade rather than idle ping: how the
+                  link behaves busy is what the sheet leads with. An entry
+                  from before RPM was kept reads "–", never 0. */}
+              Mb/s · {typeof last.rpm === 'number' ? last.rpm : '–'} RPM · {last.grade} · {whenText(last.at, Date.now())}
             </div>
             {/* Where it ran and from which network, cut to the panel's width -
                 the whole of both is the title. */}

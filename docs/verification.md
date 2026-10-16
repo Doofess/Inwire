@@ -476,6 +476,23 @@ wrong ground is a full-window flash rather than a strip.
       opens dark with no error, then corrects once the renderer reports its
       theme.
 
+### Windows' contrast themes
+
+Windows' contrast themes turn on forced colours, and Chromium would repaint the
+page in the system's colours while the minimap, the map and the window ground
+kept Inwire's. `.contrast` opts out (`forced-color-adjust: none`, ADR 0056), so
+under Follow Windows the app is its own High Contrast theme. Nothing scripted
+can turn a contrast theme on.
+
+- [ ] With **Follow Windows** on, turn on each of Windows' contrast themes
+      (Settings → Accessibility → Contrast themes: Aquatic, Desert, Dusk, Night
+      sky). The app moves to **High Contrast** at once, and the whole window -
+      packet list, minimap, map, title row - is Inwire's black theme. A light
+      page over a black ground, or system colours in the list beside a black
+      minimap, is forced colours not being opted out of.
+- [ ] Turn the contrast theme off. The app returns to Light or Dark by Windows'
+      app mode, not to High Contrast.
+
 ### Scaling
 
 The reserve is ours now — 138 CSS pixels at every scale factor, because the

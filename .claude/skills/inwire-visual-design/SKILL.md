@@ -1,6 +1,6 @@
 ---
 name: inwire-visual-design
-description: Inwire's typography, theming and brand-mark rules - the system faces and why there is no webfont and no typeface picker, the two themes and the token contract, and the five-plate brand mark every icon is generated from. Use when changing fonts, colours, theme tokens, the CSS in src/index.css, or anything under logo/ and electron/resources/.
+description: Inwire's typography, theming and brand-mark rules - the system faces and why there is no webfont and no typeface picker, the four themes and the token contract, and the five-plate brand mark every icon is generated from. Use when changing fonts, colours, theme tokens, the CSS in src/index.css, or anything under logo/ and electron/resources/.
 ---
 
 # Visual design: typography, theming, the brand mark
@@ -52,12 +52,35 @@ in `index.css` says so.
 
 ### Theming
 
-**Two themes** declared in `src/lib/themeOptions.ts` — Day and Night — each with
-a complete token block in `src/index.css` and a palette entry in
-`src/services/themePalettes.ts`, plus System, which is a rule for choosing
-between them rather than a third palette.
+**Four themes** declared in `src/lib/themeOptions.ts` — Light, Dark, Dim and
+High Contrast — each with a complete token block in `src/index.css` and a
+palette entry in `src/services/themePalettes.ts`, plus System, which is a rule
+for choosing between them rather than a fifth palette: Light or Dark from
+Windows, and High Contrast when `prefers-contrast: more` or `forced-colors`
+matches. ADR 0056 says why four, against the cut that once made it two.
 
-**Night holds the `dark` id**, and that matters mechanically: next-themes writes
+**Dark is near black (`#101112`), and pure black is High Contrast's.** Every
+dark theme's `--card` stays under about `#222`, every pair of themes stays 5 ΔE
+apart, and High Contrast text is 7:1. The selected row mixes `--primary` into
+`--background` at a share set per theme (`SELECTION_SHARE` in the registry).
+
+**The accent is one of seven swatches, never a free colour.** `src/lib/accents.ts`
+is the table - a `--primary`, foreground and ring per theme - and an accent
+overrides only `--primary`, `--primary-foreground`, `--ring` and
+`--speed-download` (Violet also moves `--speed-upload` to orange, since purple
+is upload's). Blue is the theme blocks' own values and gets no rule. The other
+rules sit between the `accent-css` markers in `index.css`, printed by
+`scripts/themes/accent-css.ts`; `scripts/themes/accents.ts` fails on drift and
+`registry.ts` checks every swatch in every theme. Edit the table, re-run the
+generator, paste. The setting is `accentColor` / `data-accent-color`, never
+"accent", which is shadcn's hover fill. **The brand mark does not follow it.**
+
+**A theme drawn inside another needs `.theme-scope`.** `@theme` resolves every
+`--color-*` on `:root` against the document's theme, so a wrapper carrying only
+a theme class still paints the document's colours. The Appearance tiles carry
+both, and the registry fails on a utility `.theme-scope` does not re-point.
+
+**Dark holds the `dark` id**, and that matters mechanically: next-themes writes
 `color-scheme` only for the literal strings `light` and `dark`, so while the
 neutral dark theme was stored under another id the native scrollbars and form
 controls stayed on the light side of the divide for the theme most people use.
@@ -73,7 +96,7 @@ completeness, contrast and CSS-vs-palette drift.
 its own colours rather than taking `currentColor`, because a stack given one
 colour is a silhouette of a hexagon. The rule is narrow and worth keeping: the
 colours live with the geometry, `BrandMark.tsx` holds none, and **one ramp
-serves both themes** so there is no per-theme mark to keep in step.
+serves every theme** so there is no per-theme mark to keep in step.
 
 **One source, every icon generated from it.** The art is ported into
 `brandMark.ts` rather than committed as the artist's `.ico`, because a binary

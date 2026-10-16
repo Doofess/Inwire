@@ -482,7 +482,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         e.stopPropagation();
         setColumnWidths(prev => ({ ...prev, [column]: DEFAULT_COLUMN_WIDTHS[column] }));
       }}
-      className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-foreground/25 z-10"
+      className="absolute right-0 top-0 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-handle-hover z-10"
       title="Drag to resize column - right-click to reset"
     />
   );
@@ -1470,7 +1470,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                         // separators from the list's ground instead of from
                         // itself - the single exception to the rule the grid is
                         // built on, and on Day a line lighter than both.
-                        ? '[--row-bg:var(--accent)] !bg-accent !text-primary dark:!text-primary ring-1 ring-inset ring-primary font-bold'
+                        ? '[--row-bg:var(--selection)] !bg-selection !text-primary ring-1 ring-inset ring-primary font-bold'
                         : 'hover:brightness-95 dark:hover:brightness-125'
                     }`}
                     // The matched rule's foreground applies to the whole row,

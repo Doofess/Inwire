@@ -45,7 +45,8 @@ import {
 import {
   TITLE_BAR_HEIGHT, WINDOW_CONTROL_COUNT, WINDOW_CONTROL_HEIGHT, WINDOW_CONTROL_WIDTH,
 } from '../../electron/window';
-import { THEME_OPTIONS } from '../../src/lib/themeOptions';
+import { THEME_NAMES, THEME_OPTIONS } from '../../src/lib/themeOptions';
+import { PALETTE_BY_THEME } from '../../src/services/themePalettes';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -97,13 +98,20 @@ console.log('--- the ground a window opens on, per theme ---\n');
       tokenIn(selectorFor(value), '--background').toLowerCase());
   }
 
-  // Every theme, not just the two that exist today: the loop above is driven by
-  // THEME_OPTIONS, so a theme added without a palette entry would silently not
-  // be checked rather than fail. The floor is the picker's real contents - Day
-  // and Night - and `scripts/themes/registry.ts` is what holds that to exactly
-  // one of each.
+  // The loop above is driven by THEME_OPTIONS, so a theme added without a
+  // palette entry would silently not be checked rather than fail. The floor is
+  // the picker's real contents - Light, Dark, Dim and High Contrast - and
+  // `scripts/themes/registry.ts` is what holds that to one light and three dark.
   check('every theme in the picker was checked',
-    THEME_OPTIONS.length >= 2, true);
+    THEME_OPTIONS.length >= 4, true);
+  // And the table main reads is the palette itself, not a fallback that
+  // happens to match: an unknown name falls back to Dark's ground, so a theme
+  // missing from PALETTE_BY_THEME would open on Dark's colour and pass a
+  // comparison against Dark.
+  for (const n of THEME_NAMES) {
+    check(`${n} opens on its own palette's ground`,
+      PALETTE_BY_THEME[n]?.surface.background, resolveWindowBackground(n));
+  }
 }
 
 console.log('\n--- main never overrides the OS theme ---\n');

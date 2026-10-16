@@ -1,4 +1,4 @@
-import { Sun, Moon, Monitor } from 'lucide-react';
+import { Sun, Moon, CloudMoon, Contrast, Monitor } from 'lucide-react';
 
 /**
  * Every app theme, and whether it is a light or a dark one.
@@ -37,20 +37,28 @@ export interface ThemeOption {
 }
 
 export const THEME_OPTIONS: ThemeOption[] = [
-  { value: 'light', label: 'Day', icon: Sun, mode: 'light' },
-  { value: 'dark', label: 'Night', icon: Moon, mode: 'dark' },
+  { value: 'light', label: 'Light', icon: Sun, mode: 'light' },
+  { value: 'dark', label: 'Dark', icon: Moon, mode: 'dark' },
+  { value: 'dim', label: 'Dim', icon: CloudMoon, mode: 'dark' },
+  { value: 'contrast', label: 'High Contrast', icon: Contrast, mode: 'dark' },
 ];
 
 /**
- * Two themes and a rule, where there were four and a rule.
+ * Four themes and a rule (ADR 0056).
  *
- * Paper and Graphite are gone. Paper was the warm light one and Graphite the
- * warm dark one, and each existed as a counterweight to the other survivor -
- * "one warm and one cool is a real choice" was the argument, and it was a good
- * argument for four. It is not an argument for keeping a second of each when
- * what is wanted is Day, Night and System.
+ * There were four once before - Day, Paper, Night and Graphite - and two of
+ * them were cut because each was only the other survivor's counterweight, one
+ * warm and one cool. The four now are four different answers rather than two
+ * pairs: Light; Dark, a near-black instrument panel; Dim, a grey ground for
+ * long sessions, as Codex and GitHub's dimmed theme have beside their dark
+ * one; and High Contrast, an accessibility theme held to 7:1 by
+ * `scripts/themes/registry.ts`, which "follow Windows" lands on when Windows
+ * asks for more contrast.
  *
- * **Night took the `dark` id from Graphite, and that is the part worth
+ * **Light and Dark keep the ids `light` and `dark`**, whatever they are
+ * labelled, and that is the part worth knowing.
+ *
+ * **Dark took the `dark` id from Graphite, and that is the part worth
  * knowing.** next-themes writes `color-scheme` onto the document only for the
  * literal strings `"light"` and `"dark"`, which is what keeps native
  * scrollbars, text selection and form controls on the right side of the
@@ -124,16 +132,34 @@ export const SYSTEM_THEME_OPTION = {
 } as const;
 
 /**
- * Which two themes "System" chooses between.
+ * Which two themes "System" chooses between for Windows' light and dark.
  *
- * Now that there are exactly two, this pair is every theme there is - but it
- * stays a declared pair rather than being inferred from THEME_OPTIONS, and
+ * Two of the four, declared rather than inferred from THEME_OPTIONS, and
  * next-themes' own `enableSystem` stays unused. Both for the same reason: which
  * theme someone who asked for "whatever the OS says" should land on is a
- * product decision, and a third theme would otherwise silently make it by
- * position in a list.
+ * product decision, and with four themes a list position would otherwise make
+ * it. Dim is never chosen for them - it is a preference, and Windows has no
+ * setting that asks for it. High Contrast is the one Windows can ask for, and
+ * `systemThemeFor` says when.
  */
 export const SYSTEM_THEME_PAIR = { light: 'light', dark: 'dark' } as const;
+
+/**
+ * The theme "System" resolves to (ADR 0056).
+ *
+ * High Contrast whenever Windows asks for more contrast or is in its own
+ * High Contrast mode (forced colours), whatever its light or dark setting says;
+ * otherwise the pair above. Contrast wins because someone who turned it on at
+ * the OS needs it, and a light or dark preference is only a preference.
+ */
+export function systemThemeFor(q: {
+  prefersDark: boolean;
+  prefersMoreContrast: boolean;
+  forcedColors: boolean;
+}): 'light' | 'dark' | 'contrast' {
+  if (q.prefersMoreContrast || q.forcedColors) return 'contrast';
+  return SYSTEM_THEME_PAIR[q.prefersDark ? 'dark' : 'light'];
+}
 
 /** Every theme next-themes is allowed to resolve to. */
 export const THEME_NAMES: string[] = THEME_OPTIONS.map((t) => t.value);

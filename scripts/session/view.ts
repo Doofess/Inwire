@@ -373,6 +373,11 @@ console.log('\n--- Settings is a pane and not a view ---\n');
     && !railSrc.includes("'view' | 'toggle'"));
   checkTrue('...with no outline ring anywhere in the strip',
     !/ring-1 ring-inset/.test(railSrc));
+  // High Contrast cannot rely on a 20% tint alone, so its active button is
+  // outlined too - by a class the theme styles, not by a second shape here.
+  checkTrue("...whose one named exception is High Contrast's outline",
+    railSrc.includes('rail-active')
+    && /\.contrast \.rail-active\s*\{[^}]*outline/.test(readFileSync('src/index.css', 'utf8')));
   // The strip has shipped two identical glyphs once already - the brand mark
   // opened as an `EthernetPort`, the adapter button's own icon, 42px under it.
   // Network is the adapter's neighbour in meaning and must not be in picture.

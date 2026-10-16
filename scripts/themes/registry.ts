@@ -22,6 +22,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { contrastRatio, deltaE76, mixHex } from '../../src/lib/colorMix';
+import { ACCENTS } from '../../src/lib/accents';
+import { PALETTE_BY_THEME } from '../../src/services/themePalettes';
 import {
   RETIRED_THEMES,
   SYSTEM_THEME_PAIR,
@@ -61,18 +63,19 @@ function tokensIn(selector: string): string[] {
 const light = THEME_OPTIONS.filter((t) => t.mode === 'light');
 const dark = THEME_OPTIONS.filter((t) => t.mode === 'dark');
 
-// One of each, and that is the whole set. Paper and Graphite were the second
-// light and the second dark; each existed as the other survivor's counterweight
-// - one warm, one cool - which was an argument for four and not an argument for
-// keeping a spare of each once the answer wanted is Day, Night and System.
+// One light and three dark, and that is the whole set (ADR 0056). Paper and
+// Graphite were cut because each was only the other survivor's warm-or-cool
+// counterweight; Dim and High Contrast are not spares of Dark - Dim is a grey
+// ground beside a near-black one, and High Contrast is an accessibility theme
+// held to 7:1 below.
 //
 // Pinned as exact counts rather than as `>= 1`, because the cost of a theme is
 // not in this file: it is a complete token block in index.css, a palette, and
 // every pairwise contrast and deltaE check below. A theme added without that
 // deliberation should fail here first.
 check('one light theme', light.length, 1);
-check('one dark theme', dark.length, 1);
-check('two themes, both of them real', THEME_NAMES.length, 2);
+check('three dark themes', dark.length, 3);
+check('four themes, all of them real', THEME_NAMES.length, 4);
 // `system` is gone, so there is no longer a picker entry that resolves to
 // something else at runtime. Every option now names a palette directly, which
 // is what let `mode` become required rather than optional.
@@ -163,7 +166,10 @@ const REQUIRED_TOKENS = tokensIn(':root');
 // value would not merely be a shade out, it would draw the line on the wrong
 // side of the ground - which is the state that shipped while this was a
 // fraction of white and every theme shared it.
-check('the :root baseline declares 33 tokens', REQUIRED_TOKENS.length, 33);
+//
+// `--selection` and `--handle-hover` made it 35 (ADR 0056): both are a share
+// that differs per theme, so both are declared in every block.
+check('the :root baseline declares 35 tokens', REQUIRED_TOKENS.length, 35);
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;
@@ -379,8 +385,8 @@ const CHROME_PAIRS: readonly [string, string, string][] = [
   // continuous chrome - so its quiet items ride the two pairs above. Its
   // elapsed clock is its own, and it clears the text floor on both themes.
   ['--primary', '--secondary', 'StatusBar capture elapsed'],
-  // The speed test's upload colour is on its figures' icons, the dial's label
-  // and the live tile's edge, on the card and on the ground (ADR 0054).
+  // The speed test's upload colour is on its figures' arrows, its trace and
+  // its latency box, on the card and on the ground (ADR 0054).
   ['--speed-upload', '--card', 'speed test upload, on a card'],
   ['--speed-upload', '--background', 'speed test upload, on the ground'],
   ['--speed-download', '--card', 'speed test download, on a card'],
@@ -446,6 +452,125 @@ for (const t of THEME_OPTIONS) {
 }
 
 console.log();
+// --- selection, and High Contrast's 7:1 (ADR 0056) ----------------------------
+// The selected row is the accent mixed into the ground, and its text is the
+// accent itself, so the pair that has to hold is primary on that mix. The share
+// is per theme because it is the largest each ground allows: Light's accents
+// sit near 4.5:1 on the ground already, so 6% is all it has room for; the ring
+// and the weight carry the selection there, the tint only confirms it.
+const SELECTION_SHARE: Record<string, number> = { light: 6, dark: 22, dim: 13, contrast: 19 };
+
+function themeBlock(theme: string): string {
+  const selector = theme === 'light' ? ':root' : `.${theme}`;
+  const start = css.indexOf(`${selector} {`);
+  return start === -1 ? '' : css.slice(start, css.indexOf('\n}', start));
+}
+function hexIn(theme: string, token: string): string {
+  return new RegExp(`${token}:\\s*(#[0-9a-fA-F]{6})`).exec(themeBlock(theme))?.[1] ?? '#000000';
+}
+function selectionHex(theme: string, primary: string): string {
+  return mixHex(primary, hexIn(theme, '--background'), SELECTION_SHARE[theme] / 100);
+}
+
+// The Appearance tiles wrap each miniature in a div of that theme's class, so
+// Light has to be reachable by `.light` as well as by `:root` - or the Light
+// tile inside any dark document would draw in the document's colours.
+checkTrue('the light block is selected by .light as well as :root',
+  /(^|\n)\.light, :root \{/.test(css));
+
+// And a theme class is not enough on its own: Tailwind declares every
+// `--color-*` on :root, where it resolves to the DOCUMENT's theme and is
+// inherited already resolved, so `bg-background` under `.light` inside `.dark`
+// paints dark. `.theme-scope` re-points each one at the scope's own token -
+// and every colour utility a miniature uses must be among them, or that part
+// of the tile quietly draws in the wrong theme.
+{
+  const panel = fs.readFileSync(
+    path.join(process.cwd(), 'src/components/common/AppearanceSettingsPanel.tsx'), 'utf8');
+  const mini = panel.slice(panel.indexOf('const ThemeMiniature'), panel.indexOf('const SYSTEM_SPLIT'));
+  const scope = /(^|\n)\.theme-scope \{([^}]*)\}/.exec(css)?.[2] ?? '';
+  const used = [...new Set([...mini.matchAll(/\b(?:bg|ring|border)-([a-z]+(?:-[a-z]+)*)/g)]
+    .map((m) => m[1]).filter((n) => !['inset', 'r', 'b', 'l', 't'].includes(n)))];
+  checkTrue('the theme miniature carries .theme-scope', /theme-scope/.test(mini));
+  for (const name of used) {
+    checkTrue(`.theme-scope re-points --color-${name}`,
+      scope.includes(`--color-${name}: var(--${name});`));
+  }
+}
+
+for (const theme of realThemes) {
+  const share = SELECTION_SHARE[theme];
+  checkTrue(`${theme}: --selection mixes ${share}% of the accent into the ground`,
+    new RegExp(`--selection:\\s*color-mix\\(in srgb, var\\(--primary\\) ${share}%, var\\(--background\\)\\)`).test(themeBlock(theme)));
+  const primary = hexIn(theme, '--primary');
+  const floor = theme === 'contrast' ? 7 : 4.5;
+  const ratio = contrastRatio(primary, selectionHex(theme, primary));
+  checkTrue(`${theme}: the selected row's text (primary on the mix) is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
+}
+
+for (const fg of ['--foreground', '--muted-foreground', '--primary']) {
+  for (const bg of ['--background', '--card', '--secondary']) {
+    const ratio = contrastRatio(hexIn('contrast', fg), hexIn('contrast', bg));
+    checkTrue(`contrast: ${fg} on ${bg} is 7:1 (${ratio.toFixed(2)})`, ratio >= 7);
+  }
+}
+{
+  const warn = contrastRatio(hexIn('contrast', '--warning'), hexIn('contrast', '--secondary'));
+  checkTrue(`contrast: --warning on --secondary is 4.5:1 (${warn.toFixed(2)})`, warn >= 4.5);
+  const edge = contrastRatio(hexIn('contrast', '--border'), hexIn('contrast', '--background'));
+  checkTrue(`contrast: --border on --background is 3:1, the structure on its own (${edge.toFixed(2)})`, edge >= 3);
+}
+
+console.log();
+// --- every accent swatch, in every theme (ADR 0056) ----------------------------
+// An accent replaces --primary, --primary-foreground, --ring and
+// --speed-download, so every pair above that reads --primary is asked again
+// with each swatch in its place. Blue is the theme blocks' own values, so it
+// repeats checks already made; it stays in the loop so the table cannot hold a
+// Blue that differs from them and pass.
+for (const theme of realThemes) {
+  const floor = theme === 'contrast' ? 7 : 4.5;
+  const chrome = hexIn(theme, '--secondary');
+  const hover = hexIn(theme, '--accent');
+  for (const a of ACCENTS) {
+    const primary = a.primary[theme];
+    const at = `${theme} / ${a.id}`;
+    const fill = contrastRatio(a.primaryForeground[theme], primary);
+    checkTrue(`${at}: text on the accent fill is 4.5:1 (${fill.toFixed(2)})`, fill >= 4.5);
+    for (const bg of ['--background', '--card', '--secondary']) {
+      const r = contrastRatio(primary, hexIn(theme, bg));
+      checkTrue(`${at}: the accent on ${bg} is ${floor}:1 (${r.toFixed(2)})`, r >= floor);
+    }
+    const sel = contrastRatio(primary, selectionHex(theme, primary));
+    checkTrue(`${at}: the selected row's text is ${floor}:1 (${sel.toFixed(2)})`, sel >= floor);
+
+    const railFill = mixHex(primary, chrome, activeAlpha);
+    const glyph = contrastRatio(hexIn(theme, '--foreground'), railFill);
+    checkTrue(`${at}: the rail's active glyph is 4.5:1 (${glyph.toFixed(2)})`, glyph >= 4.5);
+    const fromChrome = deltaE76(railFill, chrome);
+    const fromHover = deltaE76(railFill, hover);
+    checkTrue(`${at}: the rail's active fill reads against the rail (${fromChrome.toFixed(1)} deltaE)`,
+      fromChrome >= MIN_STATE_DELTA_E);
+    checkTrue(`${at}: ...and is not its hover (${fromHover.toFixed(1)} deltaE)`,
+      fromHover >= MIN_STATE_DELTA_E);
+
+    // An accent that reads as an error or a warning makes every selected row
+    // and focused control say something the app did not mean.
+    for (const status of ['--destructive', '--warning']) {
+      const d = deltaE76(primary, hexIn(theme, status));
+      checkTrue(`${at}: the accent is not ${status} (${d.toFixed(1)} deltaE)`, d >= 10);
+    }
+
+    // Download is the accent, upload is purple - unless the accent IS purple,
+    // when upload takes the theme's orange.
+    const upload = a.uploadHue ? PALETTE_BY_THEME[theme].hues[a.uploadHue] : hexIn(theme, '--speed-upload');
+    const apart = deltaE76(primary, upload);
+    checkTrue(`${at}: download and upload stay apart (${apart.toFixed(1)} deltaE)`, apart >= 15);
+    const onCard = contrastRatio(upload, hexIn(theme, '--card'));
+    checkTrue(`${at}: the upload colour on --card is 4.5:1 (${onCard.toFixed(2)})`, onCard >= 4.5);
+  }
+}
+
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
   process.exit(1);

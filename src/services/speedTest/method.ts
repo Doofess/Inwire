@@ -177,30 +177,36 @@ export function bloatGrade(idleMs: number, loadedMs: number): BloatGrade {
   return 'F';
 }
 
-/** Responsiveness in round trips per minute, as Apple's `networkQuality` reports it. */
-export const rpm = (latencyMs: number): number => (latencyMs > 0 ? Math.round(60_000 / latencyMs) : 0);
-
 /**
- * The gauge's marks: Ookla's non-linear scale, each mark an equal step of arc,
- * so 5 Mb/s and 500 Mb/s are both readable on one dial.
+ * A finished test's grade: idle against the worse loaded median, or the one
+ * phase that has one. When no loaded probe answered at all there is no
+ * grade - falling back to idle would compare idle with itself and print a
+ * green A+ the test has no evidence for.
  */
-export const GAUGE_MARKS = [0, 5, 10, 50, 100, 250, 500, 750, 1000] as const;
-
-/** Where `mbps` sits on the dial, 0..1, interpolated linearly between marks and pinned past the last. */
-export function gaugeFraction(mbps: number): number {
-  if (!(mbps > 0)) return 0;
-  const steps = GAUGE_MARKS.length - 1;
-  for (let i = 1; i < GAUGE_MARKS.length; i++) {
-    if (mbps <= GAUGE_MARKS[i]) {
-      const lo = GAUGE_MARKS[i - 1];
-      const hi = GAUGE_MARKS[i];
-      return (i - 1 + (mbps - lo) / (hi - lo)) / steps;
-    }
-  }
-  return 1;
+export function resultGrade(idleMs: number, loadedDownMs: number | null, loadedUpMs: number | null): BloatGrade | null {
+  if (loadedDownMs === null && loadedUpMs === null) return null;
+  return bloatGrade(idleMs, Math.max(loadedDownMs ?? -Infinity, loadedUpMs ?? -Infinity));
 }
 
-/** A speed as the dial and the tiles print it: three significant figures, never an exponent. */
+/**
+ * Responsiveness in round trips per minute: a minute over one loaded round
+ * trip. **Approximate**, and labelled so: Apple's `networkQuality` and the
+ * IETF responsiveness draft (draft-ietf-ippm-responsiveness) count every
+ * round trip a fresh request makes - DNS, TCP, TLS, HTTP - on new and loaded
+ * connections alike, where this is one empty request on a warm connection.
+ */
+export const rpm = (latencyMs: number): number => (latencyMs > 0 ? Math.round(60_000 / latencyMs) : 0);
+
+export type RpmBand = 'Low' | 'Medium' | 'High';
+/** The draft's bands, as `networkQuality` prints them: Low under 300, High over 1000. */
+export const RPM_BANDS = { mediumFrom: 300, highAbove: 1000 } as const;
+
+export function rpmBand(value: number): RpmBand {
+  if (value < RPM_BANDS.mediumFrom) return 'Low';
+  return value > RPM_BANDS.highAbove ? 'High' : 'Medium';
+}
+
+/** A speed as the headline and the history print it: three significant figures, never an exponent. */
 export function formatMbps(mbps: number): string {
   if (!(mbps > 0)) return '0';
   if (mbps >= 100) return mbps.toFixed(0);

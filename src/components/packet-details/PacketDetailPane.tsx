@@ -811,7 +811,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
                     <>
                       {/* Doubles as the border between the panes. */}
                       <div
-                        className="w-1.5 h-full shrink-0 cursor-col-resize bg-muted hover:bg-foreground/25 transition-colors"
+                        className="w-1.5 h-full shrink-0 cursor-col-resize bg-muted hover:bg-handle-hover transition-colors"
                         title="Drag to resize — double-click to reset"
                         onMouseDown={split.onHandleMouseDown}
                         onDoubleClick={split.reset}

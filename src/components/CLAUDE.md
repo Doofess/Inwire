@@ -140,9 +140,12 @@ second boolean beside it, and then "both open" is representable in a card that
 shows one. **The speed test's sheet** (`speedtest/SpeedTestSheet.tsx`, ADR 0054)
 follows every rule below; what it adds is that leaving it does not stop a test,
 because the test's state is `services/speedTest/state.ts`'s, a module store, not
-the sheet's - so App also does not re-render at the dial's ten updates a second.
-It is opened from the Network panel's *Speed test* section, never from the
-rail.
+the sheet's - so App also does not re-render at the test's ten updates a
+second. It is opened from the Network panel's *Speed test* section, never from
+the rail. **It is laid out as an instrument, not a dial** (0054's amendment):
+a phase strip, the headline (two medians, RPM and the bufferbloat grade), the
+latency boxes on one log axis, a throughput trace per direction with the last
+run as a ghost, a footer, then history - one component each beside the sheet.
 
 **Three ways out and no fourth**: the title row's back step, reading
 "Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and
@@ -212,7 +215,8 @@ a DOM marker and one arc, read from the speed test's history, never from
 joins `ArcLayer` only at `syncConnectionsLayer`'s final `setArcs`.
 `scripts/speed-test/map-overlay.ts` reads GeoMap's source to hold that. Its
 two colours are tokens, `--speed-download` (the accent) and `--speed-upload`
-(purple), which the dial, the tiles, the history and the tooltip all share.
+(purple), which the sheet's headline and traces, the history and the tooltip
+all share.
 
 **Exactly one MapLibre instance is ever live** — a fact about the component tree
 rather than a condition somebody keeps true, since the Routing Map is a view and
@@ -345,9 +349,10 @@ legitimately contains `setSideBar`.
 
 **The sash is an in-flow `w-1` sibling and IS the 4px gap.** At rest it paints
 nothing, two card borders already drawing that edge. **Every resize handle in
-the app hovers to `bg-foreground/25`, not to the accent** - a neutral that
-follows Day and Night, because the accent blue reads as a stray line against
-Night's black (the owner's report). It carries the full
+the app hovers to `bg-handle-hover`, not to the accent** - a neutral that
+follows every theme, because the accent blue reads as a stray line against
+Dark's near-black (the owner's report). It is the foreground at 25%, and at 70%
+in High Contrast, where a quarter-strength line is not a statement. It carries the full
 divider vocabulary: `role="separator"`, `aria-valuenow/min/max` in px, arrows
 with Shift for bigger steps, Home/End, and a reset on double-click, right-click
 and Enter.

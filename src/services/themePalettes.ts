@@ -87,7 +87,7 @@ const PALETTES: Record<string, ThemePalette> = {
   },
 
   /**
-   * Night - the dark theme, and the only one.
+   * Dark - the near-black dark theme.
    *
    * This was `midnight`, the cool counterweight to a warm dark called Graphite.
    * Graphite is gone and this took its id: next-themes writes `color-scheme`
@@ -106,7 +106,38 @@ const PALETTES: Record<string, ThemePalette> = {
       cyan: '#22d3ee', blue: '#818cf8', violet: '#c084fc', magenta: '#e879f9',
       neutral: '#a1a1a1',
     },
-    surface: { background: '#000000', card: '#040404', foreground: '#e4e4e4', border: '#262626' },
+    surface: { background: '#101112', card: '#141516', foreground: '#e4e4e4', border: '#2e2f30' },
+  },
+
+  /**
+   * Dim - a grey ground for long sessions, beside Dark's near-black one.
+   *
+   * Dark's nine to start with: the ground is lighter, but not so much that a
+   * hue legible on near-black stops being legible here, and
+   * `scripts/themes/packet-themes.ts` is what decides that rather than taste.
+   */
+  dim: {
+    hues: {
+      red: '#f87171', orange: '#fb923c', yellow: '#fde047', green: '#34d399',
+      cyan: '#22d3ee', blue: '#818cf8', violet: '#c084fc', magenta: '#e879f9',
+      neutral: '#9aa4b0',
+    },
+    surface: { background: '#1c2026', card: '#20252b', foreground: '#d1d7e0', border: '#353c46' },
+  },
+
+  /**
+   * High Contrast - the accessibility theme.
+   *
+   * Tailwind 300s, lighter than Dark's 400s, so every hue clears 7:1 on the
+   * black ground as text and not only as a tint.
+   */
+  contrast: {
+    hues: {
+      red: '#fca5a5', orange: '#fdba74', yellow: '#fde047', green: '#86efac',
+      cyan: '#67e8f9', blue: '#a5b4fc', violet: '#d8b4fe', magenta: '#f0abfc',
+      neutral: '#c4c7cc',
+    },
+    surface: { background: '#000000', card: '#050505', foreground: '#ffffff', border: '#8a8f98' },
   },
 };
 

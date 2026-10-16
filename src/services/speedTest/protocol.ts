@@ -29,14 +29,54 @@ export interface SpeedServer {
   city: string | null;
 }
 
+/**
+ * One latency probe: when it ran (from its phase's start), the server's
+ * round trip for it (`netLatency`: Cloudflare's smoothed kernel RTT when sent),
+ * and the client's own time to first byte net of the server's time. The first
+ * is what the figures and the grade compare; the second is what the boxes
+ * draw, because a smoothed RTT moves an eighth of the way per sample and so
+ * hides most of the spread.
+ */
+export interface LatencySample { tMs: number; rttMs: number; ttfbMs: number }
+
+/** Where a set of latencies falls: the box and whiskers the sheet draws. */
+export interface Spread { n: number; p10: number; p25: number; p50: number; p75: number; p90: number }
+
+/** One direction, as the engine finished it. */
+export type SpeedTransfer = TransferFigure & {
+  loadedLatencyMs: number | null;
+  connections: number;
+  /** Mb/s in each 100 ms slice from the start, warm-up included, the partial last slice dropped. */
+  trace: number[];
+  /** The loaded-latency probes, in order. */
+  loaded: LatencySample[];
+  /** When the ramp added connections, ms from the start. */
+  rampsAtMs: number[];
+};
+
+/** What the sheet prints beside the figures, built by the engine so a run nobody watched has it too. */
+export interface SpeedSummary {
+  /** Spreads of time to first byte, per phase; null where no probe answered. */
+  idle: Spread | null;
+  download: Spread | null;
+  upload: Spread | null;
+  /** Round trips a minute at the worse loaded median - approximate, see `rpm`. */
+  rpm: number | null;
+  /** Bytes over time past warm-up: the cursor beside the median. */
+  downMeanMbps: number | null;
+  upMeanMbps: number | null;
+}
+
 export interface SpeedResult {
   /** Epoch ms the test finished. */
   at: number;
   server: SpeedServer;
-  latency: { idleMs: number; jitterMs: number; samples: number };
-  download: TransferFigure & { loadedLatencyMs: number | null; connections: number };
-  upload: TransferFigure & { loadedLatencyMs: number | null; connections: number };
-  grade: BloatGrade;
+  latency: { idleMs: number; jitterMs: number; samples: number; idle: LatencySample[] };
+  download: SpeedTransfer;
+  upload: SpeedTransfer;
+  /** Null when no loaded probe answered in either phase: nothing to grade. */
+  grade: BloatGrade | null;
+  summary: SpeedSummary;
   /** Every byte both directions moved, for the "transfers up to" promise. */
   bytesMoved: number;
 }
@@ -45,11 +85,14 @@ export type SpeedEvent =
   | { type: 'phase'; phase: SpeedPhase }
   | { type: 'server'; server: SpeedServer }
   /** One idle-latency sample, in order, with the jitter estimate so far. */
-  | { type: 'latency'; ms: number; jitterMs: number | null }
-  /** A transfer's running speed: the last second, sampled every slice-ish. */
-  | { type: 'progress'; phase: 'download' | 'upload'; mbps: number; elapsedMs: number; connections: number }
-  /** One loaded-latency probe during a transfer. */
-  | { type: 'loaded'; phase: 'download' | 'upload'; ms: number }
+  | { type: 'latency'; ms: number; jitterMs: number | null; ttfbMs: number; tMs: number }
+  /**
+   * A transfer's running speed: `mbps` over the last second, for the figure,
+   * and `sliceMbps` over the last 100 ms alone, for the trace.
+   */
+  | { type: 'progress'; phase: 'download' | 'upload'; mbps: number; sliceMbps: number; elapsedMs: number; connections: number }
+  /** One loaded-latency probe during a transfer; `ms` is its round trip. */
+  | { type: 'loaded'; phase: 'download' | 'upload'; ms: number; ttfbMs: number; tMs: number }
   /** A phase finished; its figure is final. */
   | { type: 'figure'; phase: 'download' | 'upload'; figure: TransferFigure }
   | { type: 'done'; result: SpeedResult }

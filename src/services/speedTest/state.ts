@@ -4,13 +4,15 @@
  * A module-level store rather than App state, for the reason `byteRange.ts`
  * is one: the Network panel's section and the workspace sheet both read it, a
  * test keeps running when the sheet is closed, and progress arrives ten times a
- * second - App re-rendering at that rate for a dial nobody may be looking at is
+ * second - App re-rendering at that rate for a trace nobody may be looking at is
  * the regression `packetCounts.ts` exists to prevent. The reducer is pure so
  * `scripts/speed-test/state.ts` can drive it.
  */
 import { useSyncExternalStore } from 'react';
 import { median } from './method';
-import { isSpeedEvent, type SpeedEvent, type SpeedPhase, type SpeedResult, type SpeedServer } from './protocol';
+import {
+  isSpeedEvent, type LatencySample, type SpeedEvent, type SpeedPhase, type SpeedResult, type SpeedServer,
+} from './protocol';
 import { recordResult } from './history';
 
 export type SpeedStatus = 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
@@ -22,48 +24,86 @@ export interface SpeedState {
   /** Idle-latency samples so far, for the live ping tile, and the engine's jitter estimate. */
   latencySamples: number[];
   liveJitterMs: number | null;
-  /** The dial's live value and the sparkline under it, for the transfer running. */
+  /** The running transfer's figure: the last second's speed. */
   liveMbps: number;
-  spark: number[];
   connections: number;
+  /**
+   * Each transfer's slice speeds on its own clock, for the trace. The
+   * download's is kept through the upload, so the done view draws both.
+   */
+  trace: { download: TracePoint[]; upload: TracePoint[] };
+  /** Every probe so far, per phase: idle from the latency events, the rest from `loaded`. */
+  loaded: { idle: LatencySample[]; download: LatencySample[]; upload: LatencySample[] };
+  /** When each transfer's ramp added connections, ms from its start. */
+  rampsAtMs: { download: number[]; upload: number[] };
   downloadMbps: number | null;
   uploadMbps: number | null;
   result: SpeedResult | null;
   error: { phase: SpeedPhase; message: string; rateLimited: boolean } | null;
 }
 
+export interface TracePoint { tMs: number; mbps: number }
+
 export const IDLE: SpeedState = {
-  status: 'idle', phase: null, server: null, latencySamples: [], liveJitterMs: null, liveMbps: 0, spark: [],
-  connections: 0, downloadMbps: null, uploadMbps: null, result: null, error: null,
+  status: 'idle', phase: null, server: null, latencySamples: [], liveJitterMs: null, liveMbps: 0, connections: 0,
+  trace: { download: [], upload: [] },
+  loaded: { idle: [], download: [], upload: [] },
+  rampsAtMs: { download: [], upload: [] },
+  downloadMbps: null, uploadMbps: null, result: null, error: null,
 };
 
 /** The state a fresh run starts from. */
 export const STARTING: SpeedState = { ...IDLE, status: 'running', phase: 'connecting' };
 
-/** The sparkline keeps this many points - about the last ten seconds. */
-const SPARK_POINTS = 100;
+/**
+ * The most a trace keeps: twenty seconds of slices, twice a transfer, so a
+ * whole one always fits and a runaway stream of events cannot grow it.
+ */
+export const TRACE_POINTS = 200;
+/** The most probes a phase keeps: ~30 s at one every 150 ms. */
+export const SAMPLE_POINTS = 200;
 
 export function reduceSpeed(state: SpeedState, event: SpeedEvent): SpeedState {
   switch (event.type) {
     case 'phase':
+      // A new run starts from nothing; a new transfer starts its figure from nothing.
+      if (event.phase === 'connecting') return STARTING;
       return {
         ...state, status: 'running', phase: event.phase,
-        // A new transfer starts its dial and sparkline from nothing.
-        ...(event.phase === 'download' || event.phase === 'upload' ? { liveMbps: 0, spark: [], connections: 0 } : {}),
+        ...(event.phase === 'download' || event.phase === 'upload' ? { liveMbps: 0, connections: 0 } : {}),
       };
     case 'server':
       return { ...state, server: event.server };
     case 'latency':
-      return { ...state, latencySamples: [...state.latencySamples, event.ms], liveJitterMs: event.jitterMs };
-    case 'progress':
+      return {
+        ...state,
+        latencySamples: [...state.latencySamples, event.ms],
+        liveJitterMs: event.jitterMs,
+        loaded: {
+          ...state.loaded,
+          idle: [...state.loaded.idle, { tMs: event.tMs, rttMs: event.ms, ttfbMs: event.ttfbMs }].slice(-SAMPLE_POINTS),
+        },
+      };
+    case 'progress': {
+      const p = event.phase;
+      // A rise from a count already reported is the ramp; the first report is the start.
+      const ramped = state.connections > 0 && event.connections > state.connections;
       return {
         ...state,
         liveMbps: event.mbps,
         connections: event.connections,
-        spark: [...state.spark, event.mbps].slice(-SPARK_POINTS),
+        trace: { ...state.trace, [p]: [...state.trace[p], { tMs: event.elapsedMs, mbps: event.sliceMbps }].slice(-TRACE_POINTS) },
+        rampsAtMs: ramped ? { ...state.rampsAtMs, [p]: [...state.rampsAtMs[p], event.elapsedMs] } : state.rampsAtMs,
       };
+    }
     case 'loaded':
-      return state;
+      return {
+        ...state,
+        loaded: {
+          ...state.loaded,
+          [event.phase]: [...state.loaded[event.phase], { tMs: event.tMs, rttMs: event.ms, ttfbMs: event.ttfbMs }].slice(-SAMPLE_POINTS),
+        },
+      };
     case 'figure':
       return event.phase === 'download'
         ? { ...state, downloadMbps: event.figure.mbps, liveMbps: event.figure.mbps }

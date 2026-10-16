@@ -112,7 +112,7 @@ interface NetworkPaneProps {
   agentConnected: boolean;
   /**
    * Opens the speed test's sheet (ADR 0054). The panel holds the test's
-   * summary and its Run button; the dial is the sheet's.
+   * summary and its Run button; the charts are the sheet's.
    */
   onOpenSpeedTest?: () => void;
   /**
