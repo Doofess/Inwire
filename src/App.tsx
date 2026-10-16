@@ -2208,7 +2208,8 @@ export default function App() {
   useEffect(() => {
     if (view === 'packets' && !sheetOpen) return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== 'Escape') return;
+      // A composing Escape cancels the IME's word; the stack declines it too.
+      if (e.key !== 'Escape' || e.isComposing) return;
       // The sheet first, and it does not take the view with it: it is a surface
       // over whatever was underneath, so closing it returns you there rather
       // than to Packets. One Escape per surface, outermost first.

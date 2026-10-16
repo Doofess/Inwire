@@ -78,6 +78,21 @@ for (const file of SURFACES) {
   const src = readFileSync('src/components/common/FilterBar.tsx', 'utf8');
   checkTrue('the presets layer follows the VISIBLE list', /useEscapeLayer\(presetsVisible,/.test(src));
 }
+{
+  // Likewise the frame view's meta overlay: `railOverlay` outlives the strip
+  // that draws it (the pane widens, the frame has no summary), and a layer
+  // with nothing on screen eats an Escape meant for the view.
+  const src = readFileSync('src/components/packet-details/PacketDetailPane.tsx', 'utf8');
+  checkTrue('the meta overlay layer follows the DRAWN overlay', /useEscapeLayer\(overlayShown,/.test(src));
+}
+{
+  // An Escape during IME composition is the IME's: the stack declines it, so
+  // App's bubble-phase listener sees it next and must decline it too, or it
+  // closes the view under a half-typed word.
+  const src = readFileSync('src/App.tsx', 'utf8');
+  checkTrue("App's Escape listener ignores a composing key",
+    /if \(e\.key !== 'Escape' \|\| e\.isComposing\) return;/.test(src));
+}
 
 console.log(failures === 0 ? '\nAll escape-stack checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

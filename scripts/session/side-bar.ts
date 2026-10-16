@@ -267,7 +267,7 @@ console.log('\n--- a place, not a detour ---\n');
   // stop Escape returning a view to Packets in one press, which is the second
   // failure and the one nobody would connect to this file.
   checkTrue('Escape does not reach the side bar',
-    !bodyOf("if (e.key !== 'Escape') return;", 'window.addEventListener').includes('setSideBar'));
+    !bodyOf("if (e.key !== 'Escape' || e.isComposing) return;", 'window.addEventListener').includes('setSideBar'));
   checkTrue('...and the sheet is still the first thing it closes',
     app.includes('if (sheetOpen) { setSheet(null); return; }'));
 

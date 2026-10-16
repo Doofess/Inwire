@@ -465,10 +465,6 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
   const navRef = useRef({ index, packets, onShowFrame });
   navRef.current = { index, packets, onShowFrame };
 
-  // The overlay is a layer on the window's Escape stack, so a surface opened
-  // over it closes first.
-  useEscapeLayer(railOverlay, () => setRailOverlay(false));
-
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const nav = navRef.current;
@@ -532,6 +528,13 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
     onFollowStream,
     onShowFrame: showFrame,
   };
+
+  // The overlay is a layer on the window's Escape stack, so a surface opened
+  // over it closes first. Up only while it is drawn: `railOverlay` outlives
+  // the strip when the pane widens, and a layer with nothing on screen would
+  // eat the Escape that returns the view to Packets.
+  const overlayShown = railMode === 'icons' && railOverlay && !!railContent;
+  useEscapeLayer(overlayShown, () => setRailOverlay(false));
 
   /**
    * The dump and its heading, built once and placed in whichever position the
