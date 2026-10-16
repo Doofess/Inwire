@@ -11,7 +11,6 @@
  * Pure: no React, no Electron, no `node:*`. The stores are imported for their
  * `defaults`, which is what "modified" is measured against.
  */
-import { rankByFuzzy } from './fuzzy';
 import type { PreferenceStore } from '../services/preferenceStore';
 import {
   layoutStore,
@@ -231,30 +230,60 @@ export function settingByLabel(label: string): SettingEntry | undefined {
   return BY_LABEL.get(label);
 }
 
+/** The words of a string, lower-cased: runs of letters and digits, so "get.geojs.io" is three. */
+function wordsOf(text: string): string[] {
+  return text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+}
+
+/**
+ * How a query token finds an entry, lower is better; null is not at all.
+ * 0 starts the label, 1 starts any other word of it, 2 starts a keyword,
+ * 3 starts the section's name, 4 starts a word of the description.
+ */
+function tokenTier(token: string, e: SettingEntry): number | null {
+  const label = wordsOf(e.label);
+  if (label[0]?.startsWith(token)) return 0;
+  if (label.some((w) => w.startsWith(token))) return 1;
+  if ((e.keywords ?? []).some((k) => wordsOf(k).some((w) => w.startsWith(token)))) return 2;
+  if (e.section.startsWith(token)) return 3;
+  if (wordsOf(e.description ?? '').some((w) => w.startsWith(token))) return 4;
+  return null;
+}
+
 /**
  * The entries a query finds, best first.
  *
- * The label is matched as a subsequence and ranked, which is the palette's own
- * matcher. Entries it misses are then tried on their description and keywords:
- * every word of the query must appear in one of them, in any order, so
- * "ipapi" finds the row that sends addresses there although no label says so.
+ * Every word of the query must START a word of the entry - of its label, its
+ * keywords, its section's name or its description - so "dns" finds Reverse DNS
+ * and not Packet list d-e-nsity, and "ram" finds the buffer (a keyword) and not
+ * Pane a-rra-ngement. The palette's subsequence matcher is right for a command
+ * typed from memory and wrong here: the rows are few, a person types a word
+ * they recognise, and letters scattered across one is a false hit that reads as
+ * the search being broken. Ranked by the worst way any word was found, then the
+ * sum, then the index's own order: a label hit outranks a keyword hit outranks
+ * a section hit outranks a description hit.
  * An empty query finds nothing - the search box shows the tabs then, not a list.
  */
 export function searchSettings(
   query: string,
   index: readonly SettingEntry[] = SETTINGS_INDEX,
 ): SettingEntry[] {
-  const q = query.trim();
-  if (q === '') return [];
-  const byLabel = rankByFuzzy(q, index, (e) => e.label).map((r) => r.item);
-  const seen = new Set(byLabel);
-  const words = q.toLowerCase().split(/\s+/);
-  const byText = index.filter((e) => {
-    if (seen.has(e)) return false;
-    const haystack = `${e.description ?? ''} ${(e.keywords ?? []).join(' ')}`.toLowerCase();
-    return words.every((w) => haystack.includes(w));
+  const tokens = wordsOf(query);
+  if (tokens.length === 0) return [];
+  const scored: { entry: SettingEntry; worst: number; sum: number; at: number }[] = [];
+  index.forEach((entry, at) => {
+    let worst = 0;
+    let sum = 0;
+    for (const token of tokens) {
+      const tier = tokenTier(token, entry);
+      if (tier === null) return;
+      worst = Math.max(worst, tier);
+      sum += tier;
+    }
+    scored.push({ entry, worst, sum, at });
   });
-  return [...byLabel, ...byText];
+  scored.sort((x, y) => x.worst - y.worst || x.sum - y.sum || x.at - y.at);
+  return scored.map((r) => r.entry);
 }
 
 function currentOf(p: SettingPref): unknown {
@@ -298,4 +327,14 @@ export function resetSetting(entry: SettingEntry): void {
 export function settingAnchorId(label: string): string {
   const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return `setting-row-${slug}`;
+}
+
+/**
+ * Whether a section's tab looks selected. Not while search results show: they
+ * span every section, so a lit tab would claim the results are that tab's, and
+ * it would be the tab the person left rather than one the answer is in. Each
+ * hit names its own tab, and choosing one switches to it.
+ */
+export function settingsTabSelected(open: SettingsSection, tab: SettingsSection, searching: boolean): boolean {
+  return !searching && open === tab;
 }

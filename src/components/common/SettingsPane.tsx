@@ -17,6 +17,7 @@ import {
 import {
   searchSettings,
   settingAnchorId,
+  settingsTabSelected,
   type SettingsSection,
 } from '../../lib/settingsIndex';
 import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
@@ -278,7 +279,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                 key={id}
                 onClick={() => setSection(id)}
                 className={`flex items-center gap-2 px-2.5 py-2 rounded-md text-xs font-medium text-left transition-colors ${
-                  section === id
+                  settingsTabSelected(section, id, searching)
                     ? 'bg-accent text-foreground'
                     : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
                 }`}

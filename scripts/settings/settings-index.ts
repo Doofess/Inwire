@@ -29,6 +29,7 @@ import {
   searchSettings,
   settingAnchorId,
   settingByLabel,
+  settingsTabSelected,
   type SettingEntry,
   type SettingPref,
   type SettingsSection,
@@ -131,7 +132,29 @@ check(
 
 const first = (q: string) => searchSettings(q)[0]?.label;
 check('"dns" finds Reverse DNS first', first('dns'), 'Reverse DNS');
-check('"minimp" finds Minimap first', first('minimp'), 'Minimap');
+check('"minim" finds Minimap first', first('minim'), 'Minimap');
+check(
+  '"dns" is not scattered through "Packet list density"',
+  searchSettings('dns').map((e) => e.label).includes('Packet list density'),
+  false,
+);
+check('"ram" finds Buffer size first', first('ram'), 'Buffer size');
+check(
+  '"ram" does not match inside "arrangement"',
+  searchSettings('ram').map((e) => e.label).includes('Pane arrangement'),
+  false,
+);
+check('a word prefix in the label finds it: "dens" finds Packet list density', first('dens'), 'Packet list density');
+check(
+  'a label hit outranks a keyword hit: "performance" lists a label-less keyword match, "buffer" ranks Buffer size above Capture Health',
+  searchSettings('buffer').map((e) => e.label).slice(0, 2),
+  ['Buffer size', 'Capture Health'],
+);
+check(
+  'a multi-word query needs every word to start a word: "reverse dns" finds Reverse DNS, "reverse dz" nothing',
+  [first('reverse dns'), searchSettings('reverse dz')],
+  ['Reverse DNS', []],
+);
 check(
   '"ipapi" finds Locate addresses through its description',
   searchSettings('ipapi').map((e) => e.label).includes('Locate addresses'),
@@ -165,6 +188,29 @@ check('a blank query is []', searchSettings('   '), []);
     true,
   );
   check('...and one missing word is no match', searchSettings('gamma zeta', fake), []);
+}
+
+// --- Which tab looks selected ---------------------------------------------------------
+
+check('with no search, the open tab is selected', settingsTabSelected('interface', 'interface', false), true);
+check('with no search, another tab is not', settingsTabSelected('interface', 'appearance', false), false);
+check(
+  'while search results show, no tab looks selected',
+  SECTIONS.map((id) => settingsTabSelected('appearance', id, true)).some(Boolean),
+  false,
+);
+
+// --- Reset follows the row's disabled state ------------------------------------------
+
+{
+  const layoutSrc = readFileSync(join(root, 'src', 'components', 'common', 'settingsLayout.tsx'), 'utf8');
+  const interfaceSrc = readFileSync(join(root, 'src', 'components', 'common', 'InterfaceSettingsPanel.tsx'), 'utf8');
+  check('SettingRow takes a disabled prop', /interface SettingRowProps \{[^}]*disabled\?: boolean/s.test(layoutSrc), true);
+  const reset = layoutSrc.match(/<button[^>]*aria-label=\{`Reset[^>]*>/s)?.[0] ?? '';
+  check('the Reset button is disabled with the row', /disabled=\{disabled\}/.test(reset), true);
+  check('...and shows the muted look rather than disappearing', /disabled:opacity-/.test(reset), true);
+  const paneRow = interfaceSrc.match(/<SettingRow\s+label="Pane arrangement"[^>]*>/s)?.[0] ?? '';
+  check('the Pane arrangement row passes the same condition its control uses', /disabled=\{!layout\.panes\}/.test(paneRow), true);
 }
 
 // --- Modified and reset, on a store with two fields -----------------------------------

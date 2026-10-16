@@ -139,6 +139,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
         <SettingRow
           label="Pane arrangement"
           description="Whether the protocol tree and byte view sit beside each other or above and below."
+          disabled={!layout.panes}
         >
           <Segmented
             ariaLabel="Pane arrangement"

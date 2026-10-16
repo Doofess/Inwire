@@ -30,6 +30,12 @@ interface SettingRowProps {
   description?: string;
   /** Set when the control is a single focusable element that can own the label. */
   htmlFor?: string;
+  /**
+   * Set when the row's control is disabled. The row's Reset follows it: a Reset
+   * that works beside a greyed control changes a value the row says it cannot.
+   * Disabled rather than hidden, so the row does not jump.
+   */
+  disabled?: boolean;
   children: React.ReactNode;
 }
 
@@ -62,6 +68,7 @@ function SettingRowShell({
   description,
   htmlFor,
   children,
+  disabled,
   modified,
   onReset,
 }: SettingRowProps & { modified: boolean; onReset?: () => void }) {
@@ -86,8 +93,9 @@ function SettingRowShell({
             <button
               type="button"
               onClick={onReset}
+              disabled={disabled}
               aria-label={`Reset ${label} to default`}
-              className="text-[11px] text-muted-foreground hover:text-foreground rounded-sm focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+              className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-muted-foreground rounded-sm focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
             >
               Reset
             </button>
