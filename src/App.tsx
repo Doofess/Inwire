@@ -543,6 +543,14 @@ export default function App() {
   const sheetOpen = sheet !== null;
 
   /**
+   * The command palette (ADR 0057): the text it opened with, or null when it
+   * is closed. Ctrl+K opens it empty, Ctrl+Shift+P on `>`, Ctrl+G on `:`.
+   */
+  const [, setPalette] = useState<string | null>(null);
+  /** The display filter's input, for Ctrl+/ and the palette. */
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
+
+  /**
    * Which of the five surfaces the rail says we are on.
    *
    * Persisted, and `restoredView` decides what is resumable - `stream` is a
@@ -2203,6 +2211,8 @@ export default function App() {
     onViewShortcut: handleViewChange,
     // The title row's toggle, by key. See `toggleSideBar`.
     onToggleSideBar: toggleSideBar,
+    onOpenPalette: setPalette,
+    onFocusFilter: () => { filterInputRef.current?.focus(); filterInputRef.current?.select(); },
     filteredPacketsRef,
     selectedPacketRef,
     isCapturingRef,

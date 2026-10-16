@@ -235,9 +235,9 @@ try {
   //
   // This was `keyboard.press('Control+k')` followed by
   // `getByText('Settings', { exact: true })`, and neither half works any more.
-  // Ctrl+K opened the command palette; `cmdk` was deleted with the hamburger
-  // menu and nothing in the app binds that chord - `useKeyboardNavigation`
-  // handles `Ctrl+1..5` and nothing else. And the only rendered "Settings" text
+  // Ctrl+K opened the old `cmdk` palette, which was deleted with the hamburger
+  // menu; the chord is bound again by ADR 0057's palette, but a rail button is
+  // still the direct route and the one this drive means. And the only rendered "Settings" text
   // in the app is the heading INSIDE `SettingsModal`, so the text click could
   // only have worked once the modal it was supposed to open was already open.
   //

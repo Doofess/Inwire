@@ -2,6 +2,25 @@ import { useEffect, useRef, type RefObject } from 'react';
 
 import type { Packet } from '../types/packet';
 import { APP_VIEWS, type AppView } from '../services/viewPrefs';
+import { matchChord } from '../lib/commands';
+import { captureKeyAction } from '../lib/captureKey';
+
+/**
+ * The chords that act even while a text field has focus (ADR 0057).
+ *
+ * Focus usually sits in the display filter, so the palette, the filter's own
+ * key, Go to packet and the capture toggle must work from there - a palette
+ * key that stood down for every input would be a key that almost never works.
+ * The view digits and Ctrl+B are NOT here: a digit with a modifier typed into
+ * a field is the field's, and has been since the digits were bound.
+ */
+export const CHORDS_BEFORE_INPUT_GUARD: readonly string[] = [
+  'palette.open', 'palette.commands', 'filter.focus', 'packet.goto', 'capture.start', 'capture.stop',
+];
+
+export function chordBeforeInputGuard(id: string): boolean {
+  return CHORDS_BEFORE_INPUT_GUARD.includes(id);
+}
 
 /**
  * The keyboard shortcuts that belong to the window rather than to a control.
@@ -33,6 +52,10 @@ export interface KeyboardNavigationOptions {
    * a detour - so without this it has no keyboard at all.
    */
   onToggleSideBar: () => void;
+  /** Ctrl+K, Ctrl+Shift+P and Ctrl+G - the palette, opened on a prefix. */
+  onOpenPalette: (prefix: '' | '>' | ':') => void;
+  /** Ctrl+/ - Wireshark's key for the display filter. */
+  onFocusFilter: () => void;
   filteredPacketsRef: RefObject<Packet[]>;
   selectedPacketRef: RefObject<Packet | null>;
   isCapturingRef: RefObject<boolean>;
@@ -60,6 +83,8 @@ export function useKeyboardNavigation({
   canCapture,
   onViewShortcut,
   onToggleSideBar,
+  onOpenPalette,
+  onFocusFilter,
   filteredPacketsRef,
   selectedPacketRef,
   isCapturingRef,
@@ -84,6 +109,9 @@ export function useKeyboardNavigation({
    */
   const toggleSideBarRef = useRef(onToggleSideBar);
   toggleSideBarRef.current = onToggleSideBar;
+  // The palette and the filter field, held the same way and for the same reason.
+  const commandRef = useRef({ onOpenPalette, onFocusFilter });
+  commandRef.current = { onOpenPalette, onFocusFilter };
 
   useEffect(() => {
     /* **There is no detail-window gate any more.** This used to bail out
@@ -94,9 +122,42 @@ export function useKeyboardNavigation({
        overlap. This binds Up and Down, the pane binds Left and Right, and both
        move the same selection. */
 
+    /** Space and Ctrl+E ask the same question, in `captureKeyAction`. */
+    const toggleCapture = (): void => {
+      const action = captureKeyAction({
+        capturing: isCapturingRef.current,
+        adapterCount: selectedInterfacesRef.current.length,
+        packetCount: packetCountRef.current,
+        canCapture,
+        blocked: captureRef.current.startBlocked(),
+      });
+      if (action === 'stop') captureRef.current.onStopCapture();
+      else if (action === 'start') captureRef.current.onStartCapture();
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
       const filteredPackets = filteredPacketsRef.current;
       const selectedPacket = selectedPacketRef.current;
+
+      /**
+       * Every keyed command in `commands.ts` is dispatched here by id, and
+       * `scripts/commands/registry.ts` fails on one with no `case`. Two
+       * switches, because the line between them is the input guard: these
+       * act from inside a text field, the second set does not.
+       */
+      const command = matchChord(e);
+      if (command && chordBeforeInputGuard(command.id)) {
+        switch (command.id) {
+          case 'palette.open': e.preventDefault(); commandRef.current.onOpenPalette(''); return;
+          case 'palette.commands': e.preventDefault(); commandRef.current.onOpenPalette('>'); return;
+          case 'packet.goto': e.preventDefault(); commandRef.current.onOpenPalette(':'); return;
+          case 'filter.focus': e.preventDefault(); commandRef.current.onFocusFilter(); return;
+          // One chord for both: the toggle decides which, by the same rule as Space.
+          case 'capture.start':
+          case 'capture.stop': e.preventDefault(); toggleCapture(); return;
+        }
+      }
+
       // Don't trigger if user is typing in an input
       if (
         e.target instanceof HTMLInputElement ||
@@ -114,21 +175,23 @@ export function useKeyboardNavigation({
        * `APP_VIEWS` order IS the numbering, so the rail's tooltips and this
        * cannot disagree about which key opens what.
        */
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
-        const at = Number.parseInt(e.key, 10);
-        const view = Number.isInteger(at) ? APP_VIEWS[at - 1] : undefined;
-        if (view !== undefined) {
+      // The view commands are generated from APP_VIEWS, so they share one
+      // case by prefix rather than five ids that could drift from it.
+      const route = command === undefined ? undefined
+        : command.id.startsWith('view.') ? 'view' : command.id;
+      switch (route) {
+        case 'view': {
+          const view = APP_VIEWS.find((v) => `view.${v.id}` === command?.id);
+          if (view === undefined) break;
           e.preventDefault();
           onViewShortcut(view.id);
           return;
         }
-        // The side bar, on VS Code's own key for it. Inside the same modifier
-        // guard as the digits, so it cannot collide with typing either.
-        if (e.key === 'b' || e.key === 'B') {
+        // The side bar, on VS Code's own key for it.
+        case 'sidebar.toggle':
           e.preventDefault();
           toggleSideBarRef.current();
           return;
-        }
       }
 
       /**
@@ -153,30 +216,9 @@ export function useKeyboardNavigation({
 
       if (e.code === "Space" && spaceIsOurs) {
         e.preventDefault();
-        // Mirror the rail's start/stop button: flip local state and tell the
-        // agent, rather than just flipping local state (which used to be
-        // enough when the old agent sniffed unconditionally from launch).
-        const wasCapturing = isCapturingRef.current;
-        // Starting needs an adapter, and a keyboard handler has nowhere to
-        // pop a picker. So space resumes on whatever was already chosen and
-        // otherwise does nothing - the first capture of a session has to be
-        // started from a control that can ask. Stopping is always allowed:
-        // being unable to stop a running capture from the keyboard would be
-        // a far worse trade than being unable to start one.
-        if (!wasCapturing && selectedInterfacesRef.current.length === 0) return;
-        // Nor does it start one that would DISCARD a buffer. A stopped capture
-        // cannot be resumed, so starting again clears what is there - and that
-        // is a question, asked by the rail button's own confirm prompt. A keyboard
-        // shortcut has nowhere to ask it and must not answer it silently:
-        // Space would otherwise be one keystroke, with no undo, between a
-        // finished capture and an empty list. Stopping stays unconditional.
-        if (!wasCapturing && packetCountRef.current > 0) return;
-        if (wasCapturing) {
-          captureRef.current.onStopCapture();
-          return;
-        }
-        if (!canCapture || captureRef.current.startBlocked()) return;
-        captureRef.current.onStartCapture();
+        // The rail's own start and stop, under the rule `captureKeyAction`
+        // states: stopping always, starting only where nothing must be asked.
+        toggleCapture();
         return;
       }
 

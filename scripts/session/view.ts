@@ -79,10 +79,15 @@ console.log('--- the order IS the numbering ---\n');
   check('no view appears twice', new Set(ids).size, ids.length);
   checkTrue('every entry has a label', APP_VIEWS.every((v) => v.label.length > 0));
 
-  // The handler is the other half of the pair above: if it ever stops indexing
-  // `APP_VIEWS`, the numbering becomes a second hand-written list.
-  checkTrue('the handler still resolves the digit through APP_VIEWS',
-    code('src/hooks/useKeyboardNavigation.ts').includes('APP_VIEWS[at - 1]'));
+  // The handler is the other half of the pair above: if it ever stops reading
+  // `APP_VIEWS`, the numbering becomes a second hand-written list. The digit
+  // now reaches it through the command registry (ADR 0057), which generates
+  // the view chords from `APP_VIEWS` order - so both links are held.
+  checkTrue('the registry numbers the views from APP_VIEWS order',
+    code('src/lib/commands.ts').includes('APP_VIEWS.map((view, i)')
+      && code('src/lib/commands.ts').includes('key: String(i + 1)'));
+  checkTrue('the handler still resolves the view through APP_VIEWS',
+    code('src/hooks/useKeyboardNavigation.ts').includes('APP_VIEWS.find('));
 }
 
 console.log('\n--- the union and the list cannot disagree ---\n');
