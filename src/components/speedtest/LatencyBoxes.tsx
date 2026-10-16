@@ -1,6 +1,6 @@
 import { resultGrade, type BloatGrade } from '../../services/speedTest/method';
 import type { Spread, SpeedPhase } from '../../services/speedTest/protocol';
-import { latencyDomain, logScale } from '../../services/speedTest/stats';
+import { bracketLabelPlacement, latencyDomain, logScale, monoTextWidth } from '../../services/speedTest/stats';
 import { fmtMsValue } from './Hint';
 
 const W = 688;
@@ -11,7 +11,8 @@ const TOP = 16;
 const ROW = 28;
 const BOX = 12;
 const ROWS_END = TOP + ROW * 3;
-const H = ROWS_END + 44;
+// Room for the bracket label's fallback line under the bracket.
+const H = ROWS_END + 50;
 
 /** The bands bloatGrade cuts at, as a rise over idle. */
 const BANDS: { grade: BloatGrade; from: number; to: number }[] = [
@@ -163,11 +164,11 @@ function Grid({ lo, hi, at }: { lo: number; hi: number; at: (ms: number) => numb
 function Bracket({ x1, x2, rise }: { x1: number; x2: number; rise: number }) {
   const y = ROWS_END + 26;
   const text = `+${fmtMsValue(rise)} ms under load`;
-  const room = W - FIGURE - x2;
+  const place = bracketLabelPlacement({ x1, x2, width: monoTextWidth(text, 11), min: 0, max: W });
   return (
     <g className="text-foreground">
       <path d={`M${x1},${y - 5} V${y} H${x2} V${y - 5}`} fill="none" stroke="currentColor" strokeWidth={1} />
-      <text x={room > 130 ? x2 + 6 : x1 - 6} y={y + 4} textAnchor={room > 130 ? 'start' : 'end'}
+      <text x={place.x} y={y + 4 + (place.below ? 12 : 0)} textAnchor={place.anchor}
         className="fill-foreground font-mono text-[11px]">
         {text}
       </text>

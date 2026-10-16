@@ -12,7 +12,9 @@ import { ThroughputTrace } from './ThroughputTrace';
 import { PhaseStrip } from './PhaseStrip';
 import { fmtMsValue, Hint } from './Hint';
 import { formatMbps, median, SLICE_MS, TEST_CAP_TEXT, TRANSFER_MS, WARMUP_MS } from '../../services/speedTest/method';
-import { spread } from '../../services/speedTest/stats';
+import {
+  loadedOfHistory, pingStripDomain, pingStripLabel, pingStripX, resultAnnouncement, spread,
+} from '../../services/speedTest/stats';
 import {
   cancelSpeedTest, livePing, startSpeedTest, useSpeedTest, type SpeedState, type SpeedStatus,
 } from '../../services/speedTest/state';
@@ -363,9 +365,9 @@ function HistoryTable({ history, onClear }: { history: SpeedHistoryEntry[]; onCl
   const [confirming, setConfirming] = useState(false);
   const now = Date.now();
   const shown = history.slice(0, 10);
-  const lat = shown.flatMap((h) => [h.pingMs, h.loadedDownMs ?? null, h.loadedUpMs ?? null])
-    .filter((v): v is number => typeof v === 'number' && v > 0);
-  const domain: [number, number] = lat.length ? [Math.min(...lat), Math.max(...lat)] : [1, 100];
+  // One track for every row shown, spanning exactly the dots drawn on it: the
+  // idle ping and the worse loaded median of each row (see pingStripDomain).
+  const domain = pingStripDomain(shown.flatMap((h) => [h.pingMs, loadedOf(h) ?? NaN]));
   return (
     <section className="w-full" aria-label="Previous tests">
       <div className="mb-2 flex items-center justify-between">
@@ -429,19 +431,22 @@ function HistoryTable({ history, onClear }: { history: SpeedHistoryEntry[]; onCl
   );
 }
 
-function loadedOf(h: SpeedHistoryEntry): number | null {
-  const v = [h.loadedDownMs, h.loadedUpMs].filter((x): x is number => typeof x === 'number');
-  return v.length ? Math.max(...v) : null;
-}
+/** An entry from before loaded latency existed has neither field: null, never 0. */
+const loadedOf = (h: SpeedHistoryEntry): number | null => loadedOfHistory(h.loadedDownMs, h.loadedUpMs);
 
-/** Idle (hollow) to loaded (solid) on a log track shared by the visible rows. */
+/**
+ * Idle (hollow) to loaded (solid) on a log track shared by the visible rows.
+ * With no loaded value the track is dashed instead of ending in a solid dot,
+ * and the strip says "no loaded data" - the missing half is shown as missing,
+ * not as a dot at zero or at the idle position.
+ */
 function PingStrip({ idle, loaded, domain }: { idle: number; loaded: number | null; domain: [number, number] }) {
-  const [lo, hi] = domain;
-  const span = Math.log10(hi) - Math.log10(lo);
-  const x = (v: number) => 4 + (span > 0 ? ((Math.log10(Math.max(lo, v)) - Math.log10(lo)) / span) * 40 : 0);
+  const x = (v: number) => pingStripX(v, domain);
+  const label = pingStripLabel(idle, loaded);
   return (
-    <svg width={48} height={8} viewBox="0 0 48 8" aria-hidden className="hidden shrink-0 sm:block">
-      <line x1={0} x2={48} y1={4} y2={4} className="stroke-border" />
+    <svg width={48} height={8} viewBox="0 0 48 8" role="img" aria-label={label} className="hidden shrink-0 sm:block">
+      <title>{label}</title>
+      <line x1={0} x2={48} y1={4} y2={4} className="stroke-border" strokeDasharray={loaded === null ? '2 3' : undefined} />
       {loaded !== null && <line x1={x(idle)} x2={x(loaded)} y1={4} y2={4} className="stroke-muted-foreground" strokeWidth={1.5} />}
       <circle cx={x(idle)} cy={4} r={2.5} className="fill-card stroke-muted-foreground" strokeWidth={1.2} />
       {loaded !== null && <circle cx={x(loaded)} cy={4} r={2.5} className="fill-foreground" />}
@@ -461,7 +466,9 @@ function Announcer({ state }: { state: SpeedState }) {
     if (state.status === 'running' && state.phase) next = `Testing ${PHASE_LABEL[state.phase].toLowerCase()}`;
     else if (state.status === 'done' && state.result) {
       const r = state.result;
-      next = `Test complete. Download ${formatMbps(r.download.mbps)} megabits per second, upload ${formatMbps(r.upload.mbps)}, ping ${Math.round(r.latency.idleMs)} milliseconds.`;
+      next = resultAnnouncement({
+        downMbps: r.download.mbps, upMbps: r.upload.mbps, idleMs: r.latency.idleMs, rpm: r.summary.rpm, grade: r.grade,
+      });
     } else if (state.status === 'failed') next = 'The speed test failed.';
     else if (state.status === 'cancelled') next = 'Speed test cancelled.';
     if (next !== said.current) {
