@@ -274,6 +274,23 @@ console.log('\n--- close keeps the colour people already know ---\n');
     [...new Set(hardcoded.map((c) => c.toLowerCase()))], ['#c42b1c']);
 }
 
+console.log('\n--- the close glyph is drawn smooth, the others crisp ---\n');
+
+{
+  // `crispEdges` turns antialiasing off. That is right for the axis-aligned
+  // strokes of minimise and maximise, and wrong for a diagonal: the X came out
+  // stair-stepped with arms of different lengths and a lump where they cross
+  // (the owner's report, 2026-10-16). So crispness is per glyph, and the X is
+  // drawn corner to corner, because a stroke that stops half a pixel inside
+  // the box is a soft-ended X once it is antialiased.
+  const close = /aria-label="Close"[\s\S]*?<Glyph([^>]*)\/>/.exec(controls)?.[1] ?? '';
+  checkTrue('the close glyph is found', close !== '');
+  checkTrue('the close glyph is antialiased', !close.includes('crisp'));
+  checkTrue('...and runs corner to corner', close.includes('d="M0 0 L10 10 M10 0 L0 10"'));
+  checkTrue('minimise and maximise stay crisp',
+    (controls.match(/<Glyph crisp /g)?.length ?? 0) === 3);
+}
+
 console.log(failures === 0
   ? '\nAll window chrome checks passed.'
   : `\n${failures} window chrome check(s) failed.`);

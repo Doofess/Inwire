@@ -14,9 +14,10 @@ import { windowControl } from '../../lib/windowChrome';
  *  - **Windows' own metrics, not ours.** 46x32 with a 10px glyph is what
  *    Windows draws, and matching it is not deference: the target size and the
  *    spacing are what fifteen years of muscle memory aims at, and a 32x32
- *    button in the same corner is one people miss. The glyphs are square-edged
- *    SVG strokes for the same reason - a rounded, thickened set reads as a web
- *    page's idea of a window.
+ *    button in the same corner is one people miss. The glyphs are 1px SVG
+ *    strokes for the same reason - a rounded, thickened set reads as a web
+ *    page's idea of a window. Minimise and maximise are pixel-snapped; the
+ *    close X is antialiased, as Windows draws its own.
  *  - **Close keeps its red.** `#c42b1c` is Windows' own hover fill, and it is
  *    the one colour in the app that is deliberately not a theme token: it is
  *    learned rather than designed, it has to mean the same thing on a light
@@ -36,18 +37,19 @@ const BUTTON = 'w-[46px] h-8 shrink-0 inline-flex items-center justify-center '
   + 'transition-colors cursor-pointer app-no-drag '
   + 'focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring';
 
-const Glyph: React.FC<{ d: string; fill?: boolean }> = ({ d, fill }) => (
+const Glyph: React.FC<{ d: string; crisp?: boolean }> = ({ d, crisp }) => (
   <svg
     aria-hidden
     width="10"
     height="10"
     viewBox="0 0 10 10"
-    // `shapeRendering: crispEdges` because every stroke here is axis-aligned at
-    // integer coordinates: antialiasing a 1px horizontal line at 10px makes the
-    // minimise glyph a grey smear rather than a line.
-    shapeRendering="crispEdges"
-    fill={fill === true ? 'currentColor' : 'none'}
-    stroke={fill === true ? 'none' : 'currentColor'}
+    // `crispEdges` for the axis-aligned glyphs: antialiasing a 1px horizontal
+    // line at 10px makes the minimise glyph a grey smear rather than a line.
+    // Never for the close X - with antialiasing off a diagonal stair-steps into
+    // arms of different lengths and a lump where they cross.
+    shapeRendering={crisp === true ? 'crispEdges' : 'geometricPrecision'}
+    fill="none"
+    stroke="currentColor"
     strokeWidth="1"
   >
     <path d={d} />
@@ -67,7 +69,7 @@ export const WindowControls: React.FC<WindowControlsProps> = ({ maximized }) => 
       title="Minimize"
       className={`${BUTTON} text-foreground/80 hover:bg-accent hover:text-foreground`}
     >
-      <Glyph d="M0 5.5 H10" />
+      <Glyph crisp d="M0 5.5 H10" />
     </button>
 
     <button
@@ -82,8 +84,8 @@ export const WindowControls: React.FC<WindowControlsProps> = ({ maximized }) => 
       {maximized
         // Two offset rectangles, Windows' restore glyph - the back one drawn
         // with its lower-left corner open so the two do not read as a grid.
-        ? <Glyph d="M2.5 2.5 H9.5 V9.5 H2.5 Z M0.5 7.5 V0.5 H7.5 V2.5" />
-        : <Glyph d="M0.5 0.5 H9.5 V9.5 H0.5 Z" />}
+        ? <Glyph crisp d="M2.5 2.5 H9.5 V9.5 H2.5 Z M0.5 7.5 V0.5 H7.5 V2.5" />
+        : <Glyph crisp d="M0.5 0.5 H9.5 V9.5 H0.5 Z" />}
     </button>
 
     <button
@@ -95,7 +97,9 @@ export const WindowControls: React.FC<WindowControlsProps> = ({ maximized }) => 
       // dark enough for white at every theme.
       className={`${BUTTON} text-foreground/80 hover:bg-[#c42b1c] hover:text-white`}
     >
-      <Glyph d="M0.5 0.5 L9.5 9.5 M9.5 0.5 L0.5 9.5" />
+      {/* Corner to corner: antialiased, a stroke stopping half a pixel inside
+          the box reads as a soft-ended X. */}
+      <Glyph d="M0 0 L10 10 M10 0 L0 10" />
     </button>
   </div>
 );
