@@ -122,6 +122,15 @@ checkTrue('main.tsx stamps the accent on <html> at module scope, before render',
 checkTrue('...and re-stamps when the setting changes',
   /accentColorStore\.subscribe\(stampAccentColor\)/.test(main));
 
+// --- what canvas, chart and map colours read --------------------------------------
+
+// useThemeToken re-reads a token only when its observer sees <html> change, and
+// an accent change touches only data-accent-color - so a filter without it left
+// the minimap, the timeline and the map on the previous accent.
+const themeColor = fs.readFileSync(path.join(root, 'src/lib/themeColor.ts'), 'utf8');
+checkTrue('useThemeToken re-reads when data-accent-color changes',
+  /attributeFilter:\s*\[[^\]]*'data-accent-color'/.test(themeColor));
+
 // --- the picker ----------------------------------------------------------------
 
 const panel = fs.readFileSync(path.join(root, 'src/components/common/AppearanceSettingsPanel.tsx'), 'utf8');

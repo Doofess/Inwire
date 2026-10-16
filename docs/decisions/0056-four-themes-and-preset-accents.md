@@ -56,6 +56,16 @@ System still follows Windows between Light and Dark. On top of that, when
 `src/hooks/useSystemTheme.ts`). `enableSystem` stays false: next-themes only
 knows `light` and `dark`, and following stays our own store.
 
+**And it is Inwire's High Contrast that shows, not Windows' colours.** A
+Windows contrast theme also turns on forced colours, and Chromium then repaints
+the page in the system's colours. The canvases, the map and the window ground
+do not go through that, so under a light contrast theme such as Desert the page
+went light over a black ground. `.contrast` sets `forced-color-adjust: none`,
+the way VS Code draws its own High Contrast theme: the audited 7:1 palette is
+the whole window. The cost is that someone on a light contrast theme gets a
+black one. `scripts/themes/follow-windows.ts` holds the declaration, and
+`docs/verification.md` has the hand check against each of Windows' four.
+
 ### Selection is mixed from the accent, at a share per theme
 
 The selected row is `--primary` text on a `color-mix` of `--primary` into

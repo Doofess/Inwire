@@ -32,6 +32,15 @@ check('the hook asks Windows for more contrast', hook.includes("'(prefers-contra
 check('...and for forced colours, which is what Windows High Contrast sets', hook.includes("'(forced-colors: active)'"));
 check('...and chooses through systemThemeFor, not a second copy of the rule', /systemThemeFor\(/.test(hook));
 
+// Windows' contrast themes turn on forced colours, and Chromium then repaints
+// the page in the system's colours - while the canvases, the map and the
+// window ground keep reading .contrast's own. Under a light contrast theme
+// that was a light page over a black ground. The theme Following Windows lands
+// on is the audited one, so it opts out (ADR 0056).
+const css = readFileSync('src/index.css', 'utf8');
+check('High Contrast opts out of forced colours, so its own palette is what shows',
+  /\n\.contrast \{[^}]*forced-color-adjust:\s*none;/.test(css));
+
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
   process.exit(1);

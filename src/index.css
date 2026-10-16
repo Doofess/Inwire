@@ -801,6 +801,10 @@ html[data-platform="win32"] {
    their own (3:1 against the ground, which no other theme asks of a hairline).
    Every text pair is held to 7:1 by scripts/themes/registry.ts, not 4.5. */
 .contrast {
+  /* Windows' contrast themes turn on forced colours, which would repaint the
+     page in the system's colours while canvases, the map and the window ground
+     keep this palette. This one is audited at 7:1, so it is what shows. */
+  forced-color-adjust: none;
   --packet-gridline-step: 0.30;
   --background: #000000;
   --foreground: #ffffff;
