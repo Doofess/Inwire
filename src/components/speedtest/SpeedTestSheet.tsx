@@ -51,7 +51,7 @@ export function SpeedTestSheet({ capturing, onShowOnMap }: {
   const ghost = useGhost(state.status);
 
   return (
-    <div className="flex h-full flex-col bg-background font-sans">
+    <div className="flex h-full flex-col bg-background font-sans motion-sheet">
       <PaneHeader title="Speed test" detail={<ServerLine server={state.server} running={state.status === 'running'} />} />
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-[46rem] flex-col gap-6 px-6 py-8">

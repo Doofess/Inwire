@@ -224,6 +224,24 @@ html[data-platform="win32"] {
   --font-weight-medium: 400;
 }
 
+/* Motion: two durations and one curve, for the surfaces that OPEN - the side
+   bar, sheets, the command palette and toasts. Never selection, arrow keys or
+   filter results: those answer a keystroke and must land on it.
+
+   On `html`, not in the theme blocks, deliberately. A duration is not a colour
+   and does not differ per theme, and scripts/themes/registry.ts requires every
+   token in the light baseline to be redeclared by every theme - putting these
+   there would mean four identical copies. The registry reads the baseline by
+   its `:root {` rule, so a token declared here is invisible to that count.
+
+   Zeroed twice, below the reduced-motion block: by the OS query, so the first
+   paint is already still, and by the app's own `data-motion` attribute. */
+html {
+  --motion-fast: 120ms;
+  --motion-panel: 180ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+}
+
 @layer base {
   body {
     @apply antialiased select-none bg-background text-foreground font-sans;
@@ -489,6 +507,67 @@ html[data-platform="win32"] {
    blanket rule above does not reach them - the button still jumps. */
 [data-motion='reduce'] .active\:scale-95:active {
   transform: none !important;
+}
+
+/* The motion tokens under reduced motion. Two routes, because the attribute is
+   only written once lib/motion.ts has run: the query covers the frame before
+   that, and yields to `data-motion='full'` so "Animations: Always" still wins
+   over an OS that asks for less. After first paint the attribute is the whole
+   story - it already folds the OS preference in. */
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion='full']) {
+    --motion-fast: 0ms;
+    --motion-panel: 0ms;
+  }
+}
+
+[data-motion='reduce'] {
+  --motion-fast: 0ms;
+  --motion-panel: 0ms;
+}
+
+/* Opacity and a few pixels of travel, and never a width: the side bar's width
+   is the user's. `transform`, not the `translate` property, so these do not
+   fight Tailwind's `-translate-x-1/2` on the palette's own dialog. */
+@keyframes palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sidebar-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.motion-sidebar {
+  animation: sidebar-in var(--motion-fast) var(--ease-out);
+}
+
+.motion-sheet {
+  animation: sheet-in var(--motion-panel) var(--ease-out);
 }
 
 /* The packet list's column separators, and there are two rules rather than one.

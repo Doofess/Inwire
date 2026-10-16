@@ -94,7 +94,7 @@ export const PANEL_TITLES: Record<SideBarPanel, string> = {
 
 export const SideBar: React.FC<SideBarProps> = ({ panel, children, actions, detail }) => (
   <div
-    className="w-[var(--side-bar-width)] shrink-0 flex flex-col min-w-0 overflow-hidden
+    className="motion-sidebar w-[var(--side-bar-width)] shrink-0 flex flex-col min-w-0 overflow-hidden
       border border-l-0 border-border rounded-r-lg bg-card text-card-foreground"
     aria-label={PANEL_TITLES[panel]}
   >
