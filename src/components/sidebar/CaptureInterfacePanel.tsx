@@ -299,7 +299,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
                     border-muted-foreground/60 group-data-[state=checked]:border-primary
                     group-data-[state=checked]:bg-primary text-primary-foreground"
                 >
-                  {selected && <Check className="w-2.5 h-2.5" strokeWidth={3} />}
+                  {selected && <Check className="w-2.5 h-2.5" />}
                 </span>
                 <span className="flex-1 truncate text-xs">
                   {shortInterfaceLabel(iface.label)}

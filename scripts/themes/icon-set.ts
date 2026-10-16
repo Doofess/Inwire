@@ -104,6 +104,30 @@ for (const f of onLucide) {
 }
 check('Map and Image are never imported bare from lucide-react', bareGlobals, []);
 
+// --- One stroke weight, set in CSS --------------------------------------------------
+
+// index.css gives every `svg.lucide` a fixed 1.5px stroke, and that rule beats
+// the attribute a `strokeWidth` prop writes - so the prop compiles, renders, and
+// does nothing. A glyph that needs its own weight says `style={{ strokeWidth }}`.
+const css = text('src/index.css');
+check('index.css fixes the Lucide stroke at 1.5px', /svg\.lucide\s*\{\s*stroke-width:\s*1\.5px;/.test(css), true);
+check('...in screen pixels, not the icon box', /svg\.lucide \*\s*\{\s*vector-effect:\s*non-scaling-stroke;/.test(css), true);
+
+const strokeProps: string[] = [];
+for (const f of onLucide) {
+  const src = withoutComments(text(f));
+  const names: string[] = [];
+  for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']lucide-react["']/g)) {
+    for (const spec of m[1].split(',').map((s) => s.trim()).filter(Boolean)) {
+      names.push(spec.split(/\s+as\s+/).pop()!.replace(/^type\s+/, ''));
+    }
+  }
+  for (const name of names) {
+    if (new RegExp(`<${name}\\b[^<>]*\\bstrokeWidth=`).test(src)) strokeProps.push(`${f}: <${name} strokeWidth>`);
+  }
+}
+check('no Lucide component takes a strokeWidth prop the CSS would ignore', strokeProps, []);
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

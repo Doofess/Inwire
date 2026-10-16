@@ -150,7 +150,7 @@ const AccentPicker: React.FC<{ theme: string }> = ({ theme }) => {
               checked ? 'ring-2 ring-offset-2 ring-offset-background ring-foreground/70' : 'hover:ring-2 hover:ring-offset-2 hover:ring-offset-background hover:ring-border'
             }`}
           >
-            {checked && <Check className="w-3 h-3" strokeWidth={3} style={{ color: a.primaryForeground[theme] ?? a.primaryForeground.light }} />}
+            {checked && <Check className="w-3 h-3" style={{ color: a.primaryForeground[theme] ?? a.primaryForeground.light }} />}
           </button>
         );
       })}

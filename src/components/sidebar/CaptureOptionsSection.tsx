@@ -130,7 +130,7 @@ export const CaptureOptionsSection: React.FC<CaptureOptionsSectionProps> = ({
           )}
           {verdict.kind === 'ok' && (
             <p className={`${NOTE} text-muted-foreground flex items-center gap-1`}>
-              <Check className="w-3 h-3 shrink-0 text-primary" strokeWidth={3} />
+              <Check className="w-3 h-3 shrink-0 text-primary" />
               Frames it does not match are dropped by the driver, before they are
               copied anywhere.
             </p>

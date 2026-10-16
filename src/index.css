@@ -251,6 +251,28 @@ html {
     overflow: hidden;
   }
 
+  /* Every Lucide glyph draws a 1.5px stroke, whatever its size.
+
+     Lucide's stroke is 2 of a 24-unit box, so it scales with the icon: 1.67px
+     on the 20px rail, 1.33px in the title row, 1.17px at the 14px most panels
+     use. None of those fills a pixel at 100% scaling, so every glyph in the
+     app straddled pixels and rendered as grey smear; and the same glyph had a
+     different weight in each place. A fixed screen width is what an icon set
+     drawn for UI chrome does, and 1.5 won against 1px everywhere - which is
+     crisp on straight lines and faint on a gear - in a side-by-side at real
+     size, both themes.
+
+     This rule beats Lucide's `stroke-width` attribute, so a `strokeWidth`
+     prop on a Lucide component does nothing. A glyph that needs its own
+     weight sets `style={{ strokeWidth }}`, which beats this;
+     scripts/themes/icon-set.ts refuses the prop. */
+  svg.lucide {
+    stroke-width: 1.5px;
+  }
+  svg.lucide * {
+    vector-effect: non-scaling-stroke;
+  }
+
   /* The focus ring.
 
      Both themes define --ring, and until this rule existed nothing painted it:

@@ -587,7 +587,7 @@ const Arrow: React.FC<{
       </text>
       {arrow.category !== null && (
         <TriangleAlert x={mid + chipWidth / 2 + 4} y={chipTop + 1.5}
-          size={MARKER_SIZE} strokeWidth={2.5} color="currentColor">
+          size={MARKER_SIZE} style={{ strokeWidth: 1 }} color="currentColor">
           <title>{arrow.category}</title>
         </TriangleAlert>
       )}
