@@ -81,6 +81,15 @@ somewhere else. The palette uses the existing card and popover styles.
 One accepted overlap: its listener is registered after `FrameMetaRail`'s on the
 same phase, so an Escape with the palette over an open meta rail closes both.
 
+**Amended 2026-10-16: the overlap is gone, and so is ordering by mount.** Every
+inner consumer - the palette, the filter's presets list, the rail's restart
+confirm, the import error and the meta rail - now pushes a layer onto one
+window-wide stack (`lib/escapeStack.ts`) while it is showing, and the one
+capture-phase listener hands Escape to the newest layer only. An Escape with
+the palette over the meta rail closes the palette. `App`'s bubble-phase
+listener is still last and still unchanged. The tour overlay is left off the
+stack; it is a bubble-phase listener of its own.
+
 ### The prefixes
 
 `Ctrl+K` opens the palette. With no prefix it searches commands and the filter

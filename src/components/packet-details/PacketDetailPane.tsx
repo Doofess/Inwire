@@ -7,6 +7,7 @@ import { ColorRulesEngine } from '../../services/colorRules';
 import { loadPreference, useDebouncedPreference } from '../../services/preferences';
 import { useMediaQuery } from '../../lib/useMediaQuery';
 import { useSplitRatio } from '../../lib/useSplitRatio';
+import { useEscapeLayer } from '../../hooks/useEscapeLayer';
 import { FrameFieldTable } from './FrameFieldTable';
 import { FrameMetaRail } from './FrameMetaRail';
 import { FrameNumberBox } from './FrameNumberBox';
@@ -461,20 +462,17 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
    * capture, so a dependency on it would tear down and re-register this
    * listener ten times a second for the life of the view.
    */
-  const navRef = useRef({ index, packets, onShowFrame, railOverlay });
-  navRef.current = { index, packets, onShowFrame, railOverlay };
+  const navRef = useRef({ index, packets, onShowFrame });
+  navRef.current = { index, packets, onShowFrame };
+
+  // The overlay is a layer on the window's Escape stack, so a surface opened
+  // over it closes first.
+  useEscapeLayer(railOverlay, () => setRailOverlay(false));
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const nav = navRef.current;
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
-      if (e.key === 'Escape') {
-        if (!nav.railOverlay) return;
-        e.preventDefault();
-        e.stopPropagation();
-        setRailOverlay(false);
-        return;
-      }
       if (typing) return;
       const step = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
       if (step === 0) return;

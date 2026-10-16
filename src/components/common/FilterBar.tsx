@@ -9,6 +9,7 @@ import { titleWithKeys } from '../../lib/commands';
 import { dismissalAfter, suggestionsVisible } from '../../lib/filterSuggestions';
 import { recentFiltersStore } from '../../services/recentFilters';
 import { usePreferenceValue } from '../../services/preferenceStore';
+import { useEscapeLayer } from '../../hooks/useEscapeLayer';
 
 /**
  * **There was a `variant`, and there is one filter field in this app.**
@@ -271,21 +272,11 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
   // Escape closes the presets list from anywhere, which the input's own keydown
   // handler cannot do: the list is opened from a button, so the field often does
-  // not have focus while it is up. Registered only while open, and stopped from
-  // propagating so one Escape dismisses one thing. That is the house rule every
-  // popover in the app keeps - the innermost open thing takes the key, and the
-  // view does not change out from under it - and it is why this is a capture-
-  // phase listener: App's view-level Escape is deliberately last in the chain.
-  useEffect(() => {
-    if (!showPresetsDropdown) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.stopPropagation();
-      setShowPresetsDropdown(false);
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [showPresetsDropdown]);
+  // not have focus while it is up. A layer on the window's Escape stack, so one
+  // Escape dismisses one thing and App's view-level Escape stays last in the
+  // chain. Up only while the list can be SEEN: while the completions cover it,
+  // a layer here would eat the Escape the input wants for closing those.
+  useEscapeLayer(presetsVisible, () => setShowPresetsDropdown(false));
 
   // Click outside closes the presets list.
   useEffect(() => {

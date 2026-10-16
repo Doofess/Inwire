@@ -551,8 +551,14 @@ export default function App() {
   /**
    * The command palette (ADR 0057): the text it opened with, or null when it
    * is closed. Ctrl+K opens it empty, Ctrl+Shift+P on `>`, Ctrl+G on `:`.
+   * `n` counts requests, so the same chord pressed again while it is open
+   * still resets text the user has typed since.
    */
-  const [palette, setPalette] = useState<string | null>(null);
+  const [palette, setPalette] = useState<{ text: string; n: number } | null>(null);
+  const openPalette = useCallback(
+    (text: string) => setPalette((p) => ({ text, n: (p?.n ?? 0) + 1 })),
+    [],
+  );
   /** The display filter's input, for Ctrl+/ and the palette. */
   const filterInputRef = useRef<HTMLInputElement | null>(null);
   const [recentFilters] = usePreferenceValue(recentFiltersStore);
@@ -2183,9 +2189,11 @@ export default function App() {
    * Escape in a non-Packets view returns to Packets.
    *
    * **Last in the chain, by construction.** Every inner consumer - the palette,
-   * the filter presets dropdown, the discard prompt, the geo overlay - listens in
-   * the capture phase and calls `stopPropagation`, so this bubble-phase listener
-   * only ever sees an Escape that nothing else claimed. Registering it in the
+   * the filter presets dropdown, the discard prompt, the frame view's overlay,
+   * the import refusal - is a layer on the window's Escape stack
+   * (`lib/escapeStack.ts`), one capture-phase listener that gives the key to the
+   * newest layer and stops it, so this bubble-phase listener only ever sees an
+   * Escape that nothing else claimed. Registering it in the
    * capture phase instead would make it the FIRST to see the key and navigate
    * out from under an open popover.
    *
@@ -2218,7 +2226,7 @@ export default function App() {
     onViewShortcut: handleViewChange,
     // The title row's toggle, by key. See `toggleSideBar`.
     onToggleSideBar: toggleSideBar,
-    onOpenPalette: setPalette,
+    onOpenPalette: openPalette,
     onFocusFilter: () => { filterInputRef.current?.focus(); filterInputRef.current?.select(); },
     filteredPacketsRef,
     selectedPacketRef,
@@ -3659,7 +3667,7 @@ export default function App() {
 
       {palette !== null && (
         <CommandPalette
-          initialText={palette}
+          request={palette}
           ctx={commandContext}
           packets={packets}
           recentFilters={recentFilters}

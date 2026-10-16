@@ -4,6 +4,7 @@ import { TriangleAlert, FileX, RefreshCw, X } from 'lucide-react';
 
 import { ImportFailure } from '../../services/exportSchema';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
+import { useEscapeLayer } from '../../hooks/useEscapeLayer';
 
 /**
  * What the user sees when a file is refused.
@@ -52,18 +53,9 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
   onRetry,
   onClose,
 }) => {
-  // Escape closes this and nothing behind it. Capture phase with
-  // stopPropagation, the same shape FilterBar uses, so one Escape dismisses one
-  // thing rather than taking the export modal down with it.
-  React.useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [onClose]);
+  // Escape closes this and nothing behind it: it is the newest layer on the
+  // window's Escape stack, so the export modal under it keeps the key.
+  useEscapeLayer(true, onClose);
 
   return (
     <motion.div

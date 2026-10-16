@@ -114,3 +114,26 @@ export function paletteRows(
     case 'search': return [...rankCommands(query, ctx), ...rankFilters(query, filters)];
   }
 }
+
+/** A row's identity within one list, for keeping the highlight on it. */
+export function paletteRowKey(row: PaletteRow): string {
+  switch (row.kind) {
+    case 'command': return `command:${row.id}`;
+    case 'filter': return `filter:${row.source}:${row.expression}`;
+    case 'prefix': return `prefix:${row.prefix}`;
+    case 'shortcut': return `shortcut:${row.title}:${row.keys}`;
+  }
+}
+
+/**
+ * Where the highlight goes when the list changes under it: to the same row if
+ * the new list still has it, otherwise to the top. A position would move the
+ * highlight onto a different command when a row appeared above it.
+ */
+export function keepActive(before: PaletteRow[], active: number, after: PaletteRow[]): number {
+  const row = before[active];
+  if (!row) return 0;
+  const key = paletteRowKey(row);
+  const i = after.findIndex((r) => paletteRowKey(r) === key);
+  return i < 0 ? 0 : i;
+}

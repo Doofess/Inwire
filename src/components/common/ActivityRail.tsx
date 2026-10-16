@@ -23,6 +23,7 @@ import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
 import { titleWithKeys } from '../../lib/commands';
 import type { SideBarPanel } from '../../services/sideBarPrefs';
 import { useRovingFocus } from './useRovingFocus';
+import { useEscapeLayer } from '../../hooks/useEscapeLayer';
 
 /**
  * The one strip of chrome that is always there.
@@ -538,27 +539,19 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
     if (isCapturing || !restartDiscards) setConfirmRestart(false);
   }, [isCapturing, restartDiscards]);
 
+  // Claimed before the view-level handler can read it: Escape in a non-Packets
+  // view switches to Packets, and dismissing a prompt must not also navigate.
+  useEscapeLayer(confirmRestart, () => setConfirmRestart(false));
+
   React.useEffect(() => {
     if (!confirmRestart) return;
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== 'Escape') return;
-      // Claimed before the view-level handler can read it: Escape in a
-      // non-Packets view switches to Packets, and dismissing a prompt must not
-      // also navigate. This is the innermost link in that chain.
-      e.stopPropagation();
-      setConfirmRestart(false);
-    };
     const onDown = (e: PointerEvent): void => {
       if (!confirmRef.current?.contains(e.target as Node)) setConfirmRestart(false);
     };
     // Capture phase, so a click on some other control cancels the prompt rather
     // than being swallowed by it.
-    window.addEventListener('keydown', onKey, true);
     window.addEventListener('pointerdown', onDown, true);
-    return () => {
-      window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('pointerdown', onDown, true);
-    };
+    return () => window.removeEventListener('pointerdown', onDown, true);
   }, [confirmRestart]);
 
   const startFresh = (): void => {

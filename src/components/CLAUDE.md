@@ -139,10 +139,25 @@ and presets together, `>` commands only, `:` go to a frame (through
 `lookupFrame` and `goToFrame`, so a number outside the buffer shows the same
 inline reason the frame-number box gives and the palette stays open), `?` the
 prefixes and the shortcut list. `CommandPalette.tsx` only draws
-`lib/paletteModel.ts`'s rows. **Escape is claimed in the capture phase and
-stops there**, so it closes the palette and not the sheet under it; a second
-Escape closes the sheet. Focus returns to the element that had it, except after
-"Focus display filter".
+`lib/paletteModel.ts`'s rows. Focus returns to the element that had it,
+except after "Focus display filter"; Tab is held inside it, and a key an IME is
+composing with is the IME's. Pressing `Ctrl+K` again resets what was typed, and
+a list that changes under the same query (the context moves during a capture)
+keeps the highlight on the same row (`keepActive`).
+
+**Escape goes to the newest surface that asked for it** (`lib/escapeStack.ts`,
+`hooks/useEscapeLayer.ts`): one capture-phase window listener and a stack of
+layers - the palette, the presets list while it is visible, the rail's restart
+confirm, the import error, Frame Detail's meta rail. The top layer takes the
+key and stops it, so a palette over a sheet closes the palette and a second
+Escape closes the sheet. A surface pushes a layer only while it is showing; one
+that listened on the window itself would race the others by mount order, which
+is what this replaced. `scripts/commands/escape-stack.ts` fails on a converted
+file that listens for Escape on the window again. The tour overlay is not on
+it, and App's view Escape stays a bubble-phase listener beneath them all.
+**A chord is read as typed, and by its physical key only when the layout types
+no ASCII** (`matchChord`'s `code`), so `Ctrl+K` works on a Hebrew or Russian
+layout and AZERTY's `A` stays `A`.
 
 **The analyst keys work from inside a text field**, because focus is usually in
 the filter: `Ctrl+/` focuses the display filter, `Ctrl+G` opens the palette on
@@ -207,7 +222,10 @@ share, and so does `applyFilter`, whose field is reachable with the sheet up and
 which navigates to Packets. Clearing navigates nowhere and closes nothing. Both
 are asserted, because a navigation nobody can see fails silently.
 
-**Settings search is across every section** (`lib/settingsIndex.ts`): a hit
+**Settings search is across every section** (`lib/settingsIndex.ts`), by
+word prefix rather than fuzzily - every word typed must start a word of the
+row, so `dns` finds Reverse DNS and not Density - and ranked label first, then
+keywords, section and description. While results show, no tab is lit. A hit
 carries its section's name, switches the tab and lights its row, which
 `settingAnchorId` finds as `setting-row-<slug>` - not `setting-<slug>`, which
 the switches already own. A query that matches nothing says so, and the first

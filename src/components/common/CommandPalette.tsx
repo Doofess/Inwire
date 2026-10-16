@@ -2,7 +2,9 @@ import React from 'react';
 
 import type { Packet } from '../../types/packet';
 import type { CommandContext } from '../../lib/commands';
-import { paletteRows, type PaletteRow } from '../../lib/paletteModel';
+import { keepActive, paletteRowKey, paletteRows, type PaletteRow } from '../../lib/paletteModel';
+import { matchChord } from '../../lib/commands';
+import { useEscapeLayer } from '../../hooks/useEscapeLayer';
 import { parsePaletteQuery } from '../../lib/paletteQuery';
 import { lookupFrame } from '../packet-details/packetDetailModel';
 
@@ -15,15 +17,21 @@ import { lookupFrame } from '../packet-details/packetDetailModel';
  * prefix, which answers from the buffer through `lookupFrame` exactly as the
  * frame-number box does, so the two give one explanation for a missing frame.
  *
- * **Escape is claimed in the capture phase and stops there**, so it closes the
- * palette and nothing else - not the sheet under it, not the view. That is the
- * chain App's bubble-phase Escape listener documents (ADR 0034).
+ * **Escape closes the palette and nothing else** - not the presets list or the
+ * sheet under it, not the view. It is the newest layer on the window's Escape
+ * stack (`lib/escapeStack.ts`), the chain App's bubble-phase Escape listener
+ * documents (ADR 0034).
+ *
+ * **Focus stays in the input**: Tab is held, because the dialog is modal and
+ * there is nothing else in it to reach. Keys an IME is composing with are its
+ * own, so Enter, Escape and the arrows wait until the composition ends.
  *
  * **Focus goes back where it came from**, except after "Focus display filter",
  * whose whole point is to put it somewhere else.
  */
 export interface CommandPaletteProps {
-  initialText: string;
+  /** What to open on; a new `n` replaces whatever was typed since. */
+  request: { text: string; n: number };
   ctx: CommandContext;
   packets: Packet[];
   recentFilters: string[];
@@ -92,18 +100,19 @@ function rowLabel(row: PaletteRow): React.ReactNode {
 }
 
 export function CommandPalette({
-  initialText, ctx, packets, recentFilters, presetExpressions,
+  request, ctx, packets, recentFilters, presetExpressions,
   onRun, onApplyFilter, onGoToFrame, onClose,
 }: CommandPaletteProps): React.ReactElement {
-  const [text, setText] = React.useState(initialText);
+  const [text, setText] = React.useState(request.text);
   const [active, setActive] = React.useState(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
   const restoreRef = React.useRef<boolean>(true);
   const listId = React.useId();
 
-  // Ctrl+K pressed again while open hands a new prefix; take it.
-  React.useEffect(() => { setText(initialText); }, [initialText]);
+  // Ctrl+K pressed again while open hands a new request; take it, even when its
+  // text is the one it opened with.
+  React.useEffect(() => { setText(request.text); }, [request]);
 
   React.useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -111,16 +120,8 @@ export function CommandPalette({
     return () => { if (restoreRef.current) previous?.focus(); };
   }, []);
 
-  React.useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener('keydown', onKey, { capture: true });
-    return () => window.removeEventListener('keydown', onKey, { capture: true });
-  }, [onClose]);
+  useEscapeLayer(true, onClose);
+
 
   const { mode, query } = parsePaletteQuery(text);
   const rows = React.useMemo(
@@ -129,8 +130,15 @@ export function CommandPalette({
   );
   const frame = mode === 'goto' ? lookupFrame(packets, query) : null;
 
-  // A new query starts at the top.
-  React.useEffect(() => { setActive(0); }, [text]);
+  // A new query starts at the top. The same query over a changed list - the
+  // context moves during a capture - keeps the highlight on the same row.
+  const shownRef = React.useRef({ text, rows });
+  React.useEffect(() => {
+    const shown = shownRef.current;
+    shownRef.current = { text, rows };
+    if (shown.rows === rows) return;
+    setActive((a) => (shown.text === text ? keepActive(shown.rows, a, rows) : 0));
+  }, [text, rows]);
 
   React.useEffect(() => {
     listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
@@ -159,6 +167,17 @@ export function CommandPalette({
   };
 
   const onInputKey = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (e.nativeEvent.isComposing) return;
+    if (e.key === 'Tab') { e.preventDefault(); return; }
+    // Ctrl+/ from inside the palette goes where it goes from anywhere else:
+    // the window's handler skips it while this input has focus.
+    if (matchChord(e.nativeEvent)?.id === 'filter.focus') {
+      e.preventDefault();
+      e.stopPropagation();
+      restoreRef.current = false;
+      onRun('filter.focus');
+      return;
+    }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       if (rows.length === 0) return;
@@ -224,8 +243,8 @@ export function CommandPalette({
           spellCheck={false}
           autoComplete="off"
           role="combobox"
-          aria-expanded="true"
-          aria-controls={listId}
+          aria-expanded={frame === null}
+          aria-controls={frame === null ? listId : undefined}
           aria-activedescendant={frame === null && rows.length > 0 ? optionId(active) : undefined}
           className={`h-8 shrink-0 px-3 bg-transparent border-b border-border text-xs text-foreground placeholder:text-muted-foreground outline-none ${
             mode === 'goto' ? 'font-mono' : ''
@@ -234,6 +253,8 @@ export function CommandPalette({
         {gotoLine !== null ? (
           <button
             type="button"
+            aria-live="polite"
+            tabIndex={-1}
             disabled={!gotoLine.ok}
             onClick={() => { if (frame?.kind === 'found') onGoToFrame(frame.packet.id); }}
             className={`m-1 px-2.5 py-1.5 rounded text-left text-xs ${
@@ -251,7 +272,7 @@ export function CommandPalette({
             )}
             {rows.map((row, i) => (
               <div
-                key={i}
+                key={paletteRowKey(row)}
                 id={optionId(i)}
                 role="option"
                 aria-selected={i === active}

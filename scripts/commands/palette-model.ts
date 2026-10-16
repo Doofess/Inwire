@@ -6,7 +6,7 @@
  * The component only draws `paletteRows`; every decision about which rows, in
  * which order, under which prefix, is made here where a script can see it.
  */
-import { paletteRows, type PaletteRow } from '../../src/lib/paletteModel';
+import { keepActive, paletteRowKey, paletteRows, type PaletteRow } from '../../src/lib/paletteModel';
 import { COMMANDS, availableCommands, type CommandContext } from '../../src/lib/commands';
 
 let failures = 0;
@@ -57,6 +57,22 @@ const hits = paletteRows('gtp', capturing, empty).find((r) => r.kind === 'comman
 check('a command row carries its hits, for highlighting', hits && hits.kind === 'command' ? hits.hits : null, [0, 3, 6]);
 const settings = paletteRows('preferences', capturing, empty);
 checkTrue('a keyword finds its command', ids(settings).includes('settings.open'));
+
+// The highlight follows the ROW, not its position. During a capture the
+// context changes as frames arrive (packetCount, canStartCapture), so the list
+// can gain or lose a row above the one under the arrow keys.
+{
+  const keys = commands.map(paletteRowKey);
+  check('every row in a list has its own key', new Set(keys).size, keys.length);
+  const before = paletteRows('>', { ...capturing, packetCount: 0 }, empty);
+  const after = paletteRows('>', capturing, empty);
+  const last = before.length - 1;
+  const moved = keepActive(before, last, after);
+  check('the highlighted row stays highlighted when rows appear above it', paletteRowKey(after[moved]), paletteRowKey(before[last]));
+  check('a highlighted row that went away hands the highlight to the top', keepActive(after, 0, []), 0);
+  const gone = keepActive([{ kind: 'prefix', prefix: '>', label: 'x' }], 0, after);
+  check('a row the new list lacks starts at the top', gone, 0);
+}
 
 console.log(failures === 0 ? '\nAll palette-model checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);
