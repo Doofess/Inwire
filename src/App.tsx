@@ -45,9 +45,12 @@ import {
   useWindowChrome, useWindowTheme, useWindowTitle, windowTitleFor,
 } from "./lib/windowChrome";
 import {
-  backTargetFor, restoredView, viewLabel, viewStore, type AppView,
+  APP_VIEWS, backTargetFor, restoredView, viewLabel, viewStore, type AppView,
 } from "./services/viewPrefs";
 import { isDarkTheme } from "./lib/themeOptions";
+import type { CommandContext } from "./lib/commands";
+import { captureKeyAction } from "./lib/captureKey";
+import { CommandPalette } from "./components/common/CommandPalette";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
@@ -108,6 +111,7 @@ import {
 import {
   FILTER_PRESETS_STORAGE_KEY,
   addPreset,
+  allPresets,
   loadFilterPresetLibrary,
   normalizeLibrary,
   saveFilterPresetLibrary,
@@ -133,6 +137,9 @@ import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
 import type { CaptureSource } from './services/export/captureMeta';
 import type { CaptureFileFacts } from './services/captureFileFacts';
 import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
+
+/** The palette's recent filters until they are stored; one identity, so its memo holds. */
+const NO_RECENT_FILTERS: string[] = [];
 
 /**
  * How far back a socket-table DELTA is allowed to re-annotate.
@@ -546,7 +553,7 @@ export default function App() {
    * The command palette (ADR 0057): the text it opened with, or null when it
    * is closed. Ctrl+K opens it empty, Ctrl+Shift+P on `>`, Ctrl+G on `:`.
    */
-  const [, setPalette] = useState<string | null>(null);
+  const [palette, setPalette] = useState<string | null>(null);
   /** The display filter's input, for Ctrl+/ and the palette. */
   const filterInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -2492,6 +2499,56 @@ export default function App() {
   }, [filterText, setView]);
 
   /**
+   * What the registry's `when` predicates read (ADR 0057). Start follows
+   * `captureKeyAction`'s rule, so the palette never offers a Start that Ctrl+E
+   * would refuse.
+   */
+  const commandContext: CommandContext = useMemo(() => ({
+    capturing: isCapturing,
+    canStartCapture: captureKeyAction({
+      capturing: isCapturing,
+      adapterCount: selectedInterfaces.length,
+      packetCount: packets.length,
+      canCapture: permissions.canCapture,
+      blocked: startBlockedReason !== null || lastCapture !== null,
+    }) === 'start',
+    packetCount: packets.length,
+    filterApplied: appliedFilter.trim() !== '',
+    sideBarOpen,
+  }), [isCapturing, selectedInterfaces.length, packets.length, permissions.canCapture,
+    startBlockedReason, lastCapture, appliedFilter, sideBarOpen]);
+
+  const presetExpressions = useMemo(
+    () => allPresets(filterPresetLibrary).map((p) => p.filter).filter((f) => f.trim() !== ''),
+    [filterPresetLibrary],
+  );
+
+  const closePalette = useCallback(() => setPalette(null), []);
+
+  /**
+   * The palette's commands, bound. The palette closes first, so a command that
+   * opens a surface opens it with nothing on top. Every id here is a visible
+   * control's handler, never a palette-only action.
+   */
+  const runCommand = (id: string): void => {
+    setPalette(null);
+    const view = APP_VIEWS.find((v) => `view.${v.id}` === id);
+    if (view) { handleViewChange(view.id); return; }
+    switch (id) {
+      case 'capture.start': void handleStartCapture(); return;
+      case 'capture.stop': handlePauseCapture(); return;
+      case 'filter.focus': filterInputRef.current?.focus(); filterInputRef.current?.select(); return;
+      case 'filter.clear': setFilterText(''); applyFilter(''); return;
+      case 'sidebar.toggle': toggleSideBar(); return;
+      case 'sidebar.interfaces': openSideBarPanel('interfaces'); return;
+      case 'sidebar.schedule': openSideBarPanel('schedule'); return;
+      case 'sidebar.transfer': openSideBarPanel('transfer'); return;
+      case 'sidebar.network': openSideBarPanel('network'); return;
+      case 'settings.open': setSheet('settings'); return;
+    }
+  };
+
+  /**
    * The back step, and Settings sits on top of the view hierarchy rather than
    * in it.
    *
@@ -3587,6 +3644,27 @@ export default function App() {
           any modal unmount it part-way through a step. */}
       {!tour.completed && (
         <TourOverlay onDone={() => tourStore.set({ completed: true })} />
+      )}
+
+      {palette !== null && (
+        <CommandPalette
+          initialText={palette}
+          ctx={commandContext}
+          packets={packets}
+          recentFilters={NO_RECENT_FILTERS}
+          presetExpressions={presetExpressions}
+          onRun={runCommand}
+          onApplyFilter={(expression) => { setPalette(null); setFilterText(expression); applyFilter(expression); }}
+          // Frame Detail reads the selection, so it stays; anywhere else lands
+          // on the list, where a selected frame is visible.
+          onGoToFrame={(id) => {
+            setPalette(null);
+            setSheet(null);
+            setView(view === 'detail' ? 'detail' : 'packets');
+            goToFrame(id);
+          }}
+          onClose={closePalette}
+        />
       )}
     </div>
   );
