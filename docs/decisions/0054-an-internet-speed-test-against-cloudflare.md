@@ -4,7 +4,8 @@
 speed test "similar to Ookla", placed in the Network side panel with the dial
 taking the workspace as a sheet. The research behind it is Part 2 of
 `docs/ideas/network-monitoring-and-speed-test.md`. **Amended 2026-10-15**: the
-dial is gone - see *Amendment: latency under load* below.
+dial is gone - see *Amendment: latency under load* below - and **2026-10-16** it
+is back while a test runs, under *the dial comes back*.
 
 ## Context
 
@@ -204,6 +205,20 @@ last run's trace is kept under its own key so the ghost survives a restart.
 `scripts/speed-test/stats.ts`, `state.ts` and `speed-test-ui.ts` hold the
 summaries, the reducer and the sheet; `GAUGE_MARKS` and `gaugeFraction` went
 with the dial.
+
+## Amendment: the dial comes back, while the test runs (2026-10-16)
+
+The owner liked the instrument and still wanted the speedometer that every
+speed test app opens on. So **the dial is the running view's hero** and the
+instrument stays everything else: during a test `SpeedGauge` stands where the
+two-figure headline was - ping in its centre until a transfer starts, then the
+live figure on Ookla's non-linear scale (`GAUGE_MARKS`, `gaugeFraction`, back
+in `method.ts` and held by `scripts/speed-test/method.ts`), in the direction's
+colour - with a finished direction's figure waiting under it. The phase strip,
+the latency boxes and the traces stay where they were. **When the test is done
+the headline returns**, because a result is two medians, RPM and a grade, which
+a dial cannot say. The objection that removed it - "a consumer gauge answering
+how fast" - is met by the dial no longer being the whole page.
 
 ## Next
 

@@ -200,10 +200,13 @@ follows every rule below; what it adds is that leaving it does not stop a test,
 because the test's state is `services/speedTest/state.ts`'s, a module store, not
 the sheet's - so App also does not re-render at the test's ten updates a
 second. It is opened from the Network panel's *Speed test* section, never from
-the rail. **It is laid out as an instrument, not a dial** (0054's amendment):
-a phase strip, the headline (two medians, RPM and the bufferbloat grade), the
-latency boxes on one log axis, a throughput trace per direction with the last
-run as a ghost, a footer, then history - one component each beside the sheet.
+the rail. **It is laid out as an instrument** (0054's amendment): a phase
+strip, the headline (two medians, RPM and the bufferbloat grade), the latency
+boxes on one log axis, a throughput trace per direction with the last run as a
+ghost, a footer, then history - one component each beside the sheet. **While a
+test runs the dial stands in for the headline** (`SpeedGauge.tsx`, 0054's
+second amendment): the owner wants the speedometer every speed test app has,
+and it went once already, so it is a decision rather than leftover decoration.
 
 **Three ways out and no fourth**: the title row's back step, reading
 "Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and

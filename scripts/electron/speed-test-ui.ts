@@ -68,6 +68,7 @@ try {
   checkTrue('...and says who sees the address before the first test', await visible(/Cloudflare sees this machine/));
   await p.getByRole('button', { name: 'Run test' }).click();
   checkTrue('running a test opens the sheet with its charts', await until(() => p.locator('svg[role="img"][aria-label]').count().then((n) => n > 0), 10_000));
+  checkTrue('the running test shows the dial', await until(() => p.locator('svg[role="img"][aria-label*="megabits per second"]').count().then((n) => n > 0), 10_000));
   checkTrue('the server and ISP show before the numbers', await until(() => visible(/Example Networks/), 10_000));
   checkTrue('the download trace draws', await until(() => p.locator('svg[aria-label^="Download trace:"]').count().then((n) => n > 0), 15_000));
   checkTrue('the upload follows it', await until(() => p.locator('svg[aria-label^="Upload trace:"]').count().then((n) => n > 0), 20_000));

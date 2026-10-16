@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowDown, ArrowUp, History, MapPin, Network, Play, RotateCcw, Server, ShieldAlert, Square,
-  WifiOff, Wifi,
+  Activity, AlertTriangle, ArrowDown, ArrowUp, History, MapPin, Network, Play, RotateCcw, Server, ShieldAlert, Square,
+  WifiOff, Wifi, Globe,
 } from 'lucide-react';
 import { requestMapFocus } from '../../services/speedTest/mapOverlay';
 import { PaneHeader } from '../common/PaneHeader';
 import { EmptyStateButton } from '../common/EmptyState';
 import { SpeedHeadline } from './SpeedHeadline';
+import { SpeedGauge } from './SpeedGauge';
 import { LatencyBoxes } from './LatencyBoxes';
 import { ThroughputTrace } from './ThroughputTrace';
 import { PhaseStrip } from './PhaseStrip';
@@ -146,7 +147,7 @@ function Running({ state, capturing, ghost }: { state: SpeedState; capturing: bo
   return (
     <div className="flex w-full flex-col gap-5">
       <PhaseStrip phase={phase} done={false} rampsAtMs={state.rampsAtMs} durationMs={TRANSFER_MS} />
-      <SpeedHeadline down={state.downloadMbps} up={state.uploadMbps} live={live} liveMbps={state.liveMbps} rpm={null} grade={null} />
+      <LiveDial state={state} live={live} />
       <LatencyBoxes
         idle={spread(state.loaded.idle.map((s) => s.ttfbMs))}
         download={spread(state.loaded.download.map((s) => s.ttfbMs))}
@@ -172,7 +173,38 @@ function Running({ state, capturing, ghost }: { state: SpeedState; capturing: bo
   );
 }
 
-type TraceInput = Pick<Parameters<typeof ThroughputTrace>[0], 'points' | 'p90' | 'mean' | 'loaded' | 'live'>;
+/**
+ * The running test's hero: the dial on Ookla's scale, which is what a speed
+ * test looks like to most people, with the ping in its centre until a transfer
+ * starts. A finished direction's figure waits under it, so the download is not
+ * lost while the upload runs; the two-figure headline takes over once it is done.
+ */
+function LiveDial({ state, live }: { state: SpeedState; live: 'download' | 'upload' | null }) {
+  const phase = state.phase ?? 'connecting';
+  const ping = livePing(state);
+  const icon = phase === 'upload' ? <ArrowUp className="h-3.5 w-3.5" />
+    : phase === 'download' ? <ArrowDown className="h-3.5 w-3.5" />
+      : phase === 'latency' ? <Activity className="h-3.5 w-3.5" /> : <Globe className="h-3.5 w-3.5" />;
+  return (
+    <div className="flex w-full flex-col items-center gap-2">
+      <SpeedGauge
+        mbps={live ? state.liveMbps : 0}
+        label={live ? PHASE_LABEL[phase] : phase === 'latency' ? 'Measuring ping' : 'Connecting to Cloudflare'}
+        icon={icon}
+        active={live !== null}
+        tone={live ?? 'download'}
+        readout={live ? null : { value: ping === null ? '–' : fmtMsValue(ping), unit: 'ms' }}
+      />
+      {/* A fixed-height line, so the boxes below do not jump when it fills. */}
+      <p className="flex h-4 items-center gap-4 font-mono text-xs tabular-nums text-muted-foreground">
+        {state.downloadMbps !== null && <span><span className="text-speed-download">↓</span> {formatMbps(state.downloadMbps)} Mb/s</span>}
+        {state.uploadMbps !== null && <span><span className="text-speed-upload">↑</span> {formatMbps(state.uploadMbps)} Mb/s</span>}
+      </p>
+    </div>
+  );
+}
+
+type TraceInput =Pick<Parameters<typeof ThroughputTrace>[0], 'points' | 'p90' | 'mean' | 'loaded' | 'live'>;
 
 function Traces({ download, upload, ghost }: { download: TraceInput; upload: TraceInput; ghost: LastTrace | null }) {
   return (

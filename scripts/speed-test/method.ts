@@ -4,7 +4,7 @@
  *   npx tsx scripts/speed-test/method.ts
  */
 import {
-  bloatGrade, formatMbps, resultGrade, jitter, median, netLatency, quantile, rpm,
+  bloatGrade, formatMbps, GAUGE_MARKS, gaugeFraction, resultGrade, jitter, median, netLatency, quantile, rpm,
   serverRttVarMs, serverTimeMs, shouldRamp, SliceCounter, transferFigure, MAX_CONNECTIONS, TEST_CAP_MB, TEST_CAP_TEXT,
 } from '../../src/services/speedTest/method';
 import { HISTORY_LIMIT, historyEntry, normalizeHistory, normalizeLastTrace } from '../../src/services/speedTest/history';
@@ -90,6 +90,12 @@ check('latency that fell under load is A+', bloatGrade(20, 10), 'A+');
 check('a test graded on the worse loaded phase', resultGrade(10, 25, 80), 'C');
 check('...or the one phase that answered', [resultGrade(10, null, 80), resultGrade(10, 80, null)], ['C', 'C']);
 check('no loaded probe answered: no grade, not idle against idle', resultGrade(10, null, null), null);
+
+console.log('\n--- the dial ---');
+check('every mark is an equal step of arc', GAUGE_MARKS.map((m) => Math.round(gaugeFraction(m) * 8 * 1000) / 1000), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+check('between marks is linear', near(gaugeFraction(75), 3.5 / 8), true);
+check('past the last mark the needle is pinned', gaugeFraction(2500), 1);
+check('nothing, or nonsense, is zero', [0, -5, NaN].map(gaugeFraction), [0, 0, 0]);
 
 console.log('\n--- formatting ---');
 check('three significant figures', [0, 0.456, 5.678, 56.78, 567.8, 1234.5].map(formatMbps), ['0', '0.46', '5.68', '56.8', '568', '1235']);
