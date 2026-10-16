@@ -89,6 +89,28 @@ controls stayed on the light side of the divide for the theme most people use.
 Run `npm run check` after any colour edit — `scripts/themes/` enforces token
 completeness, contrast and CSS-vs-palette drift.
 
+### Motion tokens
+
+Two durations and one curve, declared once on **`html`** in `src/index.css`
+(ADR 0057): `--motion-fast: 120ms`, `--motion-panel: 180ms` and
+`--ease-out: cubic-bezier(0.2, 0, 0, 1)`. `html` and not `:root`, because
+`registry.ts` requires every `:root` token to be redeclared by every theme and a
+duration is not a colour.
+
+**They are for surfaces that open**: the side bar (`.motion-sidebar`,
+`--motion-fast`), the sheets (`.motion-sheet`, on Settings' and the speed test's
+root) and the palette (`--motion-panel`), as opacity plus a few pixels of
+`transform` - never a width, which is the user's. **Selection, arrow keys and
+filter results never animate**; they answer a keystroke and must land on it.
+There are no toasts, so none has a token.
+
+**Reduced motion zeroes both tokens by two routes**: `[data-motion='reduce']`
+(the app's own setting with the OS preference folded in) and
+`@media (prefers-reduced-motion: reduce)` on `html:not([data-motion='full'])`,
+which covers the first paint before `lib/motion.ts` runs and yields to
+"Always". `scripts/themes/motion-tokens.ts` holds the values, both routes and
+that the packet list and the filter bar contain no `--motion-`.
+
 ### The brand mark
 
 **Outside the theme system.** It is a stack of five isometric plates —

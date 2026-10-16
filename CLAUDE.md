@@ -1420,7 +1420,9 @@ The old exclusion rule was correct only while nothing else in the window was
 focusable; with a dozen rail buttons, Space on a focused one both activated it
 and ran this handler's `preventDefault`, so the button's own activation was
 suppressed and capture toggled anyway. Scoped positively, every control added
-from here on is safe by default rather than by being remembered.
+from here on is safe by default rather than by being remembered. The keys, the
+Ctrl+K palette and every keyed tooltip share one list, `src/lib/commands.ts` —
+data only, with each `run` bound by id in `App.tsx` (ADR 0057).
 
 `hooks/usePacketBuffer.ts` holds the buffer — the arrival queues, the
 accounting, the dense-field writer, the flush. `hooks/useAgentConnection.ts`

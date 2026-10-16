@@ -126,6 +126,49 @@ no second way in. `scripts/session/view.ts` asserts the mark's block is
 `ml-1 w-13` — the rail's width AND the band's gutter, because a card's axis is
 `gutter + width / 2`.
 
+#### Commands, the palette and the analyst keys
+
+**`src/lib/commands.ts` is the one list** the palette, the window's keys and
+every keyed tooltip read (ADR 0057). It is data only - `run` is bound by id in
+`App.tsx` - and **no command exists only there**: each duplicates a control on
+screen, which is `d3b4326`'s rule from when the menu went.
+
+**`Ctrl+K` opens the palette and `Ctrl+Shift+P` opens it on `>`.** The first
+character picks the mode: none searches commands and the filter field's recents
+and presets together, `>` commands only, `:` go to a frame (through
+`lookupFrame` and `goToFrame`, so a number outside the buffer shows the same
+inline reason the frame-number box gives and the palette stays open), `?` the
+prefixes and the shortcut list. `CommandPalette.tsx` only draws
+`lib/paletteModel.ts`'s rows. **Escape is claimed in the capture phase and
+stops there**, so it closes the palette and not the sheet under it; a second
+Escape closes the sheet. Focus returns to the element that had it, except after
+"Focus display filter".
+
+**The analyst keys work from inside a text field**, because focus is usually in
+the filter: `Ctrl+/` focuses the display filter, `Ctrl+G` opens the palette on
+`:`, `Ctrl+E` starts or stops a capture. They are the chords in
+`CHORDS_BEFORE_INPUT_GUARD`; the view digits and `Ctrl+B` are not, since a
+digit typed with a modifier into a field is the field's. **`Ctrl+E` is Space's
+decision** (`lib/captureKey.ts`): stopping is always allowed, and starting is
+refused whenever the rail's Start would have to ask - no adapter, frames in the
+buffer, no agent, or Start blocked - so the key is advertised only on plain
+Start and on Stop. `Ctrl+/` matches `e.key === '/'` with no Shift, so on a
+layout where `/` needs Shift it does not fire; accepted.
+
+**A tooltip's "(Ctrl+X)" comes from `titleWithKeys(id, title?)`**, never from
+text in a component. `scripts/commands/registry.ts` fails on a `(Ctrl+` spelled
+in any file under `src/components/` outside a comment.
+
+**The filter field carries a match chip and remembers recents.** `MatchChip`
+(in `FilterBar.tsx`) shows `44 of 178,200` only while a filter is applied, from
+the same `packetCounts` store as the status bar; it is its own component so the
+ten-times-a-second count re-renders the chip and not the field, it dims for the
+whole scan, and it names the share only once `scanPercentage` is known. On focus
+the last 8 applied filters show under "Recent", above the preset groups, with a
+Clear (`services/recentFilters.ts`, key `inwire.recentFilters`). Only a filter
+that compiles is remembered, and junk in storage loads as `[]`. The saved
+presets are the pins; there is no second pin concept.
+
 #### Settings, the one sheet
 
 `components/common/SettingsPane.tsx` takes the workspace card: no scrim, no
@@ -163,6 +206,17 @@ only the code that *chooses* a view can know one is being chosen.
 share, and so does `applyFilter`, whose field is reachable with the sheet up and
 which navigates to Packets. Clearing navigates nowhere and closes nothing. Both
 are asserted, because a navigation nobody can see fails silently.
+
+**Settings search is across every section** (`lib/settingsIndex.ts`): a hit
+carries its section's name, switches the tab and lights its row, which
+`settingAnchorId` finds as `setting-row-<slug>` - not `setting-<slug>`, which
+the switches already own. A query that matches nothing says so, and the first
+Escape clears the query before the sheet's own Escape leaves. **A row whose
+value differs from its default carries a 2px accent bar and a Reset**
+(`settingsLayout.tsx`); `resetSetting` restores that row's own field only,
+because three rows share the performance store. The sheet's root wears
+`.motion-sheet`, an entrance and nothing else, so it still has no radius or
+border.
 
 **The colouring chain is shipped rather than chosen**, which is why there is no
 Colouring Rules tab: `parity-check.ts` compares `frame.coloring_rule.name`
