@@ -14,8 +14,37 @@
  * telling anyone (ADR 0058), and a measured-looking zero would be a claim
  * nobody measured. What the app shed itself is a separate count, because that
  * one *is* known. Sequence anomalies are counts per engine, derived only from
- * what arrived, and no estimate of lost flows is offered beyond the sum of
- * the gaps the sequence numbers show.
+ * what arrived, and no estimate of lost flows is offered beyond the summed
+ * forward jumps the sequence numbers show (`jumpedFlows`, which is not a loss
+ * count: see there).
+ *
+ * **How a sequence number is read.** Per engine, `expected` is the last
+ * datagram's sequence plus its record count, all in u32 arithmetic. A datagram
+ * `s` with `n` records:
+ *
+ *  1. A step back still *pending* is resolved first. If `s` is the pending
+ *     datagram's own successor (`pending.next`, and not also `expected`), the
+ *     step back was the exporter restarting its counter: `resets++`, the new
+ *     chain is adopted and the datagram is done. Otherwise this datagram
+ *     settles it: `s === expected` means it was a late arrival (`reordered++`),
+ *     anything else means nothing proved it (`unresolved++`). It is cleared
+ *     either way and the datagram goes on to 2.
+ *  2. `s === expected`: in sequence.
+ *  3. `s` equals the previous datagram's sequence and that one held records:
+ *     `duplicates++`; `expected` does not move. (An export with no records may
+ *     legitimately repeat a sequence.)
+ *  4. `s` is ahead of `expected` (forward distance under 2^31): `gaps++`,
+ *     `jumpedFlows` grows by the distance, the chain continues from `s + n`.
+ *  5. Otherwise `s` is behind: it becomes the one pending step back, with
+ *     `pending.next = s + n`, and `expected` does not move.
+ *
+ * A step back is classified by what the *next* datagram proves, never by how
+ * far back it went. Distance cannot tell the readings apart: an exporter that
+ * restarts at a small number looks like a short step back, and a datagram the
+ * network held up for a long time looks like a long one. Labelling by distance
+ * reported a restart as four reordered datagrams and invented lost flows, none
+ * of them true. Only one step back is held at a time; if the exporter then
+ * goes quiet it stays pending, visible as such.
  *
  * Everything is plain data - arrays and numbers, no Map or class - because a
  * `SourceHealth` crosses `postMessage`.
@@ -27,13 +56,6 @@ export type ListenerState = 'stopped' | 'starting' | 'listening' | 'failed';
 export type StorageState = 'ok' | 'failed';
 /** `never`: no valid datagram yet. `stale`: none for `LIMITS.staleMs`, or the listener was stopped. */
 export type Freshness = 'never' | 'fresh' | 'stale';
-
-/**
- * A step back of at most this many flows is read as reordering; a bigger one
- * is read as the exporter restarting its counter. Either reading is only a
- * label on a count - nothing is dropped on the strength of it.
- */
-export const REORDER_WINDOW_FLOWS = 4096;
 
 export interface EngineHealth {
   engineType: number;
@@ -48,12 +70,23 @@ export interface EngineHealth {
   lastSequence: number | null;
   /** The sequence the next datagram should carry: the last one's plus its record count. */
   expectedSequence: number | null;
-  /** Sum of the jumps forward, in flows: what the sequence says went missing. */
-  missingFlows: number;
+  /** The last valid datagram's record count: an export with none may repeat a sequence. */
+  lastFlowCount: number | null;
+  /**
+   * The summed distance of the forward sequence jumps, in flows. A late
+   * datagram may later fill part of that distance, so this is **not** a count
+   * of lost flows, and there is deliberately no such count: transport loss
+   * stays `'unknown'`.
+   */
+  jumpedFlows: number;
   gaps: number;
   duplicates: number;
   reordered: number;
   resets: number;
+  /** Step backs that no later datagram proved to be either a restart or a late arrival. */
+  unresolved: number;
+  /** The one step back not yet classified, as the sequence its successor would carry; null when none waits. */
+  pending: { next: number } | null;
 }
 
 export interface RejectedSender { address: string; count: number }
@@ -101,6 +134,12 @@ export type HealthEvent =
   | (Timed & { kind: 'shed'; count: number })
   | (Timed & { kind: 'watermark'; which: 'analyzed' | 'rolled-up'; throughEntryId: number });
 
+/**
+ * `elapsedMs` is a high-water mark, so a stray smaller value cannot un-stale
+ * anything. The price is that it cannot follow a clock that starts over: a new
+ * process, or a restarted monotonic clock, must begin from a fresh
+ * `SourceHealth` rather than carry an old one across.
+ */
 export function initialSourceHealth(exporterIPv4: string): SourceHealth {
   return {
     exporterIPv4,
@@ -133,38 +172,49 @@ export function canAdmitEngine(health: SourceHealth, engineType: number, engineI
 
 const u32 = (n: number) => n >>> 0;
 
-/** One valid datagram's effect on its engine's sequence bookkeeping. */
+/** One valid datagram's effect on its engine's sequence bookkeeping; the rules are in the file header. */
 function advanceSequence(engine: EngineHealth, sequence: number, flowCount: number, wallMs: number): EngineHealth {
   const next: EngineHealth = {
     ...engine, accepted: engine.accepted + 1, flows: engine.flows + flowCount, lastValidWallMs: wallMs,
+    lastSequence: sequence, lastFlowCount: flowCount,
   };
   const after = u32(sequence + flowCount);
   const expected = engine.expectedSequence;
-  if (expected === null || sequence === expected) {
+  if (expected === null) {
     next.expectedSequence = after;
+    return next;
+  }
+
+  if (engine.pending !== null) {
+    next.pending = null;
+    // The step back's own successor means a restart. When that number is also
+    // the one expected, the step back ended exactly where the chain stands
+    // and is read as the late arrival it plainly is.
+    if (sequence === engine.pending.next && sequence !== expected) {
+      next.resets++;
+      next.expectedSequence = after;
+      return next;
+    }
+    if (sequence === expected) next.reordered++;
+    else next.unresolved++;
+  }
+
+  if (sequence === expected) {
+    next.expectedSequence = after;
+    return next;
+  }
+  if (sequence === engine.lastSequence && engine.lastFlowCount !== 0) {
+    next.duplicates++;
     return next;
   }
   const forward = u32(sequence - expected);
   if (forward < 2 ** 31) {
     next.gaps++;
-    next.missingFlows += forward;
+    next.jumpedFlows += forward;
     next.expectedSequence = after;
     return next;
   }
-  // Behind what was expected. The same number as the datagram just before is
-  // a duplicate; a short step back is a late arrival; a long one is a
-  // restart. Only the last datagram is remembered, so an older repeat reads
-  // as reordering, which is also what it is.
-  if (sequence === engine.lastSequence) {
-    next.duplicates++;
-    return next;
-  }
-  if (u32(expected - sequence) <= REORDER_WINDOW_FLOWS) {
-    next.reordered++;
-    return next;
-  }
-  next.resets++;
-  next.expectedSequence = after;
+  next.pending = { next: after };
   return next;
 }
 
@@ -212,6 +262,8 @@ export function reduceSourceHealth(previous: SourceHealth, event: HealthEvent): 
       if (event.outcome === 'unsupported') { h.unsupported++; return h; }
       const at = h.engines.findIndex((e) => e.engineType === event.engineType && e.engineId === event.engineId);
       if (at < 0 && h.engines.length >= LIMITS.enginesPerExporter) {
+        // Only an admitted engine's datagrams are analyzed, so this one gets
+        // no row and does not make the source fresh; the sheet shows the count.
         h.engineLimitRejected++;
         return h;
       }
@@ -220,10 +272,10 @@ export function reduceSourceHealth(previous: SourceHealth, event: HealthEvent): 
         engineId: event.engineId,
         sourceKey: sourceKey(h.exporterIPv4, event.engineType, event.engineId),
         accepted: 0, flows: 0, lastValidWallMs: event.wallMs, lastSequence: null, expectedSequence: null,
-        missingFlows: 0, gaps: 0, duplicates: 0, reordered: 0, resets: 0,
+        lastFlowCount: null, jumpedFlows: 0, gaps: 0, duplicates: 0, reordered: 0, resets: 0,
+        unresolved: 0, pending: null,
       };
       const advanced = advanceSequence(engine, event.sequence, event.flowCount, event.wallMs);
-      advanced.lastSequence = event.sequence;
       h.engines = at >= 0 ? h.engines.map((e, i) => (i === at ? advanced : e)) : [...h.engines, advanced];
       h.accepted++;
       h.freshness = 'fresh';

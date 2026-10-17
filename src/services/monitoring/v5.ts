@@ -21,7 +21,11 @@
  * before the wrap has First numerically above sysUptime, and the modular
  * difference is still its true age. The cost is that a flow genuinely older
  * than 2^32 ms is indistinguishable from a younger one; no exporter's flow
- * lives that long. A record whose times cannot be derived (nanoseconds past a
+ * lives that long. For the same reason a time *later* than the header's uptime
+ * cannot be accepted: its modular age comes out near 2^32 and would place the
+ * flow 49.7 days in the past, as if valid. A real wrap leaves an age just past
+ * the wrap point, far below 2^31, so an age of 2^31 or more is read as a future
+ * time and the datagram is `malformed`. A record whose times cannot be derived (nanoseconds past a
  * second, an exporter with no clock whose flows would start before the epoch,
  * a flow that ends before it starts) makes the whole datagram `malformed`:
  * receipt time is never substituted, because the sheet shows flow times as the
@@ -34,6 +38,8 @@ import type { DatagramEvidence, DecodeResult, NormalizedV5, Sampling } from './t
 const HEADER_LENGTH = 24;
 const RECORD_LENGTH = 48;
 const U32 = 2 ** 32;
+/** An age at or past this is a time after the header's uptime, not a flow that old. */
+const FUTURE_AGE = 2 ** 31;
 
 /** A source is the configured exporter plus the v5 engine type and id (ADR 0059). */
 export function sourceKey(exporterIPv4: string, engineType: number, engineId: number): string {
@@ -44,7 +50,12 @@ function ipv4(v: DataView, at: number): string {
   return `${v.getUint8(at)}.${v.getUint8(at + 1)}.${v.getUint8(at + 2)}.${v.getUint8(at + 3)}`;
 }
 
-/** Header bits 15-14 are the mode and 13-0 the interval; all zero means the exporter did not say. */
+/**
+ * Header bits 15-14 are the mode and 13-0 the interval; all zero means the
+ * exporter did not say. A non-zero mode with interval 0 stays `reported`,
+ * because the exporter did say something: interval 0 there means it gave no
+ * interval, and a consumer must not divide by it.
+ */
 function readSampling(field: number): Sampling {
   if (field === 0) return { kind: 'unknown' };
   return { kind: 'reported', mode: field >>> 14, interval: field & 0x3fff };
@@ -94,6 +105,12 @@ export function decodeV5(evidence: DatagramEvidence, exporterIPv4: string): Deco
     const p = HEADER_LENGTH + i * RECORD_LENGTH;
     const startAgo = (uptimeMs - v.getUint32(p + 24) + U32) % U32;
     const endAgo = (uptimeMs - v.getUint32(p + 28) + U32) % U32;
+    if (startAgo >= FUTURE_AGE) {
+      return { kind: 'malformed', reason: `record ${i} First is later than the header's uptime, so its time cannot be derived` };
+    }
+    if (endAgo >= FUTURE_AGE) {
+      return { kind: 'malformed', reason: `record ${i} Last is later than the header's uptime, so its time cannot be derived` };
+    }
     if (endAgo > startAgo) {
       return { kind: 'malformed', reason: `record ${i} ends before it starts` };
     }

@@ -158,6 +158,41 @@ test('a stopped source is not fresh', () => {
   assert.equal(h.freshness, 'stale');
 });
 
+test('a failed listener records its error but does not itself make the source stale', () => {
+  // Freshness is a statement about the last valid datagram, decided by elapsed
+  // time alone; only an orderly stop marks it stale at once.
+  let h = run([listening(0), valid(1_000, 0, 0, 1)]);
+  h = run([{ kind: 'listener', state: 'failed', error: 'EADDRINUSE', elapsedMs: 1_100, wallMs: WALL }], h);
+  assert.equal(h.listener.state, 'failed');
+  assert.equal(h.listener.error, 'EADDRINUSE');
+  assert.equal(h.freshness, 'fresh');
+  assert.equal(h.accepted, 1);
+  h = run([tick(1_000 + LIMITS.staleMs)], h);
+  assert.equal(h.freshness, 'stale', 'the silence is what ages it');
+  assert.equal(h.listener.state, 'failed');
+  // And a failure with no valid datagram before it leaves the source at "never".
+  const never = run([{ kind: 'listener', state: 'failed', elapsedMs: 5, wallMs: WALL }]);
+  assert.equal(never.freshness, 'never');
+  assert.equal(never.listener.error, 'failed', 'an unnamed failure still says it failed');
+});
+
+test('starting after stopped keeps the history and a stale source until a datagram arrives', () => {
+  let h = run([listening(0), valid(10, 0, 0, 5, 1)]);
+  h = run([{ kind: 'listener', state: 'stopped', elapsedMs: 20, wallMs: WALL }], h);
+  assert.equal(h.freshness, 'stale');
+  h = run([{ kind: 'listener', state: 'starting', elapsedMs: 30, wallMs: WALL }], h);
+  assert.equal(h.listener.state, 'starting');
+  assert.equal(h.listener.error, null);
+  assert.equal(h.freshness, 'stale', 'restarting the socket proves nothing was heard');
+  assert.equal(h.accepted, 1);
+  assert.equal(h.lastValidEntryId, 1);
+  assert.equal(h.engines[0].expectedSequence, 5, 'the sequence chain survives the restart');
+  h = run([listening(40), valid(50, 0, 5, 5, 2)], h);
+  assert.equal(h.freshness, 'fresh');
+  assert.equal(h.engines[0].gaps, 0);
+  assert.equal(h.accepted, 2);
+});
+
 // --- engines ------------------------------------------------------------------------------
 
 test('engines are separate sources under one exporter, keyed as the decoder keys them', () => {
@@ -204,7 +239,7 @@ function engineAfter(...seqs: [number, number][]): SourceHealth['engines'][numbe
 test('sequence: contiguous datagrams report nothing', () => {
   const e = engineAfter([0, 5], [5, 5], [10, 1]);
   assert.equal(e.expectedSequence, 11);
-  assert.equal(e.missingFlows, 0);
+  assert.equal(e.jumpedFlows, 0);
   assert.equal(e.gaps, 0);
   assert.equal(e.duplicates, 0);
   assert.equal(e.reordered, 0);
@@ -213,7 +248,7 @@ test('sequence: contiguous datagrams report nothing', () => {
 
 test('sequence: a forward jump counts the missing flows and one gap', () => {
   const e = engineAfter([0, 5], [20, 1]);
-  assert.equal(e.missingFlows, 15);
+  assert.equal(e.jumpedFlows, 15);
   assert.equal(e.gaps, 1);
   assert.equal(e.expectedSequence, 21);
 });
@@ -225,26 +260,92 @@ test('sequence: a repeat is a duplicate, and does not move the expectation', () 
   assert.equal(e.accepted, 3, 'every datagram stays counted: nothing is deleted');
 });
 
-test('sequence: a small step back is reordering, a large one a reset', () => {
-  const reordered = engineAfter([0, 5], [10, 5], [5, 5]);
-  assert.equal(reordered.reordered, 1);
-  assert.equal(reordered.expectedSequence, 15, 'a late datagram does not pull the expectation back');
-  const reset = engineAfter([1_000_000, 5], [3, 5]);
-  assert.equal(reset.resets, 1);
-  assert.equal(reset.expectedSequence, 8, 'a reset restarts from the new number');
+/** The counts the sequence rules own, so a test can name them all and say which are zero. */
+function counts(e: SourceHealth['engines'][number]) {
+  return {
+    gaps: e.gaps, jumpedFlows: e.jumpedFlows, duplicates: e.duplicates,
+    reordered: e.reordered, resets: e.resets, unresolved: e.unresolved,
+  };
+}
+const NONE = { gaps: 0, jumpedFlows: 0, duplicates: 0, reordered: 0, resets: 0, unresolved: 0 };
+
+test('sequence: a restart at a small expected value is a reset and loses nothing', () => {
+  // The exporter reached expected=100, then restarted at 0 with 30-flow datagrams.
+  // Judged by distance this read as four reordered datagrams and 20 missing flows.
+  const e = engineAfter([0, 50], [50, 50], [0, 30], [30, 30], [60, 30], [90, 30]);
+  assert.deepEqual(counts(e), { ...NONE, resets: 1 });
+  assert.equal(e.expectedSequence, 120, 'the new chain was adopted');
+  assert.equal(e.pending, null);
+});
+
+test('sequence: a datagram arriving far behind is a late arrival, not a reset', () => {
+  // Fifteen contiguous datagrams of 1,000 flows, then a copy of one 10,000 flows
+  // back held up by the network, then the main chain carries on.
+  const chain: [number, number][] = [];
+  for (let i = 0; i < 15; i++) chain.push([i * 1000, 1000]);
+  const e = engineAfter(...chain, [5000, 1000], [15_000, 1000]);
+  assert.deepEqual(counts(e), { ...NONE, reordered: 1 });
+  assert.equal(e.expectedSequence, 16_000, 'the main chain was never disturbed');
+});
+
+test('sequence: a datagram swapped with the next is one gap, then one late arrival', () => {
+  // 0, 10 (jumps over 5), 5 (late), 15: the jump is counted when it happens and
+  // is not taken back - which is why jumpedFlows is not a loss figure.
+  const e = engineAfter([0, 5], [10, 5], [5, 5], [15, 5]);
+  assert.deepEqual(counts(e), { ...NONE, gaps: 1, jumpedFlows: 5, reordered: 1 });
+  assert.equal(e.expectedSequence, 20);
+  assert.equal(e.pending, null);
+});
+
+test('sequence: a step back followed by neither chain is unresolved', () => {
+  // Expected 100; 10 steps back (its successor would be 15); 500 is neither 100 nor 15.
+  const e = engineAfter([0, 50], [50, 50], [10, 5], [500, 5]);
+  assert.deepEqual(counts(e), { ...NONE, unresolved: 1, gaps: 1, jumpedFlows: 400 });
+  assert.equal(e.expectedSequence, 505);
+  assert.equal(e.pending, null);
+});
+
+test('sequence: a step back still waiting for proof is visible as pending', () => {
+  const e = engineAfter([0, 50], [50, 50], [10, 5]);
+  assert.deepEqual(e.pending, { next: 15 });
+  assert.deepEqual(counts(e), NONE, 'nothing is claimed until the next datagram says what it was');
+  assert.equal(e.expectedSequence, 100, 'and the expectation has not moved');
+});
+
+test('sequence: two step backs in a row leave the first unresolved', () => {
+  const e = engineAfter([0, 50], [50, 50], [10, 5], [20, 5], [100, 5]);
+  assert.deepEqual(counts(e), { ...NONE, unresolved: 1, reordered: 1 });
+  assert.equal(e.expectedSequence, 105);
+  assert.equal(e.pending, null);
+});
+
+test('sequence: a step back that ends exactly at the expectation is a late arrival, not a restart', () => {
+  // 95 + 5 = 100 = expected, so the successor of the step back is also the next
+  // in-sequence datagram. Both readings adopt the same chain; the label is the late one.
+  const e = engineAfter([0, 50], [50, 50], [95, 5], [100, 5]);
+  assert.deepEqual(counts(e), { ...NONE, reordered: 1 });
+  assert.equal(e.expectedSequence, 105);
+});
+
+test('sequence: a repeat of the previous datagram is a duplicate and moves nothing', () => {
+  const e = engineAfter([0, 5], [5, 5], [5, 5], [10, 5]);
+  assert.deepEqual(counts(e), { ...NONE, duplicates: 1 });
+  assert.equal(e.expectedSequence, 15);
 });
 
 test('sequence: the 32-bit counter wraps without a gap', () => {
   const e = engineAfter([0xffff_fffe, 5], [3, 2]);
-  assert.equal(e.gaps, 0);
-  assert.equal(e.resets, 0);
+  assert.deepEqual(counts(e), NONE);
   assert.equal(e.expectedSequence, 5);
+  // A datagram that itself straddles 2^32 and the ones after it.
+  const across = engineAfter([0xffff_fff0, 0x20], [0x10, 5], [0x15, 2]);
+  assert.deepEqual(counts(across), NONE);
+  assert.equal(across.expectedSequence, 0x17);
 });
 
 test('sequence: empty exports advance nothing and are not duplicates of each other', () => {
   const e = engineAfter([0, 5], [5, 0], [5, 0], [5, 1]);
-  assert.equal(e.duplicates, 0);
-  assert.equal(e.gaps, 0);
+  assert.deepEqual(counts(e), NONE);
   assert.equal(e.expectedSequence, 6);
 });
 

@@ -109,7 +109,7 @@ test('the key uses the configured exporter, not the datagram\'s sender or UDP po
 
 test('a valid datagram decodes every field', () => {
   const ev = v5Evidence(
-    { src: '10.1.2.3', dst: '198.51.100.7', inputIf: 7, outputIf: 9, packets: 12, octets: 1234, srcPort: 51_000, dstPort: 53, protocol: 17 },
+    { src: '10.1.2.3', dst: '198.51.100.7', inputIf: 7, outputIf: 9, packets: 12, octets: 1234, srcPort: 51_000, dstPort: 53, protocol: 17, first: 100_000, last: 120_000 },
     { sequence: 77, engineType: 1, engineId: 2, uptime: 123_456 },
     { ref: { generation: '0'.repeat(32), entryId: 9 }, receivedMs: 1_760_000_123_456 },
   );
@@ -270,6 +270,34 @@ test('the 32-bit uptime wrapping between a flow and its export is handled', () =
     assert.equal(r.flows[0].startMs, exportMs - 10_000);
     assert.equal(r.flows[0].endMs, exportMs - 3_000);
   }
+});
+
+test('uptime just past the wrap, with a flow that began just before it, is still valid', () => {
+  // uptime has wrapped to 100; First = 2^32 - 50 is 150 ms ago, Last = 90 is 10 ms ago.
+  const r = decodeV5(v5Evidence({ first: 2 ** 32 - 50, last: 90 }, { uptime: 100 }), EXPORTER);
+  assert.equal(r.kind, 'valid');
+  if (r.kind === 'valid') {
+    const exportMs = 1_760_000_000_250;
+    assert.equal(r.flows[0].startMs, exportMs - 150);
+    assert.equal(r.flows[0].endMs, exportMs - 10);
+  }
+});
+
+test('a First or Last later than the header uptime is malformed, never placed 49.7 days back', () => {
+  const uptime = 600_000;
+  const first = decodeV5(v5Evidence({ first: uptime + 1, last: uptime + 1 }, { uptime }), EXPORTER);
+  assert.equal(first.kind, 'malformed');
+  if (first.kind === 'malformed') assert.match(first.reason, /record 0 First/);
+  // Last alone: First is fine, so it is the Last check that must catch it.
+  const last = decodeV5(v5Evidence({ first: uptime - 10, last: uptime + 1 }, { uptime }), EXPORTER);
+  assert.equal(last.kind, 'malformed');
+  if (last.kind === 'malformed') assert.match(last.reason, /record 0 Last/);
+  // The record is named, and one bad record in a later position spoils the datagram.
+  const second = decodeV5(evidence(v5Payload({ uptime }, [{}, { first: uptime + 1, last: uptime + 1 }])), EXPORTER);
+  assert.equal(second.kind, 'malformed');
+  if (second.kind === 'malformed') assert.match(second.reason, /record 1 First/);
+  // Exactly now is not the future.
+  assert.equal(decodeV5(v5Evidence({ first: uptime, last: uptime }, { uptime }), EXPORTER).kind, 'valid');
 });
 
 test('times that cannot be derived make the datagram malformed, never receipt time', () => {
