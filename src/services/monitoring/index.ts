@@ -17,6 +17,18 @@
  * session open *before* its entry, because a datagram's session is not in its
  * body: it is the nearest `start` before it, and a seek that lands mid-journal
  * would otherwise have no way to know it.
+ *
+ * ## The time index
+ *
+ * Each stride also keeps the smallest and largest `receivedMs` of every entry
+ * in it, boundaries included, so a time range can be turned into the strides
+ * that might hold it without reading them. The test is overlap - `min < toMs &&
+ * max >= fromMs` - and not "the first and last entry bracket the range",
+ * because receipt time is the utility's wall clock, which can step back: a
+ * stride whose first entry is later than its last is still found. A stride the
+ * overlap test admits may hold nothing in range (the min and max are bounds,
+ * not contents); the reader checks each entry it reads. One it rejects holds
+ * nothing in range, always.
  */
 export const INDEX_STRIDE = 256;
 
@@ -30,15 +42,45 @@ export interface Checkpoint {
 export class EntryIndex {
   private offsets: number[] = [];
   private sessions: (string | null)[] = [];
+  private minMs: number[] = [];
+  private maxMs: number[] = [];
+  private lastId = 0;
 
   get checkpoints(): number { return this.offsets.length; }
 
   /** Called for every entry, in id order, before the entry changes the session. */
-  note(entryId: number, offset: number, openSession: string | null): void {
-    if ((entryId - 1) % INDEX_STRIDE !== 0) return;
-    const slot = (entryId - 1) / INDEX_STRIDE;
-    this.offsets[slot] = offset;
-    this.sessions[slot] = openSession;
+  note(entryId: number, offset: number, openSession: string | null, receivedMs: number): void {
+    const slot = Math.floor((entryId - 1) / INDEX_STRIDE);
+    if ((entryId - 1) % INDEX_STRIDE === 0) {
+      this.offsets[slot] = offset;
+      this.sessions[slot] = openSession;
+      this.minMs[slot] = receivedMs;
+      this.maxMs[slot] = receivedMs;
+    } else if (slot < this.minMs.length) {
+      // The open tail stride is updated on every append.
+      if (receivedMs < this.minMs[slot]) this.minMs[slot] = receivedMs;
+      if (receivedMs > this.maxMs[slot]) this.maxMs[slot] = receivedMs;
+    }
+    this.lastId = entryId;
+  }
+
+  /**
+   * The id ranges, merged and ascending, of the strides whose receipt times
+   * overlap `[fromMs, toMs)`, no later than `throughId`.
+   */
+  strideRanges(fromMs: number, toMs: number, throughId: number): { fromId: number; toId: number }[] {
+    const out: { fromId: number; toId: number }[] = [];
+    const last = Math.min(throughId, this.lastId);
+    for (let slot = 0; slot < this.minMs.length; slot++) {
+      const fromId = slot * INDEX_STRIDE + 1;
+      if (fromId > last) break;
+      if (!(this.minMs[slot] < toMs && this.maxMs[slot] >= fromMs)) continue;
+      const toId = Math.min(fromId + INDEX_STRIDE - 1, last);
+      const tail = out[out.length - 1];
+      if (tail !== undefined && tail.toId + 1 === fromId) tail.toId = toId;
+      else out.push({ fromId, toId });
+    }
+    return out;
   }
 
   /** The nearest checkpoint at or before `entryId`, or null with nothing noted. */

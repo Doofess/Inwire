@@ -111,6 +111,7 @@ const NOT_TESTS: Record<string, string> = {
     'measurement and human step (ADRs 0058-0059); the journal mode writes ~2.7 GB to temp, socket, journal and rollup print '
     + 'machine properties with no pass mark, and the firewall mode needs the installed agent, WSL and a person to answer the Windows Security prompt',
   'monitoring/fixtures.ts': 'helper, not a test; builds the generated NetFlow v5 payloads and evidence the monitoring scripts assert against',
+  'monitoring/queryRig.ts': 'helper, not a test; the in-memory journal, sidecar, runtime and Worker host that rollup.ts and queries.ts drive',
   'perf/xlsx-cost.ts':
     'measurement; sizes the Excel export budget (XLSX_BYTES_PER_CELL) on the real captures, '
     + 'needs the fixtures and --expose-gc, and has no pass mark',

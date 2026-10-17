@@ -159,6 +159,13 @@ function encodeBoundary(b: BoundaryFields): Uint8Array {
   }));
 }
 
+function boundaryEvidence(generation: string, entryId: number, b: BoundaryFields): BoundaryEvidence {
+  return {
+    kind: 'boundary', ref: { generation, entryId }, sessionId: b.sessionId, receivedMs: b.receivedMs,
+    action: b.action, reason: b.reason, droppedDatagrams: b.droppedDatagrams,
+  };
+}
+
 /**
  * Which session a boundary leaves open. `suspend` and `resume` leave it as it
  * was: a suspended session is still one that a crash must close with an
@@ -177,13 +184,15 @@ interface JournalScan extends RecoveryResult {
   openSession: string | null;
   lastReceivedMs: number;
   index: EntryIndex;
+  /** Every boundary the scan passed, in id order: they are few, and a query needs all of them to place its gaps. */
+  boundaries: BoundaryEvidence[];
 }
 
 function scanJournal(file: BlockFile): JournalScan {
   const index = new EntryIndex();
   const base: JournalScan = {
     generation: null, completeEntries: 0, lastEntryId: 0, validBytes: 0, tornTail: null, status: 'empty',
-    createdMs: 0, openSession: null, lastReceivedMs: 0, index,
+    createdMs: 0, openSession: null, lastReceivedMs: 0, index, boundaries: [],
   };
   const size = file.size();
   if (size === 0) return base;
@@ -214,22 +223,27 @@ function scanJournal(file: BlockFile): JournalScan {
 
   let open: string | null = null;
   let lastReceivedMs = header.createdMs;
+  const boundaries: BoundaryEvidence[] = [];
   const outcome = scanEntries(file, JOURNAL_FRAMING, FILE_HEADER_BYTES, 0, (e) => {
     const before = open;
+    let receivedMs = 0;
     if (e.kind === KIND_DATAGRAM) {
       if (open === null) return 'a datagram with no open session';
       const d = decodeDatagramBody(e.body);
       if (!d.ok) return d.reason;
       lastReceivedMs = d.value.receivedMs;
+      receivedMs = d.value.receivedMs;
     } else if (e.kind === KIND_BOUNDARY) {
       const b = parseBoundary(e.body);
       if (!b.ok) return b.reason;
       open = sessionAfter(open, b.value);
       lastReceivedMs = b.value.receivedMs;
+      receivedMs = b.value.receivedMs;
+      boundaries.push(boundaryEvidence(generation, e.entryId, b.value));
     } else {
       return `unknown kind ${e.kind}`;
     }
-    index.note(e.entryId, e.offset, before);
+    index.note(e.entryId, e.offset, before, receivedMs);
     return null;
   });
 
@@ -243,6 +257,7 @@ function scanJournal(file: BlockFile): JournalScan {
     ...(outcome.problem === null ? {} : { problem: outcome.problem }),
     openSession: open,
     lastReceivedMs,
+    boundaries,
   };
 }
 
@@ -277,11 +292,20 @@ export class MonitoringJournal {
   private openSession: string | null;
   private readonly index: EntryIndex;
   private readonly generationHex: string;
+  /**
+   * Every boundary in the file, in id order, kept in memory: the open scan
+   * collects them and every append adds to the list. A history query needs all
+   * of them to place its gaps, and they are a few per session, not per second.
+   */
+  private readonly boundaryList: BoundaryEvidence[];
 
   private constructor(
     private readonly file: BlockFile,
     private readonly options: JournalOptions,
-    init: { generation: string; end: number; lastId: number; state: JournalState; openSession: string | null; index: EntryIndex },
+    init: {
+      generation: string; end: number; lastId: number; state: JournalState; openSession: string | null;
+      index: EntryIndex; boundaries: BoundaryEvidence[];
+    },
   ) {
     this.generationHex = init.generation;
     this.end = init.end;
@@ -289,6 +313,7 @@ export class MonitoringJournal {
     this.status = init.state;
     this.openSession = init.openSession;
     this.index = init.index;
+    this.boundaryList = init.boundaries;
   }
 
   /**
@@ -309,7 +334,7 @@ export class MonitoringJournal {
     };
     const refused = (state: JournalState): MonitoringJournal => new MonitoringJournal(file, options, {
       generation: scan.generation ?? '', end: scan.validBytes, lastId: scan.lastEntryId, state,
-      openSession: null, index: scan.index,
+      openSession: null, index: scan.index, boundaries: scan.boundaries,
     });
 
     if (scan.status === 'corrupt') return { journal: refused('refused-corrupt'), recovery };
@@ -332,7 +357,7 @@ export class MonitoringJournal {
       }
       const journal = new MonitoringJournal(file, options, {
         generation: generationToHex(bytes), end: FILE_HEADER_BYTES, lastId: 0, state,
-        openSession: null, index: new EntryIndex(),
+        openSession: null, index: new EntryIndex(), boundaries: [],
       });
       return { journal, recovery };
     }
@@ -347,7 +372,7 @@ export class MonitoringJournal {
     }
     const journal = new MonitoringJournal(file, options, {
       generation: scan.generation!, end: scan.validBytes, lastId: scan.lastEntryId, state,
-      openSession: scan.openSession, index: scan.index,
+      openSession: scan.openSession, index: scan.index, boundaries: scan.boundaries,
     });
     // A session a crash left open. `receivedMs` is the last entry's own, so the
     // gap runs from the last thing seen, and no count is invented.
@@ -428,7 +453,7 @@ export class MonitoringJournal {
       return false;
     }
 
-    const written = this.writeEntry(kind, body);
+    const written = this.writeEntry(kind, body, input.receivedMs, boundary);
     if (!written) return false;
     if (boundary !== null) this.afterBoundary(boundary);
     return true;
@@ -483,7 +508,7 @@ export class MonitoringJournal {
       if (this.status === 'open') this.status = 'storage-limit';
       return false;
     }
-    if (!this.writeEntry(KIND_BOUNDARY, body)) return false;
+    if (!this.writeEntry(KIND_BOUNDARY, body, b.receivedMs, b)) return false;
     this.afterBoundary(b);
     return true;
   }
@@ -497,7 +522,7 @@ export class MonitoringJournal {
    * if the disk will let it, and the journal stops: it cannot know what state
    * the file is in, and a torn tail is what the next open expects to find.
    */
-  private writeEntry(kind: number, body: Uint8Array): boolean {
+  private writeEntry(kind: number, body: Uint8Array, receivedMs: number, boundary: BoundaryFields | null): boolean {
     const id = this.lastId + 1;
     const bytes = encodeEntry(JOURNAL_FRAMING, id, kind, body);
     try {
@@ -507,7 +532,8 @@ export class MonitoringJournal {
       this.status = 'failed';
       return false;
     }
-    this.index.note(id, this.end, this.openSession);
+    this.index.note(id, this.end, this.openSession, receivedMs);
+    if (boundary !== null) this.boundaryList.push(boundaryEvidence(this.generationHex, id, boundary));
     this.end += bytes.length;
     this.lastId = id;
     return true;
@@ -582,6 +608,48 @@ export class MonitoringJournal {
     }
     const last = id - 1;
     return { entries, nextAfterId: last, done: last >= through };
+  }
+
+  /**
+   * The id ranges, merged and ascending, that might hold a datagram received in
+   * `[fromMs, toMs)`, no later than the snapshot. Answered from the index
+   * alone, and by overlap of each stride's smallest and largest receipt time:
+   * a clock that stepped back makes a stride's last entry earlier than its
+   * first, and a test on either end would lose the entries between. A range may
+   * hold entries outside the window - the reader checks each one it reads - but
+   * an id outside every range holds none inside it.
+   */
+  locate(snapshot: { generation: string; throughEntryId: number }, fromMs: number, toMs: number): { fromId: number; toId: number }[] {
+    if (snapshot.generation !== this.generationHex) throw new StaleGenerationError(snapshot.generation, this.generationHex);
+    return this.index.strideRanges(fromMs, toMs, Math.min(snapshot.throughEntryId, this.lastId));
+  }
+
+  /**
+   * The boundaries after `afterId` and no later than the snapshot, from memory.
+   * `nextAfterId` is the last id the answer is complete through - the snapshot's
+   * own when `done` - so a cache that stores it knows it has seen every
+   * boundary up to there, whether or not the ids in between held any.
+   */
+  readBoundaries(
+    snapshot: { generation: string; throughEntryId: number }, afterId: number, maxEntries: number,
+  ): { entries: BoundaryEvidence[]; nextAfterId: number; done: boolean } {
+    if (!Number.isSafeInteger(afterId) || afterId < 0) throw new RangeError(`afterId ${afterId} is not a non-negative safe integer`);
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) throw new RangeError(`maxEntries ${maxEntries} is not a positive safe integer`);
+    if (snapshot.generation !== this.generationHex) throw new StaleGenerationError(snapshot.generation, this.generationHex);
+    const through = Math.min(snapshot.throughEntryId, this.lastId);
+    const list = this.boundaryList;
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (list[mid].ref.entryId <= afterId) lo = mid + 1; else hi = mid;
+    }
+    const entries: BoundaryEvidence[] = [];
+    let i = lo;
+    while (i < list.length && list[i].ref.entryId <= through && entries.length < maxEntries) entries.push(list[i++]);
+    const more = i < list.length && list[i].ref.entryId <= through;
+    if (more) return { entries, nextAfterId: entries[entries.length - 1].ref.entryId, done: false };
+    return { entries, nextAfterId: Math.max(afterId, through), done: true };
   }
 
   private readBytes(offset: number, n: number): Uint8Array {

@@ -12,7 +12,7 @@
  * ...  deflate of:
  *   u8   flags                         bit 0: complete
  *   u16  key length, then the source key (UTF-8)
- *   u64  minuteMs, records, reportedOctets, reportedPackets, malformed, unsupported
+ *   u64  minuteMs, records, reportedOctets, reportedPackets, malformed, unsupported, unknownSamplingRecords
  *   u32  endpoint count, then per endpoint: 4 address bytes, u64 sent, u64 received
  *   u32  conversation count, then per conversation: 4 src, 4 dst, u64 octets, u64 packets
  * ```
@@ -57,7 +57,7 @@ const MAX_KEY_BYTES = 0xffff;
  * one of those keys as a conversation, the larger row.
  */
 export const MAX_ROLLUP_INFLATED_BYTES =
-  1 + 2 + MAX_KEY_BYTES + 6 * 8 + 4 + 4 + LIMITS.minuteKeyBudget * Math.max(ENDPOINT_BYTES, CONVERSATION_BYTES);
+  1 + 2 + MAX_KEY_BYTES + 7 * 8 + 4 + 4 + LIMITS.minuteKeyBudget * Math.max(ENDPOINT_BYTES, CONVERSATION_BYTES);
 const utf8 = new TextEncoder();
 const utf8Strict = new TextDecoder('utf-8', { fatal: true });
 
@@ -77,7 +77,7 @@ export function encodeMinuteRollup(rollup: MinuteRollup, deflate: Deflate): Uint
   if (rollup.endpoints.length + rollup.conversations.length > LIMITS.minuteKeyBudget) {
     throw new RangeError(`a rollup holds at most ${LIMITS.minuteKeyBudget} endpoints and conversations together`);
   }
-  const size = 1 + 2 + key.length + 6 * 8 + 4 + rollup.endpoints.length * ENDPOINT_BYTES + 4
+  const size = 1 + 2 + key.length + 7 * 8 + 4 + rollup.endpoints.length * ENDPOINT_BYTES + 4
     + rollup.conversations.length * CONVERSATION_BYTES;
   const raw = new Uint8Array(size);
   const v = new DataView(raw.buffer);
@@ -92,6 +92,7 @@ export function encodeMinuteRollup(rollup: MinuteRollup, deflate: Deflate): Uint
     u64(rollup.reportedPackets, 'reportedPackets'),
     safe(rollup.malformed, 'malformed'),
     safe(rollup.unsupported, 'unsupported'),
+    safe(rollup.unknownSamplingRecords, 'unknownSamplingRecords'),
   ]) {
     v.setBigUint64(at, n, true); at += 8;
   }
@@ -161,6 +162,7 @@ export function decodeMinuteRollup(bytes: Uint8Array, inflate: Inflate): MinuteR
   const reportedPackets = big('reportedPackets');
   const malformed = counter('malformed');
   const unsupported = counter('unsupported');
+  const unknownSamplingRecords = counter('unknownSamplingRecords');
 
   need(4, 'the endpoint count');
   const endpointCount = v.getUint32(at, true); at += 4;
@@ -189,6 +191,6 @@ export function decodeMinuteRollup(bytes: Uint8Array, inflate: Inflate): MinuteR
 
   return {
     sourceKey, minuteMs, complete: flags === 1, records, reportedOctets, reportedPackets,
-    endpoints, conversations, malformed, unsupported,
+    endpoints, conversations, malformed, unsupported, unknownSamplingRecords,
   };
 }

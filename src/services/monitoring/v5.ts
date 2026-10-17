@@ -46,6 +46,22 @@ export function sourceKey(exporterIPv4: string, engineType: number, engineId: nu
   return `${exporterIPv4}/${engineType}/${engineId}`;
 }
 
+/**
+ * The key a datagram with no engine is rolled up under: the bare exporter
+ * address, with no slashes, so it can never equal a `sourceKey`. A malformed or
+ * unsupported datagram has no engine to name, and a rollup minute still has to
+ * count it (ADR 0059).
+ */
+export function exporterKey(exporterIPv4: string): string {
+  return exporterIPv4;
+}
+
+/** The exporter a `sourceKey` or an `exporterKey` belongs to. */
+export function exporterOf(key: string): string {
+  const slash = key.indexOf('/');
+  return slash < 0 ? key : key.slice(0, slash);
+}
+
 function ipv4(v: DataView, at: number): string {
   return `${v.getUint8(at)}.${v.getUint8(at + 1)}.${v.getUint8(at + 2)}.${v.getUint8(at + 3)}`;
 }

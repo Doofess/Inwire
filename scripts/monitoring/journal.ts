@@ -1012,7 +1012,7 @@ class FaultyFile implements BlockFile {
 
 test('EntryIndex: checkpoints every INDEX_STRIDE entries, seek answers the nearest at or before', () => {
   const ix = new EntryIndex();
-  for (let id = 1; id <= INDEX_STRIDE * 3 + 5; id++) ix.note(id, 1000 + id * 10, id === 1 ? null : 'S');
+  for (let id = 1; id <= INDEX_STRIDE * 3 + 5; id++) ix.note(id, 1000 + id * 10, id === 1 ? null : 'S', 5000 + id);
   assert.equal(ix.checkpoints, 4);
   assert.deepEqual(ix.seek(1), { entryId: 1, offset: 1010, openSession: null });
   assert.equal(ix.seek(INDEX_STRIDE)?.entryId, 1);
@@ -1036,7 +1036,7 @@ function rollup(over: Partial<MinuteRollup> = {}): MinuteRollup {
       { srcAddr: '10.0.0.1', dstAddr: '10.0.0.2', reportedOctets: 2n ** 53n + 1n, reportedPackets: 9007199254740993n },
       { srcAddr: '10.0.0.2', dstAddr: '10.0.0.1', reportedOctets: 0n, reportedPackets: 0n },
     ],
-    malformed: 2, unsupported: 1,
+    malformed: 2, unsupported: 1, unknownSamplingRecords: 3,
     ...over,
   };
 }
@@ -1052,7 +1052,7 @@ test('rollupCodec: round trip with bigints above 2^53, exactly', () => {
 test('rollupCodec: an incomplete minute and empty maps', () => {
   const incomplete = rollup({ complete: false, endpoints: [], conversations: [], records: 50_000 });
   assert.deepEqual(decodeMinuteRollup(encodeMinuteRollup(incomplete, deflate), inflate), incomplete);
-  const empty = rollup({ endpoints: [], conversations: [], records: 0, reportedOctets: 0n, reportedPackets: 0n, malformed: 0, unsupported: 0 });
+  const empty = rollup({ endpoints: [], conversations: [], records: 0, reportedOctets: 0n, reportedPackets: 0n, malformed: 0, unsupported: 0, unknownSamplingRecords: 0 });
   assert.deepEqual(decodeMinuteRollup(encodeMinuteRollup(empty, deflate), inflate), empty);
   const unicode = rollup({ sourceKey: 'exporter/éé/0/1' });
   assert.deepEqual(decodeMinuteRollup(encodeMinuteRollup(unicode, deflate), inflate), unicode);
@@ -1102,13 +1102,13 @@ test('rollupCodec: the inflate bound is computed and the key budget is a total o
   // A hand-built body whose counts are over budget but honest about the bytes they carry is refused by the decoder.
   const handBuilt = (endpoints: number, conversations: number): Uint8Array => {
     const key = new TextEncoder().encode('k');
-    const raw = new Uint8Array(1 + 2 + key.length + 48 + 4 + endpoints * 20 + 4 + conversations * 24);
+    const raw = new Uint8Array(1 + 2 + key.length + 56 + 4 + endpoints * 20 + 4 + conversations * 24);
     const v = new DataView(raw.buffer);
     let at = 0;
     raw[at++] = 1;
     v.setUint16(at, key.length, true); at += 2;
     raw.set(key, at); at += key.length;
-    at += 48;
+    at += 56;
     v.setUint32(at, endpoints, true); at += 4 + endpoints * 20;
     v.setUint32(at, conversations, true);
     const out = new Uint8Array(2 + deflate(raw).length);
@@ -1161,11 +1161,11 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.deepEqual(first.store.watermark(), WM(10));
     const check = (store: RollupStore) => {
       assert.deepEqual(store.readMinutes('a', M0, M0 + 2 * MIN, 1 << 20), [
-        { minuteMs: M0, bytes: mb(1) }, { minuteMs: M0 + MIN, bytes: mb(2) },
+        { minuteMs: M0, throughEntryId: 10, bytes: mb(1) }, { minuteMs: M0 + MIN, throughEntryId: 10, bytes: mb(2) },
       ]);
       assert.deepEqual(store.readMinutes('a', M0, M0 + MIN, 1 << 20).map((m) => m.minuteMs), [M0], 'toMs is exclusive');
       assert.deepEqual(store.readMinutes('a', M0 + 1, M0 + MIN, 1 << 20), []);
-      assert.deepEqual(store.readMinutes('b', 0, Number.MAX_SAFE_INTEGER, 1 << 20), [{ minuteMs: M0, bytes: new Uint8Array(0) }]);
+      assert.deepEqual(store.readMinutes('b', 0, Number.MAX_SAFE_INTEGER, 1 << 20), [{ minuteMs: M0, throughEntryId: 10, bytes: new Uint8Array(0) }]);
       assert.deepEqual(store.readMinutes('nobody', 0, Number.MAX_SAFE_INTEGER, 1 << 20), []);
     };
     check(first.store);
@@ -1183,6 +1183,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     const got = openStore(rig.reopen()).store.readMinutes('a', M0, M0 + 2 * MIN, 1 << 20);
     assert.deepEqual(got.map((m) => m.minuteMs), [M0 + MIN, M0, M0 + MIN]);
     assert.deepEqual(got.map((m) => m.bytes), [mb(1), mb(2), mb(3)]);
+    assert.deepEqual(got.map((m) => m.throughEntryId), [10, 10, 20], 'each fragment names its own batch watermark');
     assert.throws(() => store.readMinutes('a', M0, M0 + 2 * MIN, 100), /maxBytes|budget|limit/i, 'a range past maxBytes is refused, not clipped');
   });
 
@@ -1259,7 +1260,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     stale.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(9) }], WM(1));
     const reopened = openStore(rig.reopen(), { ...JOURNAL_INFO, throughEntryId: 1 });
     assert.equal(reopened.status, 'ok');
-    assert.deepEqual(reopened.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20), [{ minuteMs: M0, bytes: mb(9) }]);
+    assert.deepEqual(reopened.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20), [{ minuteMs: M0, throughEntryId: 1, bytes: mb(9) }]);
     reopened.store.reset();
     assert.equal(openStore(rig.reopen()).status, 'empty');
   });
@@ -1371,10 +1372,137 @@ test('volume: opens both files under a temp root, creates the directory, plain t
   }
 });
 
+// --- the time index and the boundary list (Task 4) ---------------------------------------------
+
+test('EntryIndex: min and max receipt time per stride, overlap and not first/last, the open stride updates on append', () => {
+  const ix = new EntryIndex();
+  // Stride 0: the clock steps back half way, so first (1000) is later than last (400).
+  for (let id = 1; id <= INDEX_STRIDE; id++) ix.note(id, 100 + id, null, id <= 100 ? 1000 + id : 400);
+  // Stride 1: ordinary, 5000..5099, still open.
+  for (let id = INDEX_STRIDE + 1; id <= INDEX_STRIDE + 100; id++) ix.note(id, 100 + id, null, 5000 + (id - INDEX_STRIDE - 1));
+  const last = INDEX_STRIDE + 100;
+  // 400..1100 overlap [450, 500)? The range sits in the stepped-back span, which neither first (1001) nor last (400) brackets.
+  assert.deepEqual(ix.strideRanges(450, 500, last), [{ fromId: 1, toId: INDEX_STRIDE }], 'found by overlap');
+  assert.deepEqual(ix.strideRanges(0, 400, last), [], 'max 1100 and min 400: nothing before 400');
+  assert.deepEqual(ix.strideRanges(1101, 5000, last), [], 'between the strides: nothing');
+  assert.deepEqual(ix.strideRanges(5099, 5100, last), [{ fromId: INDEX_STRIDE + 1, toId: last }], 'the open stride is clipped to the last id');
+  assert.deepEqual(ix.strideRanges(0, 10_000, last), [{ fromId: 1, toId: last }], 'adjacent strides merge');
+  assert.deepEqual(ix.strideRanges(0, 10_000, 10), [{ fromId: 1, toId: 10 }], 'clipped to the through id');
+  // The open stride grows with an append that is later than everything in it.
+  ix.note(last + 1, 9999, null, 9000);
+  assert.deepEqual(ix.strideRanges(8999, 9001, last + 1), [{ fromId: INDEX_STRIDE + 1, toId: last + 1 }]);
+  assert.deepEqual(new EntryIndex().strideRanges(0, 10, 100), []);
+});
+
+function timeIndexCases(kind: 'memory' | 'disk'): void {
+  const tag = (s: string) => `[${kind}] ${s}`;
+
+  test(tag('locate: merged ranges clipped to the snapshot, and a stepped-back clock is found by overlap'), () => {
+    const rig = newRig(kind);
+    const { journal } = open(rig.file);
+    const inputs: EvidenceInput[] = [bnd('start', 'S1', T0)];
+    // 600 datagrams: stride 0 and 1 ascend from T0 + 1000; stride 2 starts at a clock far behind.
+    for (let i = 0; i < 600; i++) inputs.push(dg(i < 511 ? T0 + 1000 + i : T0 - 50_000 + i));
+    journal.append(inputs);
+    const snap = journal.snapshot();
+    assert.equal(snap.throughEntryId, 601);
+    const wide = journal.locate(snap, 0, T0 + 10_000_000);
+    assert.deepEqual(wide, [{ fromId: 1, toId: 601 }], 'every stride overlaps; adjacent ranges merge');
+    // The stepped-back entries (ids 513..601) are in stride 2 (ids 513..768) alone.
+    const back = journal.locate(snap, T0 - 51_000, T0 - 40_000);
+    assert.deepEqual(back, [{ fromId: 513, toId: 601 }]);
+    // The first stepped-back stamp (id 513) is found alone.
+    assert.deepEqual(journal.locate(snap, T0 - 49_489, T0 - 49_488), [{ fromId: 513, toId: 601 }]);
+    // Between the two clocks there is nothing to read.
+    assert.deepEqual(journal.locate(snap, T0 - 40_000, T0 - 1), []);
+    // The snapshot clips.
+    assert.deepEqual(journal.locate({ generation: GEN, throughEntryId: 300 }, 0, T0 + 10_000_000), [{ fromId: 1, toId: 300 }]);
+    assert.deepEqual(journal.locate({ generation: GEN, throughEntryId: 0 }, 0, T0 + 10_000_000), []);
+    // A snapshot beyond the journal's end clips to the end.
+    assert.deepEqual(journal.locate({ generation: GEN, throughEntryId: 9999 }, 0, T0 + 10_000_000), [{ fromId: 1, toId: 601 }]);
+    assert.throws(() => journal.locate({ generation: 'f'.repeat(32), throughEntryId: 5 }, 0, 10), StaleGenerationError);
+    // The same answer after a reopen: the index is rebuilt from the scan. The reopen closes the
+    // session the crash left open with an `interrupted` boundary (id 602), in the last stride.
+    const reopened = open(rig.reopen()).journal;
+    assert.equal(reopened.snapshot().throughEntryId, 602);
+    assert.deepEqual(reopened.locate(reopened.snapshot(), T0 - 51_000, T0 - 40_000), [{ fromId: 513, toId: 602 }]);
+    // Boundaries count: a lone early boundary pulls its stride's min down.
+    const rig2 = newRig(kind);
+    const j2 = open(rig2.file).journal;
+    j2.append([bnd('start', 'S1', T0 + 500), dg(T0 + 600), bnd('gap', 'S1', T0 + 100, 'shed', 2)]);
+    assert.deepEqual(j2.locate(j2.snapshot(), T0 + 100, T0 + 101), [{ fromId: 1, toId: 3 }]);
+  });
+
+  test(tag('readBoundaries: from the open scan and from appends, paged, by cursor'), () => {
+    const rig = newRig(kind);
+    const { journal } = open(rig.file);
+    journal.append([
+      bnd('start', 'S1', T0), dg(T0 + 1), bnd('gap', 'S1', T0 + 2, 'inbox full', 5), dg(T0 + 3),
+      bnd('suspend', 'S1', T0 + 4, 'sleep'), bnd('resume', 'S1', T0 + 5, 'wake'), dg(T0 + 6),
+    ]);
+    const snap = journal.snapshot();
+    const ids = (r: { entries: BoundaryEvidence[] }) => r.entries.map((e) => e.ref.entryId);
+    const all = journal.readBoundaries(snap, 0, 100);
+    assert.deepEqual(ids(all), [1, 3, 5, 6]);
+    assert.equal(all.done, true);
+    assert.equal(all.nextAfterId, 7, 'complete through the snapshot, whatever the ids in between held');
+    assert.deepEqual(all.entries[1], { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: 'S1', receivedMs: T0 + 2, action: 'gap', reason: 'inbox full', droppedDatagrams: 5 });
+    // Paging by two.
+    const p1 = journal.readBoundaries(snap, 0, 2);
+    assert.deepEqual([ids(p1), p1.done, p1.nextAfterId], [[1, 3], false, 3]);
+    const p2 = journal.readBoundaries(snap, p1.nextAfterId, 2);
+    assert.deepEqual([ids(p2), p2.done, p2.nextAfterId], [[5, 6], true, 7]);
+    assert.deepEqual(ids(journal.readBoundaries(snap, 7, 2)), []);
+    // The snapshot clips: a later boundary is not in an older answer.
+    journal.append([bnd('stop', 'S1', T0 + 8, 'user')]);
+    assert.deepEqual(ids(journal.readBoundaries(snap, 0, 100)), [1, 3, 5, 6]);
+    assert.deepEqual(ids(journal.readBoundaries(journal.snapshot(), 0, 100)), [1, 3, 5, 6, 8]);
+    // After a reopen the open scan supplies the list, plus the `interrupted` a crash earns.
+    const rig2 = newRig(kind);
+    const j2 = open(rig2.file).journal;
+    j2.append([bnd('start', 'S9', T0), dg(T0 + 1), bnd('gap', 'S9', T0 + 2, 'x', 1), dg(T0 + 3)]);
+    const again = open(rig2.reopen()).journal;
+    const after = again.readBoundaries(again.snapshot(), 0, 100);
+    assert.deepEqual(after.entries.map((e) => [e.ref.entryId, e.action]), [[1, 'start'], [3, 'gap'], [5, 'interrupted']]);
+    // Numbers are untrusted; a foreign generation is stale.
+    assert.throws(() => journal.readBoundaries(snap, -1, 1), RangeError);
+    assert.throws(() => journal.readBoundaries(snap, 0, 0), RangeError);
+    assert.throws(() => journal.readBoundaries(snap, 0.5, 1), RangeError);
+    assert.throws(() => journal.readBoundaries({ generation: 'f'.repeat(32), throughEntryId: 5 }, 0, 1), StaleGenerationError);
+  });
+
+  test(tag('sidecar sources(): sorted keys the sidecar holds minutes for; refused while it needs a rebuild'), () => {
+    const rig = newRig(kind);
+    const { store } = RollupStore.open(rig.file, JOURNAL_INFO, { nowMs: () => T0 });
+    assert.deepEqual(store.sources(), []);
+    store.appendMinutes([
+      { sourceKey: 'b/0/1', minuteMs: M0, bytes: mb(1) }, { sourceKey: 'a/0/0', minuteMs: M0, bytes: mb(2) },
+      { sourceKey: 'a/0/0', minuteMs: M0 + MIN, bytes: mb(3) }, { sourceKey: 'a', minuteMs: M0, bytes: mb(4) },
+    ], WM(4));
+    assert.deepEqual(store.sources(), ['a', 'a/0/0', 'b/0/1']);
+    const stale = RollupStore.open(rig.reopen(), { ...JOURNAL_INFO, generation: 'f'.repeat(32) }, { nowMs: () => T0 });
+    assert.equal(stale.status, 'rebuild-required');
+    assert.throws(() => stale.store.sources(), /needs a rebuild/);
+  });
+
+  test(tag('sidecar: each fragment keeps its own batch watermark across a reopen'), () => {
+    const rig = newRig(kind);
+    const first = RollupStore.open(rig.file, JOURNAL_INFO, { nowMs: () => T0 }).store;
+    first.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(5));
+    first.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }, { sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(3) }], WM(9));
+    const expected = [[0, 5], [0, 9], [MIN, 9]];
+    const read = (s: RollupStore) => s.readMinutes('a', M0, M0 + 2 * MIN, 1 << 20).map((m) => [m.minuteMs - M0, m.throughEntryId]);
+    assert.deepEqual(read(first), expected);
+    const reopened = RollupStore.open(rig.reopen(), JOURNAL_INFO, { nowMs: () => T0 }).store;
+    assert.deepEqual(read(reopened), expected);
+  });
+}
+
 try {
   for (const kind of ['memory', 'disk'] as const) {
     journalCases(kind);
     sidecarCases(kind);
+    timeIndexCases(kind);
   }
 } finally {
   for (const rig of openRigs) {

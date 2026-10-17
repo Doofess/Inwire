@@ -54,7 +54,7 @@ export interface RollupStoreOptions {
 
 export interface MinuteInput { sourceKey: string; minuteMs: number; bytes: Uint8Array }
 
-interface Located { minuteMs: number; offset: number; bodyLength: number; bytes: number }
+interface Located { minuteMs: number; offset: number; bodyLength: number; bytes: number; throughEntryId: number }
 
 /** What the open scan found, before anything is decided about it. */
 interface SidecarScan {
@@ -120,7 +120,7 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
       if (minuteThrough > BigInt(Number.MAX_SAFE_INTEGER)) return 'a minute entry has a watermark out of range';
       pending.push([key, {
         minuteMs: Number(minuteMs), offset: e.offset + ENTRY_HEADER_BYTES, bodyLength: e.body.length,
-        bytes: e.body.length - (at + 16),
+        bytes: e.body.length - (at + 16), throughEntryId: Number(minuteThrough),
       }, Number(minuteThrough)]);
       return null;
     }
@@ -255,7 +255,10 @@ export class RollupStore {
       body.set(m.bytes, 2 + key.length + 16);
       const entry = encodeEntry(ROLLUP_FRAMING, ++id, KIND_MINUTE, body);
       encoded.push(entry);
-      placed.push([m.sourceKey, { minuteMs: m.minuteMs, offset: at + ENTRY_HEADER_BYTES, bodyLength: body.length, bytes: m.bytes.length }]);
+      placed.push([m.sourceKey, {
+        minuteMs: m.minuteMs, offset: at + ENTRY_HEADER_BYTES, bodyLength: body.length, bytes: m.bytes.length,
+        throughEntryId: watermark.throughEntryId,
+      }]);
       at += entry.length;
     }
     const wm = new Uint8Array(WATERMARK_BODY_BYTES);
@@ -289,8 +292,14 @@ export class RollupStore {
    * order they were written. Several for one minute is normal after a clock
    * step back; the reader sums them. A range holding more than `maxBytes` is
    * refused, never clipped: a clipped answer is a wrong total.
+   *
+   * Each carries `throughEntryId`, the watermark of the batch that wrote it:
+   * a reader that froze the watermark at its start uses only fragments at or
+   * below it, so a batch posted during the query changes nothing in its answer.
    */
-  readMinutes(sourceKey: string, fromMinuteMs: number, toMinuteMs: number, maxBytes: number): { minuteMs: number; bytes: Uint8Array }[] {
+  readMinutes(
+    sourceKey: string, fromMinuteMs: number, toMinuteMs: number, maxBytes: number,
+  ): { minuteMs: number; throughEntryId: number; bytes: Uint8Array }[] {
     this.requireUsable();
     const hits = (this.minutes.get(sourceKey) ?? []).filter((m) => m.minuteMs >= fromMinuteMs && m.minuteMs < toMinuteMs);
     const total = hits.reduce((n, m) => n + m.bytes, 0);
@@ -304,8 +313,18 @@ export class RollupStore {
       }
       const parsed = parseEntryHeader(ROLLUP_FRAMING, header);
       if (!parsed.ok || parsed.crc !== entryCrc(header, body)) throw new Error('a stored minute no longer matches its checksum');
-      return { minuteMs: m.minuteMs, bytes: body.slice(2 + keyLength + 16) };
+      return { minuteMs: m.minuteMs, throughEntryId: m.throughEntryId, bytes: body.slice(2 + keyLength + 16) };
     });
+  }
+
+  /**
+   * Every source key the sidecar holds a minute for, sorted. The Worker learns
+   * which engines the journal has already admitted from these (the engine cap
+   * is the first 16 in journal order), then extends the set from the tail.
+   */
+  sources(): string[] {
+    this.requireUsable();
+    return [...this.minutes.keys()].sort();
   }
 
   /** Back to an empty sidecar with a fresh header: how a `rebuild-required` one recovers. */

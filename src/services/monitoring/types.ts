@@ -176,6 +176,11 @@ export interface MinuteRollup {
   conversations: ConversationTotals[];
   malformed: number;
   unsupported: number;
+  /**
+   * Records whose datagram said nothing about sampling. A bucket's sampling is
+   * known only if none of its records are in this count.
+   */
+  unknownSamplingRecords: number;
 }
 
 /** What the sidecar covers. Any disagreement with the journal means rebuild, never trust. */
@@ -224,7 +229,11 @@ export interface HistoryResult {
   samplingKnown: boolean;
   matchingRecords: number;
   answeredFrom: { rollupMinutes: number; rawMinutes: number };
-  /** A focused query's first `LIMITS.focusedReferences` supporting records, in journal order. */
+  /**
+   * A focused query's first `LIMITS.focusedReferences` (100) supporting
+   * records, in journal order. `matchingRecords` still counts every match, so a
+   * caller can say "100 of 4,213": the list is a detail limit, never the count.
+   */
   evidence: { ref: EvidenceRef; recordIndex: number }[];
 }
 
@@ -232,6 +241,6 @@ export type HistoryReply =
   | { ok: true; value: HistoryResult }
   | {
     ok: false;
-    code: 'range-too-large' | 'cancelled' | 'stale-generation' | 'runtime-unavailable' | 'storage-failed';
+    code: 'range-too-large' | 'invalid-query' | 'cancelled' | 'stale-generation' | 'runtime-unavailable' | 'storage-failed';
     message: string;
   };
