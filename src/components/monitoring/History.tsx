@@ -139,68 +139,68 @@ export function History({ client, state, config, onFilterCapture }: {
   // a measuring node that came and went with the data would be watched dead.
   return (
     <div ref={chartBox} className="min-w-0">
-    {sources.length === 0 ? <EmptyHistory config={config} state={state} /> : (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {toolbar}
-        <div className="flex items-center gap-2">
-          {loading && <Loader2 className="h-3.5 w-3.5 text-muted-foreground motion-safe:animate-spin" aria-label="Reading" />}
-          <button type="button" className={BUTTON_SECONDARY} disabled={!result || saving.kind === 'saving'}
-            onClick={() => void save()}>
-            <Download className="h-3.5 w-3.5" aria-hidden />
-            {saving.kind === 'saving' ? 'Exporting…' : 'Export CSV'}
-          </button>
-        </div>
-      </div>
-      <SaveLine saving={saving} />
-
-      <div className="min-w-0">
-        {failure ? (
-          <Note tone={failure.code === 'range-too-large' ? 'warn' : 'bad'} role="alert"
-            title={failure.code === 'range-too-large' ? 'That range is too large to read' : 'The history could not be read'}>
-            <p>{failure.message}</p>
-            {failure.code === 'range-too-large' && <p className="text-muted-foreground">Choose a shorter range.</p>}
-          </Note>
-        ) : result ? (
-          <HistoryChart buckets={result.buckets} measure={measure} width={width} />
-        ) : (
-          <div className="flex h-[200px] items-center justify-center gap-1.5 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden />Reading the history…
+      {sources.length === 0 ? <EmptyHistory config={config} state={state} /> : (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {toolbar}
+            <div className="flex items-center gap-2">
+              {loading && <Loader2 className="h-3.5 w-3.5 text-muted-foreground motion-safe:animate-spin" aria-label="Reading" />}
+              <button type="button" className={BUTTON_SECONDARY} disabled={!result || saving.kind === 'saving'}
+                onClick={() => void save()}>
+                <Download className="h-3.5 w-3.5" aria-hidden />
+                {saving.kind === 'saving' ? 'Exporting…' : 'Export CSV'}
+              </button>
+            </div>
           </div>
-        )}
-      </div>
+          <SaveLine saving={saving} />
 
-      {result && !failure && (
-        <>
-          <Facts result={result} />
-          {result.gaps.length > 0 && <Gaps gaps={result.gaps} />}
-          {focus && (
-            <Focus client={client} spec={focus.spec} focus={focus.focus} onClear={() => setFocus(null)}
-              onFilterCapture={onFilterCapture} />
+          <div className="min-w-0">
+            {failure ? (
+              <Note tone={failure.code === 'range-too-large' ? 'warn' : 'bad'} role="alert"
+                title={failure.code === 'range-too-large' ? 'That range is too large to read' : 'The history could not be read'}>
+                <p>{failure.message}</p>
+                {failure.code === 'range-too-large' && <p className="text-muted-foreground">Choose a shorter range.</p>}
+              </Note>
+            ) : result ? (
+              <HistoryChart buckets={result.buckets} measure={measure} width={width} />
+            ) : (
+              <div className="flex h-[200px] items-center justify-center gap-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden />Reading the history…
+              </div>
+            )}
+          </div>
+
+          {result && !failure && (
+            <>
+              <Facts result={result} />
+              {result.gaps.length > 0 && <Gaps gaps={result.gaps} />}
+              {focus && (
+                <Focus client={client} spec={focus.spec} focus={focus.focus} onClear={() => setFocus(null)}
+                  onFilterCapture={onFilterCapture} />
+              )}
+              <div className="grid gap-4 @3xl:grid-cols-2">
+                <TopTable title="Top endpoints" table={result.endpoints} leftColumns={1}
+                  head={['Address', 'Sent', 'Received']}
+                  rows={(rows) => rows.map((r) => ({
+                    key: r.address,
+                    selected: focus?.focus.kind === 'endpoint' && focus.focus.address === r.address,
+                    onSelect: () => select({ kind: 'endpoint', address: r.address }),
+                    cells: [<span className="font-mono">{r.address}</span>, formatBytes(Number(r.sentOctets)), formatBytes(Number(r.receivedOctets))],
+                  }))} />
+                <TopTable title="Top conversations" table={result.conversations} leftColumns={2}
+                  head={['Source', 'Destination', measure === 'octets' ? 'Bytes' : 'Packets']}
+                  rows={(rows) => rows.map((r) => ({
+                    key: `${r.srcAddr}>${r.dstAddr}`,
+                    selected: focus?.focus.kind === 'conversation' && focus.focus.srcAddr === r.srcAddr && focus.focus.dstAddr === r.dstAddr,
+                    onSelect: () => select({ kind: 'conversation', srcAddr: r.srcAddr, dstAddr: r.dstAddr }),
+                    cells: [<span className="font-mono">{r.srcAddr}</span>, <span className="font-mono">{r.dstAddr}</span>,
+                      measure === 'octets' ? formatBytes(Number(r.reportedOctets)) : count(r.reportedPackets)],
+                  }))} />
+              </div>
+            </>
           )}
-          <div className="grid gap-4 @3xl:grid-cols-2">
-            <TopTable title="Top endpoints" table={result.endpoints} leftColumns={1}
-              head={['Address', 'Sent', 'Received']}
-              rows={(rows) => rows.map((r) => ({
-                key: r.address,
-                selected: focus?.focus.kind === 'endpoint' && focus.focus.address === r.address,
-                onSelect: () => select({ kind: 'endpoint', address: r.address }),
-                cells: [<span className="font-mono">{r.address}</span>, formatBytes(Number(r.sentOctets)), formatBytes(Number(r.receivedOctets))],
-              }))} />
-            <TopTable title="Top conversations" table={result.conversations} leftColumns={2}
-              head={['Source', 'Destination', measure === 'octets' ? 'Bytes' : 'Packets']}
-              rows={(rows) => rows.map((r) => ({
-                key: `${r.srcAddr}>${r.dstAddr}`,
-                selected: focus?.focus.kind === 'conversation' && focus.focus.srcAddr === r.srcAddr && focus.focus.dstAddr === r.dstAddr,
-                onSelect: () => select({ kind: 'conversation', srcAddr: r.srcAddr, dstAddr: r.dstAddr }),
-                cells: [<span className="font-mono">{r.srcAddr}</span>, <span className="font-mono">{r.dstAddr}</span>,
-                  measure === 'octets' ? formatBytes(Number(r.reportedOctets)) : count(r.reportedPackets)],
-              }))} />
-          </div>
-        </>
+        </div>
       )}
-    </div>
-    )}
     </div>
   );
 }
