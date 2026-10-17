@@ -320,6 +320,9 @@ async function start(): Promise<void> {
   // prevented quit re-runs every other `will-quit` listener, which is why each
   // of them is idempotent. The drain is bounded by `LIMITS.drainMs` inside the
   // host; past it the utility is killed and the journal left for recovery.
+  // Windows shutdown, logoff and the installer's Restart Manager never reach
+  // `will-quit`; that journal is recovered on the next open too, and that is
+  // the design - not a gap to close with `session-end` and a blocking drain.
   let monitoringDrain: Promise<void> | null = null;
   let monitoringDrained = false;
   app.on('will-quit', (event) => {
@@ -330,7 +333,10 @@ async function start(): Promise<void> {
     monitoringDrain = monitoring.drainForQuit().then((result) => {
       if (!result.ok || !result.clean) console.error(`[monitoring] quit drain was not clean: ${result.ok ? 'final boundary or flush refused' : result.message}`);
       monitoringDrained = true;
-      app.quit();
+      // On a macrotask: a drain that settled through microtasks alone would call
+      // quit inside Electron's own `will-quit` dispatch, where it is ignored, and
+      // leave a windowless process holding the single-instance lock.
+      setImmediate(() => app.quit());
     });
   });
   // Sleep ends intake with a boundary; on resume the UI says why it stopped and

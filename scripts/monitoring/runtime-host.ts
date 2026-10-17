@@ -541,6 +541,35 @@ test('host: isRunning follows a session that exists, has not ended and has a sta
   assert.equal(r.core.isRunning(), false);
 });
 
+test('host: a Start still waiting for the utility counts as running, so a quit then drains rather than kills', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  child.replies.start = 'none';
+  let start = null as StartResult | null;
+  void r.core.start(c1, CONFIG).then((v) => { start = v; });
+  await flush();
+  assert.equal(child.of('start').length, 1);
+  assert.equal(r.core.isRunning(), true, 'no status has come back yet');
+  assert.equal(planQuitDrain({ running: r.core.isRunning(), draining: false, drained: false }), 'drain');
+  child.replies.dispose = { ok: true, clean: true, snapshot: null };
+  const result = await r.core.drainForQuit();
+  assert.equal(result.ok, true);
+  assert.equal(child.of('dispose').length, 1, 'the utility was asked to stop, not just killed');
+  assert.equal(child.killed, 1);
+  await flush();
+  assert.equal(start!.ok, false, 'and the waiting Start was settled');
+});
+
+test('host: a Start the utility refuses leaves isRunning false', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  child.replies.start = { ok: false, message: 'the port is taken' };
+  assert.equal((await r.core.start(c1, CONFIG)).ok, false);
+  assert.equal(r.core.isRunning(), false);
+});
+
 test('host: release while stopped kills the child, sends nothing, announces no exit, and twice is fine', async () => {
   const r = hostRig();
   const c1 = new FakeContents(1);
@@ -722,6 +751,19 @@ test('host: suspend while stopped, or with nothing connected, sends nothing and 
   const sent = child.sent.length;
   assert.deepEqual(await r.core.suspend(), { ok: true, clean: true, snapshot: null });
   assert.equal(child.sent.length, sent);
+});
+
+test('host: suspend during a Start still unanswered sends stop, so the listener does not run through the sleep', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  child.replies.start = 'none';
+  void r.core.start(c1, CONFIG);
+  await flush();
+  assert.equal(r.core.isRunning(), true, 'no status has come back yet');
+  await r.core.suspend();
+  assert.equal(child.of('stop').length, 1);
+  assert.equal(child.of('stop')[0].message.reason, 'suspend');
 });
 
 test('host: a suspend the utility never answers settles at the ordinary stop deadline', async () => {
@@ -1325,33 +1367,24 @@ function heldControl() {
     startMonitoring: () => new Promise((resolve) => { held.start.push(resolve); }),
     stopMonitoring: () => new Promise((resolve) => { held.stop.push(resolve); }),
   };
-  const failAll = (message: string): void => {
-    for (const resolve of held.start.splice(0)) resolve({ ok: false, message });
-    for (const resolve of held.stop.splice(0)) resolve({ ok: false, message, clean: false, snapshot: null });
-  };
-  return { bridge, held, failAll };
+  return { bridge, held };
 }
 
-test('client: on a runtime exit a pending query, detail, start and stop all settle, as failures', async () => {
-  const control = heldControl();
-  const r = clientRig(control.bridge);
+// A pending start or stop on a runtime exit is settled by main, not by the client: 'a pending start is settled as failed
+// when the utility exits' and 'a utility exit settles every pending request', in the host section above, pin it.
+test('client: on a runtime exit a pending query and detail settle, as failures', async () => {
+  const r = clientRig(heldControl().bridge);
   await r.client.connect();
   r.workers[0].replies.query = () => 'none';
   r.workers[0].replies.detail = () => 'none';
   const q = r.client.query('v', {} as never);
   const d = r.client.detail({} as never, {} as never, 0);
-  const start = r.client.start(CONFIG);
-  const stop = r.client.stop();
   await flush();
   r.exit(EXIT);
-  control.failAll(EXIT.message);
-  const [qr, dr, sr, pr] = await Promise.all([q, d, start, stop]);
+  const [qr, dr] = await Promise.all([q, d]);
   assert.equal(qr.ok, false);
   assert.equal((qr as { code: string }).code, 'runtime-unavailable');
   assert.equal(dr, null);
-  assert.equal(sr.ok, false);
-  assert.equal(pr.ok, false);
-  assert.equal(pr.ok ? true : pr.clean, false);
 });
 
 test('client: on a Worker error a pending query and detail settle as failures and control is untouched', async () => {
@@ -1430,6 +1463,15 @@ test('state: a rebuild message is ignored before a connection and after the runt
   assert.equal(reduceMonitoring(gone, { type: 'rebuild', progress }), gone);
   const up = reduceMonitoring(reduceMonitoring(initialMonitoringState, { type: 'connecting' }), { type: 'connected', phase: 'idle', watermark: 0 });
   assert.deepEqual(reduceMonitoring(up, { type: 'rebuild', progress }).rebuild, progress);
+});
+
+test('state: an exit keeps why the listener stopped', () => {
+  let s = reduceMonitoring(initialMonitoringState, { type: 'connecting' });
+  s = reduceMonitoring(s, { type: 'connected', phase: 'live', watermark: 4 });
+  s = reduceMonitoring(s, { type: 'status', status: status({ listener: 'stopped', stopReason: 'suspend' }) });
+  assert.equal(s.intake?.stopReason, 'suspend');
+  s = reduceMonitoring(s, { type: 'exit', exit: EXIT });
+  assert.equal(s.intake?.stopReason, 'suspend');
 });
 
 test('state: an exit makes the runtime unavailable and a dead process is no longer listening', () => {

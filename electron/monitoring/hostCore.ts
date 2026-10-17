@@ -88,6 +88,8 @@ interface Session {
   disposing: boolean;
   /** Whether a listener was last known to be starting or running; `RuntimeExit.wasRunning`. */
   running: boolean;
+  /** Starts asked of the utility and not yet answered: a quit then must drain, not kill. */
+  startsOutstanding: number;
   readonly pending: Map<number, Pending>;
   spawn: Promise<void>;
   rejectSpawn(error: Error): void;
@@ -181,10 +183,11 @@ export class MonitoringHostCore {
     if (source === null) return failStart('that is not a valid monitoring source');
     // A Start can wait out the handshake inside the utility, so its deadline
     // is that wait and then the ordinary one.
+    session.startsOutstanding++;
     const result = await this.ask(
       session, (id) => ({ type: 'start', id, config: source }),
       readStartResult, failStart, LIMITS.handshakeMs + LIMITS.requestMs,
-    );
+    ).finally(() => { session.startsOutstanding--; });
     if (result.ok) session.running = true;
     return result;
   }
@@ -206,7 +209,8 @@ export class MonitoringHostCore {
   async suspend(): Promise<StopResult> {
     if (this.quitting) return failStop(QUITTING);
     const session = this.session;
-    if (session === null || session.ended || !session.running) return NOTHING_TO_STOP;
+    // `isRunning`, not `running`: a Start still unanswered may bind after the lid closes.
+    if (session === null || !this.isRunning()) return NOTHING_TO_STOP;
     return this.stopSession(session, 'suspend');
   }
 
@@ -219,10 +223,10 @@ export class MonitoringHostCore {
     return result;
   }
 
-  /** Whether a listener is starting or listening in a utility that is still alive. */
+  /** Whether a listener is starting or listening in a utility that is still alive, a Start still unanswered included. */
   isRunning(): boolean {
     const session = this.session;
-    return session !== null && !session.ended && session.running;
+    return session !== null && !session.ended && (session.running || session.startsOutstanding > 0);
   }
 
   private isBound(sender: ContentsLike): boolean {
@@ -291,7 +295,7 @@ export class MonitoringHostCore {
     let resolveSpawn!: () => void;
     let rejectSpawn!: (error: Error) => void;
     const session: Session = {
-      child, ended: false, spawned: false, disposing: false, running: false,
+      child, ended: false, spawned: false, disposing: false, running: false, startsOutstanding: 0,
       pending: new Map(),
       spawn: new Promise<void>((resolve, reject) => { resolveSpawn = resolve; rejectSpawn = reject; }),
       rejectSpawn: (error) => rejectSpawn(error),

@@ -160,6 +160,10 @@ export class Collector {
   private listenerError: string | null = null;
   /** Why intake last stopped in this utility's life; cleared by a Start that succeeds. */
   private stopReason: IntakeStopReason | null = null;
+  /** The reason of the latest Stop asked for, so a Start queued behind work and then aborted by it can say why. */
+  private lastStopRequest: StopReason | null = null;
+  /** The `stopReason` the last posted status carried, so a change nothing else posts is still posted. */
+  private publishedStopReason: IntakeStopReason | null = null;
   private cancelFlush: (() => void) | null = null;
 
   private inbox: InboxItem[] = [];
@@ -284,7 +288,8 @@ export class Collector {
 
   stop(reason: StopReason): Promise<StopResult> {
     this.stopEpoch++;
-    this.abortStart();
+    this.lastStopRequest = reason;
+    if (this.abortStart()) this.stopReason = reason;
     return this.run(() => this.stopOp(reason))
       .catch((e): StopResult => ({ ok: false, message: `monitoring could not stop cleanly: ${message(e)}`, clean: false, snapshot: null }));
   }
@@ -294,7 +299,8 @@ export class Collector {
     if (this.disposing !== null) return this.disposing;
     this.disposed = true;
     this.stopEpoch++;
-    this.abortStart();
+    this.lastStopRequest = 'quit';
+    if (this.abortStart()) this.stopReason = 'quit';
     this.disposing = this.run(() => {
       const result = this.stopOp('quit');
       this.cancelStatusTimer();
@@ -343,11 +349,13 @@ export class Collector {
     return next;
   }
 
-  private abortStart(): void {
+  /** Whether a Start was in flight to be aborted. */
+  private abortStart(): boolean {
     const abort = this.startAbort;
-    if (abort === null) return;
+    if (abort === null) return false;
     abort.aborted = true;
     abort.onAbort?.();
+    return true;
   }
 
   // --- the dataset ---------------------------------------------------------------------------------------------------
@@ -499,6 +507,7 @@ export class Collector {
     }
 
     const abort: StartAbort = { aborted: this.stopEpoch !== epoch, onAbort: null };
+    if (abort.aborted && this.lastStopRequest !== null) this.stopReason = this.lastStopRequest;
     this.startAbort = abort;
     try {
       const notReady = await this.awaitReady(abort);
@@ -682,6 +691,7 @@ export class Collector {
       this.listener = 'stopped';
       this.listenerError = null;
     } else {
+      this.stopReason = 'storage-failed';
       this.listener = 'failed';
       this.listenerError = describeStorage(state);
     }
@@ -695,8 +705,9 @@ export class Collector {
     void this.run(() => {
       if (this.socket !== socket || this.session === null) return;
       const why = describeListenError(error, config.bindIPv4, config.port);
-      this.closeSession('socket-error', false);
+      // Before the close, as `stopOp` does: a drain that fills the journal overwrites it.
       this.stopReason = 'socket-error';
+      this.closeSession('socket-error', false);
       this.listener = 'failed';
       this.listenerError = why;
       this.publish();
@@ -740,14 +751,24 @@ export class Collector {
   private stopOp(reason: StopReason): StopResult {
     if (this.session === null) {
       // Nothing is open, so nothing is written: a second Stop is an answer, not an event.
+      // Unless it aborted a Start short of the bind, which posts nothing: after a
+      // suspend nothing else may post either, so the reason it recorded goes now.
+      if (this.stopReason !== this.publishedStopReason) this.publish();
       return { ok: true, clean: true, snapshot: this.dataset?.journal.snapshot() ?? null };
     }
     // Before the close, because a drain that fills the journal ends the session
     // itself and overwrites this with `storage-limit`, which is the truer reason.
     this.stopReason = reason;
     const clean = this.closeSession(reason, reason === 'suspend');
-    this.listener = 'stopped';
-    this.listenerError = null;
+    if (this.listener === 'failed' || this.dataset?.journal.state === 'failed') {
+      // The close ran into a journal failure: a stop is not what happened to the listener, and the status must not say it is.
+      this.stopReason = 'storage-failed';
+      this.listener = 'failed';
+      this.listenerError ??= describeStorage('failed');
+    } else {
+      this.listener = 'stopped';
+      this.listenerError = null;
+    }
     this.publish();
     return { ok: true, clean, snapshot: this.dataset?.journal.snapshot() ?? null };
   }
@@ -788,7 +809,9 @@ export class Collector {
   private publish(): void {
     this.cancelStatusTimer();
     this.lastStatusMs = this.env.now();
-    this.env.postStatus(this.status());
+    const status = this.status();
+    this.publishedStopReason = status.stopReason;
+    this.env.postStatus(status);
   }
 
   private cancelStatusTimer(): void {

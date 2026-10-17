@@ -37,9 +37,16 @@ export type StopResult =
 /** Why intake stopped. `suspend` is `powerMonitor`'s, `quit` the drain's, `user` the Stop button's. */
 export type StopReason = 'user' | 'quit' | 'suspend';
 const STOP_REASONS: ReadonlySet<string> = new Set<StopReason>(['user', 'quit', 'suspend']);
-/** Why intake last stopped: a requested stop's reason, or what ended the listener without one. */
-export type IntakeStopReason = StopReason | 'socket-error' | 'storage-limit';
-const INTAKE_STOP_REASONS: ReadonlySet<string> = new Set<IntakeStopReason>(['user', 'quit', 'suspend', 'socket-error', 'storage-limit']);
+/**
+ * Why intake last stopped: a requested stop's reason, or what ended the
+ * listener without one. `storage-failed` is a journal write or flush that
+ * failed (`storageError` has the words), as against `storage-limit`, which is
+ * the journal refusing to grow.
+ */
+export type IntakeStopReason = StopReason | 'socket-error' | 'storage-limit' | 'storage-failed';
+const INTAKE_STOP_REASONS: ReadonlySet<string> = new Set<IntakeStopReason>([
+  'user', 'quit', 'suspend', 'socket-error', 'storage-limit', 'storage-failed',
+]);
 
 // --- status ---------------------------------------------------------------------------------
 

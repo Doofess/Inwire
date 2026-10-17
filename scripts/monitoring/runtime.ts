@@ -764,7 +764,7 @@ async function main(): Promise<void> {
     assert.equal(r.ok, true);
     assert.equal(r.ok && r.clean, false);
     assert.equal(rig.socket.closed, true);
-    assert.equal(rig.last.listener, 'stopped');
+    assert.equal(rig.last.listener, 'failed', 'a stop that ran into a journal failure does not read as a clean stop');
   });
 
   await test('stop: not clean when the flush does not take', async () => {
@@ -859,6 +859,73 @@ async function main(): Promise<void> {
     await settle();
     assert.equal(rig.last.listener, 'failed');
     assert.equal(rig.last.stopReason, 'socket-error');
+  });
+
+  await test('stopReason: a socket error whose final drain fills the journal says storage-limit, as a Stop does', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 100; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, round));
+      rig.drain();
+    }
+    for (let i = 0; i < 120; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, 9));
+    rig.socket.fail('ECONNRESET', 'the socket broke');
+    await settle();
+    assert.equal(rig.last.storage, 'storage-limit', 'the drain is what hit the limit');
+    assert.equal(rig.last.stopReason, 'storage-limit', 'the journal wrote that stop, not the socket');
+    assert.deepEqual(actions(fileEntries(rig.volume.journal)), ['start', 'stop:storage-limit']);
+  });
+
+  await test('stopReason: a flush that fails says storage-failed', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    rig.volume.journal.failFlush = true;
+    rig.clock.advance(LIMITS.flushMs);
+    assert.equal(rig.last.listener, 'failed');
+    assert.equal(rig.last.stopReason, 'storage-failed');
+  });
+
+  await test('stopReason: a Stop whose close hits a journal failure keeps the listener failed and says storage-failed', async () => {
+    for (const mode of ['failWrites', 'failFlush'] as const) {
+      const rig = new Rig();
+      await rig.listen();
+      rig.volume.journal[mode] = true;
+      const r = await rig.collector.stop('user');
+      assert.equal(r.ok && r.clean, false, mode);
+      assert.equal(rig.last.listener, 'failed', mode);
+      assert.match(rig.last.listenerError ?? '', /could not be written/, mode);
+      assert.equal(rig.last.stopReason, 'storage-failed', mode);
+    }
+  });
+
+  await test('stopReason: a Start aborted by a Stop records that Stop reason, suspend included', async () => {
+    for (const reason of ['suspend', 'user'] as const) {
+      const rig = new Rig();
+      await rig.collector.open(ROOT, CFG.storageLimitBytes);
+      rig.collector.attach(new FakePort());
+      rig.nextBinds.push('hang');
+      const started = rig.collector.start(CFG);
+      await settle();
+      await rig.collector.stop(reason);
+      assert.equal((await started).ok, false);
+      assert.equal(rig.last.stopReason, reason);
+      assert.equal(rig.collector.status().stopReason, reason);
+    }
+  });
+
+  await test('stopReason: a Start aborted before it reached the bind still posts why, so the UI is not left on the old reason', async () => {
+    for (const queued of [false, true]) {
+      const rig = new Rig();
+      // No Worker port: the Start waits for one, short of the bind that would publish.
+      const opening = rig.collector.open(ROOT, CFG.storageLimitBytes);
+      if (!queued) await opening;
+      const started = rig.collector.start(CFG);
+      await settle();
+      await rig.collector.stop('suspend');
+      assert.equal((await started).ok, false, `queued ${queued}`);
+      assert.equal(rig.collector.status().stopReason, 'suspend', `queued ${queued}`);
+      assert.equal(rig.last.stopReason, 'suspend', `queued ${queued}: posted, not only held`);
+    }
   });
 
   await test('stopReason: a full dataset says storage-limit, and a later Stop of the stopped listener leaves it', async () => {
