@@ -161,7 +161,9 @@ export class MonitoringClient {
   private portWait: PortWait | null = null;
   private connecting: Promise<ConnectResult> | null = null;
   private lastId = 0;
-  private lastNonce = 0;
+  // Seeded at random: a reload is a new client, and one counting from 0 again
+  // would take a port main posted for the previous page's same-numbered attempt.
+  private lastNonce = Math.floor(Math.random() * 2 ** 48);
   private disposed = false;
   private readonly unsubscribers: (() => void)[] = [];
 

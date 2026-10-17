@@ -958,6 +958,8 @@ async function main(): Promise<void> {
     assert.equal(second.done, true);
     const inf = await rig.collector.runtime.readBoundaries(snapshot, 0, Infinity);
     assert.equal(inf.entries.length, LIMITS.pageEntries, 'what is not finite is a page too');
+    await assert.rejects(rig.collector.runtime.readBoundaries(snapshot, 0, Number.NaN), RangeError);
+    await assert.rejects(rig.collector.runtime.readBoundaries(snapshot, 0, 0), RangeError);
   });
 
   await test('runtime: readMinutes is clamped to the rollup read constant, so no caller\'s number reads more than it', async () => {
@@ -975,6 +977,9 @@ async function main(): Promise<void> {
     await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, 1e12), RangeError);
     const under = await rig.collector.runtime.readMinutes('a', M0, M0 + 7 * 60_000, Infinity);
     assert.equal(under.length, 7);
+    // NaN compares false against every total, so unrefused it would read all nine.
+    await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, Number.NaN), RangeError);
+    await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, -1), RangeError);
   });
 
   await test('runtime: it reads the dataset as it is now, across a reopen for a new storage limit', async () => {

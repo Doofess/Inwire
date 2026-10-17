@@ -114,6 +114,12 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 const toHex = (b: Uint8Array): string => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 const GENERATION = /^[0-9a-f]{32}$/;
 
+/** A caller's size, clamped to `cap`. NaN and a non-positive number are refused, not clamped: `Math.min(NaN, cap)` is NaN, and a NaN bound compares false against every total, so it would read without a limit at all. */
+function clampSize(n: number, cap: number): number {
+  if (!(n > 0)) throw new RangeError(`a read size must be a positive number (got ${n})`);
+  return Math.min(n, cap);
+}
+
 // --- the collector ---------------------------------------------------------------------------------------
 
 interface Dataset {
@@ -205,17 +211,17 @@ export class Collector {
   readonly runtime: Omit<HostRuntime, 'onLive'> = {
     snapshot: async () => this.local().snapshot(),
     readPage: async (snapshot, afterId, maxEntries, maxBytes) => this.local().readPage(
-      snapshot, afterId, Math.min(maxEntries, LIMITS.pageEntries), Math.min(maxBytes, LIMITS.pageBytes),
+      snapshot, afterId, clampSize(maxEntries, LIMITS.pageEntries), clampSize(maxBytes, LIMITS.pageBytes),
     ),
     readEvidence: async (ref) => this.local().readEvidence(ref),
     // Needs no clamp: its size is the journal index's (one range per stride), not the caller's.
     locate: async (snapshot, fromMs, toMs) => this.local().locate(snapshot, fromMs, toMs),
     readBoundaries: async (snapshot, afterId, maxEntries) => this.local().readBoundaries(
-      snapshot, afterId, Math.min(maxEntries, LIMITS.pageEntries),
+      snapshot, afterId, clampSize(maxEntries, LIMITS.pageEntries),
     ),
     watermark: async () => this.local().watermark(),
     readMinutes: async (sourceKey, from, to, maxBytes) => this.local().readMinutes(
-      sourceKey, from, to, Math.min(maxBytes, LIMITS.rollupReadBytes),
+      sourceKey, from, to, clampSize(maxBytes, LIMITS.rollupReadBytes),
     ),
     sources: async () => this.local().sources(),
     appendMinutes: async (minutes, watermark) => this.local().appendMinutes(minutes, watermark),

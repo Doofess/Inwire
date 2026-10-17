@@ -783,6 +783,19 @@ test('client: a port carrying another nonce is closed and ignored, and the one w
   assert.deepEqual(closed, ['stale', 'no-nonce']);
 });
 
+test('client: a reloaded page does not start its nonces where the last page did, so a port posted to the old one is not taken', async () => {
+  const a = clientRig({ sendPort: false });
+  const b = clientRig({ sendPort: false });
+  void a.client.connect();
+  void b.client.connect();
+  await flush();
+  const [na, nb] = [a.nonces[0], b.nonces[0]];
+  assert.ok(Number.isSafeInteger(na) && na > 0 && Number.isSafeInteger(nb) && nb > 0, `${na} ${nb}`);
+  assert.notEqual(na, nb);
+  a.client.dispose();
+  b.client.dispose();
+});
+
 test('client: main may take longer than the port wait to answer - the wait starts when it has', async () => {
   let answer!: () => void;
   const r = clientRig({
