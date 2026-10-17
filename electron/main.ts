@@ -35,6 +35,8 @@ import {
   WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
   SPEEDTEST_CANCEL_CHANNEL, SPEEDTEST_START_CHANNEL,
+  MONITORING_CONFIG_GET_CHANNEL, MONITORING_CONFIG_SAVE_CHANNEL, MONITORING_PORT_REQUEST,
+  MONITORING_START_CHANNEL, MONITORING_STOP_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
   QUIT_CONFIRM_CHANNEL, QUIT_CONFIRM_REPLY_CHANNEL,
 } from './channels';
@@ -48,6 +50,9 @@ import { AgentPipeLink } from './agentPipe';
 import { isComponentId } from './updateCenter/components';
 import { UpdateCenter } from './updateCenter/host';
 import { SpeedTestHost } from './speedTest/host';
+import { MonitoringHost } from './monitoring/host';
+import { readMonitoringSettings, saveMonitoringSettings } from './monitoring/settings';
+import { monitoringRoot } from './monitoring/volume';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
@@ -287,6 +292,25 @@ async function start(): Promise<void> {
   ipcMain.handle(SPEEDTEST_START_CHANNEL, () => speedTest.start());
   ipcMain.handle(SPEEDTEST_CANCEL_CHANNEL, () => speedTest.cancel());
   app.on('will-quit', () => speedTest.dispose());
+  // NetFlow monitoring (ADRs 0058, 0059). Asking for the port opens the
+  // history and binds nothing; only Start does, and only for the window that
+  // asked for the port (`hostCore.ts` holds the binding).
+  const monitoringDirectory = monitoringRoot(app.getPath('userData'));
+  const monitoring = new MonitoringHost(monitoringDirectory);
+  ipcMain.handle(MONITORING_PORT_REQUEST, async (event) => {
+    try {
+      await monitoring.connect(event.sender);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  });
+  ipcMain.handle(MONITORING_START_CHANNEL, (event, config: unknown) => monitoring.start(event.sender, config));
+  ipcMain.handle(MONITORING_STOP_CHANNEL, (event) => monitoring.stop(event.sender, 'user'));
+  ipcMain.handle(MONITORING_CONFIG_GET_CHANNEL, () => readMonitoringSettings(monitoringDirectory));
+  ipcMain.handle(MONITORING_CONFIG_SAVE_CHANNEL, (_event, config: unknown) =>
+    saveMonitoringSettings(monitoringDirectory, config));
+  app.on('will-quit', () => { void monitoring.dispose(); });
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.

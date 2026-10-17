@@ -279,10 +279,17 @@ export class MonitoringWorkerHost {
     }
   }
 
-  private onLive(entries: Evidence[]): void {
+  /**
+   * The promise is the push's own: it settles when these entries have been
+   * consumed, and the transport acknowledges the push then. A push that is
+   * dropped settles at once - there is nothing to wait for.
+   */
+  private onLive(entries: Evidence[]): Promise<void> {
     // Dropped during the rebuild: its loop re-takes the snapshot until it has them.
-    if (this.phase !== 'live' || this.shuttingDown) return;
-    this.feedChain = this.feedChain.then(() => this.consume(entries));
+    if (this.phase !== 'live' || this.shuttingDown) return Promise.resolve();
+    const done = this.feedChain.then(() => this.consume(entries));
+    this.feedChain = done;
+    return done;
   }
 
   private async consume(entries: Evidence[]): Promise<void> {

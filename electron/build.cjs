@@ -38,6 +38,9 @@ async function main() {
       'store/store': path.join(root, 'electron/store/entry.ts'),
       // The speed test's utilityProcess (ADR 0054), forked for one test.
       'speedTest/speedTest': path.join(root, 'electron/speedTest/entry.ts'),
+      // The NetFlow collector's utilityProcess (ADR 0058): the UDP socket, the
+      // journal and the rollup sidecar, and nothing that decodes them.
+      'monitoring/monitoring': path.join(root, 'electron/monitoring/entry.ts'),
     },
     outdir: path.join(root, 'dist-electron'),
     outExtension: { '.js': '.cjs' },

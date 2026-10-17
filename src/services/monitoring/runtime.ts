@@ -50,14 +50,19 @@ export interface MonitoringRuntime extends EvidenceReader, RollupReader, RollupW
   resetRollups(): Promise<void>;
 }
 
-/** Where the runtime pushes the entries it has just appended, so the Worker's rollups follow the journal. */
+/**
+ * Where the runtime pushes the entries it has just appended, so the Worker's
+ * rollups follow the journal. A handler may return a promise: the transport
+ * acknowledges a push once it settles, and that acknowledgement is the credit
+ * that lets the next one be sent.
+ */
 export interface LiveSource {
-  onLive(handler: (entries: Evidence[]) => void): void;
+  onLive(handler: (entries: Evidence[]) => unknown): void;
 }
 
 export type HostRuntime = MonitoringRuntime & LiveSource;
 
-/** The wire shape of a live push (ruling 23); Task 5's utility sends it, `runtimeRpc.ts` handles it. */
+/** The wire shape of a live push (ruling 23); the utility sends it, `runtimeRpc.ts` handles it and answers `{ type: 'live-ack' }`. */
 export interface LiveMessage { type: 'live'; entries: Evidence[] }
 
 /**

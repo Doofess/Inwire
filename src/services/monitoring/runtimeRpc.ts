@@ -7,7 +7,7 @@
  * handler and optionally a close. `domPort` adapts a `MessagePort`; the tests
  * use the same adapter over node's, which has the same `onmessage`.
  *
- * Three rules, each from a way a request/reply layer hangs a UI:
+ * Four rules, each from a way a request/reply layer hangs a UI:
  *
  * - **Every call has a deadline.** A utility process that is busy, wedged or
  *   gone must not leave a query pending for ever, so a call that is not
@@ -17,10 +17,16 @@
  * - **A closed port fails everything at once**, pending and future, with the
  *   same error.
  * - **Errors cross by name.** An `Error` does not survive structured clone with
- *   its class, and the query maps `StaleGenerationError`, `RangeError` and
- *   `CorruptRollupError` to different answers, so the server sends
- *   `{name, message}` plus the two generation strings and the client rebuilds
- *   the class.
+ *   its class, and the query maps `StaleGenerationError`, `RangeError`,
+ *   `CorruptRollupError` and `RuntimeUnavailableError` to different answers, so
+ *   the server sends `{name, message}` plus the two generation strings and the
+ *   client rebuilds the class.
+ * - **Live evidence is acknowledged, and a server is bounded.** The client
+ *   answers every `live` push with `live-ack` once its handlers have settled,
+ *   which is the credit the utility's feed spends (`liveFeed.ts`); and a server
+ *   with `maxInFlight` requests unanswered refuses the next one at once, so a
+ *   Worker that fires reads faster than the journal answers them is told the
+ *   runtime is busy rather than queueing them without bound.
  */
 import { StaleGenerationError } from './journal';
 import { CorruptRollupError, RuntimeUnavailableError, type HostRuntime, type LiveMessage } from './runtime';
@@ -78,6 +84,7 @@ function errorFrom(body: ErrorBody): Error {
   if (body.name === 'StaleGenerationError') return new StaleGenerationError(body.wanted ?? '', body.actual ?? '');
   if (body.name === 'RangeError') return new RangeError(body.message);
   if (body.name === 'CorruptRollupError') return new CorruptRollupError(body.message);
+  if (body.name === 'RuntimeUnavailableError') return new RuntimeUnavailableError(body.message);
   const e = new Error(body.message);
   e.name = body.name;
   return e;
@@ -92,22 +99,48 @@ export interface RuntimeServer {
   pushLive(entries: Evidence[]): void;
 }
 
-export function serveRuntime(port: RpcPort, runtime: Omit<HostRuntime, 'onLive'>): RuntimeServer {
+export interface ServeOptions {
+  /** Called once per `live-ack` the client posts: the utility's credit coming back. */
+  onLiveAck?: () => void;
+  /** Requests unanswered at once, past which the next is refused as busy. Default 16. */
+  maxInFlight?: number;
+}
+
+export const DEFAULT_MAX_IN_FLIGHT = 16;
+
+export function serveRuntime(port: RpcPort, runtime: Omit<HostRuntime, 'onLive'>, options: ServeOptions = {}): RuntimeServer {
+  const maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
+  let inFlight = 0;
   port.onMessage((message) => {
+    if (isObject(message) && message.type === 'live-ack') {
+      options.onLiveAck?.();
+      return;
+    }
     if (!isObject(message) || message.type !== 'req' || typeof message.id !== 'number') return;
     const req = message as unknown as Request;
-    const reply = (r: Reply): void => port.postMessage(r);
+    // A port that closed under a reply has nobody to tell; it must not become an unhandled rejection.
+    const reply = (r: Reply): void => {
+      try { port.postMessage(r); } catch { /* the client is gone */ }
+    };
     if (typeof req.method !== 'string' || !METHODS.has(req.method) || !Array.isArray(req.args)) {
       reply({ type: 'res', id: req.id, ok: false, error: { name: 'TypeError', message: `unknown runtime call ${String(req.method)}` } });
       return;
     }
+    if (inFlight >= maxInFlight) {
+      reply({
+        type: 'res', id: req.id, ok: false,
+        error: errorBody(new RuntimeUnavailableError(`the monitoring runtime is busy: ${maxInFlight} requests are already waiting`)),
+      });
+      return;
+    }
+    inFlight++;
     // The call is looked up in the table above, never by an arbitrary name from the port.
     const call = (runtime as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[req.method];
     Promise.resolve()
       .then(() => call.apply(runtime, req.args))
       .then(
-        (value) => reply({ type: 'res', id: req.id, ok: true, value }),
-        (e) => reply({ type: 'res', id: req.id, ok: false, error: errorBody(e) }),
+        (value) => { inFlight--; reply({ type: 'res', id: req.id, ok: true, value }); },
+        (e) => { inFlight--; reply({ type: 'res', id: req.id, ok: false, error: errorBody(e) }); },
       );
   });
   return {
@@ -130,7 +163,7 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
   let nextId = 1;
   let closed = false;
   const pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void; cancel(): void }>();
-  const live: ((entries: Evidence[]) => void)[] = [];
+  const live: ((entries: Evidence[]) => unknown)[] = [];
 
   const failAll = (): void => {
     closed = true;
@@ -141,7 +174,16 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
   port.onMessage((message) => {
     if (!isObject(message)) return;
     if (message.type === 'live' && Array.isArray(message.entries)) {
-      for (const h of live) h(message.entries as Evidence[]);
+      const entries = message.entries as Evidence[];
+      // Called now and in order, as before; a handler that throws has settled.
+      const settled = live.map((h) => {
+        try { return Promise.resolve(h(entries)); } catch (e) { return Promise.reject(e); }
+      });
+      // The ack is the utility's credit: returned when the Worker has consumed
+      // the push, not when it arrived.
+      void Promise.allSettled(settled).then(() => {
+        try { port.postMessage({ type: 'live-ack' }); } catch { /* the port closed under it */ }
+      });
       return;
     }
     if (message.type !== 'res' || typeof message.id !== 'number') return;

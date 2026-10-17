@@ -24,9 +24,9 @@
  * plain `tsx`; `saveCaptured.ts` is the adapter.
  */
 import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { isCaptureId } from '../src/services/capture/captureDirectory';
+import { partialPath } from './atomicWrite';
 
 /**
  * A file the agent names: `capture.pcapng`, or a ring's
@@ -77,7 +77,7 @@ export function copyWhole(sources: readonly string[], targets: readonly string[]
   let partial: string | null = null;
   try {
     for (let i = 0; i < sources.length; i++) {
-      partial = `${targets[i]}.${randomBytes(6).toString('hex')}.partial`;
+      partial = partialPath(targets[i]);
       copyFileSync(sources[i], partial);
       renameSync(partial, targets[i]);
       partial = null;
