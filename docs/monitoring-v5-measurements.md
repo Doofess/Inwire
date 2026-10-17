@@ -19,9 +19,9 @@ measured, and are listed under **Not run** rather than left out.
 | Electron | 44.3.0, the repository's dev copy (`node_modules/electron/dist`) |
 | Capture | the installed Inwire agent 0.5.0 (Rust), on `NPF_Loopback` and the WSL adapter |
 | WSL | WSL 2, kernel 6.18.54.1, Ubuntu in NAT mode, Python 3.14.4 |
-| Not present | softflowd, nfdump, any exporter; nothing was installed for this |
+| Exporter | softflowd 1.1.1 in WSL, installed by the owner for the interop run; no nfdump |
 
-Datagrams are generated: `TrafficModel` in the script builds v5 records for
+Datagrams are generated, except in the softflowd section: `TrafficModel` in the script builds v5 records for
 twelve hosts talking to a pool of 2,000 remote addresses, with a heavy tail of
 ports, at 2, 7 and 50 datagrams a second; a *high-cardinality* variant gives
 every record a new address pair. The 7 a second profile is the planning point:
@@ -42,9 +42,31 @@ no person present.
 | an address not on this machine (`192.0.2.1`) | `EADDRNOTAVAIL` |
 | port 514, below 1024 | ok - no privilege is needed on Windows |
 
-A wildcard bind beside a specific one was **not run**: binding `0.0.0.0` from
-`node.exe` raises the firewall prompt for `node.exe`, which this mode exists to
-avoid.
+### A wildcard bind beside a specific one (`bindpair`)
+
+Binding `0.0.0.0` from `node.exe` would raise the firewall prompt for
+`node.exe`, so this ran under the copy of Electron whose rules run 2 below had
+already turned to Allow. `bind-pair-probe.cjs` bound each socket in its own
+order, one `utilityProcess` per process in the plan, and a sender in WSL sent
+20 datagrams to the WSL adapter's address. 2026-10-17:
+
+| Binds, in order | Both bind? | Who received the 20 |
+|---|---|---|
+| wildcard, then specific (one process, or two; with or without `reuseAddr` on either) | yes | the specific socket, all 20 |
+| specific, then wildcard (the same six variations) | yes | the specific socket, all 20 |
+| specific, then the same specific address, neither `reuseAddr` | `EADDRINUSE` | the first |
+| specific, then the same specific address, both `reuseAddr` | yes | the first, all 20; the second none |
+| specific without `reuseAddr`, then the same with it | `EACCES` | the first |
+
+- **A wildcard listener never makes a specific bind fail, in either order.**
+  The more specific socket takes every datagram to its address, and the
+  wildcard socket goes silent for that address with no error. If another
+  program is collecting on `0.0.0.0:2055`, a specific bind here succeeds and
+  takes its datagrams; if Inwire is bound first, the other program's
+  wildcard bind succeeds and receives nothing on this address.
+- **`EADDRINUSE` means the same address and port**, held by a socket without
+  `reuseAddr`. A socket bound without `reuseAddr` cannot be shared, by a later
+  bind with or without the option.
 
 ### Delivery against passive capture (`socket`)
 
@@ -90,8 +112,8 @@ Firewall one:
 Below the text are the program's name ("Electron") and publisher
 ("GitHub, Inc."), and a "Show more" link. The buttons are **Allow** and
 **Cancel**. There is no checkbox for choosing a profile. Both the name and the
-publisher are read from the executable. The packaged `Inwire.exe` will show its
-own, and that prompt is **not run** (see below).
+publisher are read from the executable; the packaged `Inwire.exe`'s own prompt
+is below.
 
 **What happens at bind, before anyone clicks.** The firewall service adds
 inbound **Block** rules for the program at once: one for TCP and one for UDP,
@@ -126,6 +148,64 @@ The bind itself succeeds and the socket reports `listening`.
   Security/Firewall`) can be read without elevation. An app could see that a
   rule exists for its own executable without changing it, but no design here
   depends on that.
+
+### The packaged `Inwire.exe`'s prompt
+
+Run once, 2026-10-17, the owner answering Allow. `npm run pack` built and
+signed `release/win-unpacked` from `main` at 674364c, fuses flipped, and the
+folder was copied to a scratch path with no firewall rule. A fused `Inwire.exe`
+loads only `resources/app.asar`, so the copy's asar was replaced by one holding
+`firewall-probe.cjs` as its main. That works because
+`enableEmbeddedAsarIntegrityValidation` is still off (CLAUDE.md §5), and it
+changed no source file and no signed byte. The probe bound the WSL adapter's
+address on port 2055, as in the runs above.
+
+> **Do you want to allow public and private networks to access this app?**
+>
+> Windows Firewall has blocked some features of Inwire on all public and
+> private networks.
+
+- **The wording is the dev prompt's word for word**, with *Inwire* for
+  *Electron*. ADR 0060's sheet text holds for the packaged app.
+- **Name "Inwire", publisher "Rotem Grinhut".** These are the executable's
+  VERSIONINFO, `FileDescription` and `CompanyName`, which electron-builder
+  takes from `package.json`'s `productName` and `author`. They are not the
+  certificate's subject, which is *Inwire Code Signing (this PC)*. The dev
+  `electron.exe` showed "GitHub, Inc.", its own `CompanyName`.
+- **The rules are the same shape**: two inbound rules named `inwire.exe`,
+  Public only, created as Block at the bind (event 2097, twice) and turned to
+  Allow by the click (event 2099, six times), with no UAC prompt.
+- **Delivery: 361 of 400.** All 400 reached the adapter. The 39 lost are about the
+  first 8 seconds of sending, while the prompt was open, and no ICMP was sent.
+
+Cancel was not run against the packaged build. Windows' refusal to ask again
+is a property of the rule already existing, which run 3 showed for the dev
+copy.
+
+## softflowd against the app's decoder (`softflowd`)
+
+softflowd 1.1.1 (Ubuntu's package, in WSL) replayed each fixture with
+`-r <capture> -v 5 -d`, exporting to a receiver inside WSL that kept every
+datagram. The script wrapped those datagrams in a pcap, and tshark's `cflow`
+dissector and the app's own `normalizeFlows`
+(`src/services/flow/flowExport.ts`) each read them. Fourteen fields were compared
+per record: addresses, next hop, interfaces, packets, octets, ports, TCP
+flags, protocol, ToS and both AS numbers.
+
+| Fixture | Datagrams | Records | Field mismatches | Packets: flows / capture IPv4 |
+|---|---|---|---|---|
+| `inwire` | 7 | 188 | **0** | 4,226 / 4,226 |
+| `bulk` | 2 | 33 | **0** | 170 / 170 |
+
+- **The decoder agrees with tshark on every field of every record**, with no
+  sequence breaks and at most 29 records in a datagram.
+- **softflowd's octets are not IP lengths.** They count every byte past the
+  Ethernet header, so a short frame's padding is included: 5,311,697 against
+  5,300,353 by `ip.len` for `inwire`, and exactly 5,311,697 past the
+  Ethernet header. The 11,344 bytes are the padding on 1,890 frames. A
+  collector shows an exporter's octets as the exporter counted them, and
+  this exporter counts a few bytes more than the IP headers say.
+- v5 carries IPv4 only, so a fixture's IPv6 traffic exports nothing.
 
 ## The journal (`journal`, ~2.7 GB written to temp and deleted)
 
@@ -218,16 +298,15 @@ port. *Address pair* is the directional pair of addresses.
 
 ## Not run
 
-- **softflowd interop.** It is not installed, and nothing is installed
-  automatically. Every v5 datagram here came from the script's generator.
 - **A real exporter on the LAN.** The Ethernet path from a router (Public
   profile here) has not received a datagram. The firewall result above is for
   the WSL adapter.
-- **The packaged, fused `Inwire.exe`'s prompt.** The probe ran under the dev
-  `electron.exe`, because a fused `Inwire.exe` loads only its own asar. What
-  the prompt names, which publisher it shows, and whether a Cancel is ever
-  asked again belong to Task 8, against the installed build.
-- **A wildcard bind beside a specific one** (see above).
+- **Cancel under the packaged `Inwire.exe`.** Its Allow is measured above;
+  its Cancel was not run.
+- **The installed build's prompt.** The packaged run used a scratch copy of
+  `release/win-unpacked`. An installed `Inwire.exe` under `Program Files`
+  carries the same VERSIONINFO, so it should show the same name and
+  publisher. That is expected, not measured.
 
 ## Exporter survey
 
