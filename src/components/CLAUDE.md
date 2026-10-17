@@ -191,8 +191,8 @@ radius, no border, because `<main>` is the card and a second one inside it is a
 card in a card. It covers the workspace, the view underneath is untouched, and
 closing it puts that view back rather than navigating anywhere.
 
-**The slot stays a union, and it has a second member now.** `App` models it as
-`sheet: 'settings' | 'speedtest' | null` rather than a boolean, which makes "the
+**The slot stays a union, and it has three members now.** `App` models it as
+`sheet: 'settings' | 'speedtest' | 'monitoring' | null` rather than a boolean, which makes "the
 card holds exactly one surface" a fact the type carries — a boolean invites a
 second boolean beside it, and then "both open" is representable in a card that
 shows one. **The speed test's sheet** (`speedtest/SpeedTestSheet.tsx`, ADR 0054)
@@ -207,6 +207,22 @@ ghost, a footer, then history - one component each beside the sheet. **While a
 test runs the dial stands in for the headline** (`SpeedGauge.tsx`, 0054's
 second amendment): the owner wants the speedometer every speed test app has,
 and it went once already, so it is a decision rather than leftover decoration.
+
+**The monitoring sheet** (`monitoring/MonitoringSheet.tsx`, ADRs 0058-0060) is
+the third member and follows the same rules: no rail button, opened from the
+Network panel's *Monitoring* section and the palette's `monitoring.open`, and
+leaving it does not stop collection, because the client is
+`getMonitoringClient()`'s module singleton and the sheet only reads it through
+`useMonitoring()` - nothing on the way out resets it. **The first open is what
+connects**: main reports no status until `ensureConnected()`, so the panel says
+*Not started* until then, and that is the truth rather than a placeholder.
+`nothingArriving()` is pure, so the sheet runs its own one-second clock to
+re-ask it. Its one way into the capture is "Filter capture by this host",
+which is `setFilterText` plus `applyFilter` and therefore closes the sheet onto
+Packets like any applied filter. Like the speed test, the view underneath keeps
+its rail marker while it is up; only Settings clears it.
+`scripts/electron/monitoring-ui.ts` drives all of it against datagrams it sends
+itself; `monitoring-shots.ts` photographs every state.
 
 **Three ways out and no fourth**: the title row's back step, reading
 "Back to &lt;the view underneath&gt;"; Escape, outermost surface first; and
@@ -381,7 +397,9 @@ first section is the speed test** (`speedtest/SpeedTestSection.tsx`): the last
 result, Run - a tinted outline, the one thing in the panel to press, still
 quieter than the facts around it - and Results and history, which opens the
 speed-test sheet. Sized for the panel's 170 px floor: the figures stack rather
-than squeeze. Its
+than squeeze. **Its second section is monitoring**
+(`monitoring/MonitoringSection.tsx`): one status line from
+`monitoringSummary` and Open monitoring, which opens the monitoring sheet. Its
 organising idea is the pairing — the OS says how the machine was told to behave,
 the capture shows what actually happened — so it has to sit *beside* the frames
 it is comparing against rather than on top of them. Capture Health stays a

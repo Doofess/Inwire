@@ -99,6 +99,7 @@ import { findPacketIndexById, frameJumpRefusal } from "./components/packet-detai
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
 import { SpeedTestSheet } from "./components/speedtest/SpeedTestSheet";
+import { MonitoringSheet } from "./components/monitoring/MonitoringSheet";
 import { NetworkPane, NetworkPanelActions } from './components/network/NetworkPane';
 import { SideBar } from './components/sidebar/SideBar';
 import { CaptureInterfacePanel } from './components/sidebar/CaptureInterfacePanel';
@@ -545,7 +546,7 @@ export default function App() {
    * a sheet would then have to remember to close both. That argument was won
    * once; a union is what stops it being re-litigated by an edit.
    */
-  const [sheet, setSheet] = useState<'settings' | 'speedtest' | null>(null);
+  const [sheet, setSheet] = useState<'settings' | 'speedtest' | 'monitoring' | null>(null);
   const sheetOpen = sheet !== null;
 
   /**
@@ -2562,6 +2563,7 @@ export default function App() {
       case 'sidebar.schedule': openSideBarPanel('schedule'); return;
       case 'sidebar.transfer': openSideBarPanel('transfer'); return;
       case 'sidebar.network': openSideBarPanel('network'); return;
+      case 'monitoring.open': setSheet('monitoring'); return;
       case 'settings.open': setSheet('settings'); return;
     }
   };
@@ -3067,6 +3069,7 @@ export default function App() {
                 captureInterfaces={selectedInterfaces}
                 agentConnected={agentStatus === 'connected'}
                 onOpenSpeedTest={() => setSheet('speedtest')}
+                onOpenMonitoring={() => setSheet('monitoring')}
               />
             )}
             {sideBar === 'transfer' && (
@@ -3256,6 +3259,13 @@ export default function App() {
             // and the back step, Escape or any view leaves it. Leaving does not
             // stop a test; the state is `services/speedTest/state.ts`'s.
             <SpeedTestSheet capturing={isCapturing} onShowOnMap={() => handleViewChange('geo')} />
+          ) : sheet === 'monitoring' ? (
+            // NetFlow v5 monitoring (ADRs 0058-0060): opened from the Network
+            // panel or the palette, a sheet by the same rules. Leaving does not
+            // stop collection; the client is `getMonitoringClient()`'s. The
+            // capture pivot is the filter field's own path, so it lands on
+            // Packets and closes the sheet as any applied filter does.
+            <MonitoringSheet onFilterCapture={(expression) => { setFilterText(expression); applyFilter(expression); }} />
           ) : (
           <div className="flex-1 flex min-h-0 overflow-hidden">
             {/* Main Packet Inspection Core */}

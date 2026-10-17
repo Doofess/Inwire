@@ -27,6 +27,7 @@ export class ExportCancelled extends Error {
 const EOL = '\r\n';
 /** Rows per `write`; the signal is checked between writes. */
 const ROWS_PER_WRITE = 300;
+const encoder = new TextEncoder();
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -108,7 +109,6 @@ export async function exportHistory(
   sink: ByteSink,
   options: ExportOptions = {},
 ): Promise<SaveOutcome> {
-  const encoder = new TextEncoder();
   const endpoints = tableRows(result.endpoints);
   const conversations = tableRows(result.conversations);
 
