@@ -554,22 +554,79 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('every boundary is held to the limit; a forced one that does not fit is not written and the session stays open'), () => {
-    // Measure a start and the storage-limit stop that closes it.
-    const probe = open(newRig(kind).file).journal;
-    const s1 = probe.append([bnd('start', 'S1', T0)]).snapshot.writtenBytes;
-    const stopBytes = probe.append([bnd('stop', 'S1', T0 + 1, 'storage-limit')]).snapshot.writtenBytes - s1;
-
-    // 1. An ordinary boundary refused at the limit closes the session from the reserve.
+    // 1. Boundaries that do not close a session stop short of the limit by the reserve, like datagrams.
+    //    The reviewer's case: fill to just under limit - reserve, then many gaps, then a datagram.
     {
+      const reserve = LIMITS.closingReserveBytes;
+      const other = 500;
+      const limit = reserve + 4_000;
+      const ceiling = limit - reserve - other; // what the file itself may reach for anything but a close
       const rig = newRig(kind);
-      const { journal } = open(rig.file, { limitBytes: s1 + stopBytes + 10 });
+      const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
       journal.append([bnd('start', 'S1', T0)]);
-      const r = journal.append([bnd('gap', 'S1', T0 + 1, 'x'.repeat(300), 5)]);
+      let datagrams = 0;
+      while (rig.file.size() + 130 <= ceiling && datagrams < 1_000) {
+        datagrams += journal.append([dg(T0 + 1, new Uint8Array(40))]).appended;
+      }
+      assert.ok(datagrams > 5 && journal.state === 'open', 'the journal is filled to just under the datagram ceiling');
+      let gaps = 0;
+      let refused = false;
+      for (let i = 0; i < 2_000 && !refused; i++) {
+        const before = rig.file.size();
+        const r = journal.append([bnd('gap', 'S1', T0 + 2, 'x'.repeat(200), 5)]);
+        if (r.appended === 1) {
+          gaps++;
+          assert.ok(rig.file.size() + other <= limit - reserve, 'an accepted gap never enters the reserve');
+        } else {
+          refused = true;
+          assert.equal(r.state, 'storage-limit');
+          assert.ok(before + other <= limit - reserve, 'the refusal came before the reserve was touched');
+        }
+      }
+      assert.ok(refused, 'gaps are refused once they would enter the reserve');
+      assert.ok(gaps < 100, 'a gap does not run on to the limit');
+      const last = journal.readEvidence({ generation: GEN, entryId: journal.snapshot().throughEntryId }) as BoundaryEvidence;
+      assert.deepEqual([last.action, last.reason, last.sessionId], ['stop', 'storage-limit', 'S1'], 'the session is closed on disk');
+      assert.ok(rig.file.size() + other <= limit, 'the dataset never exceeds the limit');
+      const r = journal.append([dg(T0 + 3, new Uint8Array(40))]);
       assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'storage-limit']);
+      assert.equal(open(rig.reopen(), { limitBytes: limit, otherBytes: () => other }).journal.snapshot().throughEntryId, r.snapshot.throughEntryId, 'no interrupted marker: the stop closed it');
+    }
+
+    // 1b. start, suspend and resume are held to the same ceiling.
+    for (const action of ['suspend', 'resume'] as const) {
+      const reserve = LIMITS.closingReserveBytes;
+      const limit = reserve + 2_000;
+      const rig = newRig(kind);
+      const { journal } = open(rig.file, { limitBytes: limit });
+      journal.append([bnd('start', 'S1', T0)]);
+      if (action === 'resume') journal.append([bnd('suspend', 'S1', T0 + 1)]);
+      while (rig.file.size() + 130 <= limit - reserve) journal.append([dg(T0 + 2, new Uint8Array(40))]);
+      while (journal.state === 'open' && journal.snapshot().throughEntryId < 10_000) {
+        journal.append([bnd(action, 'S1', T0 + 3), bnd(action === 'suspend' ? 'resume' : 'suspend', 'S1', T0 + 4)]);
+      }
+      assert.equal(journal.state, 'storage-limit', action);
+      const last = journal.readEvidence({ generation: GEN, entryId: journal.snapshot().throughEntryId }) as BoundaryEvidence;
+      assert.deepEqual([last.action, last.reason], ['stop', 'storage-limit'], action);
+      assert.ok(rig.file.size() <= limit);
+    }
+
+    // 1c. A user stop may use the reserve: inside it, it is written and the journal stays open for a new session.
+    {
+      const reserve = LIMITS.closingReserveBytes;
+      const limit = reserve + 4_000;
+      let other = 0;
+      const rig = newRig(kind);
+      const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
+      journal.append([bnd('start', 'S1', T0)]);
+      while (rig.file.size() + 130 <= limit - reserve) journal.append([dg(T0 + 1, new Uint8Array(40))]);
+      other = limit - reserve - rig.file.size() + 100; // the journal is now 100 bytes inside the reserve
+      const r = journal.append([bnd('stop', 'S1', T0 + 2)]);
+      assert.deepEqual([r.appended, r.refused, r.state], [1, 0, 'open'], 'the user stop is written from the reserve');
       const last = journal.readEvidence({ generation: GEN, entryId: r.snapshot.throughEntryId }) as BoundaryEvidence;
-      assert.deepEqual([last.action, last.reason, last.sessionId], ['stop', 'storage-limit', 'S1']);
-      assert.ok(rig.file.size() <= s1 + stopBytes + 10, 'never past the limit');
-      assert.equal(open(rig.reopen()).journal.snapshot().throughEntryId, r.snapshot.throughEntryId, 'the session is closed on disk: no interrupted marker');
+      assert.deepEqual([last.action, last.reason], ['stop', '']);
+      assert.ok(rig.file.size() + other <= limit, 'never past the limit');
+      assert.equal(journal.append([bnd('start', 'S2', T0 + 3)]).appended, 0, 'a new session does not fit inside the reserve');
     }
 
     // 2. otherBytes grows mid-run past what the reserve can cover.

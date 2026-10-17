@@ -416,16 +416,14 @@ export class MonitoringJournal {
 
     const entryBytes = ENTRY_HEADER_BYTES + body.length;
     const total = this.end + this.otherBytes();
-    if (kind === KIND_DATAGRAM) {
-      // Datagrams stop short of the limit by the closing reserve, so the
-      // `stop` that explains the gap always has room to be written.
-      if (total + entryBytes > this.options.limitBytes - LIMITS.closingReserveBytes) {
-        this.enterStorageLimit(input.receivedMs);
-        return false;
-      }
-    } else if (total + entryBytes > this.options.limitBytes) {
-      // An ordinary boundary is held to the limit itself, and refusing it must
-      // not leave a session open on disk when a forced `stop` still fits.
+    // The closing reserve belongs to the entries that close a session: a `stop`
+    // (the user's or the forced one) and `interrupted`. Everything else -
+    // datagrams, `start`, `suspend`, `resume`, `gap` - stops short of the limit
+    // by the reserve, so the `stop` that explains the end always has room to be
+    // written. Refusing one of them with a session open writes that `stop`.
+    const closes = boundary !== null && (boundary.action === 'stop' || boundary.action === 'interrupted');
+    const ceiling = closes ? this.options.limitBytes : this.options.limitBytes - LIMITS.closingReserveBytes;
+    if (total + entryBytes > ceiling) {
       this.enterStorageLimit(input.receivedMs);
       return false;
     }
@@ -455,7 +453,8 @@ export class MonitoringJournal {
   }
 
   /**
-   * The journal has reached its limit. Closing the open session on disk is the
+   * The journal has reached its limit (less the closing reserve, for anything
+   * that does not close a session). Closing the open session on disk is the
    * one write allowed to use the reserve.
    *
    * **If even that does not fit** - `otherBytes()` grew past the reserve - it
