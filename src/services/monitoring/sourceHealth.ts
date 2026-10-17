@@ -283,9 +283,12 @@ export function reduceSourceHealth(previous: SourceHealth, event: HealthEvent): 
       const advanced = advanceSequence(engine, event.sequence, event.flowCount, event.wallMs);
       h.engines = at >= 0 ? h.engines.map((e, i) => (i === at ? advanced : e)) : [...h.engines, advanced];
       h.accepted++;
-      h.freshness = 'fresh';
+      // The datagram's own time, not the clock's high-water mark: one fed late
+      // (a rebuild reading entries that arrived during it) is as old as it is.
+      const lastValid = Math.max(h.lastValidElapsedMs ?? event.elapsedMs, event.elapsedMs);
+      h.freshness = elapsedMs - lastValid >= LIMITS.staleMs ? 'stale' : 'fresh';
       h.lastValidWallMs = event.wallMs;
-      h.lastValidElapsedMs = elapsedMs;
+      h.lastValidElapsedMs = lastValid;
       h.lastValidEntryId = event.entryId;
       return h;
     }

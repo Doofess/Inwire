@@ -489,5 +489,17 @@ test('a valid datagram the Worker did not admit counts against the engine limit 
   assert.equal(explicit.accepted, 1);
 });
 
+test('a datagram fed after the clock moved on keeps its own age, so an old one is stale and not fresh', () => {
+  // A rebuild reads entries that arrived during it, stamped with when they arrived, after ticks
+  // have advanced the clock: the high-water mark must not make a 115 s old datagram look new.
+  const h = run([valid(0, 0, 0, 1, 1), tick(130_000), valid(15_000, 0, 1, 1, 2)]);
+  assert.equal(h.lastValidElapsedMs, 15_000);
+  assert.equal(h.freshness, 'stale');
+  const recent = run([tick(130_000), valid(100_000, 0, 0, 1, 1)]);
+  assert.equal(recent.freshness, 'fresh');
+  const older = run([valid(100_000, 0, 0, 1, 1), valid(20_000, 0, 1, 1, 2)]);
+  assert.equal(older.lastValidElapsedMs, 100_000, 'an older stamp never moves the last valid time back');
+});
+
 console.log(failures === 0 ? '\nall passed' : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);
