@@ -6,7 +6,9 @@
  *   npx tsx scripts/monitoring/measurement.ts journal [--quick]
  *   npx tsx scripts/monitoring/measurement.ts rollup  [--quick]
  *   npx tsx scripts/monitoring/measurement.ts vector
- *   npx tsx scripts/monitoring/measurement.ts firewall --electron <electron.exe> [--port n] [--seconds n] [--shot png]
+ *   npx tsx scripts/monitoring/measurement.ts firewall --electron <electron.exe> [--port n] [--seconds n] [--shot png] [--nic regex] [--listen-only]
+ *   npx tsx scripts/monitoring/measurement.ts bindpair --electron <electron.exe>
+ *   npx tsx scripts/monitoring/measurement.ts softflowd --pcap <capture> [--port n]
  *
  * Not a test: every number is a property of the machine it ran on, and the
  * journal mode writes about 2.7 GB under the OS temp folder (and deletes it).
@@ -16,6 +18,11 @@
  * the WSL adapter's address, sends to it from WSL, and prints what was sent,
  * what reached the adapter and what reached the socket, second by second. A
  * fresh copy of Electron's dist folder per run is a program with no rule yet.
+ * `--nic` binds another adapter (Ethernet, for a real exporter on the LAN) and
+ * `--listen-only` sends nothing, counting what an exporter elsewhere sends.
+ * `bindpair` binds the wildcard beside a specific address, under an Electron
+ * whose rules already say Allow. `softflowd` replays a capture through
+ * softflowd in WSL and holds `normalizeFlows` to tshark on what it exported.
  * In `check.ts`'s NOT_TESTS.
  *
  * The journal framing and the rollup codec here are prototypes of the ones
@@ -870,10 +877,12 @@ async function firewallMode(): Promise<void> {
   const port = Number(argValue('--port') ?? 2055);
   const seconds = Number(argValue('--seconds') ?? 120);
   const shot = argValue('--shot');
-  const nic = Object.entries(networkInterfaces()).find(([name]) => /WSL/.test(name));
+  const nicPattern = new RegExp(argValue('--nic') ?? 'WSL');
+  const listenOnly = process.argv.includes('--listen-only');
+  const nic = Object.entries(networkInterfaces()).find(([name]) => nicPattern.test(name));
   const host = nic?.[1]?.find((a) => a.family === 'IPv4' && !a.internal)?.address;
-  if (host === undefined) throw new Error('no IPv4 address on a WSL adapter');
-  const capture = await agentCapture(`udp port ${port} or icmp`, /WSL/);
+  if (host === undefined) throw new Error(`no IPv4 address on an adapter matching ${nicPattern}`);
+  const capture = await agentCapture(`udp port ${port} or icmp`, nicPattern);
   console.log(`agent ${capture.version} capturing on ${capture.label}; binding ${nic![0]} port ${port} under ${electron}`);
 
   let delivered = 0;
@@ -897,9 +906,9 @@ async function firewallMode(): Promise<void> {
   const exited = new Promise<void>((r) => probe.once('exit', () => r()));
   await sleep(2000);
 
-  const sender = spawn('wsl.exe', ['-d', 'Ubuntu', '--', 'python3', '-', host, String(port), String(seconds - 10)], { stdio: ['pipe', 'pipe', 'inherit'] });
-  sender.stdin.end(WSL_SENDER);
-  sender.stdout.on('data', (c: Buffer) => { const last = c.toString('utf8').trim().split('\n').pop(); if (last) sent = Number(last); });
+  const sender = listenOnly ? null : spawn('wsl.exe', ['-d', 'Ubuntu', '--', 'python3', '-', host, String(port), String(seconds - 10)], { stdio: ['pipe', 'pipe', 'inherit'] });
+  sender?.stdin.end(WSL_SENDER);
+  sender?.stdout.on('data', (c: Buffer) => { const last = c.toString('utf8').trim().split('\n').pop(); if (last) sent = Number(last); });
   if (shot !== undefined) {
     setTimeout(() => spawnSync('powershell.exe', ['-NoProfile', '-Command',
       `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; ` +
@@ -914,12 +923,213 @@ async function firewallMode(): Promise<void> {
   }, 1000);
   await exited;
   clearInterval(timer);
-  sender.kill();
+  sender?.kill();
   const captured = await capture.stop();
   console.log(`${at()}  done: sent ${sent}, on the adapter ${captured.udpTo.get(port) ?? 0}, delivered ${delivered}, ICMP unreachable for port ${port}: ${captured.icmpUnreachable.get(port) ?? 0}`);
 }
 
+// --- bindpair ---------------------------------------------------------------------
+
+// The wildcard beside a specific bind on one port: does the second bind fail,
+// and if not, which socket does a datagram to the specific address reach? Run
+// under an Electron whose firewall rules already say Allow, or the prompt
+// decides the answer instead of the stack.
+async function bindPairMode(): Promise<void> {
+  const electron = argValue('--electron');
+  if (electron === undefined || !existsSync(electron)) throw new Error('--electron <path to an electron.exe> is required');
+  const nic = Object.entries(networkInterfaces()).find(([name]) => /WSL/.test(name));
+  const host = nic?.[1]?.find((a) => a.family === 'IPv4' && !a.internal)?.address;
+  if (host === undefined) throw new Error('no IPv4 address on a WSL adapter');
+  type Sock = { id: string; addr: string; port: number; reuse: boolean };
+  const w = (port: number, reuse = false): Sock => ({ id: 'wildcard', addr: '0.0.0.0', port, reuse });
+  const s = (port: number, reuse = false): Sock => ({ id: 'specific', addr: host, port, reuse });
+  const cases: { name: string; plan: Sock[][] }[] = [
+    { name: 'one process, wildcard then specific', plan: [[w(2061), s(2061)]] },
+    { name: 'one process, specific then wildcard', plan: [[s(2062), w(2062)]] },
+    { name: 'two processes, wildcard then specific', plan: [[w(2063)], [s(2063)]] },
+    { name: 'two processes, specific then wildcard', plan: [[s(2064)], [w(2064)]] },
+    { name: 'two processes, wildcard then specific, both reuseAddr', plan: [[w(2065, true)], [s(2065, true)]] },
+    { name: 'two processes, specific then wildcard, both reuseAddr', plan: [[s(2066, true)], [w(2066, true)]] },
+    { name: 'two processes, wildcard (reuseAddr) then specific (none)', plan: [[w(2067, true)], [s(2067)]] },
+    { name: 'two processes, specific (none) then wildcard (reuseAddr)', plan: [[s(2068)], [w(2068, true)]] },
+    { name: 'two processes, specific twice', plan: [[s(2069)], [{ ...s(2069), id: 'second' }]] },
+    { name: 'two processes, specific twice, both reuseAddr', plan: [[s(2070, true)], [{ ...s(2070, true), id: 'second' }]] },
+    { name: 'two processes, specific (none) then specific (reuseAddr)', plan: [[s(2071)], [{ ...s(2071, true), id: 'second' }]] },
+  ];
+  console.log(`specific = ${nic![0]}; sending from WSL to the specific address under ${electron}`);
+  for (const c of cases) {
+    const port = c.plan[0][0].port;
+    const binds: string[] = [];
+    let counts: Record<string, number> = {};
+    let sent = 0;
+    const probe = spawn(electron, [join(dirname(fileURLToPath(import.meta.url)), 'bind-pair-probe.cjs'), '--plan', JSON.stringify(c.plan), '--seconds', '9'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let buffered = '';
+    const all = new Promise<void>((ready) => probe.stdout.on('data', (chunk: Buffer) => {
+      buffered += chunk.toString('utf8');
+      for (let nl = buffered.indexOf('\n'); nl >= 0; nl = buffered.indexOf('\n')) {
+        const line = buffered.slice(0, nl).trim();
+        buffered = buffered.slice(nl + 1);
+        if (!line.startsWith('{')) continue;
+        const m = JSON.parse(line);
+        if (m.all) ready();
+        else if (m.counts) counts = m.counts;
+        else binds.push(`${m.id} ${m.error ?? 'bound'}`);
+      }
+    }));
+    probe.stderr.on('data', () => { /* Chromium's own logging */ });
+    const exited = new Promise<void>((r) => probe.once('exit', () => r()));
+    await all;
+    const sender = spawn('wsl.exe', ['-d', 'Ubuntu', '--', 'python3', '-', host, String(port), '4'], { stdio: ['pipe', 'pipe', 'inherit'] });
+    sender.stdin.end(WSL_SENDER);
+    sender.stdout.on('data', (chunk: Buffer) => { const last = chunk.toString('utf8').trim().split('\n').pop(); if (last) sent = Number(last); });
+    await new Promise<void>((r) => sender.once('exit', () => r()));
+    await exited;
+    console.log(`${c.name} (port ${port})\n  binds: ${binds.join(', ')}\n  sent ${sent}; received ${Object.entries(counts).map(([id, n]) => `${id} ${n}`).join(', ') || 'none'}`);
+  }
+}
+
+// --- softflowd --------------------------------------------------------------------
+
+// A receiver inside WSL that keeps every datagram, as [u32 length][payload],
+// and stops 3 s after the last one (or 60 s after starting with none).
+const WSL_KEEPER = `
+import socket, struct, sys, time
+port, path = int(sys.argv[1]), sys.argv[2]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+s.bind(('127.0.0.1', port))
+s.settimeout(0.5)
+print('ready', flush=True)
+n, start, last = 0, time.time(), None
+with open(path, 'wb') as f:
+    while True:
+        try:
+            d, src = s.recvfrom(65535)
+            f.write(struct.pack('<I', len(d)) + d)
+            n, last = n + 1, time.time()
+        except socket.timeout:
+            pass
+        if (last and time.time() - last > 3) or (not last and time.time() - start > 60):
+            break
+print(n, flush=True)
+`;
+
+const winToWsl = (p: string) => `/mnt/${p[0].toLowerCase()}${p.slice(2).replace(/\\/g, '/')}`;
+
+/** A classic pcap of raw IPv4 (LINKTYPE_RAW), each datagram given a UDP/IPv4 header. */
+function rawUdpPcap(datagrams: Uint8Array[], dstPort: number): Uint8Array {
+  const parts: Uint8Array[] = [];
+  const g = new DataView(new ArrayBuffer(24));
+  g.setUint32(0, 0xa1b2c3d4, true); g.setUint16(4, 2, true); g.setUint16(6, 4, true);
+  g.setUint32(16, 65535, true); g.setUint32(20, 101, true);
+  parts.push(new Uint8Array(g.buffer));
+  datagrams.forEach((d, i) => {
+    const frame = new Uint8Array(28 + d.length);
+    const v = new DataView(frame.buffer);
+    frame.set([0x45, 0, 0, 0, 0, 0, 0, 0, 64, 17, 0, 0, 192, 0, 2, 10, 192, 0, 2, 1]);
+    v.setUint16(2, frame.length);
+    let sum = 0;
+    for (let p = 0; p < 20; p += 2) sum += v.getUint16(p);
+    while (sum > 0xffff) sum = (sum & 0xffff) + (sum >>> 16);
+    v.setUint16(10, ~sum & 0xffff);
+    v.setUint16(20, 50000); v.setUint16(22, dstPort); v.setUint16(24, 8 + d.length);
+    frame.set(d, 28);
+    const r = new DataView(new ArrayBuffer(16));
+    r.setUint32(0, 1_700_000_000 + i, true); r.setUint32(8, frame.length, true); r.setUint32(12, frame.length, true);
+    parts.push(new Uint8Array(r.buffer), frame);
+  });
+  return Buffer.concat(parts);
+}
+
+// softflowd reads a capture from file and exports NetFlow v5 to a keeper in
+// WSL; every record is then decoded twice, by `normalizeFlows` and by tshark's
+// cflow, and compared field by field. The flows' totals are set beside the
+// capture's own, which are not expected to match exactly (softflowd counts
+// IPv4 alone, and per its own flow table). Needs WSL's Ubuntu with softflowd
+// and python3, and tshark on this side.
+async function softflowdMode(): Promise<void> {
+  const { readFileSync, writeFileSync, mkdtempSync, realpathSync } = await import('node:fs');
+  const { findWiresharkTool } = await import('../export/realCaptures');
+  const pcap = argValue('--pcap');
+  if (pcap === undefined || !existsSync(pcap)) throw new Error('--pcap <a capture to replay> is required');
+  const port = Number(argValue('--port') ?? 2055);
+  const tshark = findWiresharkTool('tshark');
+  if (tshark === null) throw new Error('tshark not found');
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'inwire-softflowd-')));
+  const kept = join(dir, 'datagrams.bin');
+  const version = spawnSync('wsl.exe', ['-d', 'Ubuntu', '--', 'sh', '-c', 'softflowd -h 2>&1 | sed -n 2p'], { encoding: 'utf8' }).stdout.trim();
+
+  const keeper = spawn('wsl.exe', ['-d', 'Ubuntu', '--', 'python3', '-', String(port), winToWsl(kept)], { stdio: ['pipe', 'pipe', 'inherit'] });
+  keeper.stdin.end(WSL_KEEPER);
+  let keeperOut = '';
+  await new Promise<void>((ready) => keeper.stdout.on('data', (c: Buffer) => { keeperOut += c.toString('utf8'); if (keeperOut.includes('ready')) ready(); }));
+  const exported = spawnSync('wsl.exe', ['-d', 'Ubuntu', '--', 'softflowd', '-r', winToWsl(realpathSync.native(pcap)), '-n', `127.0.0.1:${port}`, '-v', '5', '-d'], { encoding: 'utf8' });
+  await new Promise<void>((r) => keeper.once('exit', () => r()));
+  console.log(`${version}; exit ${exported.status}${exported.stderr.trim() ? `; stderr: ${exported.stderr.trim().split('\n').slice(-3).join(' | ')}` : ''}`);
+
+  const raw = readFileSync(kept);
+  const datagrams: Uint8Array[] = [];
+  for (let p = 0; p + 4 <= raw.length;) { const n = raw.readUInt32LE(p); datagrams.push(raw.subarray(p + 4, p + 4 + n)); p += 4 + n; }
+  const outPcap = join(dir, 'export.pcap');
+  writeFileSync(outPcap, rawUdpPcap(datagrams, port));
+
+  const FIELDS = ['srcaddr', 'dstaddr', 'nexthop', 'inputint', 'outputint', 'packets', 'octets', 'srcport', 'dstport', 'tcpflags', 'protocol', 'tos', 'srcas', 'dstas'] as const;
+  const theirs = spawnSync(tshark, ['-r', outPcap, '-d', `udp.port==${port},cflow`, '-T', 'fields', '-E', 'occurrence=a', '-E', 'aggregator=,',
+    '-e', 'cflow.version', '-e', 'cflow.count', '-e', 'cflow.sequence', ...FIELDS.flatMap((f) => ['-e', `cflow.${f}`])], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  const rows = theirs.stdout.trimEnd().split(/\r?\n/).map((l) => l.split('\t'));
+
+  const ours = (fr: ReturnType<typeof normalizeFlows>[number]): Record<(typeof FIELDS)[number], string> => ({
+    srcaddr: fr.srcAddr!, dstaddr: fr.dstAddr!, nexthop: fr.nextHop!, inputint: String(fr.inputIf), outputint: String(fr.outputIf),
+    packets: String(fr.packets), octets: String(fr.octets), srcport: String(fr.srcPort), dstport: String(fr.dstPort),
+    tcpflags: `0x${fr.tcpFlags!.toString(16).padStart(2, '0')}`, protocol: String(fr.protocol), tos: `0x${fr.tos!.toString(16).padStart(2, '0')}`,
+    srcas: String(fr.srcAs), dstas: String(fr.dstAs),
+  });
+  let records = 0;
+  let mismatches = 0;
+  let sequenceBreaks = 0;
+  let expectedSequence: number | null = null;
+  let maxCount = 0;
+  let packets = 0;
+  let octets = 0;
+  const versions = new Set<string>();
+  const shown: string[] = [];
+  datagrams.forEach((d, i) => {
+    const flows = normalizeFlows(d, 0, d.length, '192.0.2.10', new MemoryTemplateStore());
+    const row = rows[i] ?? [];
+    versions.add(row[0]);
+    const count = Number(row[1]);
+    maxCount = Math.max(maxCount, count);
+    const sequence = Number(row[2]);
+    if (expectedSequence !== null && sequence !== expectedSequence) sequenceBreaks++;
+    expectedSequence = sequence + count;
+    if (flows.length !== count) { mismatches++; shown.push(`datagram ${i + 1}: ${flows.length} records decoded, header says ${count}`); }
+    flows.forEach((fr, k) => {
+      records++;
+      packets += fr.packets ?? 0;
+      octets += fr.octets ?? 0;
+      const mine = ours(fr);
+      FIELDS.forEach((f, c) => {
+        const theirsValue = (row[3 + c] ?? '').split(',')[k];
+        if (mine[f] !== theirsValue) { mismatches++; if (shown.length < 10) shown.push(`datagram ${i + 1} record ${k + 1} ${f}: ours ${mine[f]}, tshark ${theirsValue}`); }
+      });
+    });
+  });
+  // softflowd counts every byte past the Ethernet header, so a short frame's
+  // padding is in its octets; both sums are printed, and it should match the second.
+  const capture = spawnSync(tshark, ['-r', pcap, '-Y', 'ip', '-T', 'fields', '-E', 'occurrence=f', '-e', 'ip.len', '-e', 'frame.len'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  const ipRows = capture.stdout.trimEnd().split(/\r?\n/).map((l) => l.split('\t').map(Number)).filter(([ip]) => ip > 0);
+  const ipOctets = ipRows.reduce((a, [ip]) => a + ip, 0);
+  const pastEthernet = ipRows.reduce((a, [, frame]) => a + frame - 14, 0);
+  console.log(`datagrams ${datagrams.length}, versions ${[...versions].join(',')}, records ${records}, most in one datagram ${maxCount}, sequence breaks ${sequenceBreaks}`);
+  console.log(`field mismatches against tshark: ${mismatches} (fields compared: ${FIELDS.length} per record)`);
+  for (const line of shown) console.log(`  ${line}`);
+  console.log(`flows' totals: ${packets} packets, ${octets} octets; the capture's IPv4: ${ipRows.length} packets, ${ipOctets} octets by ip.len, ${pastEthernet} past the Ethernet header`);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 switch (mode) {
+  case 'softflowd': await softflowdMode(); break;
+  case 'bindpair': await bindPairMode(); break;
   case 'socket': await socketMode(); break;
   case 'journal': await journalMode(); break;
   case 'rollup': rollupMode(); break;

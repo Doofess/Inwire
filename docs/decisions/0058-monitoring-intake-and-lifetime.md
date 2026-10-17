@@ -61,6 +61,15 @@ address** and one UDP port. Nothing else is configured.
 - **A busy port is an error the sheet shows**, `EADDRINUSE`, in its own
   words. A local address the machine does not have is `EADDRNOTAVAIL`.
   Nothing is retried on another port.
+- **Busy means the same address, not the same port.** A program listening
+  on `0.0.0.0` at the same port does not make the bind fail, in either
+  order. The specific socket takes every datagram to its address, and the
+  wildcard one stops receiving them without an error. So Start beside
+  another collector on that port succeeds and silently takes its datagrams
+  for this address. The sheet's Start does not claim the port is free.
+- **The socket is bound without `reuseAddr`.** That is what makes a second
+  bind of the same address fail, `EADDRINUSE` without the option and
+  `EACCES` with it, so nothing can share Inwire's address once it holds it.
 - **The receive buffer is set to 8 MiB.** The default 64 KiB lost 100 of
   1,000 datagrams in a burst and 4,955 of 5,000 across a 2-second stall. At
   8 MiB both delivered everything. An exporter's cache expiry is exactly such
@@ -115,9 +124,11 @@ cause afterwards. Observed on this machine with the dev `electron.exe`
   below exists for. Undoing it needs an administrator in *Windows Defender
   Firewall with Advanced Security*.
 
-The packaged, fused `Inwire.exe`'s prompt, meaning what it names and which
-publisher it shows, is **not run**. It is owed to the end-to-end task against
-the installed build.
+The packaged, fused `Inwire.exe` raised the same prompt word for word, naming
+**Inwire** with publisher **Rotem Grinhut**: its VERSIONINFO, which comes from
+`package.json`, not the certificate. Its rules took the same shape, and Allow
+again needed no UAC prompt. Its Cancel, and the installed build's prompt,
+are not run.
 
 ### Limits and timing
 
@@ -143,7 +154,10 @@ From the survey in the measurement report:
 
 - **v5 is what the small end exports.** Sophos SFOS exports only v5,
   correcting the spec's working assumption that it sends v9. MikroTik,
-  OPNsense and pfSense offer v5, and softflowd defaults to it.
+  OPNsense and pfSense offer v5, and softflowd defaults to it. softflowd's
+  v5 export, replayed from both fixtures, decoded field for field as tshark
+  reads it. Its octets count Ethernet padding, so they are shown as the
+  exporter counted them and are never checked against IP lengths.
 - **The enterprise end is v9 or IPFIX.** Palo Alto and Meraki export only v9,
   and Cisco Flexible NetFlow defaults to it. The spec's v9/IPFIX gate stands.
 - **30-minute active and 15-second inactive timeouts are the common

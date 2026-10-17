@@ -62,8 +62,8 @@ open capture, never the flow's own packets.
 > Firewall.
 
 This replaces the spec's "choose **Private networks**", which the observed
-dialog does not offer. The words must be checked once more against the
-packaged `Inwire.exe`'s own prompt, which has not been run.
+dialog does not offer. The packaged `Inwire.exe` raised the same dialog word
+for word, naming *Inwire* (see the measurement report).
 
 **After 60 seconds of listening with nothing arriving**, the sheet names the
 two usual causes beside the listener state:
