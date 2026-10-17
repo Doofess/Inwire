@@ -92,14 +92,14 @@ async function main(): Promise<void> {
     const outcome = await exportHistory(result(), sink);
     const text = sink.text();
     ok('close returns its outcome', outcome.saved === true && sink.closes === 1 && sink.aborts === 0);
-    ok('no BOM', sink.bytes()[0] === 0x23);
+    ok('no BOM', sink.bytes()[0] === 0x22);
     ok('CRLF only', !/(^|[^\r])\n/.test(text));
     for (const k of ['# source: 192.0.2.1:2055', '# from: 2026-10-17T10:00:00.000Z', '# to: 2026-10-17T11:00:00.000Z',
       '# time basis: receipt time at this collector', '# counters: as reported by the exporter', '# sampling:',
       '# snapshot: generation ' + 'ab'.repeat(16) + ' through entry 42', '# matching records: 5',
       '# malformed datagrams: 1', '# unsupported datagrams: 2', '# answered from: 30 rollup minutes, 2 raw minutes',
       '# gap: 2026-10-17T10:30:00.000Z - 2026-10-17T11:00:00.000Z']) {
-      ok(`preamble has ${k.slice(0, 28)}`, text.includes(k));
+      ok(`preamble has ${k.slice(0, 28)}`, parseCsv(text).some((r) => r.length === 1 && r[0].startsWith(k)));
     }
     const rows = parseCsv(text);
     const b = section(rows, 'buckets');
@@ -145,7 +145,7 @@ async function main(): Promise<void> {
     const a = new TestSink(); const b = new TestSink();
     await exportHistory(result({ samplingKnown: true }), a);
     await exportHistory(result({ samplingKnown: false }), b);
-    const line = (s: TestSink) => s.text().split('\r\n').find((l) => l.startsWith('# sampling:'));
+    const line = (s: TestSink) => parseCsv(s.text()).find((r) => r[0].startsWith('# sampling:'))?.[0];
     ok('sampling line reflects samplingKnown', line(a) !== line(b) && !!line(a) && !!line(b));
   }
   // Big result, totals, chunking
@@ -189,6 +189,51 @@ async function main(): Promise<void> {
     await exportHistory(big, sink).catch((e) => { err = e; });
     ok('write failure: that error, abort once, no close',
       err instanceof Error && err.message === 'disk full' && !(err instanceof ExportCancelled) && sink.aborts === 1 && sink.closes === 0);
+  }
+  // Abort that rejects too
+  {
+    class BadSink extends TestSink {
+      async write(): Promise<void> { throw new Error('disk full'); }
+      async abort(): Promise<void> { this.aborts++; throw new Error('abort failed'); }
+    }
+    const sink = new BadSink();
+    let err: unknown;
+    await exportHistory(big, sink).catch((e) => { err = e; });
+    ok('write and abort both reject: original error surfaces', err instanceof Error && err.message === 'disk full' && sink.aborts === 1);
+    const ctl = new AbortController(); ctl.abort();
+    const sink2 = new BadSink();
+    err = undefined;
+    await exportHistory(big, sink2, { signal: ctl.signal }).catch((e) => { err = e; });
+    ok('cancel and abort rejects: ExportCancelled surfaces', err instanceof ExportCancelled);
+  }
+  // Preamble lines are one quoted cell each; gap carries its reason; focus line
+  {
+    const lineOf = (text: string, prefix: string): string | undefined =>
+      parseCsv(text).find((r) => r.length === 1 && r[0].startsWith(prefix))?.[0];
+    const sink = new TestSink();
+    await exportHistory(result({ gaps: [{ fromMs: T0, toMs: T0 + 1000, reason: 'app closed\r\nnow' }] }), sink);
+    const text = sink.text();
+    ok('time basis line is a single cell despite its comma',
+      lineOf(text, '# time basis: ')?.includes('collector (when Inwire received each export), not flow') === true);
+    ok('gap line carries its reason, one line', lineOf(text, '# gap: ')?.endsWith(': app closed now') === true, String(lineOf(text, '# gap: ')));
+    ok('focus none', lineOf(text, '# focus: ') === '# focus: none');
+    const preambleStart = text.split('\r\n').slice(0, 3).join('|');
+    ok('focus line follows source', preambleStart === '"# source: 192.0.2.1:2055"|"# focus: none"|"# from: 2026-10-17T10:00:00.000Z"', preambleStart);
+
+    const q = { sourceKey: '192.0.2.1:2055', fromMs: T0, toMs: T0 + 1000, bucketCount: 1 };
+    const ep = new TestSink();
+    const epResult = result({ query: { ...q, focus: { kind: 'endpoint', address: '10.0.0.5' } } });
+    await exportHistory(epResult, ep);
+    ok('focus endpoint line', lineOf(ep.text(), '# focus: ') === '# focus: endpoint 10.0.0.5');
+    const epName = historyCsvName(epResult);
+    ok('focus endpoint name', epName.endsWith('-endpoint-10.0.0.5.csv') && !/[\\/:*?"<>|]/.test(epName), epName);
+
+    const cv = new TestSink();
+    const cvResult = result({ query: { ...q, focus: { kind: 'conversation', srcAddr: '2001:db8::1', dstAddr: '10.0.0.2' } } });
+    await exportHistory(cvResult, cv);
+    ok('focus conversation line', lineOf(cv.text(), '# focus: ') === '# focus: conversation 2001:db8::1 -> 10.0.0.2');
+    const cvName = historyCsvName(cvResult);
+    ok('focus conversation name', cvName.endsWith('-conv-2001_db8_1-10.0.0.2.csv') && !/[\\/:*?"<>|]/.test(cvName), cvName);
   }
   // Name
   {

@@ -12,7 +12,7 @@
 import type { SaveOutcome } from '../../lib/saveFile';
 import type { ByteSink } from '../../lib/saveSink';
 import { csvCell } from '../export/writers/csv';
-import type { HistoryResult, HistoryTable } from './types';
+import type { HistoryResult, HistoryTable, QueryFocus } from './types';
 
 export interface ExportOptions { signal?: AbortSignal }
 
@@ -31,18 +31,35 @@ const ROWS_PER_WRITE = 300;
 const iso = (ms: number): string => new Date(ms).toISOString();
 
 /** A preamble value cannot start a new line. */
-const oneLine = (text: string): string => text.replace(/[\r\n]+/g, ' ');
+const oneLine = (text: string): string => text.replace(/[\r\n\u2028\u2029\u0085]+/g, ' ');
+
+/** Always quoted, like the capture CSV's preamble: the line stays in column A whatever it holds. */
+const quotedLine = (text: string): string => `"${text.replace(/"/g, '""')}"`;
+
+const safePart = (text: string): string => text.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
+
+function focusText(focus: QueryFocus | undefined): string {
+  if (!focus) return 'none';
+  return focus.kind === 'endpoint'
+    ? `endpoint ${oneLine(focus.address)}`
+    : `conversation ${oneLine(focus.srcAddr)} -> ${oneLine(focus.dstAddr)}`;
+}
 
 /** A file name for the result: no character Windows refuses. */
 export function historyCsvName(result: HistoryResult): string {
   const stamp = (ms: number): string => iso(ms).replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-  const exporter = result.query.sourceKey.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'exporter';
-  return `inwire-flows-${exporter}-${stamp(result.query.fromMs)}-${stamp(result.query.toMs)}.csv`;
+  const exporter = safePart(result.query.sourceKey) || 'exporter';
+  const focus = result.query.focus;
+  const suffix = !focus ? ''
+    : focus.kind === 'endpoint' ? `-endpoint-${safePart(focus.address) || 'x'}`
+      : `-conv-${safePart(focus.srcAddr) || 'x'}-${safePart(focus.dstAddr) || 'x'}`;
+  return `inwire-flows-${exporter}-${stamp(result.query.fromMs)}-${stamp(result.query.toMs)}${suffix}.csv`;
 }
 
 function preamble(result: HistoryResult): string {
   const lines = [
     `# source: ${result.query.sourceKey}`,
+    `# focus: ${focusText(result.query.focus)}`,
     `# from: ${iso(result.query.fromMs)}`,
     `# to: ${iso(result.query.toMs)}`,
     '# time basis: receipt time at this collector (when Inwire received each export), not flow start or end',
@@ -55,9 +72,9 @@ function preamble(result: HistoryResult): string {
     `# malformed datagrams: ${result.malformed}`,
     `# unsupported datagrams: ${result.unsupported}`,
     `# answered from: ${result.answeredFrom.rollupMinutes} rollup minutes, ${result.answeredFrom.rawMinutes} raw minutes`,
-    ...result.gaps.map((g) => `# gap: ${iso(g.fromMs)} - ${iso(g.toMs)}`),
+    ...result.gaps.map((g) => `# gap: ${iso(g.fromMs)} - ${iso(g.toMs)}: ${g.reason}`),
   ];
-  return lines.map(oneLine).join(EOL) + EOL;
+  return lines.map((line) => quotedLine(oneLine(line))).join(EOL) + EOL;
 }
 
 /** The rows of a section, as chunks of text; the first carries the heading. */
@@ -115,7 +132,8 @@ export async function exportHistory(
     }
     if (options.signal?.aborted) throw new ExportCancelled();
   } catch (error) {
-    await sink.abort();
+    // A failed abort must not hide the error that caused it.
+    await sink.abort().catch(() => undefined);
     throw error;
   }
   return sink.close();

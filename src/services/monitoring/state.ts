@@ -39,6 +39,7 @@ export interface MonitoringState {
    * The Worker's last word on the source: null until a datagram that arrived after the connect
    * names an exporter, and again whenever the Worker is gone. Listener, storage and the
    * rejected and shed counts are `intake`'s, not this.
+   * In the Worker those four `SourceHealth` fields keep the reducer's defaults (`stopped`, `ok`, empty, 0): `state.intake` is authoritative for them.
    */
   health: SourceHealth | null;
   /** The engine-form source keys the Worker knows, sorted. */

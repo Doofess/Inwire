@@ -78,7 +78,7 @@ export interface HostOptions {
   now(): number;
   /** Lets the event loop run: a macrotask, so a queued message is handled before this returns. */
   yieldNow(): Promise<void>;
-  /** The wall clock a still-open session is covered up to. */
+  /** The wall clock a still-open session is covered up to, and what ages an entry the host feeds late. */
   wallNow(): number;
   /**
    * Calls `fn` once after `ms` and returns the cancel. The health tick re-arms itself, so a
@@ -137,8 +137,11 @@ export class MonitoringWorkerHost {
 
   // What is pushed as `health`. Fed only by entries above `healthFloor`, the journal's end at
   // connect: replay is history, and a stale count on a fresh connect would read as a live fault.
+  // It needs `decodeV5` and not the aggregator, so a failed host keeps feeding it from the live
+  // push (`feedHealthOnly`); `healthThrough` is what keeps an entry from counting twice.
   private health: SourceHealth | null = null;
   private healthFloor = 0;
+  private healthThrough = 0;
   private knownSources = new Set<string>();
   private lastSignature = '';
   private analyzedThrough: number | null = null;
@@ -223,6 +226,7 @@ export class MonitoringWorkerHost {
       if (sidecarFault !== null) { mark = null; sources = []; }
       this.generation = snapshot.generation;
       this.healthFloor = snapshot.throughEntryId;
+      this.healthThrough = 0;
       this.health = null;
       this.knownSources = new Set(sources);
       this.analyzedThrough = null;
@@ -244,11 +248,12 @@ export class MonitoringWorkerHost {
     }
     this.connecting = false;
     this.postHealth(true);
+    // A failed host still ticks: the exporter going quiet is true whether or not the rollups work.
+    this.armTick();
     if (this.phase === 'failed') {
       this.announce(failure);
       return;
     }
-    this.armTick();
     // The rebuild runs behind the reply: queries are answered meanwhile, from
     // the sidecar as it stands (rule 13 makes that consistent).
     this.feedChain = this.feedChain.then(() => this.rebuild());
@@ -262,8 +267,8 @@ export class MonitoringWorkerHost {
   }
 
   private fail(e: unknown): void {
+    // The tick stays armed: only shutdown stops it (see `armTick`).
     this.phase = 'failed';
-    this.disarmTick();
     this.announce(e instanceof Error ? e.message : String(e));
   }
 
@@ -316,8 +321,13 @@ export class MonitoringWorkerHost {
    * dropped settles at once - there is nothing to wait for.
    */
   private onLive(entries: Evidence[]): Promise<void> {
+    if (this.shuttingDown) return Promise.resolve();
+    if (this.phase === 'failed') {
+      this.feedHealthOnly(entries);
+      return Promise.resolve();
+    }
     // Dropped during the rebuild: its loop re-takes the snapshot until it has them.
-    if (this.phase !== 'live' || this.shuttingDown) return Promise.resolve();
+    if (this.phase !== 'live') return Promise.resolve();
     const done = this.feedChain.then(() => this.consume(entries));
     this.feedChain = done;
     return done;
@@ -325,7 +335,13 @@ export class MonitoringWorkerHost {
 
   private async consume(entries: Evidence[]): Promise<void> {
     const runtime = this.runtime;
-    if (runtime === null || this.phase !== 'live' || this.stopRebuild) return;
+    if (runtime === null || this.stopRebuild) return;
+    if (this.phase === 'failed') {
+      // Failed between the push and this turn of the chain.
+      this.feedHealthOnly(entries);
+      return;
+    }
+    if (this.phase !== 'live') return;
     try {
       for (const e of entries) {
         const id = e.ref.entryId;
@@ -339,6 +355,8 @@ export class MonitoringWorkerHost {
       this.announce();
     } catch (e) {
       this.fail(e);
+      // What this push still holds arrived all the same.
+      this.feedHealthOnly(entries);
     }
   }
 
@@ -349,7 +367,7 @@ export class MonitoringWorkerHost {
     if (setTimer === undefined || this.shuttingDown || this.cancelTick !== null) return;
     this.cancelTick = setTimer(() => {
       this.cancelTick = null;
-      if (this.shuttingDown || this.phase === 'failed') return;
+      if (this.shuttingDown) return;
       this.observe({ kind: 'tick', elapsedMs: this.options.now(), wallMs: this.options.wallNow() });
       this.postHealth(false);
       this.armTick();
@@ -405,37 +423,71 @@ export class MonitoringWorkerHost {
       return;
     }
     const decoded = decodeV5(e, e.remoteIPv4);
-    // Only what arrived after the connect is health; the replay of older entries is not.
-    const watch = id > this.healthFloor;
-    const timing = (): { elapsedMs: number; wallMs: number } => ({ elapsedMs: this.options.now(), wallMs: e.receivedMs });
+    const admitted = this.admit(e, decoded);
     if (decoded.kind === 'valid') {
-      const key = sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId);
-      const admitted = this.admission.admit(key);
-      if (admitted) this.knownSources.add(key);
       if (!admitted) agg.fed(id);
-      else if (decoded.flows.length === 0) agg.touch(key, e.receivedMs, id);
+      else if (decoded.flows.length === 0) agg.touch(sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId), e.receivedMs, id);
       else for (const flow of decoded.flows) agg.add(flow);
-      if (watch) {
-        this.observeDatagram(e.remoteIPv4, {
-          kind: 'datagram', outcome: 'valid', engineType: decoded.engineType, engineId: decoded.engineId,
-          sequence: decoded.sequence, flowCount: decoded.flows.length, entryId: id, admitted, ...timing(),
-        });
-      }
     } else if (decoded.kind === 'malformed') {
       agg.addMalformed(e.remoteIPv4, e.receivedMs, id);
-      if (watch) this.observeDatagram(e.remoteIPv4, { kind: 'datagram', outcome: 'malformed', entryId: id, ...timing() });
     } else {
       agg.addUnsupported(e.remoteIPv4, e.receivedMs, id);
-      if (watch) this.observeDatagram(e.remoteIPv4, { kind: 'datagram', outcome: 'unsupported', entryId: id, ...timing() });
     }
+    this.watch(e, decoded, admitted);
     // Receipt time has passed every earlier minute; the watermark, not the
     // wall clock, is what makes it safe to post them.
     agg.seal(minuteOf(e.receivedMs));
   }
 
+  /** Engine admission and the source list: the Worker's own facts, replay included, and independent of the aggregator. */
+  private admit(e: DatagramEvidence, decoded: ReturnType<typeof decodeV5>): boolean {
+    if (decoded.kind !== 'valid') return false;
+    const key = sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId);
+    const admitted = this.admission.admit(key);
+    if (admitted) this.knownSources.add(key);
+    return admitted;
+  }
+
+  /**
+   * One datagram into the health, if it arrived after the connect and has not been counted.
+   * Stamped with its real age (`now()` less how long ago it was received) rather than with the
+   * moment it is fed: the rebuild's later passes read entries that arrived minutes earlier, and
+   * a source that went quiet meanwhile must not look fresh for another `staleMs`.
+   */
+  private watch(e: DatagramEvidence, decoded: ReturnType<typeof decodeV5>, admitted: boolean): void {
+    const id = e.ref.entryId;
+    if (id <= Math.max(this.healthFloor, this.healthThrough)) return;
+    this.healthThrough = id;
+    const age = Math.max(0, this.options.wallNow() - e.receivedMs);
+    const timing = { elapsedMs: this.options.now() - age, wallMs: e.receivedMs };
+    if (decoded.kind === 'valid') {
+      this.observeDatagram(e.remoteIPv4, {
+        kind: 'datagram', outcome: 'valid', engineType: decoded.engineType, engineId: decoded.engineId,
+        sequence: decoded.sequence, flowCount: decoded.flows.length, entryId: id, admitted, ...timing,
+      });
+    } else {
+      this.observeDatagram(e.remoteIPv4, { kind: 'datagram', outcome: decoded.kind, entryId: id, ...timing });
+    }
+  }
+
+  /**
+   * After a failure nothing is analyzed, but datagrams are still arriving and the health and the
+   * source list are still true of them. Entries of another generation have ids that mean nothing
+   * against this one's, so they are not counted.
+   */
+  private feedHealthOnly(entries: Evidence[]): void {
+    if (this.shuttingDown) return;
+    for (const e of entries) {
+      if (e.kind !== 'datagram' || e.ref.generation !== this.generation) continue;
+      const decoded = decodeV5(e, e.remoteIPv4);
+      this.watch(e, decoded, this.admit(e, decoded));
+    }
+  }
+
   private async postDrained(runtime: HostRuntime): Promise<void> {
     // Whatever has been fed has been analyzed; what is rolled up is what the sidecar acknowledged.
-    if (this.aggregator.fedThrough > this.healthFloor) this.noteWatermark('analyzed', this.aggregator.fedThrough);
+    const live = this.aggregator.fedThrough > this.healthFloor;
+    if (live) this.noteWatermark('analyzed', this.aggregator.fedThrough);
     const drained = this.aggregator.drain();
     if (drained === null) return;
     const minutes = drained.fragments.map((f) => ({
@@ -444,7 +496,8 @@ export class MonitoringWorkerHost {
       bytes: encodeMinuteRollup(f.rollup, this.options.deflate),
     }));
     await runtime.appendMinutes(minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION });
-    this.noteWatermark('rolled-up', drained.watermark);
+    // Replay posts to the sidecar too, but it is history and updates nothing (R7.2).
+    if (live) this.noteWatermark('rolled-up', drained.watermark);
   }
 
   private rebuildNote(): string | null {

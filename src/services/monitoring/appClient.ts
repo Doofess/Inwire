@@ -4,10 +4,12 @@
  * The sheet, the status bar and anything else that shows monitoring read the same
  * `MonitoringClient`, so the Worker, the port main ferries and the state they fold
  * exist once. It is built the first time something asks, and **asking does not
- * connect**: the client registers for main's status and exit pushes (cheap, and
- * the status bar wants them before any sheet is opened) but the Worker and the
- * journal behind it start only at `ensureConnected()`, which the sheet calls when
- * it opens. A page that never opens monitoring never starts a Worker.
+ * connect**: the client registers for main's status and exit pushes (cheap), but
+ * main sends status only to the window bound at the port request, so nothing
+ * arrives before `ensureConnected()` and the Network panel shows "Not started"
+ * until then (R7.5). The Worker and the journal behind it start only at
+ * `ensureConnected()`, which the sheet calls when it opens. A page that never
+ * opens monitoring never starts a Worker.
  *
  * Real dependencies, so nothing under `scripts/` imports this: they build a
  * `MonitoringClient` with fakes.

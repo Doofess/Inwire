@@ -27,6 +27,9 @@ async function live(prefill: (rig: Rig) => void = () => undefined): Promise<{ ri
   rig.append([start(m(0))]);
   prefill(rig);
   const h = new HostRig(rig.runtime);
+  // The wall clock sits at the start of the journal's own hour, so an entry is never aged by the
+  // distance between the rig's fixed `NOW` and its receipt times; the M2 tests move it on purpose.
+  h.wall = BASE;
   const reply = await h.connect();
   assert.ok(reply.type === 'connect-reply' && reply.ok);
   assert.equal(h.host.rebuildPhase, 'live');
@@ -76,6 +79,7 @@ test('health: entries already in the journal at connect are replay and update no
   const rig = new Rig();
   rig.append([start(m(0)), dgram(m(1), [{}]), dgram(m(1, 5), [{}], { sequence: 1 }), junk(m(1, 9))]);
   const h = await rollUp(rig);
+  h.wall = BASE;
   h.tick();
   h.tick();
   for (const p of h.healthPosts()) assert.equal(p.health, null, 'replay never makes a health');
@@ -170,6 +174,7 @@ test('sources: the connect\'s sources plus every engine admitted since, sorted a
   rig.append([start(m(0)), dgram(m(1), [{}], { engineId: 1 }), dgram(m(1, 1), [{}], { engineId: 0 }), stop(m(2))]);
   await rollUp(rig);
   const h = new HostRig(rig.runtime);
+  h.wall = BASE;
   await h.connect();
   assert.deepEqual(h.healthPosts()[0].sources, [SRC, SRC1], 'what the sidecar knew, sorted');
   rig.runtime.publishLive(rig.add(start(m(3, 0), 's2')));
@@ -198,6 +203,7 @@ test('health: a datagram from an engine the Worker did not admit is counted agai
   await rollUp(rig);
   rig.append([start(m(3), 's2')]);
   const h = new HostRig(rig.runtime);
+  h.wall = BASE;
   await h.connect();
   await push(rig, h, dgram(m(3, 5), [{}], { engineId: LIMITS.enginesPerExporter }));
   h.tick();
@@ -221,7 +227,15 @@ test('health: the analyzed and rolled-up watermarks follow the entries and the a
   assert.ok(health.rolledUpThroughEntryId <= health.analyzedThroughEntryId);
 });
 
-test('health: ticks stop on shutdown and on a failed rebuild, and nothing is posted after', async () => {
+/** Fails a live host the way a generation change does: a push naming another generation. */
+async function failRebuild(rig: Rig, h: HostRig): Promise<void> {
+  const [entry] = rig.add(dgram(m(9), [{}], { sequence: 900 }));
+  rig.runtime.publishLive([{ ...entry, ref: { ...entry.ref, generation: 'ff'.repeat(16) } }]);
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'failed');
+}
+
+test('health: ticks stop on shutdown and nothing is posted after', async () => {
   const a = await live();
   assert.equal(a.h.timers.count, 1);
   const id = a.h.send({ type: 'shutdown' });
@@ -231,12 +245,116 @@ test('health: ticks stop on shutdown and on a failed rebuild, and nothing is pos
   a.h.tick();
   assert.equal(a.h.posts.length, posted);
 
+  // A failed host is shut down like any other.
   const b = await live();
-  const [entry] = b.rig.add(dgram(m(1), [{}]));
-  b.rig.runtime.publishLive([{ ...entry, ref: { ...entry.ref, generation: 'ff'.repeat(16) } }]);
-  await b.h.host.settled();
-  assert.equal(b.h.host.rebuildPhase, 'failed');
+  await failRebuild(b.rig, b.h);
+  const idB = b.h.send({ type: 'shutdown' });
+  await b.h.waitFor(() => b.h.repliesTo(idB)[0], 'the shutdown reply');
   assert.equal(b.h.timers.count, 0);
+});
+
+test('health: a failed rebuild does not stop the clock, so a silent source still goes stale (I1)', async () => {
+  const { rig, h } = await live();
+  h.clock = 1000;
+  await push(rig, h, dgram(m(1), [{}]));
+  h.tick();
+  assert.equal(h.healthPosts().at(-1)?.health?.freshness, 'fresh');
+  await failRebuild(rig, h);
+  assert.equal(h.timers.count, 1, 'the tick is still armed');
+  // No datagram for staleMs: nothing is being analyzed, but the exporter has gone quiet all the same.
+  for (let waited = 0; waited < LIMITS.staleMs; waited += LIMITS.flushMs) h.tick();
+  const last = h.healthPosts().at(-1)?.health;
+  assert.ok(last);
+  assert.equal(last.freshness, 'stale');
+  assert.equal(last.accepted, 1);
+});
+
+test('health: a datagram that arrives after the rebuild failed still counts (I1)', async () => {
+  const { rig, h } = await live();
+  await failRebuild(rig, h);
+  await push(rig, h, dgram(m(10), [{}, {}], { sequence: 901 }));
+  h.tick();
+  const health = h.healthPosts().at(-1)?.health;
+  assert.ok(health);
+  assert.equal(health.accepted, 1);
+  assert.equal(health.freshness, 'fresh');
+  assert.equal(health.engines[0].flows, 2);
+});
+
+test('health: with the sidecar failing at connect, live datagrams still make a health and a source list (I1)', async () => {
+  const rig = new Rig();
+  rig.append([start(m(0))]);
+  rig.runtime.watermark = async () => { throw new Error('the sidecar cannot be read'); };
+  const h = new HostRig(rig.runtime);
+  h.wall = BASE;
+  const reply = await h.connect();
+  assert.ok(reply.type === 'connect-reply' && reply.ok && reply.phase === 'failed');
+  assert.equal(h.timers.count, 1, 'a failed connect still ticks');
+  await push(rig, h, dgram(m(1), [{}], { sequence: 0 }), dgram(m(1, 5), [{}, {}], { sequence: 1 }), junk(m(1, 9)));
+  h.tick();
+  const post = h.healthPosts().at(-1);
+  assert.ok(post?.health);
+  assert.equal(post.health.accepted, 2);
+  assert.equal(post.health.malformed, 1);
+  assert.equal(post.health.freshness, 'fresh');
+  assert.deepEqual(post.sources, [SRC]);
+  // The same silence turns it stale.
+  for (let waited = 0; waited < LIMITS.staleMs; waited += LIMITS.flushMs) h.tick();
+  assert.equal(h.healthPosts().at(-1)?.health?.freshness, 'stale');
+});
+
+test('health: an entry fed late carries its real age, so a source that went quiet during a long rebuild is stale (M2)', async () => {
+  const { rig, h } = await live();
+  h.clock = 500_000;
+  // Received 100 s before the host feeds it.
+  h.wall = m(1) + 100_000;
+  await push(rig, h, dgram(m(1), [{}]));
+  h.tick();
+  assert.equal(h.healthPosts().at(-1)?.health?.freshness, 'stale', '100 s old on arrival is past staleMs');
+});
+
+test('health: an entry fed late stays fresh until its real age reaches staleMs (M2)', async () => {
+  const { rig, h } = await live();
+  h.clock = 500_000;
+  const age = 10_000;
+  h.wall = m(1) + age;
+  await push(rig, h, dgram(m(1), [{}]));
+  h.tick();
+  assert.equal(h.healthPosts().at(-1)?.health?.freshness, 'fresh');
+  while (h.clock - 500_000 + age + LIMITS.flushMs < LIMITS.staleMs) h.tick();
+  assert.equal(h.healthPosts().at(-1)?.health?.freshness, 'fresh', 'just short of staleMs of real age');
+  h.tick();
+  assert.equal(h.healthPosts().at(-1)?.health?.freshness, 'stale');
+});
+
+test('health: an entry stamped in the future of this clock is not aged (M2)', async () => {
+  const { rig, h } = await live();
+  h.clock = 500_000;
+  h.wall = m(1) - 5_000; // the wall clock stepped back
+  await push(rig, h, dgram(m(1), [{}]));
+  h.tick();
+  const health = h.healthPosts().at(-1)?.health;
+  assert.ok(health);
+  assert.equal(health.freshness, 'fresh');
+  assert.equal(health.lastValidElapsedMs, 500_000);
+});
+
+test('health: replay moves neither watermark, including the rolled-up one (M1, R7.2)', async () => {
+  const rig = new Rig();
+  rig.append([start(m(0)), dgram(m(1), [{}]), dgram(m(1, 5), [{}], { sequence: 1 }), stop(m(2))]);
+  const h = await rollUp(rig);
+  h.wall = BASE;
+  const floor = rig.through;
+  // The rebuild posted the replayed minute to the sidecar, so its watermark is the replay's.
+  assert.equal(rig.store.watermark()?.throughEntryId, floor);
+  // A live datagram in a later minute seals nothing that was open, so nothing new is rolled up.
+  rig.runtime.publishLive(rig.add(start(m(4), 's2'), dgram(m(5), [{}], { sequence: 2 })));
+  await h.host.settled();
+  h.tick();
+  const health = h.healthPosts().at(-1)?.health;
+  assert.ok(health);
+  assert.equal(health.analyzedThroughEntryId, floor + 2);
+  assert.equal(health.rolledUpThroughEntryId, null, 'the sidecar watermark the replay left is not a live fact');
 });
 
 test('health: a host given no timer posts the connect\'s health and nothing else', async () => {
