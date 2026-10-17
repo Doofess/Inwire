@@ -1,8 +1,9 @@
 # 0059 — Monitoring keeps its own journal of what it received, and derives minute rollups beside it
 
-**Status:** proposed 2026-10-17. Measured in
-[`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md); waits
-on the owner's acceptance before any of it is built.
+**Status:** accepted 2026-10-17, with the owner's three rulings folded in:
+address-pair conversations, a bound per table, and an 8 GiB default. Measured
+in [`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md);
+nothing built yet.
 
 ## Context
 
@@ -266,28 +267,26 @@ than as a measured zero.
 
 | Limit | Value | Measured against |
 |---|---|---|
-| storage limit, default | **1 GiB**, minimum 16 MiB, of which 64 KiB is reserved for closing records | journal plus deflated sidecar: about 27 h at 7 a second, 4 days at 2 a second |
+| storage limit, default | **8 GiB**, minimum 16 MiB, of which 64 KiB is reserved for closing records | journal plus deflated sidecar, 0.88 GiB a day at 7 a second: about 9 days, and about 30 at 2 a second |
 | minute key budget | **16,384** | the table above |
 | raw query | 100,000 datagrams and 50,000 distinct keys | 1.7 s for 100,000 datagrams |
+| range, per table | 50,000 endpoints, 50,000 conversations | a day's distinct address pairs, about 50,000 |
 | buckets / top rows | 120 / 20 | |
 | concurrent history queries | 2; a newer one for the same view supersedes the older | |
 
 **At the limit, recording stops** with a `stop` boundary whose reason is
 `storage-limit`. The gap is shown, and nothing is expired.
 
-**The 50,000-key range bound is the one limit the measurement did not
-settle.** A day's distinct address pairs reached it at both rates, and a real
-network can have more than the model's ceiling. Holding it as written refuses
-the conversation table for most day and week views. The two ways forward are
-an owner decision at acceptance:
-
-1. **Bound each table on its own.** Bucket totals are never refused. Endpoints
-   and conversations each have a 50,000-key bound, and a table that passes
-   its bound comes back empty with its own `range-too-large` and a
-   narrower-range hint, while the totals stay exact. `HistoryResult` gains a
-   status per table. This is the recommendation.
-2. **Keep the plan's whole-query refusal.** It is simpler, and a long range
-   says "narrow it" before showing anything.
+**Each table is bounded on its own.** A day's distinct address pairs reached
+50,000 at both rates, and a real network can have more than the model's
+ceiling, so a whole-query refusal would refuse most day and week views.
+Instead, bucket totals are never refused. The endpoint and conversation
+tables each have a 50,000-key bound, and a table that passes its bound comes
+back empty with its own `range-too-large` and a narrower-range hint, while
+the totals stay exact. **This revises the plan's `HistoryResult`**, which
+gains a status per table. A range whose incomplete minutes pass the raw
+budget is still refused whole, because then its totals cannot be exact
+either.
 
 ## Retained-history semantics
 
@@ -306,5 +305,6 @@ an owner decision at acceptance:
   not product code.
 - Port and protocol questions cost a raw drill-down. The sheet asks them only
   of a selected endpoint or conversation over a short range.
-- At 7 a second, 1 GiB holds about a day of history. A default that holds a
-  week at that rate is about 7 GiB, and setting it is part of accepting this.
+- The 8 GiB default is the owner's choice over the plan's 1 GiB, which held
+  about 27 hours at the planning rate. The minimum stays 16 MiB, and the
+  sheet shows the limit before the first Start.

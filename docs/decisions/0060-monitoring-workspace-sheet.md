@@ -1,7 +1,6 @@
 # 0060 — Monitoring is a third sheet, opened from the Network panel and the palette
 
-**Status:** proposed 2026-10-17. Waits on the owner's acceptance before any of
-it is built.
+**Status:** accepted 2026-10-17; nothing built yet.
 
 ## Context
 
