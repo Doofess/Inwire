@@ -37,6 +37,9 @@ export type StopResult =
 /** Why intake stopped. `suspend` is `powerMonitor`'s, `quit` the drain's, `user` the Stop button's. */
 export type StopReason = 'user' | 'quit' | 'suspend';
 const STOP_REASONS: ReadonlySet<string> = new Set<StopReason>(['user', 'quit', 'suspend']);
+/** Why intake last stopped: a requested stop's reason, or what ended the listener without one. */
+export type IntakeStopReason = StopReason | 'socket-error' | 'storage-limit';
+const INTAKE_STOP_REASONS: ReadonlySet<string> = new Set<IntakeStopReason>(['user', 'quit', 'suspend', 'socket-error', 'storage-limit']);
 
 // --- status ---------------------------------------------------------------------------------
 
@@ -68,6 +71,12 @@ export interface IntakeStatus {
   snapshot: JournalSnapshot | null;
   /** Whether a Worker's runtime port is attached; a reload detaches it until the new page asks. */
   workerAttached: boolean;
+  /**
+   * Why the most recent stop in this utility's life happened; null before any
+   * stop and again once a Start succeeds. `suspend` is what lets the UI say the
+   * computer slept and Start is needed - no loss count is invented for the gap.
+   */
+  stopReason: IntakeStopReason | null;
 }
 
 /** Main -> renderer when the utility process exits; every pending request has already been failed. */
@@ -147,7 +156,7 @@ export function readIntakeStatus(v: unknown): IntakeStatus | null {
   if (!isObject(v)) return null;
   const {
     listener, listenerError, storage, storageError, source, sessionId, received,
-    rejectedSenders, rejectedOverflow, shedDatagrams, snapshot, workerAttached,
+    rejectedSenders, rejectedOverflow, shedDatagrams, snapshot, workerAttached, stopReason,
   } = v;
   if (!isText(listener) || !LISTENER_STATES.has(listener) || !textOrNull(listenerError)) return null;
   if (!isText(storage) || !STORAGE_STATES.has(storage) || !textOrNull(storageError)) return null;
@@ -163,11 +172,12 @@ export function readIntakeStatus(v: unknown): IntakeStatus | null {
   const snap = snapshot === null ? null : readJournalSnapshot(snapshot);
   if (snapshot !== null && snap === null) return null;
   if (typeof workerAttached !== 'boolean') return null;
+  if (stopReason !== null && !(isText(stopReason) && INTAKE_STOP_REASONS.has(stopReason))) return null;
   return {
     listener: listener as ListenerState, listenerError,
     storage: storage as IntakeStatus['storage'], storageError,
     source: config, sessionId, received, rejectedSenders: senders, rejectedOverflow, shedDatagrams,
-    snapshot: snap, workerAttached,
+    snapshot: snap, workerAttached, stopReason: stopReason as IntakeStopReason | null,
   };
 }
 

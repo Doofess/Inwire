@@ -38,7 +38,7 @@
  */
 import type { BlockFile } from '../../src/services/capture/blockFile';
 import { readSourceConfig } from '../../src/services/monitoring/config';
-import type { IntakeStatus, StartResult, StopReason, StopResult } from '../../src/services/monitoring/control';
+import type { IntakeStatus, IntakeStopReason, StartResult, StopReason, StopResult } from '../../src/services/monitoring/control';
 import { MonitoringJournal, type EvidenceInput, type JournalState } from '../../src/services/monitoring/journal';
 import { LiveFeed } from '../../src/services/monitoring/liveFeed';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
@@ -158,6 +158,8 @@ export class Collector {
   private source: SourceConfig | null = null;
   private listener: ListenerState = 'stopped';
   private listenerError: string | null = null;
+  /** Why intake last stopped in this utility's life; cleared by a Start that succeeds. */
+  private stopReason: IntakeStopReason | null = null;
   private cancelFlush: (() => void) | null = null;
 
   private inbox: InboxItem[] = [];
@@ -329,6 +331,7 @@ export class Collector {
       shedDatagrams: this.shed,
       snapshot: this.dataset?.journal.snapshot() ?? null,
       workerAttached: this.port !== null,
+      stopReason: this.stopReason,
     };
   }
 
@@ -563,6 +566,7 @@ export class Collector {
       this.rejected = new Map();
       this.rejectedOverflow = 0;
       this.listener = 'listening';
+      this.stopReason = null;
       this.armFlush();
       this.feed.notify();
       this.publish();
@@ -674,6 +678,7 @@ export class Collector {
     this.session = null;
     if (state === 'storage-limit') {
       // Not a failure: the journal wrote its own stop, and the dataset is simply full.
+      this.stopReason = 'storage-limit';
       this.listener = 'stopped';
       this.listenerError = null;
     } else {
@@ -691,6 +696,7 @@ export class Collector {
       if (this.socket !== socket || this.session === null) return;
       const why = describeListenError(error, config.bindIPv4, config.port);
       this.closeSession('socket-error', false);
+      this.stopReason = 'socket-error';
       this.listener = 'failed';
       this.listenerError = why;
       this.publish();
@@ -736,6 +742,9 @@ export class Collector {
       // Nothing is open, so nothing is written: a second Stop is an answer, not an event.
       return { ok: true, clean: true, snapshot: this.dataset?.journal.snapshot() ?? null };
     }
+    // Before the close, because a drain that fills the journal ends the session
+    // itself and overwrites this with `storage-limit`, which is the truer reason.
+    this.stopReason = reason;
     const clean = this.closeSession(reason, reason === 'suspend');
     this.listener = 'stopped';
     this.listenerError = null;

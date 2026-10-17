@@ -23,11 +23,15 @@
  *   second press.
  * - **A window going away does not stop intake.** Evidence is what the app is
  *   for; closing the window unbinds control and the listener runs on.
+ *
+ * And one lifecycle rule: **quit is final.** `drainForQuit` and `release` are
+ * the two ways out, `quitDrain.ts` decides which, and once either has been
+ * called nothing connects, starts, stops or forks again.
  */
 import { readSourceConfig } from '../../src/services/monitoring/config';
 import {
   readFromUtility, readStartResult, readStopReason, readStopResult,
-  type RuntimeExit, type StartResult, type StopResult, type ToMonitoringUtility,
+  type RuntimeExit, type StartResult, type StopReason, type StopResult, type ToMonitoringUtility,
 } from '../../src/services/monitoring/control';
 import { LIMITS } from '../../src/services/monitoring/types';
 import { MONITORING_EXIT_CHANNEL, MONITORING_PORT_CHANNEL, MONITORING_STATUS_CHANNEL } from '../channels';
@@ -92,6 +96,8 @@ interface Session {
 
 const failStart = (message: string): StartResult => ({ ok: false, message });
 const failStop = (message: string): StopResult => ({ ok: false, message, clean: false, snapshot: null });
+const NOTHING_TO_STOP: StopResult = { ok: true, clean: true, snapshot: null };
+const QUITTING = 'the app is quitting';
 
 /**
  * How long `open` may take: the ordinary request, plus a scan of the whole
@@ -112,6 +118,10 @@ export class MonitoringHostCore {
   private lastId = 0;
   /** Contents already watched for `destroyed`, so a reload does not add a listener each time. */
   private readonly watched = new WeakSet<ContentsLike>();
+  /** Set by the first `drainForQuit` or `release`, and never cleared. */
+  private quitting = false;
+  /** The one drain, shared by every caller; its settled value is the answer to a late one. */
+  private drain: Promise<StopResult> | null = null;
 
   constructor(private readonly deps: HostDeps) {}
 
@@ -129,6 +139,7 @@ export class MonitoringHostCore {
    * `unknown` until it is a positive safe integer.
    */
   async connect(contents: ContentsLike, nonce: unknown): Promise<void> {
+    if (this.quitting) throw new Error(QUITTING);
     if (typeof nonce !== 'number' || !Number.isSafeInteger(nonce) || nonce <= 0) {
       throw new Error('that is not a monitoring port request');
     }
@@ -163,6 +174,7 @@ export class MonitoringHostCore {
   // --- start and stop ---------------------------------------------------------------------------------------
 
   async start(sender: ContentsLike, config: unknown): Promise<StartResult> {
+    if (this.quitting) return failStart(QUITTING);
     const session = this.session;
     if (session === null || !this.isBound(sender)) return failStart(NOT_CONNECTED);
     const source = readSourceConfig(config);
@@ -178,44 +190,98 @@ export class MonitoringHostCore {
   }
 
   async stop(sender: ContentsLike, reason: unknown): Promise<StopResult> {
+    if (this.quitting) return failStop(QUITTING);
     const session = this.session;
     if (session === null || !this.isBound(sender)) return failStop(NOT_CONNECTED);
     const why = readStopReason(reason);
     if (why === null) return failStop('that is not a reason monitoring can stop for');
+    return this.stopSession(session, why);
+  }
+
+  /**
+   * Main's own stop, for the computer going to sleep: no window is asked and
+   * none need be bound. Stopped or unconnected is already what was asked for,
+   * so nothing is sent. `stop` stays the only operation a window reaches.
+   */
+  async suspend(): Promise<StopResult> {
+    if (this.quitting) return failStop(QUITTING);
+    const session = this.session;
+    if (session === null || session.ended || !session.running) return NOTHING_TO_STOP;
+    return this.stopSession(session, 'suspend');
+  }
+
+  private async stopSession(session: Session, reason: StopReason): Promise<StopResult> {
     const result = await this.ask(
-      session, (id) => ({ type: 'stop', id, reason: why }),
+      session, (id) => ({ type: 'stop', id, reason }),
       readStopResult, failStop, LIMITS.drainMs + LIMITS.requestMs,
     );
     if (result.ok) session.running = false;
     return result;
   }
 
+  /** Whether a listener is starting or listening in a utility that is still alive. */
+  isRunning(): boolean {
+    const session = this.session;
+    return session !== null && !session.ended && session.running;
+  }
+
   private isBound(sender: ContentsLike): boolean {
     return this.bound !== null && this.bound.id === sender.id && !this.bound.isDestroyed();
   }
 
-  // --- dispose -------------------------------------------------------------------------------------------------
+  // --- quitting ------------------------------------------------------------------------------------------------
 
   /**
-   * On quit: the utility stops intake with reason `quit`, closes the dataset
-   * and is then ended. Resolves whatever happens - a process that is already
-   * dead, never spawned or past its deadline does not hold the app open.
+   * On quit with a listener running: the utility stops intake with reason
+   * `quit` (which finishes the admitted journal writes, appends the final
+   * boundary and flushes) and closes the dataset, and is then ended. Never
+   * rejects, and every caller gets the one answer: a second call while this is
+   * in flight returns the same promise, a call after it settled returns the
+   * settled result and sends nothing.
+   *
+   * `LIMITS.drainMs` is the whole wait. A deadline, a refused write or a dead
+   * child is `clean: false`, the child is killed and the journal is left for
+   * the next open to recover; nothing here removes it.
    */
-  async dispose(): Promise<void> {
+  drainForQuit(): Promise<StopResult> {
+    if (this.drain !== null) return this.drain;
+    this.quitting = true;
     const session = this.session;
-    if (session === null) return;
+    this.drain = session === null ? Promise.resolve(NOTHING_TO_STOP) : this.drainSession(session);
+    return this.drain;
+  }
+
+  private async drainSession(session: Session): Promise<StopResult> {
     session.disposing = true;
+    let result: StopResult = NOTHING_TO_STOP;
     try {
+      // A child that never spawned has been sent nothing and holds nothing to stop.
       if (session.spawned) {
-        await this.ask(
+        result = await this.ask(
           session, (id) => ({ type: 'dispose', id }),
-          readStopResult, failStop, LIMITS.drainMs + LIMITS.requestMs,
+          readStopResult, failStop, LIMITS.drainMs,
         );
       }
     } finally {
       this.endSession(session, 'monitoring was shut down', null, true);
       this.bound = null;
     }
+    return result;
+  }
+
+  /**
+   * On quit with nothing running: the session ends at once, the child is
+   * killed and nothing is sent or awaited. The journal is consistent because
+   * the last stop flushed it, and anything else is the next open's recovery.
+   * Idempotent; a no-op with no session.
+   */
+  release(): void {
+    this.quitting = true;
+    const session = this.session;
+    if (session === null) return;
+    session.disposing = true;
+    this.endSession(session, 'monitoring was shut down', null, true);
+    this.bound = null;
   }
 
   // --- the process ----------------------------------------------------------------------------------------------

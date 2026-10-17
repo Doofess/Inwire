@@ -23,7 +23,7 @@
  * files into it.
  */
 import {
-  app, BrowserWindow, dialog, ipcMain, Menu, protocol, session, shell,
+  app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, protocol, session, shell,
 } from 'electron';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -51,6 +51,7 @@ import { isComponentId } from './updateCenter/components';
 import { UpdateCenter } from './updateCenter/host';
 import { SpeedTestHost } from './speedTest/host';
 import { MonitoringHost } from './monitoring/host';
+import { planQuitDrain } from './monitoring/quitDrain';
 import { readMonitoringSettings, saveMonitoringSettings } from './monitoring/settings';
 import { monitoringRoot } from './monitoring/volume';
 import { captureDirectory, CaptureStoreHost } from './store/host';
@@ -313,7 +314,28 @@ async function start(): Promise<void> {
   ipcMain.handle(MONITORING_CONFIG_GET_CHANNEL, () => readMonitoringSettings(monitoringDirectory));
   ipcMain.handle(MONITORING_CONFIG_SAVE_CHANNEL, (_event, config: unknown) =>
     saveMonitoringSettings(monitoringDirectory, config));
-  app.on('will-quit', () => { void monitoring.dispose(); });
+  // A running listener is drained before the app goes: stop intake, write the
+  // final boundary, flush, then quit again. `will-quit` is the one place that
+  // is late enough - every window has already passed `guardClose` - and a
+  // prevented quit re-runs every other `will-quit` listener, which is why each
+  // of them is idempotent. The drain is bounded by `LIMITS.drainMs` inside the
+  // host; past it the utility is killed and the journal left for recovery.
+  let monitoringDrain: Promise<void> | null = null;
+  let monitoringDrained = false;
+  app.on('will-quit', (event) => {
+    const plan = planQuitDrain({ running: monitoring.isRunning(), draining: monitoringDrain !== null, drained: monitoringDrained });
+    if (plan === 'quit') { monitoring.release(); return; }
+    event.preventDefault();
+    if (plan === 'wait') return;
+    monitoringDrain = monitoring.drainForQuit().then((result) => {
+      if (!result.ok || !result.clean) console.error(`[monitoring] quit drain was not clean: ${result.ok ? 'final boundary or flush refused' : result.message}`);
+      monitoringDrained = true;
+      app.quit();
+    });
+  });
+  // Sleep ends intake with a boundary; on resume the UI says why it stopped and
+  // asks for Start again. Nothing estimates what the sleeping machine missed.
+  powerMonitor.on('suspend', () => { void monitoring.suspend(); });
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.

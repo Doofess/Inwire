@@ -677,6 +677,7 @@ async function main(): Promise<void> {
     assert.equal(rig.last.storage, 'storage-limit', 'the drain is what hit the limit');
     assert.ok(stop.ok);
     assert.equal(stop.ok && stop.clean, true, 'the journal wrote the stop and it was flushed');
+    assert.equal(rig.last.stopReason, 'storage-limit', 'the journal ended the session, not the Stop that was asked for');
     const snapshot = await rig.collector.runtime.snapshot();
     assert.equal(snapshot.syncedThroughEntryId, snapshot.throughEntryId, 'the journal-written stop is synced');
     assert.deepEqual(actions(fileEntries(rig.volume.journal)), ['start', 'stop:storage-limit']);
@@ -816,6 +817,62 @@ async function main(): Promise<void> {
   });
 
   // --- dispose ---------------------------------------------------------------------------------------------------
+
+  await test('stopReason: null before any stop, the reason of each stop, null again once a Start succeeds', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    assert.equal(rig.last.stopReason, null, 'a running listener has not stopped');
+    for (const reason of ['user', 'suspend', 'quit'] as const) {
+      await rig.collector.stop(reason);
+      assert.equal(rig.last.stopReason, reason);
+      assert.equal(rig.collector.status().stopReason, reason);
+      assert.equal(rig.last.listener, 'stopped');
+      if (reason !== 'quit') {
+        assert.deepEqual(await rig.collector.start(CFG), { ok: true });
+        assert.equal(rig.last.stopReason, null, 'a successful Start clears it');
+      }
+    }
+  });
+
+  await test('stopReason: a Stop while already stopped leaves the reason of the stop that did it', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    await rig.collector.stop('suspend');
+    await rig.collector.stop('user');
+    assert.equal(rig.collector.status().stopReason, 'suspend');
+    assert.equal(rig.last.stopReason, 'suspend');
+  });
+
+  await test('stopReason: a refused Start does not clear it', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    await rig.collector.stop('suspend');
+    const refused = await rig.collector.start({ ...CFG, bindIPv4: '0.0.0.0' });
+    assert.equal(refused.ok, false);
+    assert.equal(rig.collector.status().stopReason, 'suspend');
+  });
+
+  await test('stopReason: a socket error says socket-error', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    rig.socket.fail('ECONNRESET', 'the socket broke');
+    await settle();
+    assert.equal(rig.last.listener, 'failed');
+    assert.equal(rig.last.stopReason, 'socket-error');
+  });
+
+  await test('stopReason: a full dataset says storage-limit, and a later Stop of the stopped listener leaves it', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    for (let round = 0; round < 12 && !rig.socket.closed; round++) {
+      for (let i = 0; i < 100; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, round & 0xff));
+      rig.drain();
+    }
+    assert.equal(rig.last.storage, 'storage-limit');
+    assert.equal(rig.last.stopReason, 'storage-limit');
+    await rig.collector.stop('user');
+    assert.equal(rig.collector.status().stopReason, 'storage-limit', 'a Stop of a stopped listener changes nothing');
+  });
 
   await test('dispose: stops with reason quit, closes the socket, the port and the dataset, and is the same answer twice', async () => {
     const rig = new Rig();

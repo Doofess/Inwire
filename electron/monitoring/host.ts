@@ -7,7 +7,7 @@
  * Task Manager shows what holds the UDP socket, and `stdio: 'pipe'`, because a
  * packaged GUI app has no console to inherit and a utility's last words would
  * go nowhere. The difference is lifetime: this one outlives a window, and is
- * ended by `dispose()` on quit.
+ * ended by `drainForQuit()` or `release()` on quit.
  */
 import { MessageChannelMain, utilityProcess, type MessagePortMain } from 'electron';
 import path from 'node:path';

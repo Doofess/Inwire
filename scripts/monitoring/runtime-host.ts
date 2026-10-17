@@ -21,12 +21,13 @@ import path from 'node:path';
 import { writeFileAtomic, partialPath } from '../../electron/atomicWrite';
 import { MONITORING_EXIT_CHANNEL, MONITORING_PORT_CHANNEL, MONITORING_STATUS_CHANNEL } from '../../electron/channels';
 import { MonitoringHostCore, openDeadlineMs, type ChildLike, type ContentsLike } from '../../electron/monitoring/hostCore';
+import { planQuitDrain } from '../../electron/monitoring/quitDrain';
 import { readMonitoringSettings, saveMonitoringSettings, SETTINGS_FILE } from '../../electron/monitoring/settings';
 import {
   MonitoringClient, MONITORING_PORT_MESSAGE,
   type MonitoringBridge, type PortMessageEvent, type WorkerLike,
 } from '../../src/services/monitoring/client';
-import type { IntakeStatus, RuntimeExit } from '../../src/services/monitoring/control';
+import type { IntakeStatus, RuntimeExit, StartResult, StopResult } from '../../src/services/monitoring/control';
 import {
   initialMonitoringState, reduceMonitoring, type MonitoringState,
 } from '../../src/services/monitoring/state';
@@ -73,7 +74,8 @@ const CONFIG: SourceConfig = { exporterIPv4: '192.0.2.10', bindIPv4: '127.0.0.1'
 function status(over: Partial<IntakeStatus> = {}): IntakeStatus {
   return {
     listener: 'listening', listenerError: null, storage: 'open', storageError: null, source: CONFIG, sessionId: 'session-1',
-    received: 0, rejectedSenders: [], rejectedOverflow: 0, shedDatagrams: 0, snapshot: null, workerAttached: true, ...over,
+    received: 0, rejectedSenders: [], rejectedOverflow: 0, shedDatagrams: 0, snapshot: null, workerAttached: true,
+    stopReason: null, ...over,
   };
 }
 
@@ -480,37 +482,274 @@ test('host: a destroyed window unbinds control without stopping intake', async (
   assert.equal((await r.core.stop(c2, 'user')).ok, true);
 });
 
-// --- the host: dispose --------------------------------------------------------------------------------------------
+// --- the host: reload ----------------------------------------------------------------------------------------------
 
-test('host: dispose asks the utility to dispose, kills it and does not announce an exit', async () => {
+test('host: a reload (a connect from new contents after the bound ones were destroyed) leaves a running listener running and binds the new page', async () => {
+  const r = hostRig();
+  const first = new FakeContents(1);
+  const child = await connect(r, first);
+  assert.equal((await r.core.start(first, CONFIG)).ok, true);
+  assert.equal(r.core.isRunning(), true);
+  first.destroy();
+  const second = new FakeContents(2);
+  await connect(r, second);
+  assert.equal(r.children.length, 1, 'no new process');
+  assert.deepEqual(child.of('stop'), [], 'nothing stopped the listener');
+  assert.deepEqual(child.of('dispose'), []);
+  assert.equal(child.killed, 0);
+  assert.equal(r.core.isRunning(), true);
+  assert.equal(first.sent(MONITORING_EXIT_CHANNEL).length, 0);
+  assert.equal((await r.core.stop(second, 'user')).ok, true);
+  assert.equal(child.of('stop').length, 1);
+  assert.equal(r.core.isRunning(), false);
+  assert.equal((await r.core.start(second, CONFIG)).ok, true, 'and the new page may start again');
+});
+
+// --- the host: quitting ------------------------------------------------------------------------------------------------
+
+test('quit plan: drained quits; else draining waits; else running drains; else quits - all eight inputs', () => {
+  const table: [boolean, boolean, boolean, 'quit' | 'drain' | 'wait'][] = [
+    // running, draining, drained
+    [false, false, false, 'quit'],
+    [true, false, false, 'drain'],
+    [false, true, false, 'wait'],
+    [true, true, false, 'wait'],
+    [false, false, true, 'quit'],
+    [true, false, true, 'quit'],
+    [false, true, true, 'quit'],
+    [true, true, true, 'quit'],
+  ];
+  assert.equal(new Set(table.map(([a, b, c]) => `${a}${b}${c}`)).size, 8);
+  for (const [running, draining, drained, expected] of table) {
+    assert.equal(planQuitDrain({ running, draining, drained }), expected, JSON.stringify({ running, draining, drained }));
+  }
+});
+
+test('host: isRunning follows a session that exists, has not ended and has a starting or listening listener', async () => {
+  const r = hostRig();
+  assert.equal(r.core.isRunning(), false);
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  assert.equal(r.core.isRunning(), false);
+  await r.core.start(c1, CONFIG);
+  assert.equal(r.core.isRunning(), true);
+  child.emitMessage({ type: 'status', status: status({ listener: 'stopped' }) });
+  assert.equal(r.core.isRunning(), false);
+  child.emitMessage({ type: 'status', status: status({ listener: 'starting' }) });
+  assert.equal(r.core.isRunning(), true);
+  child.emitExit(1);
+  assert.equal(r.core.isRunning(), false);
+});
+
+test('host: release while stopped kills the child, sends nothing, announces no exit, and twice is fine', async () => {
   const r = hostRig();
   const c1 = new FakeContents(1);
   const child = await connect(r, c1);
-  await r.core.dispose();
-  assert.equal(child.of('dispose').length, 1);
+  const before = child.sent.length;
+  r.core.release();
+  r.core.release();
   assert.equal(child.killed, 1);
-  assert.equal(c1.sent(MONITORING_EXIT_CHANNEL).length, 0);
+  assert.equal(child.sent.length, before, 'nothing was sent');
   child.emitExit(0);
   await flush();
   assert.equal(c1.sent(MONITORING_EXIT_CHANNEL).length, 0);
+  assert.equal(r.clock.pendingTimers, 0);
+  assert.equal(r.core.isRunning(), false);
+  // And with nothing ever connected it is a no-op.
+  const empty = hostRig();
+  empty.core.release();
+  assert.equal(empty.children.length, 0);
 });
 
-test('host: dispose resolves with nothing connected, with a child that never spawned and with a silent one', async () => {
-  await hostRig().core.dispose();
+test('host: release with a connect still waiting for the spawn ends it and kills the child', async () => {
+  const r = hostRig();
+  const done = r.core.connect(new FakeContents(1), 1).then(() => 'connected', (e: Error) => e.message);
+  await flush();
+  r.core.release();
+  assert.match(await done, /shut down/);
+  assert.equal(r.children[0].killed, 1);
+  assert.deepEqual(r.children[0].sent, []);
+  assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('host: quit is final - after release a connect forks nothing, and start, stop and suspend are refused', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  r.core.release();
+  const c2 = new FakeContents(2);
+  await assert.rejects(r.core.connect(c2, 5), /the app is quitting/);
+  assert.equal(r.children.length, 1);
+  assert.deepEqual(c2.posts, []);
+  assert.equal((await r.core.start(c1, CONFIG)).ok, false);
+  assert.equal((await r.core.stop(c1, 'user')).ok, false);
+  assert.equal((await r.core.suspend()).ok, false);
+  assert.equal(child.of('start').length + child.of('stop').length, 0);
+});
+
+test('host: quit is final during a drain too - nothing connects, starts, stops or suspends while it is in flight', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  child.replies.dispose = 'none';
+  const drain = r.core.drainForQuit();
+  await flush();
+  await assert.rejects(r.core.connect(new FakeContents(3), 7), /the app is quitting/);
+  assert.equal((await r.core.start(c1, CONFIG)).ok, false);
+  assert.equal((await r.core.stop(c1, 'user')).ok, false);
+  assert.equal((await r.core.suspend()).ok, false);
+  assert.equal(r.children.length, 1);
+  assert.equal(child.of('stop').length, 0);
+  await r.clock.advance(LIMITS.drainMs);
+  await drain;
+});
+
+test('host: drainForQuit while running sends one dispose however many ask, kills the child, announces no exit, and a later call sends nothing', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  const a = r.core.drainForQuit();
+  const b = r.core.drainForQuit();
+  assert.equal(a, b, 'the same promise');
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.deepEqual(ra, { ok: true, clean: true, snapshot: null });
+  assert.equal(ra, rb);
+  assert.equal(child.of('dispose').length, 1);
+  assert.equal(child.killed, 1);
+  const sent = child.sent.length;
+  const c = await r.core.drainForQuit();
+  assert.equal(c, ra, 'the settled result');
+  assert.equal(child.sent.length, sent);
+  child.emitExit(0);
+  await flush();
+  assert.equal(c1.sent(MONITORING_EXIT_CHANNEL).length, 0);
+  assert.equal(r.clock.pendingTimers, 0);
+  assert.equal(r.core.isRunning(), false);
+});
+
+test('host: drainForQuit with nothing connected answers clean without sending, and a never-spawned child is killed and not asked', async () => {
+  assert.deepEqual(await hostRig().core.drainForQuit(), { ok: true, clean: true, snapshot: null });
   const never = hostRig();
   const pending = never.core.connect(new FakeContents(1), 1).catch(() => undefined);
-  await never.core.dispose();
+  const result = await never.core.drainForQuit();
   await pending;
+  assert.equal(result.ok, true);
   assert.equal(never.children[0].killed, 1);
   assert.deepEqual(never.children[0].sent, []);
-  const silent = hostRig();
-  const child = await connect(silent, new FakeContents(1));
-  child.replies.dispose = 'none';
-  let done = false;
-  void silent.core.dispose().then(() => { done = true; });
-  await silent.clock.advance(LIMITS.drainMs + LIMITS.requestMs);
-  assert.equal(done, true);
+});
+
+test('host: drainForQuit relays an unclean answer from the utility as it is', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  child.replies.dispose = { ok: true, clean: false, snapshot: null };
+  assert.deepEqual(await r.core.drainForQuit(), { ok: true, clean: false, snapshot: null });
   assert.equal(child.killed, 1);
+});
+
+test('host: a silent utility is waited for exactly LIMITS.drainMs - not a millisecond less, not drainMs plus the request deadline - and is then killed', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  child.replies.dispose = 'none';
+  let result = null as StopResult | null;
+  void r.core.drainForQuit().then((v) => { result = v; });
+  await r.clock.advance(LIMITS.drainMs - 1);
+  assert.equal(result, null);
+  assert.equal(child.killed, 0);
+  await r.clock.advance(1);
+  assert.notEqual(result, null);
+  assert.equal(result!.ok, false);
+  assert.equal(result!.ok ? true : result!.clean, false);
+  assert.equal(child.killed, 1);
+  assert.equal(c1.sent(MONITORING_EXIT_CHANNEL).length, 0);
+  assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('host: a child that exits mid-drain resolves unclean and announces no exit', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  child.replies.dispose = 'none';
+  const drain = r.core.drainForQuit();
+  await flush();
+  child.emitExit(9);
+  const result = await drain;
+  assert.equal(result.ok, false);
+  assert.equal(result.ok ? true : result.clean, false);
+  assert.equal(c1.sent(MONITORING_EXIT_CHANNEL).length, 0);
+  assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('host: a refused write to the child during the drain is unclean and still ends the session', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  child.postMessage = () => { throw new Error('channel closed'); };
+  const result = await r.core.drainForQuit();
+  assert.equal(result.ok, false);
+  assert.match((result as { message: string }).message, /channel closed/);
+  assert.equal(child.killed, 1);
+});
+
+// --- the host: suspend ---------------------------------------------------------------------------------------------------
+
+test('host: suspend while running sends stop with reason suspend, and needs no bound window', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  c1.destroy();
+  const result = await r.core.suspend();
+  assert.deepEqual(result, { ok: true, clean: true, snapshot: null });
+  assert.equal(child.of('stop').length, 1);
+  assert.equal(child.of('stop')[0].message.reason, 'suspend');
+  assert.equal(r.core.isRunning(), false);
+  assert.equal(child.killed, 0, 'suspending is not quitting');
+});
+
+test('host: suspend while stopped, or with nothing connected, sends nothing and answers clean', async () => {
+  const empty = hostRig();
+  assert.deepEqual(await empty.core.suspend(), { ok: true, clean: true, snapshot: null });
+  const r = hostRig();
+  const child = await connect(r, new FakeContents(1));
+  const sent = child.sent.length;
+  assert.deepEqual(await r.core.suspend(), { ok: true, clean: true, snapshot: null });
+  assert.equal(child.sent.length, sent);
+});
+
+test('host: a suspend the utility never answers settles at the ordinary stop deadline', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  await r.core.start(c1, CONFIG);
+  child.replies.stop = 'none';
+  let result = null as StopResult | null;
+  void r.core.suspend().then((v) => { result = v; });
+  await r.clock.advance(LIMITS.drainMs + LIMITS.requestMs - 1);
+  assert.equal(result, null);
+  await r.clock.advance(1);
+  assert.equal(result!.ok, false);
+});
+
+test('host: a pending start is settled as failed when the utility exits', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  child.replies.start = 'none';
+  let start = null as StartResult | null;
+  void r.core.start(c1, CONFIG).then((v) => { start = v; });
+  await flush();
+  child.emitExit(2);
+  await flush();
+  assert.equal(start!.ok, false);
+  assert.match((start as unknown as { message: string }).message, /exit 2/);
 });
 
 // --- the saved source ---------------------------------------------------------------------------------------------
@@ -1073,6 +1312,106 @@ test('client: dispose unsubscribes from main, fails what is pending and ends the
   assert.equal((await r.client.connect()).ok, false);
   assert.equal(r.workers.length, 1);
 });
+
+// --- the client: every call settles ---------------------------------------------------------------------------------
+// (Task 5 already covers a pending query, detail and connect on a runtime exit, and a pending query on a Worker
+// error. start and stop are not the Worker's: they go to main, which fails them itself on an exit - the host tests
+// above - so here they are driven by a bridge that answers the way main does, and the client must pass it on.)
+
+/** A bridge whose start and stop stay out until the test lets them go, as main's do until the utility answers or dies. */
+function heldControl() {
+  const held: { start: ((v: unknown) => void)[]; stop: ((v: unknown) => void)[] } = { start: [], stop: [] };
+  const bridge: Partial<MonitoringBridge> = {
+    startMonitoring: () => new Promise((resolve) => { held.start.push(resolve); }),
+    stopMonitoring: () => new Promise((resolve) => { held.stop.push(resolve); }),
+  };
+  const failAll = (message: string): void => {
+    for (const resolve of held.start.splice(0)) resolve({ ok: false, message });
+    for (const resolve of held.stop.splice(0)) resolve({ ok: false, message, clean: false, snapshot: null });
+  };
+  return { bridge, held, failAll };
+}
+
+test('client: on a runtime exit a pending query, detail, start and stop all settle, as failures', async () => {
+  const control = heldControl();
+  const r = clientRig(control.bridge);
+  await r.client.connect();
+  r.workers[0].replies.query = () => 'none';
+  r.workers[0].replies.detail = () => 'none';
+  const q = r.client.query('v', {} as never);
+  const d = r.client.detail({} as never, {} as never, 0);
+  const start = r.client.start(CONFIG);
+  const stop = r.client.stop();
+  await flush();
+  r.exit(EXIT);
+  control.failAll(EXIT.message);
+  const [qr, dr, sr, pr] = await Promise.all([q, d, start, stop]);
+  assert.equal(qr.ok, false);
+  assert.equal((qr as { code: string }).code, 'runtime-unavailable');
+  assert.equal(dr, null);
+  assert.equal(sr.ok, false);
+  assert.equal(pr.ok, false);
+  assert.equal(pr.ok ? true : pr.clean, false);
+});
+
+test('client: on a Worker error a pending query and detail settle as failures and control is untouched', async () => {
+  const control = heldControl();
+  const r = clientRig(control.bridge);
+  await r.client.connect();
+  r.workers[0].replies.query = () => 'none';
+  r.workers[0].replies.detail = () => 'none';
+  const q = r.client.query('v', {} as never);
+  const d = r.client.detail({} as never, {} as never, 0);
+  const start = r.client.start(CONFIG);
+  const stop = r.client.stop();
+  await flush();
+  r.workers[0].fail('boom');
+  const [qr, dr] = await Promise.all([q, d]);
+  assert.equal(qr.ok, false);
+  assert.equal((qr as { code: string }).code, 'runtime-unavailable');
+  assert.match((qr as { message: string }).message, /boom/);
+  assert.equal(dr, null);
+  // The Worker is the history's, not control's: main's answers still reach the caller.
+  control.held.start[0]({ ok: true });
+  control.held.stop[0]({ ok: true, clean: true, snapshot: null });
+  assert.deepEqual(await start, { ok: true });
+  assert.deepEqual(await stop, { ok: true, clean: true, snapshot: null });
+});
+
+test('client: after a connect that fails, queries and details answer at once and start and stop still reach main', async () => {
+  const calls: string[] = [];
+  const r = clientRig({
+    requestMonitoringPort: async () => ({ ok: false, message: 'the dataset is corrupt' }),
+    startMonitoring: async () => { calls.push('start'); return { ok: false, message: 'not connected' }; },
+    stopMonitoring: async () => { calls.push('stop'); return { ok: false, message: 'not connected', clean: false, snapshot: null }; },
+  });
+  const connected = await r.client.connect();
+  assert.equal(connected.ok, false);
+  const q = await r.client.query('v', {} as never);
+  assert.equal(q.ok, false);
+  assert.equal((q as { code: string }).code, 'runtime-unavailable');
+  assert.equal(await r.client.detail({} as never, {} as never, 0), null);
+  assert.equal((await r.client.start(CONFIG)).ok, false);
+  assert.equal((await r.client.stop()).ok, false);
+  assert.deepEqual(calls, ['start', 'stop']);
+  assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('client: dispose (an unmounted sheet) never calls stopMonitoring - collection goes on without a window', async () => {
+  let stops = 0;
+  let starts = 0;
+  const r = clientRig({
+    stopMonitoring: async () => { stops++; return { ok: true, clean: true, snapshot: null }; },
+    startMonitoring: async () => { starts++; return { ok: true }; },
+  });
+  await r.client.connect();
+  await r.client.start(CONFIG);
+  await r.client.dispose();
+  await r.client.dispose();
+  assert.equal(stops, 0);
+  assert.equal(starts, 1);
+});
+
 
 // --- the reducer ---------------------------------------------------------------------------------------------------
 
