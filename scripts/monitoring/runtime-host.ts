@@ -29,8 +29,9 @@ import {
 } from '../../src/services/monitoring/client';
 import type { IntakeStatus, RuntimeExit, StartResult, StopResult } from '../../src/services/monitoring/control';
 import {
-  initialMonitoringState, reduceMonitoring, type MonitoringState,
+  initialMonitoringState, nothingArriving, reduceMonitoring, type MonitoringState,
 } from '../../src/services/monitoring/state';
+import { initialSourceHealth } from '../../src/services/monitoring/sourceHealth';
 import { LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
 
 // --- the harness --------------------------------------------------------------------------------------------
@@ -985,7 +986,7 @@ function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean } = {}
     ...bridgeOver,
   };
   const client = new MonitoringClient({
-    bridge, window: win, timers: clock,
+    bridge, window: win, timers: clock, now: () => clock.now,
     createWorker: () => { const w = new FakeWorker(); workers.push(w); return w; },
   });
   return {
@@ -1468,7 +1469,7 @@ test('state: a rebuild message is ignored before a connection and after the runt
 test('state: an exit keeps why the listener stopped', () => {
   let s = reduceMonitoring(initialMonitoringState, { type: 'connecting' });
   s = reduceMonitoring(s, { type: 'connected', phase: 'live', watermark: 4 });
-  s = reduceMonitoring(s, { type: 'status', status: status({ listener: 'stopped', stopReason: 'suspend' }) });
+  s = reduceMonitoring(s, { type: 'status', atMs: 0, status: status({ listener: 'stopped', stopReason: 'suspend' }) });
   assert.equal(s.intake?.stopReason, 'suspend');
   s = reduceMonitoring(s, { type: 'exit', exit: EXIT });
   assert.equal(s.intake?.stopReason, 'suspend');
@@ -1477,7 +1478,7 @@ test('state: an exit keeps why the listener stopped', () => {
 test('state: an exit makes the runtime unavailable and a dead process is no longer listening', () => {
   let s = reduceMonitoring(initialMonitoringState, { type: 'connecting' });
   s = reduceMonitoring(s, { type: 'connected', phase: 'live', watermark: 4 });
-  s = reduceMonitoring(s, { type: 'status', status: status() });
+  s = reduceMonitoring(s, { type: 'status', atMs: 0, status: status() });
   assert.equal(s.intake?.listener, 'listening');
   s = reduceMonitoring(s, { type: 'exit', exit: EXIT });
   assert.equal(s.runtime, 'unavailable');
@@ -1491,10 +1492,10 @@ test('state: an exit makes the runtime unavailable and a dead process is no long
 });
 
 test('state: after an exit a straggling status changes nothing, but a Worker-only failure still takes status', () => {
-  const exited = reduceMonitoring(reduceMonitoring(initialMonitoringState, { type: 'status', status: status() }), { type: 'exit', exit: EXIT });
-  assert.equal(reduceMonitoring(exited, { type: 'status', status: status({ received: 99 }) }), exited);
-  const workerOnly = reduceMonitoring(reduceMonitoring(initialMonitoringState, { type: 'status', status: status() }), { type: 'unavailable', message: 'worker died' });
-  const next = reduceMonitoring(workerOnly, { type: 'status', status: status({ received: 99 }) });
+  const exited = reduceMonitoring(reduceMonitoring(initialMonitoringState, { type: 'status', atMs: 0, status: status() }), { type: 'exit', exit: EXIT });
+  assert.equal(reduceMonitoring(exited, { type: 'status', atMs: 0, status: status({ received: 99 }) }), exited);
+  const workerOnly = reduceMonitoring(reduceMonitoring(initialMonitoringState, { type: 'status', atMs: 0, status: status() }), { type: 'unavailable', message: 'worker died' });
+  const next = reduceMonitoring(workerOnly, { type: 'status', atMs: 0, status: status({ received: 99 }) });
   assert.equal(next.intake?.received, 99);
   assert.equal(next.runtime, 'unavailable');
 });
@@ -1510,6 +1511,145 @@ test('state: connecting again clears the problem and the exit, and reset returns
 
 test('state: an exit with no status yet leaves the intake empty rather than inventing one', () => {
   assert.equal(reduceMonitoring(initialMonitoringState, { type: 'exit', exit: EXIT }).intake, null);
+});
+
+// --- health, sources and the time listening began (Task 7B) ------------------------------------------------------
+
+const HEALTH = initialSourceHealth('192.0.2.1');
+const connectedState = (): MonitoringState => reduceMonitoring(
+  reduceMonitoring(initialMonitoringState, { type: 'connecting' }), { type: 'connected', phase: 'live', watermark: 1 },
+);
+
+test('state: a health push is folded with its sources once the runtime is up, and not before or after', () => {
+  const push = { type: 'health' as const, health: HEALTH, sources: ['192.0.2.1/0/0'] };
+  assert.equal(reduceMonitoring(initialMonitoringState, push), initialMonitoringState);
+  const up = reduceMonitoring(connectedState(), push);
+  assert.equal(up.health, HEALTH);
+  assert.deepEqual(up.sources, ['192.0.2.1/0/0']);
+  const gone = reduceMonitoring(up, { type: 'unavailable', message: 'worker died' });
+  assert.equal(gone.health, null);
+  assert.deepEqual(gone.sources, []);
+  assert.equal(reduceMonitoring(gone, push), gone);
+});
+
+test('state: health and sources are cleared by an exit, by connecting again and by reset', () => {
+  const up = reduceMonitoring(connectedState(), { type: 'health', health: HEALTH, sources: ['a'] });
+  for (const event of [{ type: 'exit' as const, exit: EXIT }, { type: 'connecting' as const }, { type: 'reset' as const }]) {
+    const s = reduceMonitoring(up, event);
+    assert.equal(s.health, null, event.type);
+    assert.deepEqual(s.sources, [], event.type);
+  }
+});
+
+test('state: listeningSinceMs is set at the first listening status, kept while it stays, and cleared otherwise', () => {
+  let s = connectedState();
+  assert.equal(s.listeningSinceMs, null);
+  s = reduceMonitoring(s, { type: 'status', atMs: 1000, status: status({ listener: 'starting' }) });
+  assert.equal(s.listeningSinceMs, null);
+  s = reduceMonitoring(s, { type: 'status', atMs: 2000, status: status() });
+  assert.equal(s.listeningSinceMs, 2000);
+  s = reduceMonitoring(s, { type: 'status', atMs: 9000, status: status({ received: 4 }) });
+  assert.equal(s.listeningSinceMs, 2000, 'a later status while listening does not restart the wait');
+  s = reduceMonitoring(s, { type: 'status', atMs: 10_000, status: status({ listener: 'stopped' }) });
+  assert.equal(s.listeningSinceMs, null);
+  s = reduceMonitoring(s, { type: 'status', atMs: 11_000, status: status() });
+  assert.equal(s.listeningSinceMs, 11_000);
+  assert.equal(reduceMonitoring(s, { type: 'status', atMs: 12_000, status: status({ listener: 'failed', listenerError: 'bind' }) }).listeningSinceMs, null);
+  assert.equal(reduceMonitoring(s, { type: 'exit', exit: EXIT }).listeningSinceMs, null);
+  assert.equal(reduceMonitoring(s, { type: 'reset' }).listeningSinceMs, null);
+});
+
+test('nothingArriving: false before staleMs of listening, true at it, and false once anything has arrived', () => {
+  const since = 5000;
+  const s = reduceMonitoring(connectedState(), { type: 'status', atMs: since, status: status() });
+  assert.equal(nothingArriving(s, since + LIMITS.staleMs - 100), false, '59.9 s');
+  assert.equal(nothingArriving(s, since + LIMITS.staleMs), true, '60 s');
+  const arrived = reduceMonitoring(s, { type: 'status', atMs: since + 30_000, status: status({ received: 1 }) });
+  assert.equal(nothingArriving(arrived, since + LIMITS.staleMs + 1), false, 'after a datagram');
+  const stopped = reduceMonitoring(s, { type: 'status', atMs: since + 1, status: status({ listener: 'stopped' }) });
+  assert.equal(nothingArriving(stopped, since + LIMITS.staleMs * 2), false, 'not listening');
+  assert.equal(nothingArriving(initialMonitoringState, 1e12), false, 'no status at all');
+});
+
+test('client: a status is stamped with the injected clock, and a later one keeps the first listening time', async () => {
+  const r = clientRig();
+  r.clock.now = 5000;
+  r.status(status());
+  assert.equal(r.client.state.listeningSinceMs, 5000);
+  r.clock.now = 9000;
+  r.status(status({ received: 2 }));
+  assert.equal(r.client.state.listeningSinceMs, 5000);
+  r.status(status({ listener: 'stopped' }));
+  assert.equal(r.client.state.listeningSinceMs, null);
+});
+
+test('client: the Worker\'s health push lands in the state, a malformed one is ignored, and the state is stable between changes', async () => {
+  const r = clientRig();
+  await r.client.connect();
+  const seen: MonitoringState[] = [];
+  r.client.subscribe((s) => seen.push(s));
+  const before = r.client.state;
+  r.workers[0].emit({ type: 'health', health: HEALTH, sources: ['192.0.2.1/0/0'] });
+  assert.equal(r.client.state.health, HEALTH);
+  assert.deepEqual(r.client.state.sources, ['192.0.2.1/0/0']);
+  assert.notEqual(r.client.state, before);
+  const after = r.client.state;
+  assert.equal(r.client.state, after, 'the same reference until something changes');
+  for (const bad of [
+    { type: 'health', health: 'x', sources: [] },
+    { type: 'health', health: HEALTH, sources: 'x' },
+    { type: 'health', health: HEALTH, sources: [1] },
+    { type: 'health', health: { exporterIPv4: 1 }, sources: [] },
+    { type: 'health', sources: [] },
+  ]) r.workers[0].emit(bad);
+  assert.equal(r.client.state, after);
+  assert.equal(seen.length, 1);
+  r.workers[0].emit({ type: 'health', health: null, sources: [] });
+  assert.equal(r.client.state.health, null);
+});
+
+test('client: the listener shown is the status main relayed, never inferred from Start\'s answer (m10)', async () => {
+  const r = clientRig({ startMonitoring: async () => ({ ok: false, message: 'Start did not finish in time' }) });
+  await r.client.connect();
+  r.status(status({ listener: 'starting' }));
+  const started = await r.client.start(CONFIG);
+  assert.equal(started.ok, false);
+  assert.equal(r.client.state.intake?.listener, 'starting', 'a refused or late Start changes nothing');
+  r.status(status());
+  assert.equal(r.client.state.intake?.listener, 'listening');
+  const ok = clientRig();
+  await ok.client.connect();
+  await ok.client.start(CONFIG);
+  assert.equal(ok.client.state.intake, null, 'and a successful Start does not invent one');
+});
+
+test('client: ensureConnected is single-flight, answers from the state when connected, and connects again after an exit', async () => {
+  const r = clientRig();
+  const [a, b] = [r.client.ensureConnected(), r.client.ensureConnected()];
+  assert.equal(a, b, 'the same promise while one is in flight');
+  assert.deepEqual(await a, { ok: true, phase: 'live', watermark: 5 });
+  assert.equal(r.workers.length, 1);
+  assert.equal(r.portRequests, 1);
+  await r.client.ensureConnected();
+  assert.equal(r.workers.length, 1, 'connected: nothing new');
+  r.exit(EXIT);
+  assert.equal(r.client.state.runtime, 'unavailable');
+  const again = await r.client.ensureConnected();
+  assert.equal(again.ok, true);
+  assert.equal(r.workers.length, 2, 'a dead runtime is replaced');
+  assert.equal(r.client.state.runtime, 'connected');
+  assert.equal(r.client.state.exit, null);
+});
+
+test('client: ensureConnected connects again after the Worker alone failed', async () => {
+  const r = clientRig();
+  await r.client.ensureConnected();
+  r.workers[0].fail('boom');
+  assert.equal(r.client.state.runtime, 'unavailable');
+  assert.equal(r.client.state.health, null);
+  await r.client.ensureConnected();
+  assert.equal(r.workers.length, 2);
+  assert.equal(r.client.state.runtime, 'connected');
 });
 
 // --- run ------------------------------------------------------------------------------------------------------------

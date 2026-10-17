@@ -49,6 +49,12 @@ const host = new MonitoringWorkerHost({
     yieldChannel.port2.postMessage(0);
   }),
   wallNow: () => Date.now(),
+  // The health tick. A throttled background Worker only delays a push; the
+  // staleness it reports is judged on `now()` and not on how often this fires.
+  setTimer: (fn, ms) => {
+    const id = setTimeout(fn, ms);
+    return () => clearTimeout(id);
+  },
   // Level 1, as the capture store does: a rollup is written once per minute per
   // source and read rarely, so the fast level is the right trade.
   deflate: (bytes) => deflateSync(bytes, { level: 1 }),

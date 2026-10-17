@@ -126,6 +126,11 @@ export type HealthEvent =
   | (Timed & {
     kind: 'datagram'; outcome: 'valid'; engineType: number; engineId: number;
     sequence: number; flowCount: number; entryId: number;
+    /**
+     * False when the Worker's own admission refused this engine (it knows engines from the
+     * sidecar that this health, which starts at connect, never saw). Absent means admitted.
+     */
+    admitted?: boolean;
   })
   | (Timed & { kind: 'datagram'; outcome: 'malformed'; entryId: number })
   | (Timed & { kind: 'datagram'; outcome: 'unsupported'; entryId: number })
@@ -261,7 +266,7 @@ export function reduceSourceHealth(previous: SourceHealth, event: HealthEvent): 
       if (event.outcome === 'malformed') { h.malformed++; return h; }
       if (event.outcome === 'unsupported') { h.unsupported++; return h; }
       const at = h.engines.findIndex((e) => e.engineType === event.engineType && e.engineId === event.engineId);
-      if (at < 0 && h.engines.length >= LIMITS.enginesPerExporter) {
+      if (event.admitted === false || (at < 0 && h.engines.length >= LIMITS.enginesPerExporter)) {
         // Only an admitted engine's datagrams are analyzed, so this one gets
         // no row and does not make the source fresh; the sheet shows the count.
         h.engineLimitRejected++;

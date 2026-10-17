@@ -17,7 +17,7 @@ import { runHistoryQuery, type QueryOptions } from '../../src/services/monitorin
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import type { HostRuntime } from '../../src/services/monitoring/runtime';
 import {
-  DECODER_POLICY_VERSION, type BoundaryAction, type Evidence, type HistoryReply, type HistoryResult, type QuerySpec,
+  DECODER_POLICY_VERSION, LIMITS, type BoundaryAction, type Evidence, type HistoryReply, type HistoryResult, type QuerySpec,
 } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import {
@@ -164,8 +164,30 @@ export function waitTick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Timers the test fires by hand: a pending one is scheduled, `fire` runs it and forgets it. */
+export class ManualTimers {
+  private next = 1;
+  private readonly pending = new Map<number, { fn: () => void; ms: number }>();
+  /** The host's `setTimer`: returns the cancel. */
+  readonly set = (fn: () => void, ms: number): (() => void) => {
+    const id = this.next++;
+    this.pending.set(id, { fn, ms });
+    return () => { this.pending.delete(id); };
+  };
+  get count(): number { return this.pending.size; }
+  /** The delays of the timers waiting, oldest first. */
+  get delays(): number[] { return [...this.pending.values()].map((t) => t.ms); }
+  /** Runs every timer waiting now (not ones they schedule). */
+  fire(): void {
+    const due = [...this.pending.entries()];
+    for (const [id] of due) this.pending.delete(id);
+    for (const [, t] of due) t.fn();
+  }
+}
+
 export class HostRig {
   posts: FromMonitoringWorker[] = [];
+  readonly timers = new ManualTimers();
   /** The fake monotonic clock: each `now()` advances it by `step`, so a step of 0 never yields. */
   clock = 0;
   step = 0;
@@ -186,6 +208,7 @@ export class HostRig {
         return waitTick();
       },
       wallNow: () => this.wall,
+      setTimer: this.timers.set,
       inflate,
       deflate,
       ...over,
@@ -199,7 +222,7 @@ export class HostRig {
   }
 
   repliesTo(requestId: number): FromMonitoringWorker[] {
-    return this.posts.filter((p) => p.type !== 'rebuild' && p.requestId === requestId);
+    return this.posts.filter((p) => p.type !== 'rebuild' && p.type !== 'health' && p.requestId === requestId);
   }
 
   /** Polls until `find` returns something; a hung host fails the test instead of the run. */
@@ -234,6 +257,17 @@ export class HostRig {
     const id = this.queryNoWait(viewId, spec);
     const reply = await this.waitFor(() => this.repliesTo(id).find((r) => r.type === 'query-reply'), 'a query reply');
     return (reply as Extract<FromMonitoringWorker, { type: 'query-reply' }>).reply;
+  }
+
+  /** One flush window passes: the clock moves on and the host's tick timer fires. */
+  tick(ms: number = LIMITS.flushMs): void {
+    this.clock += ms;
+    this.timers.fire();
+  }
+
+  /** The health messages posted so far. */
+  healthPosts(): Extract<FromMonitoringWorker, { type: 'health' }>[] {
+    return this.posts.filter((p): p is Extract<FromMonitoringWorker, { type: 'health' }> => p.type === 'health');
   }
 
   phases(): string[] {

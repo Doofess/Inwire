@@ -33,6 +33,7 @@ import {
   readIntakeStatus, readRuntimeExit, readStartResult, readStopResult,
   type StartResult, type StopResult,
 } from './control';
+import type { SourceHealth } from './sourceHealth';
 import {
   initialMonitoringState, reduceMonitoring, type MonitoringEvent, type MonitoringState,
 } from './state';
@@ -96,6 +97,8 @@ export interface ClientDeps {
    * dataset that is merely large.
    */
   portWaitMs?: number;
+  /** The clock a status is stamped with (`listeningSinceMs`); `Date.now` by default. */
+  now?(): number;
 }
 
 // --- results ------------------------------------------------------------------------------------------------------
@@ -115,6 +118,21 @@ const describe = (e: unknown): string => (e instanceof Error ? e.message : Strin
 const UNREADABLE = 'main answered with something this build cannot read';
 const UNAVAILABLE = 'monitoring is not available in this build';
 const REBUILD_PHASES: ReadonlySet<string> = new Set<RebuildPhase>(['idle', 'rebuilding', 'live', 'failed']);
+const FRESHNESS: ReadonlySet<string> = new Set(['never', 'fresh', 'stale']);
+
+/**
+ * The Worker's `health` push, checked for the shape the sheet reads from. The Worker is ours,
+ * but a message is `unknown` until read, and a wrong type here would reach a render.
+ */
+export function readHealthPush(v: Record<string, unknown>): { health: SourceHealth | null; sources: string[] } | null {
+  const { health, sources } = v;
+  if (!Array.isArray(sources) || !sources.every((s) => typeof s === 'string')) return null;
+  if (health === null) return { health: null, sources: sources as string[] };
+  if (!isObject(health) || typeof health.exporterIPv4 !== 'string' || typeof health.freshness !== 'string' || !FRESHNESS.has(health.freshness)) return null;
+  if (!Array.isArray(health.engines) || typeof health.elapsedMs !== 'number' || typeof health.accepted !== 'number') return null;
+  if (!isObject(health.listener) || !isObject(health.storage) || !Array.isArray(health.rejectedSenders)) return null;
+  return { health: health as unknown as SourceHealth, sources: sources as string[] };
+}
 
 /** A refusal main gives instead of a port: `{ ok: false, message }`. Anything else means "wait for the port". */
 function readRefusal(v: unknown): string | null {
@@ -172,7 +190,7 @@ export class MonitoringClient {
     const offExit = bridge.onMonitoringRuntimeExit?.((raw) => this.onRuntimeExit(raw));
     const offStatus = bridge.onMonitoringStatus?.((raw) => {
       const status = readIntakeStatus(raw);
-      if (status !== null) this.dispatch({ type: 'status', status });
+      if (status !== null) this.dispatch({ type: 'status', status, atMs: (this.deps.now ?? Date.now)() });
     });
     for (const off of [offExit, offStatus]) if (off !== undefined) this.unsubscribers.push(off);
   }
@@ -212,6 +230,16 @@ export class MonitoringClient {
     });
     this.connecting = attempt;
     return attempt;
+  }
+
+  /**
+   * What an app-scoped caller uses: connects if nothing is connected, and is the same promise
+   * while an attempt is in flight. After an exit or a failed Worker it makes a new one, because
+   * a dead runtime is replaced, never repaired. (`connect` is already all of that; the name is
+   * the promise a caller can lean on without reading how.)
+   */
+  ensureConnected(): Promise<ConnectResult> {
+    return this.connect();
   }
 
   private async attach(): Promise<ConnectResult> {
@@ -344,6 +372,11 @@ export class MonitoringClient {
         type: 'rebuild',
         progress: { phase: phase as RebuildPhase, fedThroughEntryId, targetEntryId, message: typeof message === 'string' ? message : null },
       });
+      return;
+    }
+    if (data.type === 'health') {
+      const push = readHealthPush(data);
+      if (push !== null) this.dispatch({ type: 'health', ...push });
       return;
     }
     if (typeof data.requestId !== 'number') return;

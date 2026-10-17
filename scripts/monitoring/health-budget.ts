@@ -39,9 +39,12 @@ function run(events: HealthEvent[], from: SourceHealth = initialSourceHealth(EXP
 }
 
 function valid(
-  elapsedMs: number, engineId: number, sequence: number, flowCount: number, entryId = 1, wallMs = WALL + elapsedMs,
+  elapsedMs: number, engineId: number, sequence: number, flowCount: number, entryId = 1, wallMs = WALL + elapsedMs, admitted?: boolean,
 ): HealthEvent {
-  return { kind: 'datagram', outcome: 'valid', engineType: 0, engineId, sequence, flowCount, entryId, elapsedMs, wallMs };
+  return {
+    kind: 'datagram', outcome: 'valid', engineType: 0, engineId, sequence, flowCount, entryId, elapsedMs, wallMs,
+    ...(admitted === undefined ? {} : { admitted }),
+  };
 }
 
 const listening = (elapsedMs = 0): HealthEvent => ({ kind: 'listener', state: 'listening', elapsedMs, wallMs: WALL + elapsedMs });
@@ -471,6 +474,19 @@ test('budget: releasing what was never admitted is a bug and throws', () => {
   assert.throws(() => b.release(11));
   b.release(10);
   assert.equal(b.items, 0);
+});
+
+test('a valid datagram the Worker did not admit counts against the engine limit and gives no row, even with room in the list', () => {
+  // The Worker's admission knows engines this health never saw (the sidecar's), so it can refuse a
+  // datagram while the health's own list has room; the health must not then show a row for it.
+  const refused = valid(10, 3, 0, 1, 1, undefined, false);
+  const h = run([valid(0, 0, 0, 1), refused]);
+  assert.equal(h.engines.length, 1);
+  assert.equal(h.engineLimitRejected, 1);
+  assert.equal(h.accepted, 1);
+  assert.equal(h.lastValidElapsedMs, 0);
+  const explicit = run([valid(0, 0, 0, 1, 1, undefined, true)]);
+  assert.equal(explicit.accepted, 1);
 });
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} FAILED`);
