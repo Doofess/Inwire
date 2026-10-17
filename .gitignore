@@ -39,6 +39,9 @@ __pycache__/
 # they go stale the moment the code moves past them.
 docs/superpowers/
 .superpowers/
+# Agent web-research dumps. They describe the owner's own network, so an ADR
+# restates what it relies on and cites the primary sources instead.
+exa-results/
 scripts/brand/.raster.html
 
 # Parity fixtures: real captures with personal names and addresses inside (docs/decisions/0004).
