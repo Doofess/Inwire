@@ -164,25 +164,49 @@ export class MonitoringWorkerHost {
     }
     this.connecting = true;
     let runtime: HostRuntime | null = null;
+    let failure = '';
     try {
       runtime = this.options.openRuntime(port);
       const status = await runtime.rollupStatus();
-      if (status.status === 'rebuild-required') await runtime.resetRollups();
-      let mark = await runtime.watermark();
-      const snapshot = await runtime.snapshot();
-      // The store already refuses a sidecar of another generation or policy;
-      // a disagreement here is a runtime that did not, so it is wiped, not trusted.
-      if (mark !== null && (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION)) {
-        await runtime.resetRollups();
+      // The sidecar is a cache: a fault resetting or reading it leaves the host
+      // in `failed` with nothing fed and nothing posted, and queries answer from
+      // the journal. Only the journal's own faults (`snapshot`, `openRuntime`)
+      // and a lost runtime fail the connect.
+      let sidecarFault: unknown = null;
+      let mark: Awaited<ReturnType<HostRuntime['watermark']>> = null;
+      try {
+        if (status.status === 'rebuild-required') await runtime.resetRollups();
         mark = await runtime.watermark();
+      } catch (e) {
+        if (e instanceof RuntimeUnavailableError) throw e;
+        sidecarFault = e;
       }
-      const sources = mark === null ? [] : await runtime.sources();
+      const snapshot = await runtime.snapshot();
+      let sources: string[] = [];
+      if (sidecarFault === null) {
+        try {
+          // The store already refuses a sidecar of another generation or policy;
+          // a disagreement here is a runtime that did not, so it is wiped, not trusted.
+          if (mark !== null && (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION)) {
+            await runtime.resetRollups();
+            mark = await runtime.watermark();
+          }
+          sources = mark === null ? [] : await runtime.sources();
+        } catch (e) {
+          if (e instanceof RuntimeUnavailableError) throw e;
+          sidecarFault = e;
+        }
+      }
+      if (sidecarFault !== null) { mark = null; sources = []; }
       this.generation = snapshot.generation;
       this.admission = new EngineAdmission(sources);
       this.aggregator = new MinuteAggregator(mark === null ? 0 : mark.throughEntryId);
       this.runtime = runtime;
       runtime.onLive((entries) => this.onLive(entries));
-      this.phase = status.status === 'failed' ? 'failed' : 'rebuilding';
+      this.phase = status.status === 'failed' || sidecarFault !== null ? 'failed' : 'rebuilding';
+      failure = sidecarFault === null
+        ? 'the rollup sidecar could not be opened; history is answered from the journal'
+        : `the rollup sidecar could not be reset or read (${sidecarFault instanceof Error ? sidecarFault.message : String(sidecarFault)}); history is answered from the journal`;
       post({ type: 'connect-reply', requestId, ok: true, phase: this.phase, watermark: this.aggregator.fedThrough });
     } catch (e) {
       this.runtime = null;
@@ -192,7 +216,7 @@ export class MonitoringWorkerHost {
     }
     this.connecting = false;
     if (this.phase === 'failed') {
-      this.announce('the rollup sidecar could not be opened; history is answered from the journal');
+      this.announce(failure);
       return;
     }
     // The rebuild runs behind the reply: queries are answered meanwhile, from

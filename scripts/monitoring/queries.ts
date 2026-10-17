@@ -31,6 +31,7 @@ import {
   BASE, HostRig, MIN, NOW, Rig, SRC, SRC1, ask, askBoth, askOk, deflate, dgram, inflate, junk, rollUp, runAll, spec, start, stop,
   test, v9, waitTick, withoutProvenance, boundary,
 } from './queryRig';
+import { EXPORTER } from './fixtures';
 
 const m = (n: number, off = 0): number => BASE + n * MIN + off;
 const OTHER = '192.0.2.9';
@@ -1044,6 +1045,271 @@ test('degraded: a host whose rollups have failed does not use the rollups it alr
   if (fast.ok) {
     assert.deepEqual(withoutProvenance(fast.value), withoutProvenance(oracle));
     assert.ok(fast.value.answeredFrom.rollupMinutes > 0, 'a live host uses its rollups');
+  }
+});
+
+// =====================================================================================================
+// admission stops as soon as it is decided, and counts only the exporter it is deciding for
+// =====================================================================================================
+
+const SRC7 = sourceKey(EXPORTER, 0, 7);
+const SRC9 = sourceKey(EXPORTER, 0, 9);
+let lateRigCache: Rig | null = null;
+
+/**
+ * In journal order: 100,001 datagrams of another exporter; this exporter's
+ * engine 0/0 and then engine 0/9; 100,000 more of engine 0/0; and only then
+ * engine 0/7. Engine 0/9 follows two datagrams of its own exporter however much
+ * the other one sent first; engine 0/7 follows 100,002.
+ */
+function lateRig(): Rig {
+  if (lateRigCache === null) {
+    const rig = new Rig(0xc7);
+    rig.append([start(m(0))]);
+    const run = (n: number, at: (i: number) => number, remote: string): void => {
+      for (let from = 0; from < n; from += 2000) {
+        const chunk: EvidenceInput[] = [];
+        for (let i = from; i < Math.min(from + 2000, n); i++) chunk.push(dgram(at(i), [{ octets: 1 + (i % 9), packets: 1 }], {}, remote));
+        rig.append(chunk);
+      }
+    };
+    run(100_001, (i) => m(1, i), OTHER);
+    rig.append([
+      dgram(m(3), [{ octets: 5, packets: 1 }]),
+      dgram(m(3, 5), [{ octets: 9, packets: 1 }], { engineId: 9 }),
+    ]);
+    run(100_000, (i) => m(6, i), EXPORTER);
+    rig.append([dgram(m(9, 10), [{ octets: 42, packets: 1 }], { engineId: 7 }), stop(m(10))]);
+    lateRigCache = rig;
+  }
+  return lateRigCache;
+}
+
+test('admission: other exporters\' datagrams neither count against the scan nor are decoded, with or without rollups', async () => {
+  const rig = lateRig();
+  const q = spec(m(3), m(4), 1, { sourceKey: SRC9 });
+  const oracleRaw = await askOk(rig, q, { forceRaw: true });
+  assert.equal(oracleRaw.matchingRecords, 1, 'engine 0/9 has its one record');
+  // No rollups at all: 100,001 datagrams of another exporter come first and are skipped.
+  for (const [label, over] of [['no rollups yet', {}], ['rollups unusable', { rollupsUnavailable: 'the rollup sidecar has failed' }]] as const) {
+    const reply = await ask(rig, q, over);
+    assert.ok(reply.ok, `${label}: ${reply.ok ? '' : `${reply.code}: ${reply.message}`}`);
+    if (reply.ok) assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracleRaw), label);
+  }
+  // The exporter's own 100,000 datagrams are exactly the cap: engine 0/7 follows 100,002, so it is not found...
+  const refusedAt = await ask(rig, spec(m(9), m(10), 1, { sourceKey: SRC7 }), { rollupsUnavailable: 'x' });
+  assert.ok(!refusedAt.ok && refusedAt.code === 'range-too-large');
+});
+
+test('admission: a source past the cap of its own exporter is refused with what limits it, rollups or not', async () => {
+  const rig = lateRig();
+  const q = spec(m(9), m(10), 1, { sourceKey: SRC7 });
+  const noRollups = await ask(rig, q);
+  assert.ok(!noRollups.ok && noRollups.code === 'range-too-large', noRollups.ok ? 'ok' : noRollups.code);
+  if (!noRollups.ok) {
+    assert.match(noRollups.message, /The source has no rollups yet, and its first datagram could not be found within the first 100000 datagrams of its exporter after the last rollup\./);
+    assert.ok(!/narrow it/.test(noRollups.message), 'narrowing the range cannot help, so it is not advised');
+    assert.match(noRollups.message, /a narrower range does not change that/);
+  }
+  const degraded = await ask(rig, q, { rollupsUnavailable: 'the rollup sidecar has failed' });
+  assert.ok(!degraded.ok && degraded.code === 'range-too-large');
+  if (!degraded.ok) {
+    assert.match(degraded.message, /The rollups are unavailable \(the rollup sidecar has failed\), and the source's first datagram could not be found within the first 100000 datagrams of its exporter in the journal\./);
+    assert.ok(!/narrow it/.test(degraded.message));
+  }
+  const noted = await ask(rig, q, { rebuildNote: () => 'NOTE' });
+  assert.ok(!noted.ok);
+  if (!noted.ok) assert.match(noted.message, /NOTE$/, 'a rebuild in progress is still said');
+
+  // With the rollups in place the engine is known, and the same question is answered.
+  await rollUp(rig).then((h) => h.host.settled());
+  const fast = await askOk(rig, q);
+  const raw = await askOk(rig, q, { forceRaw: true });
+  assert.equal(fast.matchingRecords, 1);
+  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
+  assert.ok(fast.answeredFrom.rollupMinutes > 0);
+});
+
+test('admission: an exporter that already has its sixteen engines answers "not admitted" without reading to the end', async () => {
+  const rig = new Rig(0xc8);
+  const inputs: EvidenceInput[] = [start(m(0))];
+  for (let e = 0; e < 16; e++) inputs.push(dgram(m(1, e), [{ octets: 1 + e, packets: 1 }], { engineId: e }));
+  inputs.push(dgram(m(1, 500), [{ octets: 77, packets: 1 }], { engineId: 16 })); // the seventeenth, never admitted
+  // Eight pages of datagrams a long way from the range: reading any of them is the failure.
+  for (let i = 0; i < 8 * LIMITS.pageEntries; i++) inputs.push(dgram(m(400, i), [{ octets: 1, packets: 1 }], { engineId: i % 3 }));
+  inputs.push(stop(m(500)));
+  rig.append(inputs);
+
+  const SRC16 = sourceKey(EXPORTER, 0, 16);
+  const q = spec(m(1), m(2), 1, { sourceKey: SRC16 });
+  const reading = (rt: HostRuntime): { rt: HostRuntime; pages: number[] } => {
+    const seen: number[] = [];
+    return {
+      pages: seen,
+      rt: wrap(rt, {
+        readPage: async (snapshot, after, ...rest) => {
+          seen.push(after);
+          if (after >= 2 * LIMITS.pageEntries) throw new Error(`read past the point where the answer was decided (after ${after})`);
+          return rt.readPage(snapshot, after, ...rest);
+        },
+      }),
+    };
+  };
+  const notAdmitted = (r: Awaited<ReturnType<typeof ask>>): void => {
+    assert.ok(r.ok, r.ok ? '' : `${r.code}: ${r.message}`);
+    if (!r.ok) return;
+    assert.equal(r.value.matchingRecords, 0);
+    assert.deepEqual(r.value.endpoints, { status: 'ok', rows: [] });
+  };
+
+  // Rollups unusable: the scan starts at entry 1, and ends at the sixteenth engine's cap.
+  const degraded = reading(rig.runtime);
+  notAdmitted(await askWith(degraded.rt, q, { rollupsUnavailable: 'the rollup sidecar has failed' }));
+  assert.ok(degraded.pages.length <= 3, `${degraded.pages.length} pages read: ${degraded.pages.join(',')}`);
+
+  // No rollups yet: the same scan, from the watermark.
+  const bare = reading(rig.runtime);
+  notAdmitted(await askWith(bare.rt, q));
+  assert.ok(bare.pages.length <= 3, `${bare.pages.length} pages read`);
+
+  // Rollups that already hold the sixteen: no admission scan at all.
+  await rollUp(rig).then((h) => h.host.settled());
+  const known = reading(rig.runtime);
+  notAdmitted(await askWith(known.rt, q));
+  assert.ok(known.pages.length <= 1, `${known.pages.length} pages read: only the raw pass`);
+
+  // Control: an engine that is one of the sixteen is found, on the same paths.
+  const sixteenth = sourceKey(EXPORTER, 0, 15);
+  const found = await ask(rig, spec(m(1), m(2), 1, { sourceKey: sixteenth }), { rollupsUnavailable: 'x' });
+  assert.ok(found.ok);
+  if (found.ok) assert.equal(found.value.matchingRecords, 1);
+});
+
+// =====================================================================================================
+// connect: a sidecar that cannot be reset is a sidecar that is not there, not a Worker that is not there
+// =====================================================================================================
+
+test('connect: a rollup reset or read that fails leaves the host failed and the journal answering', async () => {
+  const rig = smallRig();
+  await rollUp(rig).then((h) => h.host.settled());
+  const rt = rig.runtime;
+  const mark = await rt.watermark();
+  assert.ok(mark !== null);
+  const q = spec(m(0), m(6), 6);
+  const oracle = await askOk(rig, q, { forceRaw: true });
+  const boom = (): never => { throw new Error('disk full (injected)'); };
+
+  const cases: [string, Over][] = [
+    ['reset on a rebuild-required status', { rollupStatus: async () => ({ status: 'rebuild-required' as const, reason: 'a stored batch is torn' }), resetRollups: async () => boom() }],
+    ['reset after a generation mismatch', { watermark: async () => ({ ...mark, generation: 'd'.repeat(32) }), resetRollups: async () => boom() }],
+    ['reset after a policy mismatch', { watermark: async () => ({ ...mark, policyVersion: mark.policyVersion + 1 }), resetRollups: async () => boom() }],
+    ['the watermark after the reset', { rollupStatus: async () => ({ status: 'rebuild-required' as const }), resetRollups: async () => undefined, watermark: async () => boom() }],
+    ['the sources', { sources: async () => boom() }],
+  ];
+  for (const [label, over] of cases) {
+    const h = new HostRig(wrap(rt, over));
+    const reply = await h.connect();
+    assert.ok(reply.type === 'connect-reply' && reply.ok, `${label}: ${JSON.stringify(reply)}`);
+    assert.equal(h.host.rebuildPhase, 'failed', label);
+    assert.equal(h.phases().at(-1), 'failed', label);
+    const note = h.posts.filter((p) => p.type === 'rebuild').at(-1);
+    assert.ok(note !== undefined && note.type === 'rebuild' && /disk full \(injected\)/.test(note.message ?? ''), `${label}: the failure is announced`);
+    // Nothing is fed and nothing posted: the aggregator starts from 0 and the host is not live.
+    assert.equal(reply.type === 'connect-reply' && reply.ok ? reply.watermark : -1, 0, `${label}: nothing fed`);
+    const answered = await h.query('v', q);
+    assert.ok(answered.ok, `${label}: ${answered.ok ? '' : `${answered.code}: ${answered.message}`}`);
+    if (answered.ok) {
+      assert.deepEqual(withoutProvenance(answered.value), withoutProvenance(oracle), label);
+      assert.equal(answered.value.answeredFrom.rollupMinutes, 0, `${label}: the journal answered`);
+    }
+  }
+
+  // The journal's own faults still fail the connect: there is nothing to answer from.
+  const noJournal = new HostRig(wrap(rt, { snapshot: async () => boom() }));
+  const failed = await noJournal.connectOnly();
+  assert.ok(failed.type === 'connect-reply' && !failed.ok && failed.code === 'storage-failed', JSON.stringify(failed));
+  const lost = new HostRig(wrap(rt, { rollupStatus: async () => { throw new RuntimeUnavailableError('the port closed'); } }));
+  const gone = await lost.connectOnly();
+  assert.ok(gone.type === 'connect-reply' && !gone.ok && gone.code === 'runtime-unavailable', JSON.stringify(gone));
+});
+
+// =====================================================================================================
+// what is a sidecar fault and what is not
+// =====================================================================================================
+
+test('degraded: a stale generation raised by a sidecar call is the sidecar\'s fault; the journal\'s is the journal\'s', async () => {
+  const rig = smallRig();
+  await rollUp(rig).then((h) => h.host.settled());
+  const rt = rig.runtime;
+  const stale = (): never => { throw new StaleGenerationError(rig.generation, 'f'.repeat(32)); };
+  const q = spec(m(0), m(6), 6);
+  const oracle = await askOk(rig, q, { forceRaw: true });
+  for (const [label, over] of [
+    ['watermark', { watermark: async () => stale() }],
+    ['sources', { sources: async () => stale() }],
+    ['readMinutes', { readMinutes: async () => stale() }],
+  ] as [string, Over][]) {
+    const reply = await askWith(wrap(rt, over), q);
+    assert.ok(reply.ok, `${label}: ${reply.ok ? '' : `${reply.code}: ${reply.message}`}`);
+    if (!reply.ok) continue;
+    assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle), label);
+    assert.equal(reply.value.answeredFrom.rollupMinutes, 0, `${label}: the rollups were not used`);
+  }
+  // The same error from the journal is still a stale-generation reply.
+  for (const method of ['snapshot', 'readPage', 'locate'] as const) {
+    const reply = await askWith(wrap(rt, { [method]: async () => stale() } as Over), q, { forceRaw: true });
+    assert.ok(!reply.ok && reply.code === 'stale-generation', `${method}: ${reply.ok ? 'ok' : reply.code}`);
+  }
+});
+
+test('degraded: a fault of the sidecar after a chunk was folded and with a real tail restarts the query, exactly', async () => {
+  const rig = new Rig(0xc3);
+  const first: EvidenceInput[] = [start(m(0, -500))];
+  for (let i = 0; i < 100; i++) {
+    first.push(dgram(m(i, 1000), [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 100 + i, packets: 1 }, { src: '10.0.0.3', dst: '10.0.0.1', octets: 7, packets: 2 }]));
+    if (i % 7 === 0) first.push(junk(m(i, 2000)));
+    if (i % 11 === 0) first.push(v9(m(i, 3000)));
+  }
+  rig.append(first);
+  const host = await rollUp(rig);
+  host.host.handle({ type: 'shutdown', requestId: 9999 });
+  await host.host.settled();
+  // Minutes 100..149 are not in the rollups, and one late datagram belongs to a minute that is.
+  const tail: EvidenceInput[] = [];
+  for (let i = 100; i < 150; i++) {
+    tail.push(dgram(m(i, 1000), [{ src: '10.0.0.1', dst: '10.0.0.9', octets: 5 + i, packets: 1 }]));
+    if (i % 5 === 0) tail.push(junk(m(i, 2000)));
+  }
+  tail.push(dgram(m(50, 45_000), [{ octets: 999, packets: 9 }]), stop(m(150)));
+  rig.append(tail);
+  const mark = await rig.runtime.watermark();
+  assert.ok(mark !== null && mark.throughEntryId < rig.through, 'there is a tail above the watermark');
+
+  const queries: [string, QuerySpec][] = [
+    ['exporter-wide', spec(m(0), m(150), 30)],
+    ['one engine', spec(m(0), m(150), 30, { sourceKey: SRC })],
+  ];
+  for (const [label, q] of queries) {
+    const oracle = await askOk(rig, q, { forceRaw: true });
+    const healthy = await askOk(rig, q);
+    assert.deepEqual(withoutProvenance(healthy), withoutProvenance(oracle), `${label}: healthy`);
+    assert.ok(healthy.answeredFrom.rollupMinutes > 0, `${label}: the rollups are used when they work`);
+    // A chunk is 60 minutes and two reads (the source and its exporter): the third read is the second chunk's.
+    for (const good of [2, 3]) {
+      let calls = 0;
+      const bad = wrap(rig.runtime, {
+        readMinutes: async (...a: Parameters<HostRuntime['readMinutes']>) => {
+          if (++calls > good) throw new Error('io fault (injected mid-query)');
+          return rig.runtime.readMinutes(...a);
+        },
+      });
+      const reply = await askWith(bad, q);
+      assert.ok(reply.ok, `${label} / ${good}: ${reply.ok ? '' : `${reply.code}: ${reply.message}`}`);
+      if (!reply.ok) continue;
+      assert.ok(calls > good, `${label} / ${good}: the fault was reached after a chunk had been folded`);
+      assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle), `${label} / ${good}`);
+      assert.equal(reply.value.answeredFrom.rollupMinutes, 0, `${label} / ${good}: nothing of the first pass survives`);
+    }
   }
 });
 

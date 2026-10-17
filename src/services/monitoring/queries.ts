@@ -391,11 +391,13 @@ class Query {
 
   /**
    * What a failed sidecar call means: the sidecar is unusable, unless the
-   * failure is the query's own cancel or the runtime itself being gone or on
-   * another generation, which no journal fallback can answer either.
+   * failure is the query's own cancel or the runtime itself being gone, which
+   * no journal fallback can answer either. A stale generation raised by a
+   * sidecar call is the sidecar's fault; the journal's own is raised by calls
+   * that never pass through here.
    */
   private rollupFailure(e: unknown): unknown {
-    if (this.signal.aborted || e instanceof RuntimeUnavailableError || e instanceof StaleGenerationError) return e;
+    if (this.signal.aborted || e instanceof RuntimeUnavailableError) return e;
     if (e instanceof Error && e.name === 'AbortError') return e;
     return new RollupUnusable(e instanceof Error ? e.message : String(e));
   }
@@ -482,26 +484,46 @@ class Query {
   /**
    * Whether the source has a row at all: the first 16 engines of an exporter,
    * in journal order. The sidecar's sources are the ones already admitted; the
-   * tail is scanned in order for the rest, and only until the query's own
-   * source shows up. Learned from the sidecar even where it ran past `S`, the
-   * set only ever grows and freezes at the cap, so it is right for every entry
-   * the snapshot holds. With no usable sidecar the set starts empty and W is 0,
-   * so the scan covers the journal from its first entry.
+   * entries above the watermark are scanned in order for the rest. Learned from
+   * the sidecar even where it ran past `S`, the set only ever grows and freezes
+   * at the cap, so it is right for every entry the snapshot holds. With no
+   * usable sidecar the set starts empty and W is 0, so the scan covers the
+   * journal from its first entry.
+   *
+   * The scan stops as soon as the answer is decided: the source is admitted, or
+   * its exporter already has its 16 engines without it, which is "not admitted"
+   * (records 0 everywhere). Only the exporter's own datagrams can change that
+   * exporter's admission, so only they are decoded and only they count against
+   * the cap - another exporter's traffic, however much of it comes first, cannot
+   * strand a source.
    */
   private async admit(): Promise<void> {
     this.admission = new EngineAdmission(this.unusable === null ? await this.rollupCall(() => this.rollups.sources()) : []);
     const key = this.spec.sourceKey;
     this.admitted = this.admission.has(key);
-    if (this.admitted) return;
+    if (this.admitted || this.admission.full(this.exporter)) return;
     let datagrams = 0;
     await this.scan([{ fromId: this.watermark + 1, toId: this.snapshot.throughEntryId }], (e) => {
-      if (e.kind !== 'datagram') return false;
-      if (++datagrams > LIMITS.rawQueryDatagrams) throw this.tooLarge(this.unusable === null ? 'The source has no rollups yet and' : 'Finding the source,');
+      if (e.kind !== 'datagram' || e.remoteIPv4 !== this.exporter) return false;
+      if (++datagrams > LIMITS.rawQueryDatagrams) throw this.admissionRefusal();
       const d = decodeV5(e, e.remoteIPv4);
       if (d.kind === 'valid') this.admission.admit(sourceKey(e.remoteIPv4, d.engineType, d.engineId));
       if (this.admission.has(key)) { this.admitted = true; return true; }
-      return false;
+      return this.admission.full(this.exporter);
     });
+  }
+
+  /**
+   * Admission could not be decided inside its cap. It looks for the source's
+   * first datagram, not for the range's, so narrowing the range cannot help and
+   * this does not say it can: it says what is actually limiting.
+   */
+  private admissionRefusal(): Refusal {
+    const lead = this.unusable !== null
+      ? `The rollups are unavailable (${this.unusable}), and the source's first datagram could not be found within the first ${LIMITS.rawQueryDatagrams} datagrams of its exporter in the journal.`
+      : `The source has no rollups yet, and its first datagram could not be found within the first ${LIMITS.rawQueryDatagrams} datagrams of its exporter after the last rollup.`;
+    const note = this.unusable === null ? this.options.rebuildNote?.() ?? null : null;
+    return new Refusal('range-too-large', `${lead} Whether it has any history could not be decided; a narrower range does not change that.${note === null ? '' : ` ${note}`}`);
   }
 
   // --- the tail ---------------------------------------------------------------------------------------

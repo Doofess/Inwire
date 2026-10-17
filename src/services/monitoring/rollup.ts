@@ -183,6 +183,9 @@ export class EngineAdmission {
 
   has(key: string): boolean { return this.keys.has(key); }
 
+  /** True when the exporter already has its full set of engines: nothing new is admitted for it, ever. */
+  full(exporter: string): boolean { return (this.perExporter.get(exporter) ?? 0) >= LIMITS.enginesPerExporter; }
+
   /** True when `key` is admitted, admitting it now if it is new and there is room. */
   admit(key: string): boolean {
     if (this.keys.has(key)) return true;
