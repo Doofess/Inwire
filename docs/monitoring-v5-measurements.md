@@ -17,7 +17,7 @@ measured, and are listed under **Not run** rather than left out.
 | OS | Windows 11 Pro 10.0.26300, not elevated |
 | Node | 26.8.1 (what `tsx` ran the socket, journal and rollup modes on) |
 | Electron | 44.3.0, the repository's dev copy (`node_modules/electron/dist`) |
-| Capture | the installed Inwire agent 0.5.0 (Rust), on `NPF_Loopback` and the WSL adapter |
+| Capture | the installed Inwire agent 0.5.0 (Rust), on `NPF_Loopback`, the WSL adapter and Ethernet |
 | WSL | WSL 2, kernel 6.18.54.1, Ubuntu in NAT mode, Python 3.14.4 |
 | Exporter | softflowd 1.1.1 in WSL, installed by the owner for the interop run; no nfdump |
 
@@ -182,6 +182,23 @@ Cancel was not run against the packaged build. Windows' refusal to ask again
 is a property of the rule already existing, which run 3 showed for the dev
 copy.
 
+### An exporter across the LAN (`firewall --nic Ethernet --listen-only`)
+
+A laptop on the same LAN ran softflowd 1.1.1 in WSL, replaying a short
+`tcpdump` of its own traffic (`-r <pcap> -v 5`) to this machine's Ethernet
+address on port 2055. The receiver was the packaged `Inwire.exe` copy above,
+whose rules already said Allow, bound to the Ethernet address. The
+Ethernet network is on the **Public** profile. The agent captured the same
+port beside it.
+
+| On the adapter | Delivered | ICMP unreachable |
+|---|---|---|
+| 2 | **2** | 0 |
+
+Every datagram that reached the wire reached the socket. The path is a real
+NIC, a real switch and another machine's stack, which the WSL adapter does not
+cover. The exporter was softflowd on a laptop, not a router.
+
 ## softflowd against the app's decoder (`softflowd`)
 
 softflowd 1.1.1 (Ubuntu's package, in WSL) replayed each fixture with
@@ -298,9 +315,10 @@ port. *Address pair* is the directional pair of addresses.
 
 ## Not run
 
-- **A real exporter on the LAN.** The Ethernet path from a router (Public
-  profile here) has not received a datagram. The firewall result above is for
-  the WSL adapter.
+- **A router or firewall as the exporter.** The Ethernet path is measured
+  with softflowd on a laptop. No hardware exporter has sent to this machine,
+  so a device's own timeouts, sequence handling and source address are
+  known only from the survey.
 - **Cancel under the packaged `Inwire.exe`.** Its Allow is measured above;
   its Cancel was not run.
 - **The installed build's prompt.** The packaged run used a scratch copy of
