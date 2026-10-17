@@ -49,7 +49,7 @@ export const MONITORING_PORT_MESSAGE = 'inwire:monitoring-port';
 
 /** The methods of `window.inwire` this class uses; each optional, like the rest of the bridge. */
 export interface MonitoringBridge {
-  requestMonitoringPort?(): Promise<unknown>;
+  requestMonitoringPort?(nonce: number): Promise<unknown>;
   getMonitoringConfig?(): Promise<unknown>;
   saveMonitoringConfig?(config: unknown): Promise<unknown>;
   startMonitoring?(config: unknown): Promise<unknown>;
@@ -88,7 +88,13 @@ export interface ClientDeps {
   createWorker(): WorkerLike;
   window: MessageTarget;
   timers: ClientTimers;
-  /** How long to wait for main's port after it has answered; `LIMITS.handshakeMs` by default. */
+  /**
+   * How long to wait for main's port once `requestMonitoringPort` has answered
+   * ok; `LIMITS.handshakeMs` by default. The invoke itself has no timer here:
+   * main bounds it with its own deadlines (the spawn, and the open, which
+   * scales with the storage limit), and cutting it short would drop a
+   * dataset that is merely large.
+   */
   portWaitMs?: number;
 }
 
@@ -142,6 +148,8 @@ interface Pending {
 
 interface PortWait {
   promise: Promise<unknown>;
+  /** Starts the deadline; called once main has answered. */
+  arm(): void;
   abort(reason: string): void;
 }
 
@@ -153,6 +161,7 @@ export class MonitoringClient {
   private portWait: PortWait | null = null;
   private connecting: Promise<ConnectResult> | null = null;
   private lastId = 0;
+  private lastNonce = 0;
   private disposed = false;
   private readonly unsubscribers: (() => void)[] = [];
 
@@ -218,15 +227,19 @@ export class MonitoringClient {
     }
     this.adopt(worker);
     // Listening before asking: the port may be posted before the answer returns.
-    const wait = this.waitForPort();
+    // The nonce is this attempt's own, so a port that belongs to an earlier
+    // attempt is not mistaken for this one's.
+    const nonce = ++this.lastNonce;
+    const wait = this.waitForPort(nonce);
     this.portWait = wait;
     try {
-      const refused = readRefusal(await bridge.requestMonitoringPort());
+      const refused = readRefusal(await bridge.requestMonitoringPort(nonce));
       if (refused !== null) {
         wait.abort(refused);
         await wait.promise.catch(() => undefined);
         return this.failConnect(worker, refused);
       }
+      wait.arm();
     } catch (e) {
       wait.abort(`main could not open monitoring (${describe(e)})`);
     }
@@ -257,25 +270,41 @@ export class MonitoringClient {
     return { ok: false, message };
   }
 
-  private waitForPort(): PortWait {
+  private waitForPort(nonce: number): PortWait {
     const { window, timers } = this.deps;
     let abort!: (reason: string) => void;
+    let arm!: () => void;
     const promise = new Promise<unknown>((resolve, reject) => {
+      let timer: unknown = null;
+      // A port posted before the invoke answered has already settled this; arming then would leak a timer.
+      let settled = false;
       const onMessage = (event: PortMessageEvent): void => {
         if (event.source !== window) return;
         if (!isObject(event.data) || event.data.channel !== MONITORING_PORT_MESSAGE) return;
         const [port] = event.ports;
         if (port === undefined) return;
+        if (event.data.nonce !== nonce) {
+          // Another attempt's port: nothing will read it, so end it rather than leave its other end waiting.
+          if (isObject(port) && typeof port.close === 'function') {
+            try { port.close(); } catch { /* already closed */ }
+          }
+          return;
+        }
         finish();
         resolve(port);
       };
-      const timer = timers.setTimeout(() => {
-        finish();
-        reject(new Error('main did not send a monitoring port'));
-      }, this.deps.portWaitMs ?? LIMITS.handshakeMs);
       const finish = (): void => {
+        settled = true;
         window.removeEventListener('message', onMessage);
-        timers.clearTimeout(timer);
+        if (timer !== null) timers.clearTimeout(timer);
+        timer = null;
+      };
+      arm = () => {
+        if (settled || timer !== null) return;
+        timer = timers.setTimeout(() => {
+          finish();
+          reject(new Error('main did not send a monitoring port'));
+        }, this.deps.portWaitMs ?? LIMITS.handshakeMs);
       };
       abort = (reason) => {
         finish();
@@ -283,7 +312,9 @@ export class MonitoringClient {
       };
       window.addEventListener('message', onMessage);
     });
-    return { promise, abort };
+    // Torn down before anyone awaits it (the invoke is still out): not unhandled.
+    promise.catch(() => undefined);
+    return { promise, arm, abort };
   }
 
   // --- the Worker ------------------------------------------------------------------------------------------------

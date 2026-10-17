@@ -13,12 +13,14 @@
  * for those and the live drive is where they get watched.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { writeFileAtomic, partialPath } from '../../electron/atomicWrite';
 import { MONITORING_EXIT_CHANNEL, MONITORING_PORT_CHANNEL, MONITORING_STATUS_CHANNEL } from '../../electron/channels';
-import { MonitoringHostCore, type ChildLike, type ContentsLike } from '../../electron/monitoring/hostCore';
+import { MonitoringHostCore, openDeadlineMs, type ChildLike, type ContentsLike } from '../../electron/monitoring/hostCore';
 import { readMonitoringSettings, saveMonitoringSettings, SETTINGS_FILE } from '../../electron/monitoring/settings';
 import {
   MonitoringClient, MONITORING_PORT_MESSAGE,
@@ -145,7 +147,7 @@ function hostRig(saved: number | null = null) {
 
 /** Connects `contents` to a child that spawns at once. */
 async function connect(r: ReturnType<typeof hostRig>, contents: FakeContents): Promise<FakeChild> {
-  const done = r.core.connect(contents);
+  const done = r.core.connect(contents, 1);
   const child = r.children[r.children.length - 1];
   child.emitSpawn();
   await done;
@@ -157,7 +159,7 @@ async function connect(r: ReturnType<typeof hostRig>, contents: FakeContents): P
 test('host: connect forks once and sends nothing before the child has spawned', async () => {
   const r = hostRig();
   const c1 = new FakeContents(1);
-  const done = r.core.connect(c1);
+  const done = r.core.connect(c1, 1);
   await flush();
   assert.equal(r.children.length, 1);
   assert.deepEqual(r.children[0].sent, []);
@@ -173,7 +175,7 @@ test('host: connect forks once and sends nothing before the child has spawned', 
 test('host: a child that never spawns fails connect at the deadline and is killed', async () => {
   const r = hostRig();
   const c1 = new FakeContents(1);
-  const done = r.core.connect(c1);
+  const done = r.core.connect(c1, 1);
   const outcome = done.then(() => 'connected', (e: Error) => e.message);
   await r.clock.advance(LIMITS.handshakeMs - 1);
   assert.equal(r.children[0].killed, 0);
@@ -199,7 +201,7 @@ test('host: open carries the saved storage limit, or 8 GiB when none is saved', 
 test('host: a refused open rejects connect with the reason and posts no port', async () => {
   const r = hostRig();
   const c1 = new FakeContents(1);
-  const done = r.core.connect(c1);
+  const done = r.core.connect(c1, 1);
   r.children[0].replies.open = { ok: false, message: 'the journal is corrupt' };
   r.children[0].emitSpawn();
   await assert.rejects(done, /the journal is corrupt/);
@@ -215,6 +217,7 @@ test('host: the port goes to the child as attach and to the window on the port c
   assert.deepEqual(attach.ports, [r.channels[0].port2]);
   assert.equal(c1.posts.length, 1);
   assert.equal(c1.posts[0].channel, MONITORING_PORT_CHANNEL);
+  assert.deepEqual(c1.posts[0].message, { nonce: 1 });
   assert.deepEqual(c1.posts[0].ports, [r.channels[0].port1]);
 });
 
@@ -241,6 +244,61 @@ test('host: the same window connecting again adds one destroyed listener, not on
   await connect(r, c1);
   await connect(r, c1);
   assert.equal(c1.listenerCount, 1);
+});
+
+test('host: the port message echoes the request nonce, and a nonce that is not a positive safe integer is refused before anything forks', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const done = r.core.connect(c1, 41);
+  r.children[0].emitSpawn();
+  await done;
+  assert.deepEqual(c1.posts[0].message, { nonce: 41 });
+  for (const bad of [undefined, null, 0, -1, 1.5, NaN, Infinity, 2 ** 53, '1', {}, [1], true]) {
+    const fresh = hostRig();
+    const c = new FakeContents(2);
+    await assert.rejects(fresh.core.connect(c, bad), /that is not a monitoring port request/, String(bad));
+    assert.equal(fresh.children.length, 0);
+    assert.deepEqual(c.posts, []);
+  }
+});
+
+test('host: open is allowed a scan of the whole storage limit - an answer just under its deadline connects', async () => {
+  assert.equal(openDeadlineMs(LIMITS.defaultStorageBytes), LIMITS.requestMs + Math.ceil(LIMITS.defaultStorageBytes / LIMITS.openScanBytesPerSecond * 1000));
+  assert.ok(openDeadlineMs(LIMITS.defaultStorageBytes) > 18_700 + LIMITS.requestMs, 'longer than the measured scan of a full default dataset');
+  assert.equal(openDeadlineMs(0), LIMITS.requestMs);
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const done = r.core.connect(c1, 1);
+  const child = r.children[0];
+  child.replies.open = 'none';
+  child.emitSpawn();
+  await flush();
+  const deadline = openDeadlineMs(LIMITS.defaultStorageBytes);
+  await r.clock.advance(deadline - 1);
+  child.emitMessage({ type: 'reply', id: child.of('open')[0].message.id, result: { ok: true } });
+  await done;
+  assert.deepEqual(child.types(), ['open', 'attach']);
+  assert.equal(c1.posts.length, 1);
+  assert.equal(child.killed, 0);
+});
+
+test('host: an open the utility never answers fails at exactly its deadline, not at the ordinary one', async () => {
+  const r = hostRig(64 * 1024 * 1024);
+  const done = r.core.connect(new FakeContents(1), 1);
+  const outcome = done.then(() => 'connected', (e: Error) => e.message);
+  r.children[0].replies.open = 'none';
+  r.children[0].emitSpawn();
+  await flush();
+  const deadline = openDeadlineMs(64 * 1024 * 1024);
+  assert.equal(deadline, LIMITS.requestMs + 1000);
+  await r.clock.advance(LIMITS.requestMs);
+  await r.clock.advance(deadline - LIMITS.requestMs - 1);
+  let settled = false;
+  void outcome.then(() => { settled = true; });
+  await flush();
+  assert.equal(settled, false);
+  await r.clock.advance(1);
+  assert.match(await outcome, /did not answer within 16 s/);
 });
 
 // --- the host: start and stop ------------------------------------------------------------------------------------
@@ -361,7 +419,7 @@ test('host: after an exit the next connect forks anew, and control is unbound un
 test('host: an exit is reported once even when it follows a kill', async () => {
   const r = hostRig();
   const c1 = new FakeContents(1);
-  const done = r.core.connect(c1).catch(() => undefined);
+  const done = r.core.connect(c1, 1).catch(() => undefined);
   await r.clock.advance(LIMITS.handshakeMs);
   await done;
   r.children[0].emitExit(null);
@@ -440,7 +498,7 @@ test('host: dispose asks the utility to dispose, kills it and does not announce 
 test('host: dispose resolves with nothing connected, with a child that never spawned and with a silent one', async () => {
   await hostRig().core.dispose();
   const never = hostRig();
-  const pending = never.core.connect(new FakeContents(1)).catch(() => undefined);
+  const pending = never.core.connect(new FakeContents(1), 1).catch(() => undefined);
   await never.core.dispose();
   await pending;
   assert.equal(never.children[0].killed, 1);
@@ -565,6 +623,28 @@ test('atomic write: a failure throws and leaves no partial behind', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('atomic write: a cleanup that itself fails does not replace the error that caused it', () => {
+  const dir = tempDir();
+  const realRm = fs.rmSync;
+  try {
+    const target = path.join(dir, 'taken');
+    mkdirSync(target);
+    // Windows can refuse to remove a partial (EPERM, EBUSY) a moment after it was written.
+    fs.rmSync = (() => { throw Object.assign(new Error('EPERM: cleanup refused'), { code: 'EPERM' }); }) as typeof fs.rmSync;
+    syncBuiltinESMExports();
+    let thrown: unknown;
+    try { writeFileAtomic(target, 'data'); } catch (e) { thrown = e; }
+    assert.ok(thrown instanceof Error);
+    // The rename onto a directory is the failure; the refused cleanup must not have replaced it.
+    assert.doesNotMatch((thrown as Error).message, /cleanup refused/);
+    assert.match((thrown as Error).message, /rename/);
+  } finally {
+    fs.rmSync = realRm;
+    syncBuiltinESMExports();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- the renderer's client -----------------------------------------------------------------------------------------
 
 class FakeWindow {
@@ -606,11 +686,13 @@ function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean } = {}
   const exitListeners: ((v: unknown) => void)[] = [];
   const statusListeners: ((v: unknown) => void)[] = [];
   let portRequests = 0;
+  const nonces: number[] = [];
   const { sendPort = true, ...bridgeOver } = over;
   const bridge: MonitoringBridge = {
-    requestMonitoringPort: async () => {
+    requestMonitoringPort: async (nonce) => {
       portRequests++;
-      if (sendPort) win.post({ source: win, data: { channel: MONITORING_PORT_MESSAGE }, ports: [port] });
+      nonces.push(nonce);
+      if (sendPort) win.post({ source: win, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [port] });
       return { ok: true };
     },
     getMonitoringConfig: async () => ({ ok: true, config: CONFIG }),
@@ -626,7 +708,7 @@ function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean } = {}
     createWorker: () => { const w = new FakeWorker(); workers.push(w); return w; },
   });
   return {
-    client, clock, win, workers, port, bridge, get portRequests() { return portRequests; },
+    client, clock, win, workers, port, bridge, nonces, get portRequests() { return portRequests; },
     exit: (v: unknown) => { for (const l of [...exitListeners]) l(v); },
     status: (v: unknown) => { for (const l of [...statusListeners]) l(v); },
     listeners: () => exitListeners.length + statusListeners.length,
@@ -654,23 +736,93 @@ test('client: it ignores port messages from another source or channel, and takes
   const second = { name: 'second' };
   const done = r.client.connect();
   await flush();
-  r.win.post({ source: stranger, data: { channel: MONITORING_PORT_MESSAGE }, ports: [{ name: 'from-stranger' }] });
-  r.win.post({ source: r.win, data: { channel: 'inwire:something-else' }, ports: [{ name: 'wrong-channel' }] });
+  const nonce = r.nonces[0];
+  r.win.post({ source: stranger, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [{ name: 'from-stranger' }] });
+  r.win.post({ source: r.win, data: { channel: 'inwire:something-else', nonce }, ports: [{ name: 'wrong-channel' }] });
   r.win.post({ source: r.win, data: 'inwire:monitoring-port', ports: [{ name: 'not-an-object' }] });
-  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE }, ports: [] });
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [] });
   await flush();
   assert.deepEqual(r.workers[0].posts, []);
-  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE }, ports: [first, second] });
-  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE }, ports: [{ name: 'late' }] });
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [first, second] });
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [{ name: 'late' }] });
   assert.equal((await done).ok, true);
   assert.equal(r.workers[0].of('connect').length, 1);
   assert.equal(r.workers[0].of('connect')[0].message.port, first);
   assert.deepEqual(r.workers[0].of('connect')[0].transfer, [first]);
 });
 
+test('client: each connect attempt asks with a fresh nonce', async () => {
+  const r = clientRig();
+  await r.client.connect();
+  r.exit(EXIT);
+  await r.client.connect();
+  assert.equal(r.nonces.length, 2);
+  assert.ok(r.nonces.every((n) => Number.isSafeInteger(n) && n > 0));
+  assert.notEqual(r.nonces[0], r.nonces[1]);
+});
+
+test('client: a port carrying another nonce is closed and ignored, and the one with this attempt nonce is taken', async () => {
+  const r = clientRig({ sendPort: false });
+  const closed: string[] = [];
+  const stale = { name: 'stale', close: () => { closed.push('stale'); } };
+  const noNonce = { name: 'no-nonce', close: () => { closed.push('no-nonce'); } };
+  const mine = { name: 'mine', close: () => { closed.push('mine'); } };
+  const done = r.client.connect();
+  await flush();
+  const nonce = r.nonces[0];
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce: nonce + 1 }, ports: [stale] });
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE }, ports: [noNonce] });
+  // A port with nothing to close is not an error.
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce: nonce + 2 }, ports: [{ name: 'unclosable' }] });
+  await flush();
+  assert.deepEqual(closed, ['stale', 'no-nonce']);
+  assert.deepEqual(r.workers[0].posts, []);
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [mine] });
+  assert.equal((await done).ok, true);
+  assert.equal(r.workers[0].of('connect')[0].message.port, mine);
+  assert.deepEqual(closed, ['stale', 'no-nonce']);
+});
+
+test('client: main may take longer than the port wait to answer - the wait starts when it has', async () => {
+  let answer!: () => void;
+  const r = clientRig({
+    sendPort: false,
+    requestMonitoringPort: (nonce) => new Promise((resolve) => {
+      answer = () => {
+        r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [r.port] });
+        resolve({ ok: true });
+      };
+    }),
+  });
+  const done = r.client.connect();
+  await r.clock.advance(LIMITS.handshakeMs * 4);
+  assert.equal(r.client.state.runtime, 'connecting');
+  assert.equal(r.workers[0].terminated, 0);
+  answer();
+  const result = await done;
+  assert.equal(result.ok, true);
+  assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('client: the port wait is armed only once main has answered, and a port that never follows still times out', async () => {
+  let answer!: () => void;
+  const r = clientRig({ sendPort: false, requestMonitoringPort: () => new Promise((resolve) => { answer = () => resolve({ ok: true }); }) });
+  const done = r.client.connect();
+  await r.clock.advance(LIMITS.handshakeMs * 2);
+  answer();
+  await flush();
+  await r.clock.advance(LIMITS.handshakeMs - 1);
+  assert.equal(r.client.state.runtime, 'connecting');
+  await r.clock.advance(1);
+  const result = await done;
+  assert.equal(result.ok, false);
+  assert.match((result as { message: string }).message, /did not send a monitoring port/);
+});
+
 test('client: connect waits for the port and fails at the deadline when none comes', async () => {
   const r = clientRig({ sendPort: false });
   const done = r.client.connect();
+  await flush();
   await r.clock.advance(LIMITS.handshakeMs - 1);
   assert.equal(r.client.state.runtime, 'connecting');
   await r.clock.advance(1);

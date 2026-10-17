@@ -311,9 +311,8 @@ interface Window { from: number; to: number }
 interface TailMinute { acc: MinuteAccumulator }
 interface Range { fromId: number; toId: number }
 
-/** Fragments are read this many minutes at a time, and no more than this many bytes at once. */
+/** Fragments are read this many minutes at a time, and no more than `LIMITS.rollupReadBytes` at once. */
 const CHUNK_MINUTES = 60;
-const CHUNK_BYTES = 8 * 1024 * 1024;
 /** Past this many raw windows each `locate` covers a cluster of them, so a pathological range costs a bounded number of calls. */
 const MAX_LOCATES = 256;
 
@@ -630,7 +629,7 @@ class Query {
       const [lo, hi] = stack.pop()!;
       let rows: { minuteMs: number; throughEntryId: number; bytes: Uint8Array }[];
       try {
-        rows = await this.rollups.readMinutes(key, lo, hi, CHUNK_BYTES);
+        rows = await this.rollups.readMinutes(key, lo, hi, LIMITS.rollupReadBytes);
       } catch (e) {
         if (!(e instanceof RangeError) && !(e instanceof CorruptRollupError)) throw this.rollupFailure(e);
         if (hi - lo <= MINUTE_MS) { for (let m = lo; m < hi; m += MINUTE_MS) unreadable.add(m); continue; }

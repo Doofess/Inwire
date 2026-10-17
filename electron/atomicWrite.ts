@@ -19,7 +19,7 @@ export function partialPath(target: string): string {
 
 /**
  * Writes `data` to `path` through a partial. On any failure the partial is
- * removed and the error is thrown on; the target is untouched.
+ * removed (if it can be) and the error is thrown on; the target is untouched.
  */
 export function writeFileAtomic(path: string, data: string | Uint8Array): void {
   const partial = partialPath(path);
@@ -27,7 +27,8 @@ export function writeFileAtomic(path: string, data: string | Uint8Array): void {
     writeFileSync(partial, data);
     renameSync(partial, path);
   } catch (error) {
-    rmSync(partial, { force: true });
+    // Windows can refuse this too (EPERM, EBUSY); the write's own error is the one the caller needs.
+    try { rmSync(partial, { force: true }); } catch { /* the original error is thrown below */ }
     throw error;
   }
 }

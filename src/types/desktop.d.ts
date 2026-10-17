@@ -171,7 +171,7 @@ declare global {
        * `inwire:monitoring-port`; every answer is `unknown` here and read by
        * `src/services/monitoring/control.ts`.
        */
-      requestMonitoringPort?(): Promise<unknown>;
+      requestMonitoringPort?(nonce: number): Promise<unknown>;
       getMonitoringConfig?(): Promise<unknown>;
       saveMonitoringConfig?(config: unknown): Promise<unknown>;
       startMonitoring?(config: unknown): Promise<unknown>;

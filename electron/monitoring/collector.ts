@@ -197,7 +197,10 @@ export class Collector {
    * page constants here as well as in the journal, because a limit that only
    * holds when the caller sends a finite number is not a limit (`Infinity`
    * survives a structured clone, and the journal rightly refuses it as a
-   * range error; the clamp makes it a full page instead).
+   * range error; the clamp makes it a full page instead). `readBoundaries` and
+   * `readMinutes` are clamped the same way, to `pageEntries` and
+   * `rollupReadBytes`: `readMinutes` refuses past its number rather than clips,
+   * so that constant is the queries' own chunk and a bigger one is never legal.
    */
   readonly runtime: Omit<HostRuntime, 'onLive'> = {
     snapshot: async () => this.local().snapshot(),
@@ -205,10 +208,15 @@ export class Collector {
       snapshot, afterId, Math.min(maxEntries, LIMITS.pageEntries), Math.min(maxBytes, LIMITS.pageBytes),
     ),
     readEvidence: async (ref) => this.local().readEvidence(ref),
+    // Needs no clamp: its size is the journal index's (one range per stride), not the caller's.
     locate: async (snapshot, fromMs, toMs) => this.local().locate(snapshot, fromMs, toMs),
-    readBoundaries: async (snapshot, afterId, maxEntries) => this.local().readBoundaries(snapshot, afterId, maxEntries),
+    readBoundaries: async (snapshot, afterId, maxEntries) => this.local().readBoundaries(
+      snapshot, afterId, Math.min(maxEntries, LIMITS.pageEntries),
+    ),
     watermark: async () => this.local().watermark(),
-    readMinutes: async (sourceKey, from, to, maxBytes) => this.local().readMinutes(sourceKey, from, to, maxBytes),
+    readMinutes: async (sourceKey, from, to, maxBytes) => this.local().readMinutes(
+      sourceKey, from, to, Math.min(maxBytes, LIMITS.rollupReadBytes),
+    ),
     sources: async () => this.local().sources(),
     appendMinutes: async (minutes, watermark) => this.local().appendMinutes(minutes, watermark),
     rollupStatus: async () => this.local().rollupStatus(),
@@ -492,9 +500,15 @@ export class Collector {
       // both files. Only while stopped: this is that branch.
       if (this.dataset !== null && this.dataset.limitBytes !== config.storageLimitBytes) {
         const root = this.dataset.root;
+        const oldLimit = this.dataset.limitBytes;
         this.closeDataset('unopened');
         const reopened = this.openNow(root, config.storageLimitBytes);
-        if (!reopened.ok) return reopened;
+        if (!reopened.ok) {
+          // History must survive a limit that will not open: the old one is opened again, and the
+          // Start still fails with the new limit's reason. If that fails too, the status says so.
+          this.openNow(root, oldLimit);
+          return reopened;
+        }
       }
       const dataset = this.dataset;
       if (dataset === null) return { ok: false, message: 'the monitoring dataset is not open' };
@@ -507,6 +521,10 @@ export class Collector {
       this.listenerError = null;
       this.publish();
 
+      // Before the socket exists, so a datagram shed from the moment it can receive is counted
+      // in this session and carried by its first gap, not zeroed after the bind.
+      this.shed = 0;
+      this.shedSinceGap = 0;
       const socket = this.env.createSocket();
       this.socket = socket;
       this.inbox = [];
@@ -538,8 +556,6 @@ export class Collector {
       this.received = 0;
       this.rejected = new Map();
       this.rejectedOverflow = 0;
-      this.shed = 0;
-      this.shedSinceGap = 0;
       this.listener = 'listening';
       this.armFlush();
       this.feed.notify();
@@ -596,12 +612,15 @@ export class Collector {
     });
   }
 
-  /** The whole inbox in one `append`, behind a `gap` if anything was shed since the last one. */
-  private drain(): void {
+  /**
+   * The whole inbox in one `append`, behind a `gap` if anything was shed since the last one.
+   * Null while the session goes on; once the append ended it, whether the end was clean.
+   */
+  private drain(): boolean | null {
     const session = this.session;
     const dataset = this.dataset;
-    if (session === null || dataset === null) return;
-    if (this.inbox.length === 0 && this.shedSinceGap === 0) return;
+    if (session === null || dataset === null) return null;
+    if (this.inbox.length === 0 && this.shedSinceGap === 0) return null;
     const batch = this.inbox;
     this.inbox = [];
     this.inboxBytes = 0;
@@ -622,16 +641,26 @@ export class Collector {
     const result = dataset.journal.append(inputs);
     if (gap > 0 && result.appended > 0) this.shedSinceGap -= gap;
     this.received += Math.max(0, result.appended - (gap > 0 ? 1 : 0));
-    if (result.state !== 'open') {
-      this.endSession(result.state);
-      return;
-    }
+    if (result.state !== 'open') return this.endSession(result.state);
     this.markCounters();
     this.feed.notify();
+    return null;
   }
 
-  /** The journal stopped accepting: the socket closes, and the listener says why. */
-  private endSession(state: JournalState): void {
+  /**
+   * The journal stopped accepting: the socket closes, and the listener says why.
+   * A full journal wrote its own `stop`, which is flushed here because nothing
+   * else will (the flush timer is cancelled), so a crash cannot turn a session
+   * that ended cleanly into an `interrupted` one. Returns whether it ended clean.
+   */
+  private endSession(state: JournalState): boolean {
+    const dataset = this.dataset;
+    let clean = false;
+    if (state === 'storage-limit' && dataset !== null) {
+      const snapshot = dataset.journal.flush();
+      clean = dataset.journal.state === 'storage-limit' && snapshot.syncedThroughEntryId === snapshot.throughEntryId;
+      if (dataset.journal.state === 'failed') state = 'failed';
+    }
     this.closeSocket();
     this.cancelFlushTimer();
     this.inbox = [];
@@ -647,6 +676,7 @@ export class Collector {
     }
     this.publish();
     this.feed.notify();
+    return clean;
   }
 
   private onSocketError(socket: UdpSocket, config: SourceConfig, error: UdpError): void {
@@ -718,9 +748,9 @@ export class Collector {
     this.closeSocket();
     this.cancelFlushTimer();
     if (session === null || dataset === null) return false;
-    this.drain();
     // The drain itself can end the session: the journal filled, and wrote its own stop.
-    if (this.session === null) return false;
+    const ended = this.drain();
+    if (ended !== null) return ended;
     const at = this.env.now();
     const inputs: EvidenceInput[] = [];
     if (suspend) {

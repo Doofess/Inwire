@@ -93,6 +93,17 @@ interface Session {
 const failStart = (message: string): StartResult => ({ ok: false, message });
 const failStop = (message: string): StopResult => ({ ok: false, message, clean: false, snapshot: null });
 
+/**
+ * How long `open` may take: the ordinary request, plus a scan of the whole
+ * storage limit. Opening checks every entry of the journal before it answers,
+ * so the time is the dataset's size, not a constant - a full default dataset
+ * took 18.7 s to scan in memory alone, and a deadline shorter than the scan
+ * fails every launch of the app that has filled its storage.
+ */
+export function openDeadlineMs(limitBytes: number): number {
+  return LIMITS.requestMs + Math.ceil(limitBytes / LIMITS.openScanBytesPerSecond * 1000);
+}
+
 const seconds = (ms: number): string => `${Math.round(ms / 100) / 10} s`;
 
 export class MonitoringHostCore {
@@ -111,14 +122,22 @@ export class MonitoringHostCore {
    * window the Worker's port, replacing any port and binding it had before.
    * Nothing here binds a socket. Rejects, with the reason, when the process
    * does not start or the dataset does not open.
+   *
+   * `nonce` is the window's own, from its request: it is echoed in the port
+   * message so a port from an attempt that already gave up is told apart from
+   * the one the current attempt waits for. It arrives over IPC, so it is
+   * `unknown` until it is a positive safe integer.
    */
-  async connect(contents: ContentsLike): Promise<void> {
+  async connect(contents: ContentsLike, nonce: unknown): Promise<void> {
+    if (typeof nonce !== 'number' || !Number.isSafeInteger(nonce) || nonce <= 0) {
+      throw new Error('that is not a monitoring port request');
+    }
     const session = this.session ?? this.launch();
     await session.spawn;
     const limitBytes = this.deps.savedLimitBytes() ?? LIMITS.defaultStorageBytes;
     const opened = await this.ask(
       session, (id) => ({ type: 'open', id, root: this.deps.directory, limitBytes }),
-      readStartResult, failStart, LIMITS.requestMs,
+      readStartResult, failStart, openDeadlineMs(limitBytes),
     );
     if (!opened.ok) throw new Error(opened.message);
     if (session.ended || this.session !== session) throw new Error('monitoring stopped while it was connecting');
@@ -127,7 +146,7 @@ export class MonitoringHostCore {
     // The role needs no tag: `attach` is the one message that carries a port,
     // and a later one replaces the earlier (`control.ts`).
     session.child.postMessage({ type: 'attach' }, [port2]);
-    contents.postMessage(MONITORING_PORT_CHANNEL, null, [port1]);
+    contents.postMessage(MONITORING_PORT_CHANNEL, { nonce }, [port1]);
     this.bind(contents);
   }
 

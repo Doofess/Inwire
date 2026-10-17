@@ -276,8 +276,8 @@ const api = {
    * thing that binds the socket, and every value back is `unknown` until
    * `src/services/monitoring/control.ts` has read it.
    */
-  requestMonitoringPort(): Promise<unknown> {
-    return ipcRenderer.invoke(MONITORING_PORT_REQUEST);
+  requestMonitoringPort(nonce: number): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_PORT_REQUEST, nonce);
   },
   getMonitoringConfig(): Promise<unknown> {
     return ipcRenderer.invoke(MONITORING_CONFIG_GET_CHANNEL);
@@ -435,9 +435,12 @@ ipcRenderer.on(AGENT_PORT_CHANNEL, (event) => {
 });
 
 // The monitoring runtime's port, the same route again: the page hands it to the
-// monitoring Worker and reads nothing from it.
-ipcRenderer.on(MONITORING_PORT_CHANNEL, (event) => {
-  window.postMessage({ channel: MONITORING_PORT_CHANNEL }, '*', event.ports);
+// monitoring Worker and reads nothing from it. The nonce is the request's own,
+// echoed by main, so a port from a connect that already timed out is told apart
+// from the one the current connect is waiting for.
+ipcRenderer.on(MONITORING_PORT_CHANNEL, (event, data: unknown) => {
+  const nonce = typeof data === 'object' && data !== null ? (data as { nonce?: unknown }).nonce : undefined;
+  window.postMessage({ channel: MONITORING_PORT_CHANNEL, nonce }, '*', event.ports);
 });
 
 contextBridge.exposeInMainWorld('inwire', api);

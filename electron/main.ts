@@ -297,9 +297,9 @@ async function start(): Promise<void> {
   // asked for the port (`hostCore.ts` holds the binding).
   const monitoringDirectory = monitoringRoot(app.getPath('userData'));
   const monitoring = new MonitoringHost(monitoringDirectory);
-  ipcMain.handle(MONITORING_PORT_REQUEST, async (event) => {
+  ipcMain.handle(MONITORING_PORT_REQUEST, async (event, nonce: unknown) => {
     try {
-      await monitoring.connect(event.sender);
+      await monitoring.connect(event.sender, nonce);
       return { ok: true };
     } catch (e) {
       return { ok: false, message: e instanceof Error ? e.message : String(e) };
@@ -307,6 +307,9 @@ async function start(): Promise<void> {
   });
   ipcMain.handle(MONITORING_START_CHANNEL, (event, config: unknown) => monitoring.start(event.sender, config));
   ipcMain.handle(MONITORING_STOP_CHANNEL, (event) => monitoring.stop(event.sender, 'user'));
+  // The saved source is not control: like every other settings handler here it
+  // answers any window, and only Start, which binds the socket, is held to the
+  // connected one.
   ipcMain.handle(MONITORING_CONFIG_GET_CHANNEL, () => readMonitoringSettings(monitoringDirectory));
   ipcMain.handle(MONITORING_CONFIG_SAVE_CHANNEL, (_event, config: unknown) =>
     saveMonitoringSettings(monitoringDirectory, config));

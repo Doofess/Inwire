@@ -50,6 +50,8 @@ export const LIMITS = {
   liveBatchBytes: 256 * KiB,
   pageEntries: 256,
   pageBytes: 1 * MiB,
+  /** One `readMinutes` answer; `readMinutes` refuses past it rather than clipping, so it is the queries' chunk as well. */
+  rollupReadBytes: 8 * MiB,
   rawQueryDatagrams: 100_000,
   rawQueryKeys: 50_000,
   /** Per table: a table past it comes back refused while the totals stay exact. */
@@ -60,6 +62,13 @@ export const LIMITS = {
   concurrentQueries: 2,
   handshakeMs: 15_000,
   requestMs: 15_000,
+  /**
+   * The slowest rate an `open` is allowed to scan the journal at. Open CRCs
+   * every entry synchronously - 18.7 s for a full 8 GiB measured in memory -
+   * so its deadline grows with the limit: `requestMs` plus the limit at this
+   * rate, about 2.4 minutes at the default.
+   */
+  openScanBytesPerSecond: 64 * MiB,
   drainMs: 5_000,
   staleMs: 60_000,
   flushMs: 1_000,
