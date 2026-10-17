@@ -16,12 +16,15 @@ import { MessageChannel } from 'node:worker_threads';
 import { deflateRawSync } from 'node:zlib';
 import type { EvidenceInput } from '../../src/services/monitoring/journal';
 import { StaleGenerationError } from '../../src/services/monitoring/journal';
+import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { boundedInflate } from '../../src/services/monitoring/boundedInflate';
-import { bucketBounds, runHistoryQuery, validateQuery } from '../../src/services/monitoring/queries';
+import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
+import { bucketBounds, runHistoryQuery, validateQuery, type QueryOptions } from '../../src/services/monitoring/queries';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
+import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, domPort, serveRuntime } from '../../src/services/monitoring/runtimeRpc';
-import { LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type Snapshot } from '../../src/services/monitoring/types';
+import { DECODER_POLICY_VERSION, LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type Snapshot } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import type { FromMonitoringWorker } from '../../src/services/monitoring/workerHost';
 import {
@@ -128,13 +131,22 @@ function codeOf(h: HostRig, id: number): string {
 // validation
 // =====================================================================================================
 
+const NAMES_A_SOURCE = 'a query names a source as exporter/engine type/engine id, like 192.0.2.1/0/0';
+
 test('validation: every malformed query is refused with its own message', async () => {
   const q = spec(0, 600_000, 10);
   const cases: [string, unknown, string][] = [
     ['null', null, 'a query is an object'],
     ['a number', 5, 'a query is an object'],
-    ['no source', { ...q, sourceKey: '' }, 'a query names a source'],
-    ['a numeric source', { ...q, sourceKey: 5 }, 'a query names a source'],
+    ['no source', { ...q, sourceKey: '' }, NAMES_A_SOURCE],
+    ['a numeric source', { ...q, sourceKey: 5 }, NAMES_A_SOURCE],
+    ['the bare exporter key, which is not a source', { ...q, sourceKey: '192.0.2.1' }, NAMES_A_SOURCE],
+    ['an engine type without an id', { ...q, sourceKey: '192.0.2.1/0' }, NAMES_A_SOURCE],
+    ['a fourth segment', { ...q, sourceKey: '192.0.2.1/0/0/0' }, NAMES_A_SOURCE],
+    ['an engine id past a byte', { ...q, sourceKey: '192.0.2.1/0/256' }, NAMES_A_SOURCE],
+    ['a leading zero in the engine', { ...q, sourceKey: '192.0.2.1/00/0' }, NAMES_A_SOURCE],
+    ['a name for an address', { ...q, sourceKey: 'router/0/0' }, NAMES_A_SOURCE],
+    ['a trailing space in the source', { ...q, sourceKey: '192.0.2.1/0/0 ' }, NAMES_A_SOURCE],
     ['a fractional from', { ...q, fromMs: 1.5 }, 'the range is a pair of whole milliseconds'],
     ['a NaN to', { ...q, toMs: NaN }, 'the range is a pair of whole milliseconds'],
     ['an infinite to', { ...q, toMs: Infinity }, 'the range is a pair of whole milliseconds'],
@@ -163,6 +175,7 @@ test('validation: every malformed query is refused with its own message', async 
   assert.equal(validateQuery(spec(0, 120, 120)), null, 'a span equal to its bucket count');
   assert.equal(validateQuery(spec(0, 119, 120)), 'the range is shorter than its bucket count');
   assert.equal(validateQuery(spec(0, 1, 1)), null);
+  assert.equal(validateQuery({ ...q, sourceKey: '192.0.2.1/255/255' }), null, 'the largest engine');
   assert.equal(validateQuery({ ...q, focus: { kind: 'endpoint', address: '255.0.0.0' } }), null);
   assert.equal(validateQuery({ ...q, focus: { kind: 'conversation', srcAddr: '0.0.0.0', dstAddr: '10.20.30.40' } }), null);
 
@@ -860,6 +873,226 @@ test('host: a rollup post that fails stops the rollups and not the queries', asy
   const reply = await h.query('v', q);
   assert.ok(reply.ok);
   const oracle = await askOk(rig, q, { forceRaw: true });
+  if (reply.ok) assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle));
+});
+
+// =====================================================================================================
+// a sidecar that cannot be used is a cache that is not there: the journal answers, exactly
+// =====================================================================================================
+
+/** The runtime and the query path, for a runtime that is not a rig's own. */
+function askWith(rt: HostRuntime, query: QuerySpec, over: Partial<QueryOptions> = {}) {
+  return runHistoryQuery(rt, rt, query, new AbortController().signal, { inflate, nowMs: NOW, ...over });
+}
+
+class FailingWrites extends MemoryBlockFile {
+  override write(): void { throw new Error('disk full (injected)'); }
+}
+
+/** The journal of `rig` with a sidecar whose file refuses every write: the open fails. */
+function failedSidecarRuntime(rig: Rig): { runtime: LocalRuntime; status: string } {
+  const snap = rig.journal.snapshot();
+  const opened = RollupStore.open(
+    new FailingWrites(),
+    { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION },
+    { nowMs: () => NOW },
+  );
+  const runtime = new LocalRuntime(rig.journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
+  return { runtime, status: opened.status };
+}
+
+/** Every way of asking one range that the sidecar could be asked to help with. */
+const DEGRADED_QUERIES: [string, QuerySpec, boolean][] = [
+  ['unfocused', spec(m(0), m(6), 6), false],
+  ['forced raw', spec(m(0), m(6), 6), true],
+  ['focused', spec(m(0), m(6), 6, { focus: { kind: 'endpoint', address: '10.0.0.1' } }), false],
+  ['one engine', spec(m(0), m(6), 6, { sourceKey: SRC }), false],
+];
+
+test('degraded: a sidecar that cannot write answers every kind of query from the journal, exactly', async () => {
+  const rig = smallRig();
+  const { runtime, status } = failedSidecarRuntime(rig);
+  assert.notEqual(status, 'ok', 'the open failed');
+  for (const [label, q, forceRaw] of DEGRADED_QUERIES) {
+    const oracle = await askOk(rig, q, { forceRaw: true });
+    const reply = await askWith(runtime, q, { forceRaw });
+    assert.ok(reply.ok, `${label}: ${reply.ok ? '' : `${reply.code}: ${reply.message}`}`);
+    if (!reply.ok) continue;
+    assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle), label);
+    assert.equal(reply.value.answeredFrom.rollupMinutes, 0, `${label}: nothing came from the rollups`);
+    assert.ok(reply.value.answeredFrom.rawMinutes > 0, `${label}: the journal answered`);
+  }
+});
+
+test('degraded: a sidecar whose sources, watermark or minutes cannot be read is not used, mid-query included', async () => {
+  const rig = smallRig();
+  await rollUp(rig).then((h) => h.host.settled());
+  const rt = rig.runtime;
+  const healthy = await askOk(rig, spec(m(0), m(6), 6, { sourceKey: SRC }));
+  assert.ok(healthy.answeredFrom.rollupMinutes > 0, 'the rollups are there to be refused');
+
+  const boom = (): never => { throw new Error('storage fault (injected)'); };
+  const faults: [string, Over][] = [
+    ['sources', { sources: async () => boom() }],
+    ['watermark', { watermark: async () => boom() }],
+    ['readMinutes', { readMinutes: async () => boom() }],
+  ];
+  for (const [label, over] of faults) {
+    const bad = wrap(rt, over);
+    for (const [qlabel, q, forceRaw] of DEGRADED_QUERIES) {
+      if (forceRaw) continue;
+      const oracle = await askOk(rig, q, { forceRaw: true });
+      const reply = await askWith(bad, q);
+      assert.ok(reply.ok, `${label} / ${qlabel}: ${reply.ok ? '' : `${reply.code}: ${reply.message}`}`);
+      if (!reply.ok) continue;
+      assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle), `${label} / ${qlabel}`);
+    }
+  }
+  // The faults that a whole-minute query reaches say so in the provenance: the rollups were not used.
+  for (const label of ['watermark', 'readMinutes']) {
+    const over = faults.find(([l]) => l === label)![1];
+    const reply = await askWith(wrap(rt, over), spec(m(0), m(6), 6));
+    assert.ok(reply.ok);
+    if (reply.ok) assert.deepEqual(reply.value.answeredFrom.rollupMinutes, 0, label);
+  }
+});
+
+test('degraded: a watermark of another policy, another generation or a place past the journal is not trusted', async () => {
+  const rig = smallRig();
+  await rollUp(rig).then((h) => h.host.settled());
+  const rt = rig.runtime;
+  const mark = await rt.watermark();
+  assert.ok(mark !== null);
+  const q = spec(m(0), m(6), 6);
+  const oracle = await askOk(rig, q, { forceRaw: true });
+  const lies: [string, typeof mark][] = [
+    ['policy', { ...mark, policyVersion: mark.policyVersion + 1 }],
+    ['generation', { ...mark, generation: 'd'.repeat(32) }],
+    ['past the journal', { ...mark, throughEntryId: mark.throughEntryId + 1000 }],
+  ];
+  for (const [label, lie] of lies) {
+    const reply = await askWith(wrap(rt, { watermark: async () => lie }), q);
+    assert.ok(reply.ok, `${label}: ${reply.ok ? '' : `${reply.code}: ${reply.message}`}`);
+    if (!reply.ok) continue;
+    assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle), label);
+    assert.equal(reply.value.answeredFrom.rollupMinutes, 0, `${label}: answered raw`);
+    assert.ok(reply.value.answeredFrom.rawMinutes > 0, label);
+  }
+  // The control: the true watermark is used.
+  const truth = await askOk(rig, q);
+  assert.ok(truth.answeredFrom.rollupMinutes > 0);
+});
+
+test('degraded: only a rollup fault degrades; the journal of another generation is still stale-generation', async () => {
+  const rig = smallRig();
+  await rollUp(rig).then((h) => h.host.settled());
+  const rt = rig.runtime;
+  const staleJournal = wrap(rt, { snapshot: async () => ({ ...(await rt.snapshot()), generation: 'e'.repeat(32) }) });
+  const reply = await askWith(staleJournal, spec(m(0), m(6), 6));
+  assert.ok(!reply.ok && reply.code === 'stale-generation', reply.ok ? 'ok' : reply.code);
+  const unavailable = wrap(rt, { readPage: async () => { throw new RuntimeUnavailableError('the port closed'); } });
+  const down = await askWith(unavailable, spec(m(0), m(6), 6), { forceRaw: true });
+  assert.ok(!down.ok && down.code === 'runtime-unavailable', down.ok ? 'ok' : down.code);
+  const sidecarDown = wrap(rt, { readMinutes: async () => { throw new RuntimeUnavailableError('the port closed'); } });
+  const r2 = await askWith(sidecarDown, spec(m(0), m(6), 6));
+  assert.ok(!r2.ok && r2.code === 'runtime-unavailable', 'a lost runtime is not a lost sidecar');
+});
+
+test('degraded: the budget still decides, and the refusal says the rollups are unavailable and why', async () => {
+  const rig = big();
+  const wide = spec(m(1), m(3), 2);
+  const bad = wrap(rig.runtime, { watermark: async () => { throw new Error('storage fault (injected)'); } });
+  const reply = await askWith(bad, wide);
+  assert.ok(!reply.ok && reply.code === 'range-too-large', reply.ok ? 'ok' : reply.code);
+  if (!reply.ok) {
+    assert.match(reply.message, /The rollups are unavailable \(.*storage fault \(injected\).*\), so every minute of the range is read from the journal\./);
+    assert.ok(!/rebuilt/.test(reply.message));
+  }
+  const told = await ask(rig, wide, { rollupsUnavailable: 'the rollup sidecar has failed' });
+  assert.ok(!told.ok && told.code === 'range-too-large');
+  if (!told.ok) assert.match(told.message, /The rollups are unavailable \(the rollup sidecar has failed\)/);
+  // Narrow enough for the budget, the same degraded path answers.
+  const narrow = await askWith(bad, spec(m(1), m(1, 50_000), 1));
+  assert.ok(narrow.ok);
+});
+
+test('degraded: a host whose rollups have failed does not use the rollups it already holds', async () => {
+  const rig = smallRig();
+  await rollUp(rig).then((h) => h.host.settled());
+  // More evidence the sidecar has not seen, so the next host has something to post - and fails to.
+  rig.append([start(m(7), 's2'), dgram(m(7, 1000), [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 5, packets: 1 }]), dgram(m(8, 1000), [{ octets: 1 }])]);
+  const q = spec(m(0), m(7), 7);
+  const oracle = await askOk(rig, q, { forceRaw: true });
+
+  const failing = new HostRig(wrap(rig.runtime, { appendMinutes: async () => { throw new Error('disk full'); } }));
+  await failing.connect();
+  assert.equal(failing.host.rebuildPhase, 'failed');
+  const reply = await failing.query('v', q);
+  assert.ok(reply.ok);
+  if (reply.ok) {
+    assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle));
+    assert.equal(reply.value.answeredFrom.rollupMinutes, 0, 'a failed host asks the journal');
+    assert.equal(reply.value.answeredFrom.rawMinutes, 7);
+  }
+
+  // The control: a host that is live, over the same sidecar, uses what the sidecar holds.
+  const live = new HostRig(rig.runtime);
+  await live.connect();
+  assert.equal(live.host.rebuildPhase, 'live');
+  const fast = await live.query('v', q);
+  assert.ok(fast.ok);
+  if (fast.ok) {
+    assert.deepEqual(withoutProvenance(fast.value), withoutProvenance(oracle));
+    assert.ok(fast.value.answeredFrom.rollupMinutes > 0, 'a live host uses its rollups');
+  }
+});
+
+// =====================================================================================================
+// one bad stored minute is one raw minute
+// =====================================================================================================
+
+/** Flips a byte inside the stored fragment of `key` for `minuteMs`, past its key and minute: its checksum no longer holds. */
+function corruptFragment(sfile: MemoryBlockFile, key: string, minuteMs: number): void {
+  const k = new TextEncoder().encode(key);
+  const pattern = new Uint8Array(2 + k.length + 8);
+  new DataView(pattern.buffer).setUint16(0, k.length, true);
+  pattern.set(k, 2);
+  new DataView(pattern.buffer).setBigUint64(2 + k.length, BigInt(minuteMs), true);
+  const all = new Uint8Array(sfile.size());
+  sfile.read(0, all);
+  outer: for (let i = 0; i + pattern.length <= all.length; i++) {
+    for (let j = 0; j < pattern.length; j++) if (all[i + j] !== pattern[j]) continue outer;
+    const at = i + pattern.length + 8 + 2; // inside the rollup bytes, after the watermark the entry carries
+    sfile.write(at, Uint8Array.of(all[at] ^ 0xff));
+    return;
+  }
+  throw new Error('the fragment to corrupt was not found');
+}
+
+test('corrupt minute: a stored minute that fails its checksum is read from the journal and the rest from the rollups', async () => {
+  const rig = smallRig();
+  await rollUp(rig).then((h) => h.host.settled());
+  const q = spec(m(0), m(6), 6);
+  const clean = await askOk(rig, q);
+  assert.equal(clean.answeredFrom.rollupMinutes, 6);
+  const oracle = await askOk(rig, q, { forceRaw: true });
+
+  corruptFragment(rig.sfile, SRC, m(2));
+  const hurt = await askOk(rig, q);
+  assert.deepEqual(withoutProvenance(hurt), withoutProvenance(oracle));
+  assert.deepEqual(hurt.answeredFrom, { rollupMinutes: 5, rawMinutes: 1 }, 'that minute alone went to the journal');
+
+  // The engine's own query is the same: the minute is single, so the halving ends on it.
+  const engine = spec(m(0), m(6), 6, { sourceKey: SRC });
+  const hurtEngine = await askOk(rig, engine);
+  assert.deepEqual(withoutProvenance(hurtEngine), withoutProvenance(await askOk(rig, engine, { forceRaw: true })));
+  assert.deepEqual(hurtEngine.answeredFrom, { rollupMinutes: 5, rawMinutes: 1 });
+
+  // And through the host, which holds the sidecar as a cache and not as a fact.
+  const h = new HostRig(rig.runtime);
+  await h.connect();
+  const reply = await h.query('v', q);
+  assert.ok(reply.ok);
   if (reply.ok) assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle));
 });
 

@@ -60,6 +60,18 @@ export type HostRuntime = MonitoringRuntime & LiveSource;
 /** The wire shape of a live push (ruling 23); Task 5's utility sends it, `runtimeRpc.ts` handles it. */
 export interface LiveMessage { type: 'live'; entries: Evidence[] }
 
+/**
+ * A stored minute that fails its checksum or is shorter than the index says.
+ * A reader sends the minutes it covers to the journal; it does not fail the
+ * query, because the sidecar is a cache and the journal is the authority.
+ */
+export class CorruptRollupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CorruptRollupError';
+  }
+}
+
 /** The runtime did not answer in time, or its port closed. A query maps it to `runtime-unavailable`. */
 export class RuntimeUnavailableError extends Error {
   constructor(message: string) {

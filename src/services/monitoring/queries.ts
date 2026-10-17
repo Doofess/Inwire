@@ -36,13 +36,13 @@
 import { StaleGenerationError } from './journal';
 import { decodeMinuteRollup, type Inflate } from './rollupCodec';
 import { MINUTE_MS, EngineAdmission, MinuteAccumulator, ipv4Number, minuteOf } from './rollup';
-import { RuntimeUnavailableError, type EvidenceReader, type RollupReader } from './runtime';
+import { CorruptRollupError, RuntimeUnavailableError, type EvidenceReader, type RollupReader } from './runtime';
 import {
-  LIMITS, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
+  DECODER_POLICY_VERSION, LIMITS, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
   type EvidenceRef, type HistoryBucket, type HistoryReply, type HistoryResult, type HistoryTable, type MinuteRollup,
   type NormalizedV5, type QueryFocus, type QuerySpec, type Snapshot,
 } from './types';
-import { decodeV5, exporterKey, exporterOf, sourceKey } from './v5';
+import { decodeV5, exporterKey, exporterOf, isEngineSourceKey, sourceKey } from './v5';
 
 export interface QueryOptions {
   /** Bounded: the codec's own `maxOutput` is passed to it. */
@@ -57,6 +57,12 @@ export interface QueryOptions {
   checkpoint?: () => Promise<void>;
   /** What to add to a budget refusal while the host is still rebuilding the rollups. */
   rebuildNote?: () => string | null;
+  /**
+   * Why the sidecar is not to be used at all, when the host already knows (its
+   * rollup phase is `failed`): the query then answers from the journal alone,
+   * as it does when the sidecar turns out to be unusable by itself.
+   */
+  rollupsUnavailable?: string;
 }
 
 /** A refusal the query decided on, as opposed to a failure it suffered. */
@@ -64,6 +70,17 @@ class Refusal extends Error {
   constructor(readonly code: 'range-too-large' | 'invalid-query' | 'stale-generation', message: string) {
     super(message);
     this.name = 'Refusal';
+  }
+}
+
+/**
+ * The rollup side cannot be trusted: it threw, or it describes another journal.
+ * Never a reply; `runHistoryQuery` answers again from the journal alone.
+ */
+class RollupUnusable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RollupUnusable';
   }
 }
 
@@ -82,7 +99,11 @@ const DOTTED_QUAD = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0
 export function validateQuery(spec: QuerySpec): string | null {
   if (typeof spec !== 'object' || spec === null) return 'a query is an object';
   const { fromMs, toMs, bucketCount } = spec;
-  if (typeof spec.sourceKey !== 'string' || spec.sourceKey.length === 0) return 'a query names a source';
+  // The bare exporter key exists to hold the malformed and unsupported counts
+  // and is not a source: only what `sourceKey` produces can be asked for.
+  if (typeof spec.sourceKey !== 'string' || !isEngineSourceKey(spec.sourceKey)) {
+    return 'a query names a source as exporter/engine type/engine id, like 192.0.2.1/0/0';
+  }
   if (!Number.isSafeInteger(fromMs) || !Number.isSafeInteger(toMs)) return 'the range is a pair of whole milliseconds';
   if (fromMs < 0 || fromMs >= toMs) return 'the range must satisfy 0 <= fromMs < toMs';
   if (!Number.isInteger(bucketCount) || bucketCount < 1 || bucketCount > LIMITS.buckets) {
@@ -302,7 +323,19 @@ export async function runHistoryQuery(
   const invalid = validateQuery(spec);
   if (invalid !== null) return { ok: false, code: 'invalid-query', message: invalid };
   try {
-    return { ok: true, value: await new Query(reader, rollups, spec, signal, options).run() };
+    // The sidecar is a cache: when it cannot be used the journal answers alone,
+    // exactly, and only the raw budget can refuse. A fault of the journal is
+    // not caught here - it is `stale-generation` or `storage-failed` below.
+    let unusable = options.rollupsUnavailable ?? null;
+    if (unusable === null) {
+      try {
+        return { ok: true, value: await new Query(reader, rollups, spec, signal, options, null).run() };
+      } catch (e) {
+        if (!(e instanceof RollupUnusable)) throw e;
+        unusable = e.message;
+      }
+    }
+    return { ok: true, value: await new Query(reader, rollups, spec, signal, options, unusable).run() };
   } catch (e) {
     if (signal.aborted || (e instanceof Error && e.name === 'AbortError')) return { ok: false, code: 'cancelled', message: 'the query was cancelled' };
     if (e instanceof Refusal) return { ok: false, code: e.code, message: e.message };
@@ -336,6 +369,8 @@ class Query {
   constructor(
     private readonly reader: EvidenceReader, private readonly rollups: RollupReader, private readonly spec: QuerySpec,
     private readonly signal: AbortSignal, private readonly options: QueryOptions,
+    /** Why the rollups are not used, or null: W is 0, no fragment is read and the journal admits the engines. */
+    private readonly unusable: string | null,
   ) {
     this.from = spec.fromMs;
     this.to = spec.toMs;
@@ -344,7 +379,7 @@ class Query {
     this.focused = spec.focus !== undefined;
     // Rollups hold no references and no per-record focus, so a focused query,
     // like a forced one, reads every minute from the journal.
-    this.rawOnly = this.focused || options.forceRaw === true;
+    this.rawOnly = this.focused || options.forceRaw === true || unusable !== null;
     this.buckets = Array.from({ length: spec.bucketCount }, () => ({ records: 0, octets: 0n, packets: 0n }));
   }
 
@@ -354,8 +389,29 @@ class Query {
     if (this.signal.aborted) throw new QueryCancelled();
   }
 
+  /**
+   * What a failed sidecar call means: the sidecar is unusable, unless the
+   * failure is the query's own cancel or the runtime itself being gone or on
+   * another generation, which no journal fallback can answer either.
+   */
+  private rollupFailure(e: unknown): unknown {
+    if (this.signal.aborted || e instanceof RuntimeUnavailableError || e instanceof StaleGenerationError) return e;
+    if (e instanceof Error && e.name === 'AbortError') return e;
+    return new RollupUnusable(e instanceof Error ? e.message : String(e));
+  }
+
+  private async rollupCall<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call();
+    } catch (e) {
+      throw this.rollupFailure(e);
+    }
+  }
+
   private tooLarge(what: string): Refusal {
-    const note = this.options.rebuildNote?.() ?? null;
+    const note = this.unusable !== null
+      ? `The rollups are unavailable (${this.unusable}), so every minute of the range is read from the journal.`
+      : this.options.rebuildNote?.() ?? null;
     return new Refusal(
       'range-too-large',
       `${what} more than ${LIMITS.rawQueryDatagrams} datagrams have to be read from the journal for this range; narrow it.${note === null ? '' : ` ${note}`}`,
@@ -368,15 +424,20 @@ class Query {
 
     // Watermark first, journal second: the sidecar can only cover what the
     // journal already held, so W <= S and the tail (W, S] is well defined.
-    const mark = await this.rollups.watermark();
+    const mark = this.unusable === null ? await this.rollupCall(() => this.rollups.watermark()) : null;
     const snap = await this.reader.snapshot();
     this.snapshot = { generation: snap.generation, throughEntryId: snap.throughEntryId };
     if (mark !== null) {
+      // A sidecar of another journal, another decoder or the future vouches for
+      // nothing here; it is not the journal's fault, so it is not `stale-generation`.
       if (mark.generation !== snap.generation) {
-        throw new Refusal('stale-generation', `the rollups belong to generation ${mark.generation}, the journal is generation ${snap.generation}`);
+        throw new RollupUnusable(`the rollups belong to generation ${mark.generation}, the journal is generation ${snap.generation}`);
+      }
+      if (mark.policyVersion !== DECODER_POLICY_VERSION) {
+        throw new RollupUnusable(`the rollups were made by decoder policy ${mark.policyVersion}, this build is ${DECODER_POLICY_VERSION}`);
       }
       if (mark.throughEntryId > snap.throughEntryId) {
-        throw new Error(`the rollups claim entry ${mark.throughEntryId}, the journal ends at ${snap.throughEntryId}`);
+        throw new RollupUnusable(`the rollups claim entry ${mark.throughEntryId}, the journal ends at ${snap.throughEntryId}`);
       }
       this.watermark = mark.throughEntryId;
     }
@@ -424,17 +485,18 @@ class Query {
    * tail is scanned in order for the rest, and only until the query's own
    * source shows up. Learned from the sidecar even where it ran past `S`, the
    * set only ever grows and freezes at the cap, so it is right for every entry
-   * the snapshot holds.
+   * the snapshot holds. With no usable sidecar the set starts empty and W is 0,
+   * so the scan covers the journal from its first entry.
    */
   private async admit(): Promise<void> {
-    this.admission = new EngineAdmission(await this.rollups.sources());
+    this.admission = new EngineAdmission(this.unusable === null ? await this.rollupCall(() => this.rollups.sources()) : []);
     const key = this.spec.sourceKey;
     this.admitted = this.admission.has(key);
-    if (this.admitted || !key.includes('/')) return;
+    if (this.admitted) return;
     let datagrams = 0;
     await this.scan([{ fromId: this.watermark + 1, toId: this.snapshot.throughEntryId }], (e) => {
       if (e.kind !== 'datagram') return false;
-      if (++datagrams > LIMITS.rawQueryDatagrams) throw this.tooLarge('The source has no rollups yet and');
+      if (++datagrams > LIMITS.rawQueryDatagrams) throw this.tooLarge(this.unusable === null ? 'The source has no rollups yet and' : 'Finding the source,');
       const d = decodeV5(e, e.remoteIPv4);
       if (d.kind === 'valid') this.admission.admit(sourceKey(e.remoteIPv4, d.engineType, d.engineId));
       if (this.admission.has(key)) { this.admitted = true; return true; }
@@ -507,7 +569,7 @@ class Query {
       const b = Math.min(r.b, a + CHUNK_MINUTES * MINUTE_MS);
       const unreadable = new Set<number>();
       const fromSource = this.admitted ? await this.fragments(source, a, b, unreadable) : new Map<number, MinuteRollup[]>();
-      const fromExporter = exporter === source ? new Map<number, MinuteRollup[]>() : await this.fragments(exporter, a, b, unreadable);
+      const fromExporter = await this.fragments(exporter, a, b, unreadable);
       const minutes = new Set<number>([...fromSource.keys(), ...fromExporter.keys(), ...unreadable]);
       for (const m of tail.keys()) if (m >= a && m < b) minutes.add(m);
       for (const m of [...minutes].sort((x, y) => x - y)) {
@@ -531,10 +593,12 @@ class Query {
 
   /**
    * The decoded fragments of one key over `[a, b)`, only those posted at or
-   * below the watermark. A range over the byte cap is halved; one minute still
-   * over it, or one that does not decode to the minute it is filed under, is
+   * below the watermark. A range over the byte cap, or one holding a minute
+   * that fails its checksum, is halved; one minute still over the cap or still
+   * corrupt, or one that does not decode to the minute it is filed under, is
    * reported in `unreadable` and answered raw - a rollup is a cache, never a
-   * reason to fail a query the journal can answer.
+   * reason to fail a query the journal can answer. Any other fault of the
+   * sidecar makes the whole query start again without it (`RollupUnusable`).
    */
   private async fragments(key: string, a: number, b: number, unreadable: Set<number>): Promise<Map<number, MinuteRollup[]>> {
     const out = new Map<number, MinuteRollup[]>();
@@ -546,7 +610,7 @@ class Query {
       try {
         rows = await this.rollups.readMinutes(key, lo, hi, CHUNK_BYTES);
       } catch (e) {
-        if (!(e instanceof RangeError)) throw e;
+        if (!(e instanceof RangeError) && !(e instanceof CorruptRollupError)) throw this.rollupFailure(e);
         if (hi - lo <= MINUTE_MS) { for (let m = lo; m < hi; m += MINUTE_MS) unreadable.add(m); continue; }
         const mid = lo + Math.ceil((hi - lo) / MINUTE_MS / 2) * MINUTE_MS;
         stack.push([mid, hi], [lo, mid]);

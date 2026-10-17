@@ -382,6 +382,9 @@ export class MonitoringWorkerHost {
         boundaries: this.boundaries,
         checkpoint: () => slicer.checkpoint(),
         rebuildNote: () => this.rebuildNote(),
+        // A failed rebuild leaves the sidecar behind the journal for good, and
+        // a failed open leaves it unreadable: either way the journal answers.
+        ...(this.phase === 'failed' ? { rollupsUnavailable: 'the rollup sidecar has failed' } : {}),
       });
       this.replyQuery(job, reply);
     } catch (e) {

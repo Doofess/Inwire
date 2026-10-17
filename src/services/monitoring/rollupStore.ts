@@ -37,6 +37,7 @@ import {
   decodeFileHeader, encodeEntry, encodeFileHeader, entryCrc, generationFromHex, generationToHex,
   isHeaderPrefix, parseEntryHeader, scanEntries,
 } from './journalCodec';
+import { CorruptRollupError } from './runtime';
 import { FORMAT_VERSION, type Generation, type RollupWatermark } from './types';
 
 const KIND_MINUTE = 1;
@@ -309,10 +310,10 @@ export class RollupStore {
       const header = new Uint8Array(ENTRY_HEADER_BYTES);
       const body = new Uint8Array(m.bodyLength);
       if (this.file.read(m.offset - ENTRY_HEADER_BYTES, header) !== header.length || this.file.read(m.offset, body) !== body.length) {
-        throw new Error('the rollup sidecar is shorter than its index');
+        throw new CorruptRollupError('the rollup sidecar is shorter than its index');
       }
       const parsed = parseEntryHeader(ROLLUP_FRAMING, header);
-      if (!parsed.ok || parsed.crc !== entryCrc(header, body)) throw new Error('a stored minute no longer matches its checksum');
+      if (!parsed.ok || parsed.crc !== entryCrc(header, body)) throw new CorruptRollupError('a stored minute no longer matches its checksum');
       return { minuteMs: m.minuteMs, throughEntryId: m.throughEntryId, bytes: body.slice(2 + keyLength + 16) };
     });
   }

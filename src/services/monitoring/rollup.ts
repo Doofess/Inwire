@@ -27,7 +27,7 @@
  * same journal produces the same fragments to the byte (`sortedRollup`).
  */
 import { LIMITS, type ConversationTotals, type EndpointTotals, type MinuteRollup, type NormalizedV5 } from './types';
-import { exporterKey, exporterOf } from './v5';
+import { exporterKey, exporterOf, isEngineSourceKey } from './v5';
 
 export const MINUTE_MS = 60_000;
 
@@ -169,9 +169,9 @@ export class EngineAdmission {
   private readonly keys = new Set<string>();
   private readonly perExporter = new Map<string, number>();
 
-  /** `known` is a list of source keys; an exporter-level key (no slash) is not an engine and is skipped. */
+  /** `known` is a list of source keys; an exporter-level key is not an engine and is skipped. */
   constructor(known: Iterable<string> = []) {
-    for (const k of known) if (k.includes('/')) this.add(k);
+    for (const k of known) if (isEngineSourceKey(k)) this.add(k);
   }
 
   private add(key: string): void {
@@ -278,18 +278,20 @@ export class MinuteAggregator {
    */
   drain(): { fragments: Fragment[]; watermark: number } | null {
     let post = this.held.slice();
+    let posted = new Set(post);
     let watermark = this.lastFed;
     for (;;) {
       let earliest = Infinity;
       for (const o of this.open.values()) earliest = Math.min(earliest, o.firstId);
-      for (const f of this.held) if (!post.includes(f)) earliest = Math.min(earliest, f.firstId);
+      for (const f of this.held) if (!posted.has(f)) earliest = Math.min(earliest, f.firstId);
       watermark = earliest === Infinity ? this.lastFed : earliest - 1;
       const next = post.filter((f) => f.lastId <= watermark);
       if (next.length === post.length) break;
       post = next;
+      posted = new Set(post);
     }
     if (post.length === 0) return null;
-    this.held = this.held.filter((f) => !post.includes(f));
+    this.held = this.held.filter((f) => !posted.has(f));
     return { fragments: post, watermark };
   }
 }

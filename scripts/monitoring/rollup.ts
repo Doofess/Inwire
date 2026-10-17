@@ -437,6 +437,26 @@ test('equality: a focused query, which is always raw, is the same on both paths'
   }
 });
 
+test('equality: the bare exporter key is not a source, on either path, and the engine keys agree on what it holds', async () => {
+  const { rig } = await built;
+  // The sidecar does hold the exporter-level key (it carries the malformed and
+  // unsupported counts), so refusing it is a decision and not an absence.
+  assert.ok(rig.store.sources().includes(exporterKey(EXPORTER)));
+  for (const exporter of [EXPORTER, BUSY, OTHER]) {
+    for (const forceRaw of [false, true]) {
+      const reply = await ask(rig, spec(m(0), m(17), 5, { sourceKey: exporterKey(exporter) }), { forceRaw });
+      assert.ok(!reply.ok && reply.code === 'invalid-query', `${exporter} (forceRaw ${forceRaw}): ${JSON.stringify(reply.ok ? 'ok' : reply.code)}`);
+    }
+  }
+  // What the bare key would have shown is still reachable, from an engine of that exporter, and the two paths agree on it.
+  for (const source of [SRC, SRC1, sourceKey(EXPORTER, 9, 9)]) {
+    const { fast, raw } = await askBoth(rig, spec(m(0), m(17), 5, { sourceKey: source }));
+    assert.equal(fast.malformed, raw.malformed, `malformed through ${source}`);
+    assert.equal(fast.unsupported, raw.unsupported, `unsupported through ${source}`);
+    assert.ok(raw.malformed > 0 && raw.unsupported > 0, `${source} sees its exporter's bad datagrams: ${raw.malformed}/${raw.unsupported}`);
+  }
+});
+
 test('equality: the stored sidecar holds every phase-1 record and no phase-2 record', async () => {
   const { rig, world, watermark } = await built;
   assert.equal(watermark, world.phase1.length, 'the watermark is the stop that sealed phase 1');

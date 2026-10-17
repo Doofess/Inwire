@@ -56,6 +56,19 @@ export function exporterKey(exporterIPv4: string): string {
   return exporterIPv4;
 }
 
+const ENGINE_KEY = /^((?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))\/(0|[1-9]\d{0,2})\/(0|[1-9]\d{0,2})$/;
+
+/**
+ * Whether `key` is exactly what `sourceKey` produces: an exporter, an engine
+ * type and an engine id, each a canonical number. The bare `exporterKey` is not
+ * one - it is where the malformed and unsupported counts live, never a source a
+ * query can name or an engine that can be admitted.
+ */
+export function isEngineSourceKey(key: string): boolean {
+  const m = ENGINE_KEY.exec(key);
+  return m !== null && Number(m[2]) <= 255 && Number(m[3]) <= 255;
+}
+
 /** The exporter a `sourceKey` or an `exporterKey` belongs to. */
 export function exporterOf(key: string): string {
   const slash = key.indexOf('/');

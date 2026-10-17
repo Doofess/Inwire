@@ -17,12 +17,13 @@
  * - **A closed port fails everything at once**, pending and future, with the
  *   same error.
  * - **Errors cross by name.** An `Error` does not survive structured clone with
- *   its class, and the query maps `StaleGenerationError` and `RangeError` to
- *   different answers, so the server sends `{name, message}` plus the two
- *   generation strings and the client rebuilds the class.
+ *   its class, and the query maps `StaleGenerationError`, `RangeError` and
+ *   `CorruptRollupError` to different answers, so the server sends
+ *   `{name, message}` plus the two generation strings and the client rebuilds
+ *   the class.
  */
 import { StaleGenerationError } from './journal';
-import { RuntimeUnavailableError, type HostRuntime, type LiveMessage } from './runtime';
+import { CorruptRollupError, RuntimeUnavailableError, type HostRuntime, type LiveMessage } from './runtime';
 import type { Evidence } from './types';
 
 export interface RpcPort {
@@ -76,6 +77,7 @@ function errorBody(e: unknown): ErrorBody {
 function errorFrom(body: ErrorBody): Error {
   if (body.name === 'StaleGenerationError') return new StaleGenerationError(body.wanted ?? '', body.actual ?? '');
   if (body.name === 'RangeError') return new RangeError(body.message);
+  if (body.name === 'CorruptRollupError') return new CorruptRollupError(body.message);
   const e = new Error(body.message);
   e.name = body.name;
   return e;
