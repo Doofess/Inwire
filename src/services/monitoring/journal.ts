@@ -40,7 +40,7 @@ import { EntryIndex } from './index';
 import {
   ENTRY_HEADER_BYTES, FILE_HEADER_BYTES, JOURNAL_FRAMING, KIND_BOUNDARY, KIND_DATAGRAM,
   decodeDatagramBody, decodeFileHeader, encodeDatagramBody, encodeEntry, encodeFileHeader,
-  entryCrc, generationToHex, isHeaderPrefix, parseEntryHeader, scanEntries,
+  entryCrc, entryReservedProblem, generationToHex, isHeaderPrefix, parseEntryHeader, scanEntries,
 } from './journalCodec';
 import {
   DECODER_POLICY_VERSION, FORMAT_VERSION, LIMITS,
@@ -317,6 +317,11 @@ export class MonitoringJournal {
 
     if (scan.status === 'empty') {
       const bytes = (options.randomBytes ?? defaultRandom)(16);
+      // A caller bug, refused before the file is touched: a generation of the
+      // wrong length would otherwise be a header nobody could read back.
+      if (!(bytes instanceof Uint8Array) || bytes.length !== 16) {
+        throw new RangeError(`randomBytes(16) returned ${bytes instanceof Uint8Array ? `${bytes.length} bytes` : 'something that is not a Uint8Array'}; a generation is exactly 16`);
+      }
       const header = encodeFileHeader(JOURNAL_FRAMING, { generation: bytes, createdMs: (options.nowMs ?? Date.now)() });
       let state: JournalState = 'open';
       try {
@@ -401,6 +406,7 @@ export class MonitoringJournal {
           reason: input.reason, droppedDatagrams: input.droppedDatagrams,
         };
         if (!ACTIONS.has(boundary.action) || !Number.isSafeInteger(boundary.receivedMs) || boundary.receivedMs < 0) return false;
+        if (typeof boundary.sessionId !== 'string' || !this.sessionAllows(boundary)) return false;
         body = encodeBoundary(boundary);
         if (body.length > JOURNAL_FRAMING.maxBodyBytes) return false;
       }
@@ -409,16 +415,18 @@ export class MonitoringJournal {
     }
 
     const entryBytes = ENTRY_HEADER_BYTES + body.length;
-    const total = this.end + (this.options.otherBytes?.() ?? 0);
+    const total = this.end + this.otherBytes();
     if (kind === KIND_DATAGRAM) {
       // Datagrams stop short of the limit by the closing reserve, so the
       // `stop` that explains the gap always has room to be written.
       if (total + entryBytes > this.options.limitBytes - LIMITS.closingReserveBytes) {
-        this.enterStorageLimit((input as { receivedMs: number }).receivedMs);
+        this.enterStorageLimit(input.receivedMs);
         return false;
       }
     } else if (total + entryBytes > this.options.limitBytes) {
-      this.status = 'storage-limit';
+      // An ordinary boundary is held to the limit itself, and refusing it must
+      // not leave a session open on disk when a forced `stop` still fits.
+      this.enterStorageLimit(input.receivedMs);
       return false;
     }
 
@@ -428,6 +436,33 @@ export class MonitoringJournal {
     return true;
   }
 
+  /**
+   * The journal's own rules for a session, applied at append so the file never
+   * holds a sequence the reader would have to forgive. A `start` needs no
+   * session open; `stop`, `suspend`, `resume` and `interrupted` need the open
+   * one, by id. `gap` is evidence about the stream, not about a session, and
+   * is held to neither. These are rules for writing: the read side accepts
+   * whatever a file contains, so no existing file is made corrupt by them.
+   */
+  private sessionAllows(b: BoundaryFields): boolean {
+    if (b.action === 'start') return this.openSession === null;
+    if (b.action === 'gap') return true;
+    return this.openSession !== null && b.sessionId === this.openSession;
+  }
+
+  private otherBytes(): number {
+    return this.options.otherBytes?.() ?? 0;
+  }
+
+  /**
+   * The journal has reached its limit. Closing the open session on disk is the
+   * one write allowed to use the reserve.
+   *
+   * **If even that does not fit** - `otherBytes()` grew past the reserve - it
+   * is not written: the file never goes over the limit. The state is still
+   * `storage-limit` and the session is left open on disk, so the next `open`
+   * with room for it writes the `interrupted` marker a crash would have.
+   */
   private enterStorageLimit(receivedMs: number): void {
     if (this.openSession !== null) {
       this.writeBoundary({
@@ -437,8 +472,21 @@ export class MonitoringJournal {
     if (this.status === 'open') this.status = 'storage-limit';
   }
 
-  private writeBoundary(b: BoundaryFields): void {
-    if (this.writeEntry(KIND_BOUNDARY, encodeBoundary(b))) this.afterBoundary(b);
+  /**
+   * A boundary the journal writes itself: the `stop` at the storage limit and
+   * the `interrupted` on open. Held to `limitBytes` - the reserve is exactly
+   * what these may spend - and never past it. Returns whether it was written;
+   * when it was not, the state is `storage-limit`.
+   */
+  private writeBoundary(b: BoundaryFields): boolean {
+    const body = encodeBoundary(b);
+    if (this.end + this.otherBytes() + ENTRY_HEADER_BYTES + body.length > this.options.limitBytes) {
+      if (this.status === 'open') this.status = 'storage-limit';
+      return false;
+    }
+    if (!this.writeEntry(KIND_BOUNDARY, body)) return false;
+    this.afterBoundary(b);
+    return true;
   }
 
   private afterBoundary(b: BoundaryFields): void {
@@ -503,9 +551,14 @@ export class MonitoringJournal {
    * still returned, alone: a page that could return nothing would never advance.
    */
   readPage(snapshot: { generation: string; throughEntryId: number }, afterId: number, maxEntries: number, maxBytes: number): EvidencePage {
+    // Task 5 puts this behind IPC, so the numbers are untrusted: NaN would
+    // slip through every comparison below and read as "no limit".
+    if (!Number.isSafeInteger(afterId) || afterId < 0) throw new RangeError(`afterId ${afterId} is not a non-negative safe integer`);
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) throw new RangeError(`maxEntries ${maxEntries} is not a positive safe integer`);
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError(`maxBytes ${maxBytes} is not a positive safe integer`);
     if (snapshot.generation !== this.generationHex) throw new StaleGenerationError(snapshot.generation, this.generationHex);
     const through = Math.min(snapshot.throughEntryId, this.lastId);
-    const after = Math.max(0, afterId);
+    const after = afterId;
     const first = after + 1;
     if (first > through) return { entries: [], nextAfterId: Math.min(after, through), done: true };
 
@@ -571,6 +624,8 @@ export class MonitoringJournal {
     if (entryCrc(headerBytes, body) !== header.crc || header.entryId !== entryId) {
       throw new Error(`journal: entry ${entryId} at ${offset} no longer matches its checksum`);
     }
+    const reserved = entryReservedProblem(headerBytes);
+    if (reserved !== null) throw new Error(`journal: entry ${entryId} at ${offset}: ${reserved}`);
     const ref: EvidenceRef = { generation: this.generationHex, entryId };
     const entryBytes = ENTRY_HEADER_BYTES + header.bodyLength;
     const nextOffset = offset + entryBytes;

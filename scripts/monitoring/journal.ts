@@ -36,7 +36,7 @@ import {
   type EvidenceInput, type JournalOptions,
 } from '../../src/services/monitoring/journal';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
-import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
+import { MAX_ROLLUP_INFLATED_BYTES, decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { EntryIndex, INDEX_STRIDE } from '../../src/services/monitoring/index';
 import { monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
 
@@ -56,12 +56,32 @@ const hex = (b: Uint8Array) => Buffer.from(b).toString('hex').replace(/(.{2})/g,
 const fromHex = (s: string) => Uint8Array.from(s.split(/\s+/).filter(Boolean).map((h) => parseInt(h, 16)));
 const sha = (b: Uint8Array) => createHash('sha256').update(b).digest('hex');
 const deflate = (b: Uint8Array): Uint8Array => new Uint8Array(deflateRawSync(b, { level: 1 }));
-const inflate = (b: Uint8Array): Uint8Array => new Uint8Array(inflateRawSync(b));
+/** The contract is `inflate(bytes, maxOutput)`: node's zlib takes the bound as `maxOutputLength`. */
+const inflate = (b: Uint8Array, maxOutput: number): Uint8Array => new Uint8Array(inflateRawSync(b, { maxOutputLength: maxOutput }));
 
 function readAll(file: BlockFile): Uint8Array {
   const out = new Uint8Array(file.size());
   file.read(0, out);
   return out;
+}
+
+/** Where each entry of a valid journal or sidecar image starts, in id order. */
+function entryStarts(image: Uint8Array): number[] {
+  const out: number[] = [];
+  const v = new DataView(image.buffer, image.byteOffset, image.byteLength);
+  let off = FILE_HEADER_BYTES;
+  while (off + 24 <= image.length) {
+    out.push(off);
+    off += 24 + v.getUint32(off + 4, true);
+  }
+  return out;
+}
+
+/** Recomputes the CRC of the entry at `off` after a field was changed, so only that field is wrong. */
+function reseal(image: Uint8Array, off: number): void {
+  const v = new DataView(image.buffer, image.byteOffset, image.byteLength);
+  const length = v.getUint32(off + 4, true);
+  v.setUint32(off + 20, crc32(image.subarray(off + 24, off + 24 + length), crc32(image.subarray(off, off + 20))), true);
 }
 
 // --- the ADR's vector --------------------------------------------------------------
@@ -418,6 +438,231 @@ function journalCases(kind: 'memory' | 'disk'): void {
     }
   });
 
+  test(tag('a corrupted interior length is corruption, never a torn tail (extent past EOF, mid-file, inside a bad-CRC extent)'), () => {
+    const cases = ['past EOF, in cap', 'lands mid-file on non-entry bytes', 'bad CRC whose extent holds a valid entry'] as const;
+    for (const how of cases) {
+      const rig = newRig(kind);
+      build(rig.file, [10, 20, 30, 40]);
+      let full = readAll(rig.file);
+      const starts = entryStarts(full);
+      const off2 = starts[1];
+      if (how === 'past EOF, in cap') {
+        // The reviewer's probe: entry 2's length rewritten to 60000, in cap, past the end of a ~400 byte file.
+        new DataView(full.buffer).setUint32(off2 + 4, 60_000, true);
+      } else if (how === 'lands mid-file on non-entry bytes') {
+        new DataView(full.buffer).setUint32(off2 + 4, 40, true);
+      } else {
+        // A last entry whose own checksum is wrong and whose body is a complete, valid entry.
+        const inner = encodeEntry(JOURNAL_FRAMING, 6, KIND_BOUNDARY, new TextEncoder().encode(JSON.stringify({ action: 'gap', sessionId: 'S1', receivedMs: T0 })));
+        const outer = encodeEntry(JOURNAL_FRAMING, 6, KIND_DATAGRAM, inner);
+        new DataView(outer.buffer).setUint32(20, 0x12345678, true);
+        const joined = new Uint8Array(full.length + outer.length);
+        joined.set(full, 0);
+        joined.set(outer, full.length);
+        full = joined;
+      }
+      const file = rig.load(full);
+      const before = sha(readAll(file));
+      const { journal, recovery } = open(file);
+      assert.equal(recovery.status, 'corrupt', how);
+      assert.equal(recovery.tornTail, null, how);
+      assert.ok(recovery.problem && recovery.problem.length > 0, how);
+      assert.equal(journal.state, 'refused-corrupt', how);
+      assert.equal(sha(readAll(file)), before, `${how}: nothing is truncated`);
+      if (how === 'past EOF, in cap') {
+        assert.match(recovery.problem!, new RegExp(`offset ${off2}\\b.*follows at ${starts[2]}\\b`), 'the reason names both offsets');
+        assert.equal(recovery.completeEntries, 1);
+        assert.equal(recovery.validBytes, off2);
+        assert.equal(journal.readPage(journal.snapshot(), 0, 100, 1 << 20).entries.length, 1, 'history before the bad entry stays readable');
+      }
+      const r = journal.append([bnd('start', 'S9', T0)]);
+      assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'refused-corrupt'], how);
+      assert.equal(sha(readAll(file)), before, `${how}: a refused append wrote nothing`);
+    }
+  });
+
+  test(tag('an all-zero tail is torn and truncated; a zero run with a non-zero byte after it is corruption'), () => {
+    for (const zeros of [1, 23, 24, 25, 4096]) {
+      for (const sessionOpen of [true, false]) {
+        const rig = newRig(kind);
+        const journal = build(rig.file, [10, 20]);
+        if (!sessionOpen) journal.append([bnd('stop', 'S1', T0 + 99)]);
+        const valid = readAll(rig.file);
+        const file = rig.load(Uint8Array.from([...valid, ...new Uint8Array(zeros)]));
+        const rec = recoverJournal(file);
+        assert.equal(rec.status, 'ok', `${zeros} zeros`);
+        assert.deepEqual(rec.tornTail, { fromOffset: valid.length, bytes: zeros }, `${zeros} zeros`);
+        const reopened = open(file);
+        assert.equal(reopened.journal.state, 'open');
+        // Start + two datagrams = 3 entries; a stop makes 4; an interrupted marker makes 4 as well.
+        if (sessionOpen) assert.ok(file.size() > valid.length && file.size() < valid.length + 400, 'the zeros are gone, a marker follows');
+        else assert.equal(file.size(), valid.length, 'the zeros are gone');
+        assert.equal(reopened.journal.snapshot().throughEntryId, 4, `${zeros} zeros`);
+        const last = reopened.journal.readEvidence({ generation: GEN, entryId: reopened.journal.snapshot().throughEntryId }) as BoundaryEvidence;
+        assert.equal(last.action, sessionOpen ? 'interrupted' : 'stop', `${zeros} zeros: an interrupted marker only when a session was open`);
+        assert.equal(sha(readAll(file).subarray(0, valid.length)), sha(valid), 'the valid part is untouched');
+      }
+    }
+    // Zeros, then one non-zero byte: the zeros are not the whole story.
+    const rig = newRig(kind);
+    build(rig.file, [10, 20]);
+    const valid = readAll(rig.file);
+    const tail = new Uint8Array(4096);
+    tail[tail.length - 1] = 1;
+    const file = rig.load(Uint8Array.from([...valid, ...tail]));
+    const before = sha(readAll(file));
+    const { journal, recovery } = open(file);
+    assert.equal(recovery.status, 'corrupt');
+    assert.equal(recovery.tornTail, null);
+    assert.equal(journal.state, 'refused-corrupt');
+    assert.equal(sha(readAll(file)), before);
+  });
+
+  test(tag('a non-zero flags or reserved byte is corruption even under a valid CRC (entry header and datagram metadata)'), () => {
+    const fields: [string, number][] = [
+      ['entry flags (byte 17)', 17],
+      ['entry reserved (byte 18)', 18],
+      ['entry reserved (byte 19)', 19],
+      ['datagram metadata reserved (body byte 20)', 24 + 20],
+      ['datagram metadata reserved (body byte 23)', 24 + 23],
+    ];
+    for (const [name, rel] of fields) {
+      // Entry 2 has entries behind it; entry 5 is the last in the file.
+      for (const id of [2, 5]) {
+        const rig = newRig(kind);
+        build(rig.file, [10, 20, 30, 40]);
+        const full = readAll(rig.file);
+        const off = entryStarts(full)[id - 1];
+        full[off + rel] = 0x01;
+        reseal(full, off);
+        const file = rig.load(full);
+        const before = sha(readAll(file));
+        const { journal, recovery } = open(file);
+        assert.equal(recovery.status, 'corrupt', `${name} in entry ${id}`);
+        assert.equal(recovery.tornTail, null, `${name} in entry ${id}`);
+        assert.equal(recovery.completeEntries, id - 1, `${name} in entry ${id}`);
+        assert.equal(journal.state, 'refused-corrupt', `${name} in entry ${id}`);
+        assert.equal(sha(readAll(file)), before, `${name} in entry ${id}`);
+      }
+    }
+    // The control: the same edit with a zero byte is the original file, and reads fine.
+    const rig = newRig(kind);
+    build(rig.file, [10, 20]);
+    const full = readAll(rig.file);
+    reseal(full, entryStarts(full)[1]);
+    assert.equal(recoverJournal(rig.load(full)).status, 'ok');
+  });
+
+  test(tag('every boundary is held to the limit; a forced one that does not fit is not written and the session stays open'), () => {
+    // Measure a start and the storage-limit stop that closes it.
+    const probe = open(newRig(kind).file).journal;
+    const s1 = probe.append([bnd('start', 'S1', T0)]).snapshot.writtenBytes;
+    const stopBytes = probe.append([bnd('stop', 'S1', T0 + 1, 'storage-limit')]).snapshot.writtenBytes - s1;
+
+    // 1. An ordinary boundary refused at the limit closes the session from the reserve.
+    {
+      const rig = newRig(kind);
+      const { journal } = open(rig.file, { limitBytes: s1 + stopBytes + 10 });
+      journal.append([bnd('start', 'S1', T0)]);
+      const r = journal.append([bnd('gap', 'S1', T0 + 1, 'x'.repeat(300), 5)]);
+      assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'storage-limit']);
+      const last = journal.readEvidence({ generation: GEN, entryId: r.snapshot.throughEntryId }) as BoundaryEvidence;
+      assert.deepEqual([last.action, last.reason, last.sessionId], ['stop', 'storage-limit', 'S1']);
+      assert.ok(rig.file.size() <= s1 + stopBytes + 10, 'never past the limit');
+      assert.equal(open(rig.reopen()).journal.snapshot().throughEntryId, r.snapshot.throughEntryId, 'the session is closed on disk: no interrupted marker');
+    }
+
+    // 2. otherBytes grows mid-run past what the reserve can cover.
+    {
+      const limit = LIMITS.closingReserveBytes + 2_000;
+      let other = 0;
+      const rig = newRig(kind);
+      const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
+      journal.append([bnd('start', 'S1', T0)]);
+      assert.equal(journal.append([dg(T0 + 1, new Uint8Array(100))]).appended, 1);
+      const sizeBefore = rig.file.size();
+      other = limit - sizeBefore - 5; // 5 bytes of room: not enough for any boundary
+      const r = journal.append([dg(T0 + 2, new Uint8Array(100))]);
+      assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'storage-limit']);
+      assert.equal(rig.file.size(), sizeBefore, 'the stop did not fit, so it was not written');
+      assert.ok(rig.file.size() + other <= limit, 'the dataset never exceeds the limit');
+      assert.equal(journal.append([bnd('stop', 'S1', T0 + 3)]).appended, 0, 'nothing more is accepted');
+      // The session is open on disk. With no room the next open writes nothing and says storage-limit...
+      const cramped = open(rig.reopen(), { limitBytes: limit, otherBytes: () => other });
+      assert.equal(cramped.journal.state, 'storage-limit');
+      assert.equal(rig.file.size(), sizeBefore);
+      // ...and with room it writes the interrupted marker a crash would have.
+      other = 0;
+      const roomy = open(rig.reopen(), { limitBytes: limit, otherBytes: () => other });
+      assert.equal(roomy.journal.state, 'open');
+      const marker = roomy.journal.readEvidence({ generation: GEN, entryId: roomy.journal.snapshot().throughEntryId }) as BoundaryEvidence;
+      assert.deepEqual([marker.action, marker.sessionId], ['interrupted', 'S1']);
+    }
+  });
+
+  test(tag('readPage refuses arguments that are not integers in range (they will arrive over IPC)'), () => {
+    const rig = newRig(kind);
+    const journal = build(rig.file, [1, 2, 3]);
+    const snap = journal.snapshot();
+    for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      assert.throws(() => journal.readPage(snap, bad, 10, 1 << 20), RangeError, `afterId ${bad}`);
+    }
+    for (const bad of [Number.NaN, 0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      assert.throws(() => journal.readPage(snap, 0, bad, 1 << 20), RangeError, `maxEntries ${bad}`);
+      assert.throws(() => journal.readPage(snap, 0, 10, bad), RangeError, `maxBytes ${bad}`);
+    }
+    assert.equal(journal.readPage(snap, 0, 10, 1 << 20).entries.length, 4, 'afterId 0 is the start');
+  });
+
+  test(tag('session consistency at append: refused without a write, counted, and the read side still accepts what a file holds'), () => {
+    const rig = newRig(kind);
+    const { journal } = open(rig.file);
+    const attempt = (inputs: EvidenceInput[], name: string) => {
+      const before = sha(readAll(rig.file));
+      const snap = journal.snapshot();
+      const r = journal.append(inputs);
+      assert.deepEqual([r.appended, r.refused, r.state], [0, inputs.length, 'open'], name);
+      assert.deepEqual(r.snapshot, snap, name);
+      assert.equal(sha(readAll(rig.file)), before, `${name}: nothing written`);
+    };
+    // No session open.
+    for (const action of ['stop', 'suspend', 'resume', 'interrupted'] as const) attempt([bnd(action, 'S1', T0)], `${action} with no session`);
+    assert.equal(journal.append([bnd('start', 'S1', T0)]).appended, 1);
+    // A session is open.
+    attempt([bnd('start', 'S2', T0 + 1)], 'start while a session is open');
+    attempt([bnd('start', 'S1', T0 + 1)], 'a second start of the same session');
+    for (const action of ['stop', 'suspend', 'resume', 'interrupted'] as const) attempt([bnd(action, 'S2', T0 + 1)], `${action} naming another session`);
+    // The legitimate sequence still works, in order.
+    const ok = journal.append([bnd('suspend', 'S1', T0 + 2), bnd('resume', 'S1', T0 + 3), dg(T0 + 4), bnd('stop', 'S1', T0 + 5)]);
+    assert.deepEqual([ok.appended, ok.refused], [4, 0]);
+    attempt([bnd('stop', 'S1', T0 + 6)], 'a second stop');
+    assert.equal(journal.append([bnd('start', 'S2', T0 + 7)]).appended, 1, 'a new session after a stop');
+    // The read side accepts what files contain: a double start, a stop naming nobody, a stop with nothing open.
+    const json = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
+    const b = (action: string, sessionId: string) => json({ action, sessionId, receivedMs: T0, reason: '', droppedDatagrams: null });
+    const entries = [
+      encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, b('start', 'S1')),
+      encodeEntry(JOURNAL_FRAMING, 2, KIND_BOUNDARY, b('start', 'S2')),
+      encodeEntry(JOURNAL_FRAMING, 3, KIND_BOUNDARY, b('stop', 'ZZ')),
+      encodeEntry(JOURNAL_FRAMING, 4, KIND_BOUNDARY, b('resume', 'S9')),
+    ];
+    const image = new Uint8Array(64 + entries.reduce((n, e) => n + e.length, 0));
+    image.set(encodeFileHeader(JOURNAL_FRAMING, { generation: GEN_BYTES, createdMs: T0 }), 0);
+    let at = 64;
+    for (const e of entries) { image.set(e, at); at += e.length; }
+    const rec = recoverJournal(newRig(kind).load(image));
+    assert.equal(rec.status, 'ok', 'an existing file is never made corrupt by the writer\'s rules');
+    assert.equal(rec.completeEntries, 4);
+  });
+
+  test(tag('a randomBytes of the wrong length is a RangeError before any write'), () => {
+    for (const n of [0, 15, 17, 32]) {
+      const rig = newRig(kind);
+      assert.throws(() => open(rig.file, { randomBytes: () => new Uint8Array(n) }), RangeError, `length ${n}`);
+      assert.equal(rig.file.size(), 0, `length ${n}: the file was not touched`);
+    }
+  });
+
   test(tag('corruption of meaning: skipped id, orphan datagram, bad boundary JSON are all preserved'), () => {
     const bodyOf = (n: number) => encodeDatagramBody({ receivedMs: T0, localIPv4: '1.1.1.1', localPort: 1, remoteIPv4: '2.2.2.2', remotePort: 2, payload: Uint8Array.from([n]) });
     const json = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
@@ -568,12 +813,10 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('storage limit edge: admitted while total + entry <= limit - reserve, refused one byte over'), () => {
-    const rig = newRig(kind);
     const entryBytes = 24 + 24 + 100;
-    const { journal } = open(rig.file, { limitBytes: 64 + 130 + LIMITS.closingReserveBytes + entryBytes * 2, otherBytes: () => 0 });
-    const start = journal.append([bnd('start', 'S1', T0)]);
-    const startBytes = start.snapshot.writtenBytes - 64;
-    // Rebuild a limit that admits exactly two datagrams after the start.
+    // Measure the start boundary, then build a limit that admits exactly two datagrams after it.
+    const probe = open(newRig(kind).file).journal;
+    const startBytes = probe.append([bnd('start', 'S1', T0)]).snapshot.writtenBytes - 64;
     const rig2 = newRig(kind);
     const exact = 64 + startBytes + 2 * entryBytes + LIMITS.closingReserveBytes;
     const j2 = open(rig2.file, { limitBytes: exact }).journal;
@@ -770,7 +1013,7 @@ test('rollupCodec: refuses what it cannot carry or trust', () => {
   assert.throws(() => decodeMinuteRollup(bytes.subarray(0, bytes.length - 3), inflate));
   const raw = (rollupBytes: Uint8Array) => { const o = new Uint8Array(2 + rollupBytes.length); o[0] = DECODER_POLICY_VERSION; o.set(rollupBytes, 2); return o; };
   // A count that promises more than the body holds is refused before allocating.
-  const lying = inflate(bytes.subarray(2)).slice();
+  const lying = inflate(bytes.subarray(2), MAX_ROLLUP_INFLATED_BYTES).slice();
   const dv = new DataView(lying.buffer);
   // The endpoint count is followed by the first endpoint, 10.0.0.1: 2 as a u32, then 0a 00 00 01.
   let patched = false;
@@ -783,6 +1026,56 @@ test('rollupCodec: refuses what it cannot carry or trust', () => {
   }
   assert.ok(patched, 'the test found the endpoint count');
   assert.throws(() => decodeMinuteRollup(raw(deflate(lying)), inflate));
+});
+
+test('rollupCodec: the inflate bound is computed and the key budget is a total of endpoints and conversations', () => {
+  const budget = LIMITS.minuteKeyBudget;
+  assert.ok(Number.isSafeInteger(MAX_ROLLUP_INFLATED_BYTES) && MAX_ROLLUP_INFLATED_BYTES > budget * 24);
+  const ep = (i: number) => ({ address: `10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`, sentOctets: 1n, receivedOctets: 2n });
+  const cv = (i: number) => ({ srcAddr: `10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`, dstAddr: '10.9.9.9', reportedOctets: 1n, reportedPackets: 1n });
+  const half = budget / 2;
+  const full = rollup({ endpoints: Array.from({ length: half }, (_, i) => ep(i)), conversations: Array.from({ length: half }, (_, i) => cv(i)) });
+  assert.deepEqual(decodeMinuteRollup(encodeMinuteRollup(full, deflate), inflate), full, 'a rollup at the budget round-trips');
+  const onlyConversations = rollup({ endpoints: [], conversations: Array.from({ length: budget }, (_, i) => cv(i)) });
+  assert.equal(decodeMinuteRollup(encodeMinuteRollup(onlyConversations, deflate), inflate).conversations.length, budget);
+
+  // The encoder will not write what the decoder will refuse.
+  assert.throws(() => encodeMinuteRollup(rollup({ endpoints: Array.from({ length: half + 1 }, (_, i) => ep(i)), conversations: Array.from({ length: half }, (_, i) => cv(i)) }), deflate), RangeError);
+
+  // A hand-built body whose counts are over budget but honest about the bytes they carry is refused by the decoder.
+  const handBuilt = (endpoints: number, conversations: number): Uint8Array => {
+    const key = new TextEncoder().encode('k');
+    const raw = new Uint8Array(1 + 2 + key.length + 48 + 4 + endpoints * 20 + 4 + conversations * 24);
+    const v = new DataView(raw.buffer);
+    let at = 0;
+    raw[at++] = 1;
+    v.setUint16(at, key.length, true); at += 2;
+    raw.set(key, at); at += key.length;
+    at += 48;
+    v.setUint32(at, endpoints, true); at += 4 + endpoints * 20;
+    v.setUint32(at, conversations, true);
+    const out = new Uint8Array(2 + deflate(raw).length);
+    new DataView(out.buffer).setUint16(0, DECODER_POLICY_VERSION, true);
+    out.set(deflate(raw), 2);
+    return out;
+  };
+  assert.doesNotThrow(() => decodeMinuteRollup(handBuilt(half, half), inflate), 'the control: exactly the budget decodes');
+  assert.throws(() => decodeMinuteRollup(handBuilt(budget + 1, 0), inflate), /endpoints/, 'endpoints alone over budget');
+  assert.throws(() => decodeMinuteRollup(handBuilt(0, budget + 1), inflate), /endpoints and conversations/, 'conversations alone over budget');
+  assert.throws(() => decodeMinuteRollup(handBuilt(half + 1, half), inflate), /endpoints and conversations/, 'the total is what is held to the budget');
+
+  // The codec hands the inflate its bound, and refuses an inflate that ignores it.
+  const good = encodeMinuteRollup(rollup(), deflate);
+  let asked = -1;
+  decodeMinuteRollup(good, (b, max) => { asked = max; return inflate(b, max); });
+  assert.equal(asked, MAX_ROLLUP_INFLATED_BYTES);
+  assert.throws(() => decodeMinuteRollup(good, () => new Uint8Array(MAX_ROLLUP_INFLATED_BYTES + 1)), /inflates past/);
+  // A real bomb: a few kilobytes that inflate to megabytes are stopped by the inflate's own limit.
+  const bomb = new Uint8Array(2 + deflateRawSync(new Uint8Array(MAX_ROLLUP_INFLATED_BYTES * 4)).length);
+  new DataView(bomb.buffer).setUint16(0, DECODER_POLICY_VERSION, true);
+  bomb.set(deflateRawSync(new Uint8Array(MAX_ROLLUP_INFLATED_BYTES * 4)), 2);
+  assert.ok(bomb.length < 50_000, 'the bomb is small on disk');
+  assert.throws(() => decodeMinuteRollup(bomb, inflate));
 });
 
 // --- the sidecar ---------------------------------------------------------------------------------
@@ -912,6 +1205,69 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.deepEqual(reopened.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20), [{ minuteMs: M0, bytes: mb(9) }]);
     reopened.store.reset();
     assert.equal(openStore(rig.reopen()).status, 'empty');
+  });
+
+  test(tag('a corrupted interior length is rebuild-required, never a torn tail; the file is not touched'), () => {
+    const rig = newRig(kind);
+    const seed = openStore(rig.file);
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50));
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) }], WM(60));
+    const good = readAll(rig.file);
+    // The first minute entry starts at 64. 500000 is in the 1 MiB cap and far past this file's end.
+    for (const [how, length] of [['extent past EOF', 500_000], ['extent ends mid-file on non-entry bytes', 40]] as const) {
+      const image = good.slice();
+      new DataView(image.buffer).setUint32(64 + 4, length, true);
+      const file = rig.load(image);
+      const r = openStore(file);
+      assert.equal(r.status, 'rebuild-required', how);
+      assert.ok(r.reason, how);
+      assert.equal(sha(readAll(file)), sha(image), `${how}: nothing is truncated`);
+      assert.throws(() => r.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20), /rebuild/i, how);
+    }
+    // The torn-tail behaviour is unchanged: zeros after a closed batch are cut off, status ok.
+    const withZeros = rig.load(Uint8Array.from([...good, ...new Uint8Array(4096)]));
+    const cut = openStore(withZeros);
+    assert.equal(cut.status, 'ok');
+    assert.equal(withZeros.size(), good.length, 'an all-zero tail is truncated');
+    assert.deepEqual(cut.store.watermark(), WM(60));
+    // Zeros, then one non-zero byte, are not a torn tail.
+    const tail = new Uint8Array(4096);
+    tail[tail.length - 1] = 1;
+    const dirty = Uint8Array.from([...good, ...tail]);
+    const dirtyFile = rig.load(dirty);
+    assert.equal(openStore(dirtyFile).status, 'rebuild-required');
+    assert.equal(sha(readAll(dirtyFile)), sha(dirty));
+  });
+
+  test(tag('every minute entry of a batch must name the batch\'s closing watermark, otherwise rebuild-required'), () => {
+    const rig = newRig(kind);
+    const seed = openStore(rig.file);
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50));
+    const good = readAll(rig.file);
+    assert.equal(openStore(rig.load(good.slice())).status, 'ok', 'the control: the untouched file opens');
+    // The minute entry starts at 64 with a 24-byte header: u16 key length, 'a', u64 minuteMs, then u64 through.
+    for (const through of [49, 51, 0]) {
+      const image = good.slice();
+      new DataView(image.buffer).setBigUint64(64 + 24 + 2 + 1 + 8, BigInt(through), true);
+      reseal(image, 64);
+      const file = rig.load(image);
+      const r = openStore(file);
+      assert.equal(r.status, 'rebuild-required', `through ${through}`);
+      assert.match(r.reason ?? '', /watermark/i, `through ${through}`);
+      assert.equal(sha(readAll(file)), sha(image), `through ${through}: the file is untouched`);
+    }
+  });
+
+  test(tag('a sidecar whose header cannot be written reports failed instead of throwing'), () => {
+    const rig = newRig(kind);
+    const faulty = new FaultyFile(rig.file);
+    faulty.failAtWrite = 1;
+    let r!: ReturnType<typeof openStore>;
+    assert.doesNotThrow(() => { r = openStore(faulty); });
+    assert.equal(r.status, 'failed');
+    assert.match(r.reason ?? '', /header/i);
+    assert.throws(() => r.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(1)));
+    assert.throws(() => r.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20));
   });
 
   test(tag('entry body cap is 1 MiB, not the journal\'s 64 KiB'), () => {

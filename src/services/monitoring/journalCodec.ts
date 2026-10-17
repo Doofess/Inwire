@@ -178,6 +178,19 @@ export function entryCrc(header: Uint8Array, body: Uint8Array): number {
   return crc32(body, crc32(header.subarray(0, 20)));
 }
 
+/**
+ * Policy 1 defines no flags, so byte 17 (flags) and bytes 18-19 (reserved) are
+ * zero in everything this build writes. A non-zero one is something a later or
+ * a wrong writer meant, and is read as corruption on the same footing as an
+ * unknown kind - **after** the checksum, so it never turns a torn tail into a
+ * corrupt file. Returns a sentence, or `null`.
+ */
+export function entryReservedProblem(header: Uint8Array): string | null {
+  if (header[17] !== 0) return `its flags byte is ${header[17]}, and policy 1 defines no flags`;
+  if (header[18] !== 0 || header[19] !== 0) return 'its reserved bytes are not zero';
+  return null;
+}
+
 // --- datagram bodies -----------------------------------------------------------------------
 
 export interface DatagramFields {
@@ -234,6 +247,8 @@ export function decodeDatagramBody(body: Uint8Array): DatagramBodyResult {
   const v = new DataView(body.buffer, body.byteOffset, body.byteLength);
   const received = v.getBigUint64(0, true);
   if (received > BigInt(Number.MAX_SAFE_INTEGER)) return { ok: false, reason: 'a datagram receipt time is out of range' };
+  // Bytes 20-23 are reserved and zero in policy 1; see `entryReservedProblem`.
+  if (v.getUint32(20, true) !== 0) return { ok: false, reason: 'a datagram\'s reserved metadata bytes are not zero' };
   return {
     ok: true,
     value: {
@@ -280,18 +295,45 @@ export interface ScanOutcome {
 }
 
 const WINDOW_BYTES = 4 << 20;
+const MAGIC_B0 = ENTRY_MAGIC & 0xff;
+const MAGIC_B1 = (ENTRY_MAGIC >>> 8) & 0xff;
+const MAGIC_B2 = (ENTRY_MAGIC >>> 16) & 0xff;
+const MAGIC_B3 = (ENTRY_MAGIC >>> 24) & 0xff;
 
 /**
  * Walks entries from `startOffset`, checking every header and every CRC.
  *
- * **Torn or corrupt** is decided here. An entry whose header is cut short, or
- * whose declared extent reaches or passes the end of the file, is a tear: it is
- * what an append that did not finish leaves, and nothing valid can lie behind
- * it. An entry whose extent ends exactly at the end of the file with a failing
- * checksum is a tear for the same reason. A bad magic, an over-cap length, a
- * failing checksum with bytes behind it, a skipped or repeated id - all
- * corruption, because truncating on a guess would discard evidence that may be
- * intact behind it.
+ * **Torn or corrupt** is decided here, and the rule is that *a tear is only
+ * ever the end of the file, with nothing valid behind it*. Truncating is the
+ * one destructive thing `open` does, so it needs more than "this entry looks
+ * incomplete":
+ *
+ * - A header cut short, or an entry whose extent reaches or passes the end of
+ *   the file, is what an append that did not finish leaves - **unless a complete
+ *   valid entry (magic, a length within the cap, an extent inside the file, and
+ *   a matching checksum) can be found anywhere after its first byte.** Then the
+ *   length is what is wrong, not the tail: an interior length rewritten to
+ *   60,000 passes the end of a 390-byte file and would, read as a tear, delete
+ *   four intact datagrams. That is corruption; the file is preserved. The
+ *   search is bounded: an extent past the end means fewer than
+ *   `24 + maxBodyBytes` bytes are left to look through, and the CRC is computed
+ *   only where the magic matches.
+ * - A failing checksum on an entry that ends exactly at the end of the file is
+ *   a tear by the same test: torn unless a valid entry sits inside its extent.
+ *   A failing checksum with bytes behind it is corruption outright.
+ * - A tail of zeros to the end of the file is a tear. NTFS extends a file with
+ *   zeros when the power goes mid-write, and zeros carry no evidence: a real
+ *   entry starts with a non-zero magic. A zero run followed by anything else
+ *   is a bad magic, which is corruption.
+ * - A bad magic, an over-cap length, a skipped or repeated id, a non-zero flags
+ *   or reserved byte: corruption, because truncating on a guess would discard
+ *   evidence that may be intact behind it.
+ *
+ * **The accepted cost:** a crash in the middle of a write whose partial body
+ * happens to contain a byte-perfect valid entry is reported as corrupt. That
+ * needs an entry nested inside an entry, which only an attacker or a
+ * deliberate test produces, and it fails safe - the file is preserved and
+ * append is refused; nothing is deleted.
  *
  * `visit` returns `null` to accept an entry or a sentence to reject it; a
  * rejected entry is corruption even at the very end, because its checksum
@@ -323,6 +365,36 @@ export function scanEntries(
     return win.subarray(offset - winStart, offset - winStart + n);
   };
 
+  /** The offset of the first complete valid entry at or after `from`, or null. */
+  const findValidEntry = (from: number): number | null => {
+    const span = size - from;
+    if (span < ENTRY_HEADER_BYTES) return null;
+    const buf = new Uint8Array(span);
+    const got = file.read(from, buf);
+    for (let p = 0; p + ENTRY_HEADER_BYTES <= got; p++) {
+      if (buf[p] !== MAGIC_B0 || buf[p + 1] !== MAGIC_B1 || buf[p + 2] !== MAGIC_B2 || buf[p + 3] !== MAGIC_B3) continue;
+      const h = parseEntryHeader(framing, buf.subarray(p, p + ENTRY_HEADER_BYTES));
+      if (!h.ok) continue;
+      const bodyEnd = p + ENTRY_HEADER_BYTES + h.bodyLength;
+      if (bodyEnd > got) continue;
+      if (crc32(buf.subarray(p + ENTRY_HEADER_BYTES, bodyEnd), crc32(buf.subarray(p, p + 20))) === h.crc) return from + p;
+    }
+    return null;
+  };
+
+  /** Whether every byte from `from` to the end of the file is zero. */
+  const zeroToEnd = (from: number): boolean => {
+    const chunk = new Uint8Array(Math.max(1, Math.min(1 << 20, size - from)));
+    let at = from;
+    while (at < size) {
+      const n = file.read(at, chunk.subarray(0, Math.min(chunk.length, size - at)));
+      if (n <= 0) return false;
+      for (let i = 0; i < n; i++) if (chunk[i] !== 0) return false;
+      at += n;
+    }
+    return true;
+  };
+
   let offset = startOffset;
   let lastId = afterEntryId;
   let entries = 0;
@@ -339,19 +411,30 @@ export function scanEntries(
     const header = get(offset, ENTRY_HEADER_BYTES);
     if (!header) return outcome(offset, null);
     const h = parseEntryHeader(framing, header);
-    if (!h.ok) return outcome(null, `${h.reason} at offset ${offset}`);
+    if (!h.ok) {
+      return zeroToEnd(offset) ? outcome(offset, null) : outcome(null, `${h.reason} at offset ${offset}`);
+    }
     const end = offset + ENTRY_HEADER_BYTES + h.bodyLength;
-    if (end > size) return outcome(offset, null);
-    // The header view is clobbered if the body read moves the window, so the
-    // CRC of its first 20 bytes is taken first.
+    if (end > size) {
+      const follows = findValidEntry(offset + 1);
+      return follows === null
+        ? outcome(offset, null)
+        : outcome(null, `the length of the entry at offset ${offset} points past EOF; a valid entry follows at ${follows}`);
+    }
+    // The header view is clobbered if the body read moves the window, so what
+    // is needed of it is taken first.
     const headerCrc = crc32(header.subarray(0, 20));
+    const reservedProblem = entryReservedProblem(header);
     const body = get(offset + ENTRY_HEADER_BYTES, h.bodyLength);
     if (!body) return outcome(offset, null);
     if (crc32(body, headerCrc) !== h.crc) {
-      return end === size
+      if (end < size) return outcome(null, `the checksum of entry ${h.entryId} at offset ${offset} does not match`);
+      const inside = findValidEntry(offset + 1);
+      return inside === null
         ? outcome(offset, null)
-        : outcome(null, `the checksum of entry ${h.entryId} at offset ${offset} does not match`);
+        : outcome(null, `the checksum of the entry at offset ${offset} does not match, and its extent holds a valid entry at ${inside}`);
     }
+    if (reservedProblem !== null) return outcome(null, `entry ${h.entryId} at offset ${offset}: ${reservedProblem}`);
     if (h.entryId !== lastId + 1) {
       return outcome(null, `entry id ${h.entryId} at offset ${offset} follows ${lastId}`);
     }

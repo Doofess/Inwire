@@ -28,14 +28,36 @@
  * last field are an error, not slack.
  */
 import { ipv4FromBytes, ipv4ToBytes } from './journalCodec';
-import { DECODER_POLICY_VERSION, type ConversationTotals, type EndpointTotals, type MinuteRollup } from './types';
+import { DECODER_POLICY_VERSION, LIMITS, type ConversationTotals, type EndpointTotals, type MinuteRollup } from './types';
 
 export type Deflate = (bytes: Uint8Array) => Uint8Array;
-export type Inflate = (bytes: Uint8Array) => Uint8Array;
+/**
+ * `maxOutput` is the codec's bound on what the inflate may produce
+ * (`MAX_ROLLUP_INFLATED_BYTES`). An implementation must stop there - node's
+ * zlib takes it as `maxOutputLength` - because the bytes are the sidecar's and
+ * a deflate stream of a few kilobytes can name gigabytes. The codec checks the
+ * length it gets back as well, so an implementation that ignores the bound is
+ * refused rather than trusted.
+ */
+export type Inflate = (bytes: Uint8Array, maxOutput: number) => Uint8Array;
 
 const U64_MAX = (1n << 64n) - 1n;
 const ENDPOINT_BYTES = 4 + 8 + 8;
 const CONVERSATION_BYTES = 4 + 4 + 8 + 8;
+const MAX_KEY_BYTES = 0xffff;
+
+/**
+ * The most a valid rollup inflates to, computed from the shape above and not
+ * typed: the flags and key length, the longest key, six u64s, two counts, and
+ * `LIMITS.minuteKeyBudget` keys at the larger of the two row sizes.
+ *
+ * **The budget is a total, not per table.** `types.ts` defines it as
+ * "endpoints and conversations together, per source and minute", so the codec
+ * refuses `endpoints + conversations` above it, and the bound here prices every
+ * one of those keys as a conversation, the larger row.
+ */
+export const MAX_ROLLUP_INFLATED_BYTES =
+  1 + 2 + MAX_KEY_BYTES + 6 * 8 + 4 + 4 + LIMITS.minuteKeyBudget * Math.max(ENDPOINT_BYTES, CONVERSATION_BYTES);
 const utf8 = new TextEncoder();
 const utf8Strict = new TextDecoder('utf-8', { fatal: true });
 
@@ -51,7 +73,10 @@ function safe(value: number, what: string): bigint {
 
 export function encodeMinuteRollup(rollup: MinuteRollup, deflate: Deflate): Uint8Array {
   const key = utf8.encode(rollup.sourceKey);
-  if (key.length > 0xffff) throw new RangeError('a source key is at most 65,535 bytes');
+  if (key.length > MAX_KEY_BYTES) throw new RangeError('a source key is at most 65,535 bytes');
+  if (rollup.endpoints.length + rollup.conversations.length > LIMITS.minuteKeyBudget) {
+    throw new RangeError(`a rollup holds at most ${LIMITS.minuteKeyBudget} endpoints and conversations together`);
+  }
   const size = 1 + 2 + key.length + 6 * 8 + 4 + rollup.endpoints.length * ENDPOINT_BYTES + 4
     + rollup.conversations.length * CONVERSATION_BYTES;
   const raw = new Uint8Array(size);
@@ -97,7 +122,8 @@ export function decodeMinuteRollup(bytes: Uint8Array, inflate: Inflate): MinuteR
   if (version !== DECODER_POLICY_VERSION) {
     throw new Error(`a stored rollup is decoder policy version ${version}; this build reads ${DECODER_POLICY_VERSION}`);
   }
-  const raw = inflate(bytes.subarray(2));
+  const raw = inflate(bytes.subarray(2), MAX_ROLLUP_INFLATED_BYTES);
+  if (raw.length > MAX_ROLLUP_INFLATED_BYTES) throw new Error('a stored rollup inflates past the most a rollup can hold');
   const v = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   let at = 0;
   const need = (n: number, what: string): void => {
@@ -140,6 +166,7 @@ export function decodeMinuteRollup(bytes: Uint8Array, inflate: Inflate): MinuteR
   const endpointCount = v.getUint32(at, true); at += 4;
   // Checked against what is left before the array exists: a count is a claim.
   if (endpointCount > (raw.length - at) / ENDPOINT_BYTES) throw new Error('a stored rollup counts more endpoints than it holds');
+  if (endpointCount > LIMITS.minuteKeyBudget) throw new Error('a stored rollup counts more endpoints than a minute may hold');
   const endpoints: EndpointTotals[] = [];
   for (let i = 0; i < endpointCount; i++) {
     const address = ipv4FromBytes(raw, at); at += 4;
@@ -149,6 +176,9 @@ export function decodeMinuteRollup(bytes: Uint8Array, inflate: Inflate): MinuteR
   need(4, 'the conversation count');
   const conversationCount = v.getUint32(at, true); at += 4;
   if (conversationCount > (raw.length - at) / CONVERSATION_BYTES) throw new Error('a stored rollup counts more conversations than it holds');
+  if (endpointCount + conversationCount > LIMITS.minuteKeyBudget) {
+    throw new Error('a stored rollup holds more endpoints and conversations than a minute may');
+  }
   const conversations: ConversationTotals[] = [];
   for (let i = 0; i < conversationCount; i++) {
     const srcAddr = ipv4FromBytes(raw, at); at += 4;

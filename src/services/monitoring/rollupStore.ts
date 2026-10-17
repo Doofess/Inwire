@@ -45,7 +45,8 @@ const WATERMARK_BODY_BYTES = 16 + 8 + 2;
 const utf8 = new TextEncoder();
 const utf8Strict = new TextDecoder('utf-8', { fatal: true });
 
-export type RollupOpenStatus = 'ok' | 'rebuild-required' | 'empty';
+/** `failed`: the file could not be given a header; the store is returned, refusing reads and appends. */
+export type RollupOpenStatus = 'ok' | 'rebuild-required' | 'empty' | 'failed';
 
 export interface RollupStoreOptions {
   nowMs?: () => number;
@@ -94,7 +95,7 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
   }
 
   const minutes = new Map<string, Located[]>();
-  let pending: [string, Located][] = [];
+  let pending: [string, Located, number][] = [];
   let batchEnd = FILE_HEADER_BYTES;
   let batchLastId = 0;
   // An object, because TypeScript cannot see a closure assign a `let`.
@@ -115,10 +116,12 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
       const at = 2 + keyLength;
       const minuteMs = v.getBigUint64(at, true);
       if (minuteMs > BigInt(Number.MAX_SAFE_INTEGER)) return 'a minute entry has a time out of range';
+      const minuteThrough = v.getBigUint64(at + 8, true);
+      if (minuteThrough > BigInt(Number.MAX_SAFE_INTEGER)) return 'a minute entry has a watermark out of range';
       pending.push([key, {
         minuteMs: Number(minuteMs), offset: e.offset + ENTRY_HEADER_BYTES, bodyLength: e.body.length,
         bytes: e.body.length - (at + 16),
-      }]);
+      }, Number(minuteThrough)]);
       return null;
     }
     if (e.kind === KIND_WATERMARK) {
@@ -128,6 +131,13 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
       if (through > BigInt(Number.MAX_SAFE_INTEGER)) return 'a watermark is out of range';
       if (v.getUint16(24, true) !== header.policyVersion) return 'a watermark names another policy';
       if (seen.watermark !== null && Number(through) < seen.watermark.throughEntryId) return 'a watermark moves backwards';
+      // A batch is written with one closing watermark, and every minute in it
+      // says which. One that names another was not written by this code.
+      for (const [, , minuteThrough] of pending) {
+        if (minuteThrough !== Number(through)) {
+          return `a minute entry names watermark ${minuteThrough}, but its batch closes at ${Number(through)}`;
+        }
+      }
       seen.watermark = { generation, throughEntryId: Number(through), policyVersion: header.policyVersion };
       for (const [key, loc] of pending) {
         const list = minutes.get(key);
@@ -175,7 +185,13 @@ export class RollupStore {
     }
     if (scan.verdict === 'empty') {
       const store = new RollupStore(file, journal, nowMs, FILE_HEADER_BYTES, 0, null, new Map(), null);
-      store.writeFreshHeader();
+      try {
+        store.writeFreshHeader();
+      } catch (e) {
+        const reason = `the sidecar's header could not be written: ${e instanceof Error ? e.message : String(e)}`;
+        store.rebuildReason = reason;
+        return { store, status: 'failed', reason };
+      }
       return { store, status: 'empty' };
     }
     // Minutes after the last watermark vouch for nothing: the batch was torn.
