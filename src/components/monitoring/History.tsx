@@ -135,16 +135,11 @@ export function History({ client, state, config, onFilterCapture }: {
     </div>
   );
 
-  if (sources.length === 0) {
-    return (
-      <div className="space-y-3">
-        <div ref={chartBox} className="h-0" />
-        <EmptyHistory config={config} state={state} />
-      </div>
-    );
-  }
-
+  // One wrapper, always mounted: useElementSize observes its element once, so
+  // a measuring node that came and went with the data would be watched dead.
   return (
+    <div ref={chartBox} className="min-w-0">
+    {sources.length === 0 ? <EmptyHistory config={config} state={state} /> : (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         {toolbar}
@@ -159,7 +154,7 @@ export function History({ client, state, config, onFilterCapture }: {
       </div>
       <SaveLine saving={saving} />
 
-      <div ref={chartBox} className="min-w-0">
+      <div className="min-w-0">
         {failure ? (
           <Note tone={failure.code === 'range-too-large' ? 'warn' : 'bad'} role="alert"
             title={failure.code === 'range-too-large' ? 'That range is too large to read' : 'The history could not be read'}>
@@ -205,6 +200,8 @@ export function History({ client, state, config, onFilterCapture }: {
         </>
       )}
     </div>
+    )}
+    </div>
   );
 }
 
@@ -212,11 +209,11 @@ function Segmented<T extends string | number>({ label, value, options, onChange 
   label: string; value: T; options: { value: T; label: string }[]; onChange: (v: T) => void;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex rounded-md border border-border bg-secondary p-0.5">
+    <div role="group" aria-label={label} className="inline-flex rounded-md border border-border bg-secondary p-0.5">
       {options.map((o) => {
         const on = o.value === value;
         return (
-          <button key={String(o.value)} type="button" role="radio" aria-checked={on} onClick={() => onChange(o.value)}
+          <button key={String(o.value)} type="button" aria-pressed={on} onClick={() => onChange(o.value)}
             className={`h-6 rounded-[5px] px-2 text-xs tabular-nums cursor-pointer transition-colors
               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
               ${on ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>

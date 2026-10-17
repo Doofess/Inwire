@@ -150,6 +150,19 @@ try {
   }
   checkTrue('datagrams read as Receiving', await until(() => visible('Receiving'), 15_000));
   checkTrue('the history draws a chart', await until(() => p.locator(`${SHEET} svg[role="img"]`).count().then((n) => n > 0), 20_000));
+  // The chart follows the window once data has arrived (the measuring node
+  // must survive the no-data to data switch).
+  const chartWidth = () => p.locator(`${SHEET} svg[role="img"]`).first()
+    .evaluate((el) => el.getBoundingClientRect().width).catch(() => 0);
+  const wide = await chartWidth();
+  await app!.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    win.unmaximize();
+    const [w, h] = win.getSize();
+    win.setSize(Math.max(1024, w - 300), h);
+  });
+  checkTrue(`the chart follows the window (was ${Math.round(wide)}px)`,
+    await until(async () => (await chartWidth()) < wide - 100, 10_000));
   checkTrue('...and the top endpoints list the exporter\'s hosts',
     await until(() => p.getByRole('button', { name: '127.0.0.1', exact: true }).count().then((n) => n > 0), 20_000));
 

@@ -9,6 +9,13 @@ import { BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT, INPUT_SURFACE, Note } from './
 type Busy = 'load' | 'save' | 'start' | 'stop' | null;
 
 /**
+ * The configurations a Start was pressed with since the app launched. The
+ * firewall note is for the first Start of a source, which is when Windows asks;
+ * module-level because the sheet unmounts on close and the answer must outlive it.
+ */
+const startedThisSession: SourceConfig[] = [];
+
+/**
  * The one exporter, the one local address and port, and how much history to
  * keep - with Save, Start and Stop.
  *
@@ -28,9 +35,6 @@ export function SourceForm({ client, state, onConfig }: {
   const [busy, setBusy] = useState<Busy>('load');
   const [shown, setShown] = useState<Set<keyof FieldErrors>>(new Set());
   const [message, setMessage] = useState<{ tone: 'neutral' | 'bad'; text: string } | null>(null);
-  // The config a Start was last pressed with on this page: the firewall note
-  // is for the first Start of a source, which is when Windows asks.
-  const [startedWith, setStartedWith] = useState<SourceConfig | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -81,7 +85,7 @@ export function SourceForm({ client, state, onConfig }: {
       if (dirty && !(await persist(config))) return;
       const connected = await client.ensureConnected();
       if (!connected.ok) { setMessage({ tone: 'bad', text: connected.message }); return; }
-      setStartedWith(config);
+      if (!startedThisSession.some((c) => sameConfig(c, config))) startedThisSession.push(config);
       const result = await client.start(config);
       if (!result.ok) {
         // The status is the truth; the reply only says how the request went.
@@ -104,7 +108,7 @@ export function SourceForm({ client, state, onConfig }: {
     setBusy(null);
   };
 
-  const firstStart = !running && (startedWith === null || config === null || !sameConfig(startedWith, config));
+  const firstStart = !running && (config === null || !startedThisSession.some((c) => sameConfig(c, config)));
   const locked = running || busy !== null;
 
   return (

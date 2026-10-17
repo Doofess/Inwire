@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Filter, Loader2, X } from 'lucide-react';
 import type { DetailResult, MonitoringClient } from '../../services/monitoring/client';
 import type { HistoryResult, QueryFocus, QuerySpec } from '../../services/monitoring/types';
@@ -37,6 +37,9 @@ export function Focus({ client, spec, focus, onClear, onFilterCapture }: {
     void client.query('monitoring-focus', { ...spec, focus }).then((reply) => {
       if (!live) return;
       if (reply.ok) { setResult(reply.value); return; }
+      // The journal moved between asking and answering: ask again, as the
+      // detail path does. Neither is something to show as an error.
+      if (reply.code === 'stale-generation') { setAgain((n) => n + 1); return; }
       if (reply.code !== 'cancelled') setError(reply.message);
     });
     return () => { live = false; };
@@ -44,18 +47,23 @@ export function Focus({ client, spec, focus, onClear, onFilterCapture }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, spec.sourceKey, spec.fromMs, spec.toMs, spec.bucketCount, key, again]);
 
-  useEffect(() => { setDetail(null); setNote(null); setResult(null); }, [key]);
+  // What is being opened, as `key|id`: an answer for anything else is late.
+  const wanted = useRef('');
+  useEffect(() => { wanted.current = ''; setDetail(null); setNote(null); setResult(null); setOpening(null); }, [key]);
 
   const open = async (ref: HistoryResult['evidence'][number]) => {
     if (!result) return;
     const id = `${ref.ref.entryId}:${ref.recordIndex}`;
+    const mine = `${key}|${id}`;
+    wanted.current = mine;
     setOpening(id);
     setNote(null);
     const answer = await client.detail(result.snapshot, ref.ref, ref.recordIndex);
+    if (wanted.current !== mine) return;
     setOpening(null);
     if (answer === null) {
       setDetail(null);
-      setNote('That reference is no longer in the history. The list has been read again.');
+      setNote('That reference could not be read; it may have left the history. The list has been read again.');
       setAgain((n) => n + 1);
       return;
     }
@@ -113,10 +121,12 @@ export function Focus({ client, spec, focus, onClear, onFilterCapture }: {
                 return (
                   <li key={id}>
                     <button type="button" onClick={() => void open(ref)} aria-pressed={current}
+                      aria-busy={opening === id || undefined}
                       className={`rounded border px-1.5 py-0.5 font-mono text-[11px] tabular-nums cursor-pointer
                         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+                        ${opening === id ? 'opacity-60 motion-safe:animate-pulse' : ''}
                         ${current ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground hover:border-primary/60 hover:text-foreground'}`}>
-                      {opening === id ? '…' : `#${ref.ref.entryId}.${ref.recordIndex + 1}`}
+                      {`#${ref.ref.entryId}.${ref.recordIndex + 1}`}
                     </button>
                   </li>
                 );
