@@ -25,7 +25,7 @@
 import { deflateSync } from 'fflate';
 import { boundedInflate } from '../services/monitoring/boundedInflate';
 import { createRuntimeClient, domPort } from '../services/monitoring/runtimeRpc';
-import { MonitoringWorkerHost } from '../services/monitoring/workerHost';
+import { MonitoringWorkerHost, type FromMonitoringWorker } from '../services/monitoring/workerHost';
 import { LIMITS } from '../services/monitoring/types';
 
 const yieldChannel = new MessageChannel();
@@ -43,6 +43,7 @@ const host = new MonitoringWorkerHost({
       return () => clearTimeout(id);
     },
   }),
+  closePort: (port) => (port as MessagePort).close(),
   now: () => performance.now(),
   yieldNow: () => new Promise<void>((resolve) => {
     yieldWaiters.push(resolve);
@@ -62,3 +63,6 @@ const host = new MonitoringWorkerHost({
 });
 
 self.onmessage = (event: MessageEvent) => host.handle(event.data);
+// The first thing this Worker says: its script has loaded and evaluated. The client arms its
+// silence deadline on it, with a longer one for the load itself (`client.ts`).
+self.postMessage({ type: 'ready' } satisfies FromMonitoringWorker);

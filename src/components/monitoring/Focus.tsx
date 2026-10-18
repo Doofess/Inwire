@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Filter, Loader2, X } from 'lucide-react';
+import { Filter, Loader2, RefreshCw, X } from 'lucide-react';
 import type { DetailResult, MonitoringClient } from '../../services/monitoring/client';
 import type { HistoryResult, QueryFocus, QuerySpec } from '../../services/monitoring/types';
-import { count } from './monitoringCopy';
+import { count, localTime } from './monitoringCopy';
 import { DatagramDetail } from './DatagramDetail';
 import { BUTTON_SECONDARY } from './parts';
 
@@ -11,21 +11,30 @@ import { BUTTON_SECONDARY } from './parts';
  * focus, which answers how many records support it and the first hundred of
  * them by reference. A reference opens the datagram it came from.
  *
+ * **It is a snapshot.** The history above is asked again every few seconds and
+ * this is asked once, at the click, because a focused query reads the journal
+ * and costs about a second under load. The line says "as of" and Refresh asks
+ * again over the range as it is now.
+ *
  * A detail that comes back empty means the reference is no longer in the
  * history the query read (the journal moved on); the list is read again
  * rather than left pointing at nothing.
  */
-export function Focus({ client, spec, focus, onClear, onFilterCapture }: {
+export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilterCapture }: {
   client: MonitoringClient;
   /** The history's own query, unfocused. */
   spec: QuerySpec;
   focus: QueryFocus;
+  /** When `spec` was taken: the answer is as of then, and Refresh is what moves it. */
+  asOfMs: number;
+  onRefresh: () => void;
   onClear: () => void;
   onFilterCapture: (expression: string) => void;
 }) {
   const [result, setResult] = useState<HistoryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [again, setAgain] = useState(0);
+  const [reading, setReading] = useState(false);
   const [detail, setDetail] = useState<DetailResult | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -34,8 +43,10 @@ export function Focus({ client, spec, focus, onClear, onFilterCapture }: {
   useEffect(() => {
     let live = true;
     setError(null);
+    setReading(true);
     void client.query('monitoring-focus', { ...spec, focus }).then((reply) => {
       if (!live) return;
+      setReading(false);
       if (reply.ok) { setResult(reply.value); return; }
       // The journal moved between asking and answering: ask again, as the
       // detail path does. Neither is something to show as an error.
@@ -44,8 +55,9 @@ export function Focus({ client, spec, focus, onClear, onFilterCapture }: {
     });
     return () => { live = false; };
     // `spec` is rebuilt per render by its owner; its fields are the dependency.
+    // `asOfMs` is one too: a Refresh inside the same minute leaves the spec as it was.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, spec.sourceKey, spec.fromMs, spec.toMs, spec.bucketCount, key, again]);
+  }, [client, spec.sourceKey, spec.fromMs, spec.toMs, spec.bucketCount, asOfMs, key, again]);
 
   // What is being opened, as `key|id`: an answer for anything else is late.
   const wanted = useRef('');
@@ -106,12 +118,19 @@ export function Focus({ client, spec, focus, onClear, onFilterCapture }: {
       )}
       {result && (
         <>
-          <p className="text-xs text-foreground" aria-live="polite">
-            Supporting references: {count(result.evidence.length)} of {count(result.matchingRecords)}
-            {result.evidence.length < result.matchingRecords && (
-              <span className="text-muted-foreground"> (the first {count(result.evidence.length)} are listed)</span>
-            )}
-          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <p className="text-xs text-foreground" aria-live="polite">
+              Supporting references: {count(result.evidence.length)} of {count(result.matchingRecords)}
+              {result.evidence.length < result.matchingRecords && (
+                <span className="text-muted-foreground"> (the first {count(result.evidence.length)} are listed)</span>
+              )}
+              <span className="tabular-nums text-muted-foreground"> · as of {localTime(asOfMs)}</span>
+            </p>
+            <button type="button" className={BUTTON_SECONDARY} disabled={reading} onClick={onRefresh}>
+              <RefreshCw className={`h-3.5 w-3.5 ${reading ? 'motion-safe:animate-spin' : ''}`} aria-hidden />
+              {reading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
           {result.evidence.length > 0 && (
             <ul className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto" aria-label="Supporting references">
               {result.evidence.map((ref) => {

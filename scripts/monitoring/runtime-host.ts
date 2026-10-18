@@ -947,6 +947,10 @@ class FakeWorker implements WorkerLike {
   answersPings = true;
   private message: ((e: { data: unknown }) => void)[] = [];
   private error: ((e: { message?: string }) => void)[] = [];
+  /** Like the real Worker, it says `ready` once its script has loaded; `speaks = false` is a script that never does. */
+  constructor(speaks = true) {
+    if (speaks) queueMicrotask(() => this.emit({ type: 'ready' }));
+  }
   postMessage(message: unknown, transfer?: unknown[]): void {
     const m = message as Record<string, unknown>;
     this.posts.push({ message: m, transfer });
@@ -966,7 +970,7 @@ class FakeWorker implements WorkerLike {
   of(type: string) { return this.posts.filter((p) => p.message.type === type); }
 }
 
-function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean } = {}) {
+function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean; workerSpeaks?: boolean } = {}) {
   const clock = new Clock();
   const win = new FakeWindow();
   const workers: FakeWorker[] = [];
@@ -975,7 +979,7 @@ function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean } = {}
   const statusListeners: ((v: unknown) => void)[] = [];
   let portRequests = 0;
   const nonces: number[] = [];
-  const { sendPort = true, ...bridgeOver } = over;
+  const { sendPort = true, workerSpeaks = true, ...bridgeOver } = over;
   const bridge: MonitoringBridge = {
     requestMonitoringPort: async (nonce) => {
       portRequests++;
@@ -993,7 +997,7 @@ function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean } = {}
   };
   const client = new MonitoringClient({
     bridge, window: win, timers: clock, now: () => clock.now,
-    createWorker: () => { const w = new FakeWorker(); workers.push(w); return w; },
+    createWorker: () => { const w = new FakeWorker(workerSpeaks); workers.push(w); return w; },
   });
   return {
     client, clock, win, workers, port, bridge, nonces, get portRequests() { return portRequests; },
@@ -1172,6 +1176,7 @@ test('client: main may take longer than the port wait to answer - the wait start
     }),
   });
   const done = r.client.connect();
+  await flush(); // the Worker's script loads and says ready, as a real one does before anything else happens
   await r.clock.advance(LIMITS.handshakeMs * 4);
   assert.equal(r.client.state.runtime, 'connecting');
   assert.equal(r.workers[0].terminated, 0);
@@ -1182,6 +1187,58 @@ test('client: main may take longer than the port wait to answer - the wait start
   assert.equal(r.clock.pendingTimers, 2);
   await r.client.dispose();
   assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('client: a Worker that never says it started is torn down at the load deadline, not the request deadline', async () => {
+  const r = clientRig({ sendPort: false, workerSpeaks: false, requestMonitoringPort: () => new Promise(() => undefined) });
+  void r.client.connect();
+  await flush();
+  // Past the 15 s a running Worker is held to: a cold script load on a busy machine is not a fault.
+  await r.clock.advance(LIMITS.requestMs * 4 - 1);
+  assert.equal(r.client.state.runtime, 'connecting');
+  assert.equal(r.workers[0].terminated, 0);
+  await r.clock.advance(1);
+  assert.equal(r.client.state.runtime, 'unavailable');
+  assert.match(String(r.client.state.problem), /the monitoring Worker did not start/);
+  assert.equal(r.workers[0].terminated, 1);
+  assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('client: a slow load under the deadline survives, and the request window starts at the first message', async () => {
+  const r = clientRig({ sendPort: false, workerSpeaks: false, requestMonitoringPort: () => new Promise(() => undefined) });
+  void r.client.connect();
+  await flush();
+  await r.clock.advance(40_000);
+  assert.equal(r.client.state.runtime, 'connecting');
+  const w = r.workers[0];
+  w.answersPings = false;
+  w.emit({ type: 'ready' });
+  await flush();
+  // The 15 s window starts now, not at the connect: 14 999 ms after `ready` it is still waited for.
+  await r.clock.advance(LIMITS.requestMs - 1);
+  assert.equal(r.client.state.runtime, 'connecting');
+  assert.equal(w.terminated, 0);
+  await r.clock.advance(1);
+  assert.equal(r.client.state.runtime, 'unavailable');
+  assert.match(String(r.client.state.problem), SILENT);
+  assert.equal(w.terminated, 1);
+});
+
+test('client: a port that arrives after the client was disposed is closed, not left for a Worker that is gone', async () => {
+  let nonce = -1;
+  const r = clientRig({ sendPort: false, requestMonitoringPort: async (n) => { nonce = n; return { ok: true }; } });
+  const closed: string[] = [];
+  const late = { name: 'late', close: () => { closed.push('late'); } };
+  const done = r.client.connect();
+  await flush();
+  r.win.post({ source: r.win, data: { channel: MONITORING_PORT_MESSAGE, nonce }, ports: [late] });
+  // Disposed in the same turn the port arrived: the attempt resumes into a client with no Worker.
+  const disposed = r.client.dispose();
+  const result = await done;
+  await disposed;
+  assert.equal(result.ok, false);
+  assert.deepEqual(closed, ['late']);
+  assert.equal(r.workers[0].of('connect').length, 0, 'the port was not handed to a Worker that was terminated');
 });
 
 test('client: the port wait is armed only once main has answered, and a port that never follows still times out', async () => {

@@ -21,7 +21,9 @@
  *   from the sidecar's watermark and a hole read after a missed push all go
  *   through one `feed` in strict id order, and `MinuteAggregator.drain` decides
  *   what may be posted. A post that fails stops the rollups, not the queries:
- *   the sidecar's older watermark is still true, and the journal answers.
+ *   the sidecar's older watermark is still true, and the journal answers. A
+ *   runtime that was only slow or lost is retried a few times from that
+ *   watermark (`rollupFault`); a fault of the sidecar itself is final.
  * - **The Worker is not the authority.** A generation that changes under it, a
  *   policy version it does not decode, or a sidecar that disagrees with the
  *   journal is a reset or a failure, never a guess.
@@ -62,6 +64,8 @@ export type FromMonitoringWorker =
   | { type: 'detail-reply'; requestId: number; ok: false; code: DetailFailure; message: string }
   | { type: 'shutdown-reply'; requestId: number }
   | { type: 'error-reply'; requestId: number; message: string }
+  /** The Worker's first message, posted when its script has loaded: the client's silence deadline starts here. */
+  | { type: 'ready' }
   /** The answer to `ping`; any message from the Worker counts as a sign of life, this one exists for when it has nothing else to say. */
   | { type: 'pong' }
   /** Not a reply: how far the rollups have got, sent as it changes. */
@@ -78,6 +82,11 @@ export interface HostOptions {
   post(message: FromMonitoringWorker): void;
   /** Wraps the port a `connect` carries; the Worker file passes `createRuntimeClient`. */
   openRuntime(port: unknown): HostRuntime;
+  /**
+   * Called with the port a `connect` carried when that connect fails, so the runtime made from it
+   * does not stay open: the Worker file closes it. A host given none leaves it to the garbage collector.
+   */
+  closePort?(port: unknown): void;
   /** A monotonic millisecond clock, for slicing only. */
   now(): number;
   /** Lets the event loop run: a macrotask, so a queued message is handled before this returns. */
@@ -96,6 +105,23 @@ export interface HostOptions {
 
 /** How long a loop runs before it yields. */
 const SLICE_MS = 8;
+
+/**
+ * How many times a lost or slow runtime is retried before the rollups are `failed`, with the
+ * first delay `LIMITS.flushMs` and each one double the last. Five is 31 s of trying, after which
+ * the runtime is gone for longer than a hiccup and the journal answering is the honest state.
+ */
+const RETRY_ATTEMPTS = 5;
+
+/**
+ * The sidecar refused a post (a `RangeError` from `appendMinutes`): the watermark was past the
+ * journal's end, the batch over the per-call caps, or it would pass the storage limit less the
+ * reserve. It is not the runtime failing and not a fault of the sidecar's file, so it is neither
+ * retried tightly nor final - see `rollupRefused`.
+ */
+class AppendRefused extends Error {
+  constructor(message: string) { super(message); this.name = 'AppendRefused'; }
+}
 
 interface Job {
   requestId: number;
@@ -151,6 +177,13 @@ export class MonitoringWorkerHost {
   private analyzedThrough: number | null = null;
   private rolledUpThrough: number | null = null;
   private cancelTick: (() => void) | null = null;
+  // The retry of a transient rollup fault: how many have been spent since the last push that was
+  // posted, and the cancel of the one waiting. Only a posted push resets the count, so a runtime
+  // that comes back and fails again at once cannot be retried for ever.
+  private retries = 0;
+  // Refusals are counted apart: they are never final, only slower, up to a ceiling.
+  private refusals = 0;
+  private cancelRetry: (() => void) | null = null;
 
   constructor(private readonly options: HostOptions) {
     this.boundaries = options.boundaries ?? new BoundaryCache();
@@ -199,14 +232,15 @@ export class MonitoringWorkerHost {
     let failure = '';
     try {
       runtime = this.options.openRuntime(port);
-      const status = await runtime.rollupStatus();
-      // The sidecar is a cache: a fault resetting or reading it leaves the host
-      // in `failed` with nothing fed and nothing posted, and queries answer from
-      // the journal. Only the journal's own faults (`snapshot`, `openRuntime`)
-      // and a lost runtime fail the connect.
+      // The sidecar is a cache: a fault asking about, resetting or reading it
+      // leaves the host in `failed` with nothing fed and nothing posted, and
+      // queries answer from the journal. Only the journal's own faults
+      // (`snapshot`, `openRuntime`) and a lost runtime fail the connect.
       let sidecarFault: unknown = null;
+      let status: Awaited<ReturnType<HostRuntime['rollupStatus']>> = { status: 'failed' };
       let mark: Awaited<ReturnType<HostRuntime['watermark']>> = null;
       try {
+        status = await runtime.rollupStatus();
         if (status.status === 'rebuild-required') await runtime.resetRollups();
         mark = await runtime.watermark();
       } catch (e) {
@@ -249,6 +283,8 @@ export class MonitoringWorkerHost {
     } catch (e) {
       this.runtime = null;
       this.connecting = false;
+      // The runtime, if one was made, is not going to be used: its port would otherwise stay open on every Try again.
+      try { this.options.closePort?.(port); } catch { /* already closed */ }
       const code = e instanceof RuntimeUnavailableError ? 'runtime-unavailable' : 'storage-failed';
       return post({ type: 'connect-reply', requestId, ok: false, code, message: e instanceof Error ? e.message : String(e) });
     }
@@ -276,6 +312,68 @@ export class MonitoringWorkerHost {
     // The tick stays armed: only shutdown stops it (see `armTick`).
     this.phase = 'failed';
     this.announce(e instanceof Error ? e.message : String(e));
+  }
+
+  /**
+   * A fault while the rollups follow the journal. A runtime that was lost or too slow is transient:
+   * the rollups go back to `rebuilding` and start again after a delay, from a fresh snapshot and
+   * the sidecar's own watermark, because the aggregator may hold minutes a failed post had
+   * already taken out of it. A fault of the sidecar or the journal is not, and is `failed`.
+   */
+  private rollupFault(e: unknown): void {
+    const setTimer = this.options.setTimer;
+    if (e instanceof AppendRefused && setTimer !== undefined && !this.shuttingDown) {
+      this.rollupRefused(e, setTimer);
+      return;
+    }
+    if (!(e instanceof RuntimeUnavailableError) || setTimer === undefined || this.shuttingDown || this.retries >= RETRY_ATTEMPTS) {
+      this.fail(e);
+      return;
+    }
+    if (this.cancelRetry !== null) return;
+    const delay = LIMITS.flushMs * 2 ** this.retries++;
+    this.phase = 'rebuilding';
+    this.announce();
+    this.cancelRetry = setTimer(() => {
+      this.cancelRetry = null;
+      this.feedChain = this.feedChain.then(() => this.resume());
+    }, delay);
+  }
+
+  /**
+   * A post the sidecar refused. At the storage limit the right state is not `failed`: the rollups stop
+   * growing, the journal keeps answering, and they resume if room comes back. The aggregator may hold
+   * fewer minutes than the sidecar's watermark vouches for (the refused post's were drained), so the
+   * try again is a `resume` from the sidecar's own watermark, like a lost runtime's. The delay doubles
+   * to a ceiling and the attempts have no limit: each costs one pass over what the sidecar lacks.
+   */
+  private rollupRefused(e: AppendRefused, setTimer: NonNullable<HostOptions['setTimer']>): void {
+    if (this.cancelRetry !== null) return;
+    const delay = LIMITS.flushMs * 2 ** Math.min(this.refusals++, RETRY_ATTEMPTS);
+    this.phase = 'rebuilding';
+    this.announce(`The rollups are paused: the sidecar refused to grow (${e.message}). Queries are answered from the journal.`);
+    this.cancelRetry = setTimer(() => {
+      this.cancelRetry = null;
+      this.feedChain = this.feedChain.then(() => this.resume());
+    }, delay);
+  }
+
+  /** The retry: a new aggregator from what the sidecar holds, then the ordinary rebuild. */
+  private async resume(): Promise<void> {
+    const runtime = this.runtime;
+    if (runtime === null || this.shuttingDown || this.phase !== 'rebuilding') return;
+    try {
+      let mark = await runtime.watermark();
+      if (mark !== null && (mark.generation !== this.generation || mark.policyVersion !== DECODER_POLICY_VERSION)) {
+        await runtime.resetRollups();
+        mark = await runtime.watermark();
+      }
+      this.aggregator = new MinuteAggregator(mark === null ? 0 : mark.throughEntryId);
+    } catch (e) {
+      this.rollupFault(e);
+      return;
+    }
+    await this.rebuild();
   }
 
   /** Reads `(fed, snapshot.through]` into the aggregator in slices, posting what may be posted after each page. */
@@ -317,7 +415,7 @@ export class MonitoringWorkerHost {
         snapshot = next;
       }
     } catch (e) {
-      this.fail(e);
+      this.rollupFault(e);
     }
   }
 
@@ -358,9 +456,10 @@ export class MonitoringWorkerHost {
         this.feed(e);
       }
       await this.postDrained(runtime);
+      this.retries = 0;
       this.announce();
     } catch (e) {
-      this.fail(e);
+      this.rollupFault(e);
       // What this push still holds arrived all the same.
       this.feedHealthOnly(entries);
     }
@@ -501,7 +600,14 @@ export class MonitoringWorkerHost {
       minuteMs: f.rollup.minuteMs,
       bytes: encodeMinuteRollup(f.rollup, this.options.deflate),
     }));
-    await runtime.appendMinutes(minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION });
+    try {
+      await runtime.appendMinutes(minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION });
+    } catch (e) {
+      // Only the sidecar's refusal; a RangeError from encoding the batch above is thrown before this.
+      if (e instanceof RangeError) throw new AppendRefused(e.message);
+      throw e;
+    }
+    this.refusals = 0;
     // Replay posts to the sidecar too, but it is history and updates nothing (R7.2).
     if (live) this.noteWatermark('rolled-up', drained.watermark);
   }
@@ -624,13 +730,27 @@ export class MonitoringWorkerHost {
   // --- shutdown ----------------------------------------------------------------------------------------------
 
   private async shutdown(requestId: number): Promise<void> {
+    // Taken before the first await, so this shutdown's own task is not in it.
+    const running = [...this.tasks];
     this.shuttingDown = true;
     this.stopRebuild = true;
     this.disarmTick();
+    this.cancelRetry?.();
+    this.cancelRetry = null;
     for (const job of [...this.jobs.values()]) this.cancelJob(job);
-    // The rebuild notices the flag at its next page; wait for it so nothing
-    // is still posting to the runtime after the reply.
-    await this.feedChain.catch(() => undefined);
+    // The rebuild notices the flag at its next page, and an aborted query at its
+    // next checkpoint: wait for both so that nothing is still posting to the
+    // runtime after the reply. A read stuck in the runtime is not waited for
+    // past a flush window - the Worker is terminated next either way.
+    const settled = Promise.all([this.feedChain.catch(() => undefined), ...running]).then(() => undefined);
+    const setTimer = this.options.setTimer;
+    if (setTimer === undefined) await settled;
+    else {
+      let cancel: () => void = () => undefined;
+      const bound = new Promise<void>((resolve) => { cancel = setTimer(resolve, LIMITS.flushMs); });
+      await Promise.race([settled, bound]);
+      cancel();
+    }
     this.options.post({ type: 'shutdown-reply', requestId });
   }
 }

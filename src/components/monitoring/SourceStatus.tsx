@@ -4,7 +4,7 @@ import { nothingArriving, type MonitoringState } from '../../services/monitoring
 import type { EngineHealth } from '../../services/monitoring/sourceHealth';
 import type { SourceConfig } from '../../services/monitoring/types';
 import { formatBytes } from '../../lib/formatBytes';
-import { count, localTime, stopReasonText, type Tone } from './monitoringCopy';
+import { count, localTime, MONITORING_FOLDER, stopReasonText, type Tone } from './monitoringCopy';
 import { Fact, Note, ToneDot } from './parts';
 
 /**
@@ -83,6 +83,12 @@ export function SourceStatus({ state, config }: { state: MonitoringState; config
 
         <Row title="Storage" tone={storageTone(state)} line={storageLine(state)}>
           <StorageMeter state={state} config={source} />
+          {intake.storage === 'refused-corrupt' && (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              To start a new history, quit Inwire and move the folder{' '}
+              <span className="font-mono text-foreground">{MONITORING_FOLDER}</span> aside. Inwire does not delete it.
+            </p>
+          )}
         </Row>
       </dl>
 

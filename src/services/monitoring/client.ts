@@ -23,7 +23,11 @@
  *   leaves every pending call waiting for ever, and a deadline per request would
  *   cut off a slow query that is merely working. So a ping goes every
  *   `PING_MS` and any message at all is a sign of life; `LIMITS.requestMs`
- *   without one tears the Worker down like an `error` does.
+ *   without one tears the Worker down like an `error` does. That clock starts
+ *   at the Worker's first message (`ready`, posted when its script has
+ *   evaluated), not when it is made: a script can take longer than
+ *   `requestMs` to load on a busy machine, and until it has, only
+ *   `WORKER_LOAD_MS` applies.
  * - **A dead runtime is replaced, not repaired.** The next `connect` makes a
  *   new Worker and asks for a new port; the old one is never reused.
  * - **Everything from main and the Worker is `unknown` until read** with the
@@ -124,8 +128,17 @@ const UNREADABLE = 'main answered with something this build cannot read';
 const UNAVAILABLE = 'monitoring is not available in this build';
 const REBUILD_PHASES: ReadonlySet<string> = new Set<RebuildPhase>(['idle', 'rebuilding', 'live', 'failed']);
 const FRESHNESS: ReadonlySet<string> = new Set(['never', 'fresh', 'stale']);
-/** How often a ping goes to an adopted Worker. */
+/** How often a ping goes to an adopted Worker that has spoken. */
 const PING_MS = 5_000;
+/** How long a new Worker may take to say anything: loading and evaluating its script, on a cold and loaded machine. */
+const WORKER_LOAD_MS = 60_000;
+
+/** Ends a port nothing will read, so its other end is not left waiting. */
+function closePort(port: unknown): void {
+  if (isObject(port) && typeof port.close === 'function') {
+    try { port.close(); } catch { /* already closed */ }
+  }
+}
 
 /**
  * The Worker's `health` push, checked for the shape the sheet reads from. The Worker is ours,
@@ -290,7 +303,11 @@ export class MonitoringClient {
     } finally {
       if (this.portWait === wait) this.portWait = null;
     }
-    if (this.worker !== worker) return { ok: false, message: 'the connection was cancelled' };
+    if (this.worker !== worker) {
+      // Replaced or shut down while the port was on its way: nothing will read it.
+      closePort(port);
+      return { ok: false, message: 'the connection was cancelled' };
+    }
     const result = await this.call(worker, 'connect-reply', (requestId) => ({ type: 'connect', requestId, port }), [port]);
     if ('failure' in result) return this.failConnect(worker, result.failure);
     const reply = result.reply;
@@ -324,9 +341,7 @@ export class MonitoringClient {
         if (port === undefined) return;
         if (event.data.nonce !== nonce) {
           // Another attempt's port: nothing will read it, so end it rather than leave its other end waiting.
-          if (isObject(port) && typeof port.close === 'function') {
-            try { port.close(); } catch { /* already closed */ }
-          }
+          closePort(port);
           return;
         }
         finish();
@@ -360,9 +375,15 @@ export class MonitoringClient {
 
   private adopt(worker: WorkerLike): void {
     this.worker = worker;
+    let heard = false;
     worker.addEventListener('message', (event) => {
       if (this.worker !== worker) return;
-      this.armSilence(worker);
+      // The first message ends the load and starts the heartbeat; every later one restarts the silence deadline.
+      if (!heard) {
+        heard = true;
+        this.schedulePing(worker);
+      }
+      this.armSilence(worker, LIMITS.requestMs, 'the monitoring Worker stopped answering');
       this.onWorkerMessage(event.data);
     });
     worker.addEventListener('error', (event) => {
@@ -371,21 +392,19 @@ export class MonitoringClient {
       this.teardown(message);
       this.dispatch({ type: 'unavailable', message });
     });
-    this.armSilence(worker);
-    this.schedulePing(worker);
+    this.armSilence(worker, WORKER_LOAD_MS, 'the monitoring Worker did not start');
   }
 
-  /** Restarts the silence deadline: called on adopt and on every message, whatever it says. */
-  private armSilence(worker: WorkerLike): void {
+  /** Restarts the silence deadline: the load deadline on adopt, `requestMs` on every message, whatever it says. */
+  private armSilence(worker: WorkerLike, ms: number, message: string): void {
     const { timers } = this.deps;
     if (this.silenceTimer !== null) timers.clearTimeout(this.silenceTimer);
     this.silenceTimer = timers.setTimeout(() => {
       this.silenceTimer = null;
       if (this.worker !== worker) return;
-      const message = 'the monitoring Worker stopped answering';
       this.teardown(message);
       this.dispatch({ type: 'unavailable', message });
-    }, LIMITS.requestMs);
+    }, ms);
   }
 
   private schedulePing(worker: WorkerLike): void {

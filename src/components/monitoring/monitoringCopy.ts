@@ -6,7 +6,7 @@
  * Plain functions of `MonitoringState`, with no React: nothing here re-renders
  * anything, and the panel line and the sheet's header line are one answer.
  */
-import { readSourceConfig } from '../../services/monitoring/config';
+import { MAX_STORAGE_BYTES, readSourceConfig } from '../../services/monitoring/config';
 import type { IntakeStopReason } from '../../services/monitoring/control';
 import { nothingArriving, type MonitoringState } from '../../services/monitoring/state';
 import { LIMITS, type SourceConfig } from '../../services/monitoring/types';
@@ -14,6 +14,13 @@ import { LIMITS, type SourceConfig } from '../../services/monitoring/types';
 export type Tone = 'neutral' | 'progress' | 'good' | 'warn' | 'bad';
 
 export interface Summary { text: string; tone: Tone }
+
+/**
+ * Where the history lives: `monitoring` under the app's data folder, which main
+ * moves out of Roaming (`app.setPath('userData', ...)` in `electron/main.ts`).
+ * The renderer cannot ask, so it is named the way the capture folder is.
+ */
+export const MONITORING_FOLDER = '%LOCALAPPDATA%\\Inwire\\monitoring';
 
 /** The stop-reason copy, verbatim from the brief. */
 export function stopReasonText(reason: IntakeStopReason | null, error: string | null): string | null {
@@ -113,7 +120,10 @@ export function readDraft(draft: SourceDraft): { config: SourceConfig | null; er
   const amount = Number(draft.limit.trim());
   const bytes = Math.round(amount * UNIT_BYTES[draft.unit]);
   if (draft.limit.trim() === '' || !Number.isFinite(amount) || !accepts({ storageLimitBytes: bytes })) {
-    errors.limit = 'The history needs at least 16 MiB.';
+    // `readSourceConfig` refuses both ends and says neither, so which one it was is read from the number.
+    errors.limit = draft.limit.trim() !== '' && Number.isFinite(amount) && bytes > MAX_STORAGE_BYTES
+      ? 'The history can be at most 64 TiB.'
+      : 'The history needs at least 16 MiB.';
   }
   if (Object.keys(errors).length > 0) return { config: null, errors };
   return { config: readSourceConfig({ exporterIPv4: exporter, bindIPv4: bind, port, storageLimitBytes: bytes }), errors };

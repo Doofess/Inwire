@@ -9,11 +9,15 @@ import { BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT, INPUT_SURFACE, Note } from './
 type Busy = 'load' | 'save' | 'start' | 'stop' | null;
 
 /**
- * The configurations a Start was pressed with since the app launched. The
+ * The configurations a Start succeeded with since the app launched. The
  * firewall note is for the first Start of a source, which is when Windows asks;
  * module-level because the sheet unmounts on close and the answer must outlive it.
  */
 const startedThisSession: SourceConfig[] = [];
+
+const remember = (config: SourceConfig): void => {
+  if (!startedThisSession.some((c) => sameConfig(c, config))) startedThisSession.push(config);
+};
 
 /**
  * The one exporter, the one local address and port, and how much history to
@@ -85,11 +89,14 @@ export function SourceForm({ client, state, onConfig }: {
       if (dirty && !(await persist(config))) return;
       const connected = await client.ensureConnected();
       if (!connected.ok) { setMessage({ tone: 'bad', text: connected.message }); return; }
-      if (!startedThisSession.some((c) => sameConfig(c, config))) startedThisSession.push(config);
       const result = await client.start(config);
+      // Recorded once the listener is up, not when Start was pressed: a Start that failed
+      // never reached Windows' firewall prompt, so the next one is still the first.
+      if (result.ok) remember(config);
       if (!result.ok) {
         // The status is the truth; the reply only says how the request went.
         if (client.state.intake?.listener === 'listening') {
+          remember(config);
           setMessage({ tone: 'neutral', text: 'Start’s reply came late; the listener is running.' });
         } else {
           setMessage({ tone: 'bad', text: result.message });

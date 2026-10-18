@@ -222,7 +222,7 @@ export class HostRig {
   }
 
   repliesTo(requestId: number): FromMonitoringWorker[] {
-    return this.posts.filter((p) => p.type !== 'rebuild' && p.type !== 'health' && p.type !== 'pong' && p.requestId === requestId);
+    return this.posts.filter((p) => p.type !== 'rebuild' && p.type !== 'health' && p.type !== 'pong' && p.type !== 'ready' && p.requestId === requestId);
   }
 
   /** Polls until `find` returns something; a hung host fails the test instead of the run. */

@@ -729,6 +729,10 @@ test('host: a shutdown answers what is running as cancelled, once, and refuses w
   const waiting = [h.queryNoWait('b', q), h.queryNoWait('c', q), h.queryNoWait('d', q)];
   await ticks();
   const down = h.send({ type: 'shutdown' });
+  await ticks();
+  // The query that was running is held at the gate, so the shutdown waits for it - up to its bound.
+  assert.equal(h.repliesTo(down).length, 0, 'the shutdown reply waits for running work');
+  h.timers.fire();
   await h.waitFor(() => h.repliesTo(down)[0], 'the shutdown reply');
   for (const id of [running, ...waiting]) assert.equal(codeOf(h, id), 'cancelled');
   const after = await h.query('e', q);
@@ -1205,6 +1209,7 @@ test('connect: a rollup reset or read that fails leaves the host failed and the 
     ['reset after a policy mismatch', { watermark: async () => ({ ...mark, policyVersion: mark.policyVersion + 1 }), resetRollups: async () => boom() }],
     ['the watermark after the reset', { rollupStatus: async () => ({ status: 'rebuild-required' as const }), resetRollups: async () => undefined, watermark: async () => boom() }],
     ['the sources', { sources: async () => boom() }],
+    ['the sidecar status itself', { rollupStatus: async () => boom() }],
   ];
   for (const [label, over] of cases) {
     const h = new HostRig(wrap(rt, over));
@@ -1231,6 +1236,252 @@ test('connect: a rollup reset or read that fails leaves the host failed and the 
   const lost = new HostRig(wrap(rt, { rollupStatus: async () => { throw new RuntimeUnavailableError('the port closed'); } }));
   const gone = await lost.connectOnly();
   assert.ok(gone.type === 'connect-reply' && !gone.ok && gone.code === 'runtime-unavailable', JSON.stringify(gone));
+});
+
+test('connect: a plain fault asking for the sidecar status fails the host, not the connect, and is not retried', async () => {
+  const rig = smallRig();
+  const h = new HostRig(wrap(rig.runtime, { rollupStatus: async () => { throw new Error('status unreadable (injected)'); } }));
+  const reply = await h.connect();
+  assert.ok(reply.type === 'connect-reply' && reply.ok, JSON.stringify(reply));
+  assert.equal(h.host.rebuildPhase, 'failed');
+  const before = h.timers.delays.length;
+  h.timers.fire();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'failed', 'a sidecar fault is not transient');
+  assert.ok(h.timers.delays.length <= before, 'no retry was scheduled');
+  const answered = await h.query('v', spec(m(0), m(6), 6));
+  assert.ok(answered.ok);
+});
+
+// =====================================================================================================
+// a lost runtime while the rollups follow the journal is retried; a fault of the sidecar is not
+// =====================================================================================================
+
+test('retry: a transient runtime fault while rebuilding goes back to rebuilding and resumes to live', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  let calls = 0;
+  const h = new HostRig(wrap(rt, {
+    appendMinutes: async (...a: Parameters<HostRuntime['appendMinutes']>) => {
+      if (calls++ === 0) throw new RuntimeUnavailableError('the port is busy');
+      return rt.appendMinutes(...a);
+    },
+  }));
+  await h.connect();
+  assert.equal(h.host.rebuildPhase, 'rebuilding', 'a lost runtime is not terminal');
+  assert.notEqual(h.phases().at(-1), 'failed');
+  assert.ok(h.timers.delays.includes(LIMITS.flushMs), `a retry is waiting: ${h.timers.delays.join(',')}`);
+  h.timers.fire();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'live');
+  assert.equal(h.phases().at(-1), 'live');
+  const q = spec(m(0), m(6), 6);
+  const reply = await h.query('v', q);
+  assert.ok(reply.ok);
+  if (reply.ok) {
+    const oracle = await askOk(rig, q, { forceRaw: true });
+    assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracle));
+    assert.ok(reply.value.answeredFrom.rollupMinutes > 0, 'the rollups answer again');
+  }
+});
+
+test('retry: a transient fault on the journal read is retried too, from a fresh snapshot', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  let snapshots = 0;
+  let calls = 0;
+  const h = new HostRig(wrap(rt, {
+    snapshot: async () => { snapshots++; return rt.snapshot(); },
+    readPage: async (...a: Parameters<HostRuntime['readPage']>) => {
+      if (calls++ === 0) throw new RuntimeUnavailableError('did not answer readPage');
+      return rt.readPage(...a);
+    },
+  }));
+  await h.connect();
+  assert.equal(h.host.rebuildPhase, 'rebuilding');
+  const taken = snapshots;
+  h.timers.fire();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'live');
+  assert.ok(snapshots > taken, 'the retry took a snapshot of its own');
+});
+
+test('retry: the delay doubles, there is a cap, and the last fault is failed with its words', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  const h = new HostRig(wrap(rt, { appendMinutes: async () => { throw new RuntimeUnavailableError('the port closed'); } }));
+  await h.connect();
+  for (let k = 0; k < 5; k++) {
+    assert.equal(h.host.rebuildPhase, 'rebuilding', `attempt ${k}: still retrying`);
+    assert.ok(h.timers.delays.includes(LIMITS.flushMs * 2 ** k), `attempt ${k}: waits ${LIMITS.flushMs * 2 ** k} ms, had ${h.timers.delays.join(',')}`);
+    h.timers.fire();
+    await h.host.settled();
+  }
+  assert.equal(h.host.rebuildPhase, 'failed', 'five retries are all there are');
+  assert.equal(h.phases().at(-1), 'failed');
+  const note = h.posts.filter((p) => p.type === 'rebuild').at(-1);
+  assert.ok(note !== undefined && note.type === 'rebuild' && /the port closed/.test(note.message ?? ''));
+  const reply = await h.query('v', spec(m(0), m(6), 6));
+  assert.ok(reply.ok, 'the journal still answers');
+});
+
+test('retry: a plain fault of the sidecar while rebuilding stays failed', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  const h = new HostRig(wrap(rt, { appendMinutes: async () => { throw new Error('disk full (injected)'); } }));
+  await h.connect();
+  assert.equal(h.host.rebuildPhase, 'failed');
+  const before = h.timers.delays.length;
+  h.timers.fire();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'failed');
+  assert.ok(h.timers.delays.length <= before, 'no retry was scheduled');
+});
+
+test('retry: a shutdown cancels a waiting retry', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  const h = new HostRig(wrap(rt, { appendMinutes: async () => { throw new RuntimeUnavailableError('the port closed'); } }));
+  await h.connect();
+  assert.equal(h.host.rebuildPhase, 'rebuilding');
+  const down = h.send({ type: 'shutdown' });
+  await h.waitFor(() => h.repliesTo(down)[0], 'the shutdown reply');
+  h.timers.fire();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'rebuilding', 'nothing resumed after the shutdown');
+  assert.equal(h.phases().filter((p) => p === 'live').length, 0);
+});
+
+test('refusal: a sidecar that refuses to grow pauses the rollups, never fails them, and resumes when there is room', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  let refuse = 8;
+  const h = new HostRig(wrap(rt, {
+    appendMinutes: async (...a: Parameters<HostRuntime['appendMinutes']>) => {
+      if (refuse-- > 0) throw new RangeError('a batch of 9000 bytes does not fit the room the storage limit leaves (0)');
+      return rt.appendMinutes(...a);
+    },
+  }));
+  await h.connect();
+  assert.equal(h.host.rebuildPhase, 'rebuilding', 'a refusal is not final');
+  assert.equal(await rt.watermark(), null, 'the sidecar grew by nothing: every post was refused');
+  assert.notEqual(h.phases().at(-1), 'failed');
+  const note = h.posts.filter((p) => p.type === 'rebuild').at(-1);
+  assert.ok(note !== undefined && note.type === 'rebuild' && /paused/.test(note.message ?? '') && /storage limit/.test(note.message ?? ''), JSON.stringify(note));
+  // Meanwhile the journal answers.
+  const q = spec(m(0), m(6), 6);
+  const during = await h.query('v', q);
+  // (`rollupMinutes` also counts the minutes folded from the journal's tail past the watermark, so the
+  // sidecar's emptiness is asserted above and the answer is held to the journal's own.)
+  assert.ok(during.ok, 'the query is answered while the rollups are paused');
+  if (during.ok) assert.deepEqual(withoutProvenance(during.value), withoutProvenance(await askOk(rig, q, { forceRaw: true })));
+  // Not tightly: the delay grows, and it goes on past the cap on real faults (5) without failing.
+  const seen: number[] = [...h.timers.delays];
+  for (let k = 0; k < 7; k++) {
+    h.timers.fire();
+    await h.host.settled();
+    assert.equal(h.host.rebuildPhase, 'rebuilding', `refusal ${k + 1}: still paused`);
+    seen.push(...h.timers.delays);
+  }
+  const ceiling = LIMITS.flushMs * 2 ** 5;
+  assert.ok(Math.max(...seen) <= ceiling, `the delay stops growing at ${ceiling}: ${seen.join(',')}`);
+  assert.ok(seen.includes(ceiling), `and it grew to the ceiling: ${seen.join(',')}`);
+  assert.ok(seen.includes(LIMITS.flushMs * 2), 'by doubling, not at once');
+  // Room comes back.
+  h.timers.fire();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'live');
+  const after = await h.query('v', q);
+  assert.notEqual(await rt.watermark(), null, 'the sidecar grew once there was room');
+  assert.ok(after.ok && after.value.answeredFrom.rollupMinutes > 0, 'the rollups answer again');
+  if (after.ok) assert.deepEqual(withoutProvenance(after.value), withoutProvenance(await askOk(rig, q, { forceRaw: true })));
+});
+
+test('refusal: a lost runtime is still retried to a cap, and a refusal does not spend its attempts', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  let mode: 'refuse' | 'lost' | 'ok' = 'refuse';
+  const h = new HostRig(wrap(rt, {
+    appendMinutes: async (...a: Parameters<HostRuntime['appendMinutes']>) => {
+      if (mode === 'refuse') throw new RangeError('over the per-call cap');
+      if (mode === 'lost') throw new RuntimeUnavailableError('the port closed');
+      return rt.appendMinutes(...a);
+    },
+  }));
+  await h.connect();
+  for (let k = 0; k < 6; k++) { h.timers.fire(); await h.host.settled(); }
+  assert.equal(h.host.rebuildPhase, 'rebuilding');
+  mode = 'lost';
+  for (let k = 0; k < 5; k++) { h.timers.fire(); await h.host.settled(); assert.equal(h.host.rebuildPhase, 'rebuilding', `lost ${k}`); }
+  h.timers.fire();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'failed', 'six refusals before did not buy the lost runtime more tries');
+});
+
+// =====================================================================================================
+// shutdown waits for what is running, with a bound
+// =====================================================================================================
+
+test('host: a shutdown waits for a running query to finish, and gives up on one that never does', async () => {
+  const q = spec(m(0), m(3), 3);
+  const done = await gatedHost(smallRig(), 'snapshot');
+  done.gate.held = true;
+  done.h.queryNoWait('a', q);
+  await ticks();
+  const down = done.h.send({ type: 'shutdown' });
+  await ticks();
+  assert.equal(done.h.repliesTo(down).length, 0, 'still waiting on the running query');
+  assert.ok(done.h.timers.delays.includes(LIMITS.flushMs), 'the wait is bounded by a flush window');
+  done.gate.release();
+  await done.h.waitFor(() => done.h.repliesTo(down)[0], 'the shutdown reply once the query ended');
+  assert.equal(done.h.repliesTo(down).length, 1);
+
+  const stuck = await gatedHost(smallRig(), 'snapshot');
+  stuck.gate.held = true;
+  stuck.h.queryNoWait('a', q);
+  await ticks();
+  const down2 = stuck.h.send({ type: 'shutdown' });
+  await ticks();
+  assert.equal(stuck.h.repliesTo(down2).length, 0);
+  stuck.h.timers.fire();
+  await stuck.h.waitFor(() => stuck.h.repliesTo(down2)[0], 'the shutdown reply at the bound');
+  stuck.gate.release();
+  await stuck.h.host.settled();
+  assert.equal(stuck.h.repliesTo(down2).length, 1, 'answered once');
+});
+
+// =====================================================================================================
+// a connect that fails after the runtime was opened closes the port it was given
+// =====================================================================================================
+
+test('connect: a failure after the runtime was opened closes the port, and a success does not', async () => {
+  const rig = smallRig();
+  const rt = rig.runtime;
+  const boom = (): never => { throw new Error('journal unreadable (injected)'); };
+  for (const [label, over, code] of [
+    ['a journal fault', { snapshot: async () => boom() }, 'storage-failed'],
+    ['a lost runtime', { rollupStatus: async () => { throw new RuntimeUnavailableError('the port closed'); } }, 'runtime-unavailable'],
+  ] as [string, Over, string][]) {
+    const closed: unknown[] = [];
+    const port = { name: label };
+    const h = new HostRig(wrap(rt, over), { closePort: (p) => { closed.push(p); } });
+    const id = h.send({ type: 'connect', port });
+    const reply = await h.waitFor(() => h.repliesTo(id)[0], 'the connect reply');
+    assert.ok(reply.type === 'connect-reply' && !reply.ok && reply.code === code, `${label}: ${JSON.stringify(reply)}`);
+    assert.deepEqual(closed, [port], `${label}: the port was closed`);
+  }
+  const closed: unknown[] = [];
+  const h = new HostRig(rt, { closePort: (p) => { closed.push(p); } });
+  const id = h.send({ type: 'connect', port: { name: 'kept' } });
+  const ok = await h.waitFor(() => h.repliesTo(id)[0], 'the connect reply');
+  await h.host.settled();
+  assert.ok(ok.type === 'connect-reply' && ok.ok);
+  assert.deepEqual(closed, [], 'a port in use stays open');
+  // A port that cannot be closed does not turn a refusal into a crash.
+  const stubborn = new HostRig(wrap(rt, { snapshot: async () => boom() }), { closePort: () => { throw new Error('already closed'); } });
+  const sid = stubborn.send({ type: 'connect', port: {} });
+  const sreply = await stubborn.waitFor(() => stubborn.repliesTo(sid)[0], 'the connect reply');
+  assert.ok(sreply.type === 'connect-reply' && !sreply.ok);
 });
 
 // =====================================================================================================

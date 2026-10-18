@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, Loader2 } from 'lucide-react';
 import type { MonitoringClient } from '../../services/monitoring/client';
 import type { MonitoringState } from '../../services/monitoring/state';
 import { LIMITS, type HistoryResult, type HistoryTable, type QueryFocus, type QuerySpec, type SourceConfig } from '../../services/monitoring/types';
 import { ExportCancelled, exportHistory, historyCsvName } from '../../services/monitoring/export';
+import { historySpec } from '../../services/monitoring/historyRange';
+import { createQueryRefresher } from '../../services/monitoring/queryRefresher';
 import { isByteSink, openSaveSink } from '../../lib/saveSink';
 import { formatBytes } from '../../lib/formatBytes';
 import { useElementSize } from '../../lib/useElementSize';
@@ -31,8 +33,11 @@ type Saving = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: str
  * endpoints and conversations, all "reported by the exporter".
  *
  * Asked again every few seconds while the document is visible, under one view
- * id so a slow answer is superseded rather than queued; a selection's focused
- * query is the second id, so at most two are ever in flight.
+ * id so a change of range is superseded rather than queued, and never while the
+ * last ask is still pending: a tick that cancelled it would starve a query slower
+ * than the interval. A selection's focused query is the second id, so at most two
+ * are ever in flight. The range is on whole minutes (`historyRange.ts`) so the
+ * rollups can answer it.
  */
 export function History({ client, state, config, onFilterCapture }: {
   client: MonitoringClient;
@@ -48,8 +53,7 @@ export function History({ client, state, config, onFilterCapture }: {
   const [result, setResult] = useState<HistoryResult | null>(null);
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [tick, setTick] = useState(0);
-  const [focus, setFocus] = useState<{ focus: QueryFocus; spec: QuerySpec } | null>(null);
+  const [focus, setFocus] = useState<{ focus: QueryFocus; spec: QuerySpec; asOfMs: number } | null>(null);
   const [saving, setSaving] = useState<Saving>({ kind: 'idle' });
   const abort = useRef<AbortController | null>(null);
   const chartBox = useRef<HTMLDivElement>(null);
@@ -57,32 +61,38 @@ export function History({ client, state, config, onFilterCapture }: {
   const bucketCount = Math.max(12, Math.min(LIMITS.buckets, Math.floor(width / 10)));
   const connected = state.runtime === 'connected';
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') setTick((t) => t + 1);
-    }, REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, []);
+  const specFor = (key: string): QuerySpec => historySpec(key, PRESETS[preset].ms, Date.now(), bucketCount);
 
-  const specFor = (key: string): QuerySpec => {
-    const toMs = Date.now();
-    return { sourceKey: key, fromMs: toMs - PRESETS[preset].ms, toMs, bucketCount };
-  };
-
-  useEffect(() => {
-    if (!connected || sourceKey === null || width <= 0) return;
-    let live = true;
-    setLoading(true);
-    void client.query('monitoring-history', specFor(sourceKey)).then((reply) => {
-      if (!live) return;
-      setLoading(false);
+  // What to ask is read through a ref: the refresher is made once per client and
+  // must ask about the range and source on screen now, not when it was made.
+  const askRef = useRef<() => ReturnType<MonitoringClient['query']>>(() => Promise.reject(new Error('not ready')));
+  askRef.current = () => client.query('monitoring-history', specFor(sourceKey ?? ''));
+  const refresher = useMemo(() => createQueryRefresher({
+    ask: () => askRef.current(),
+    busy: setLoading,
+    apply: (reply) => {
       if (reply.ok) { setResult(reply.value); setFailure(null); return; }
       if (reply.code === 'cancelled' || reply.code === 'stale-generation') return; // the next tick asks again
       setFailure({ code: reply.code, message: reply.message });
-    });
-    return () => { live = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, connected, sourceKey, preset, bucketCount, tick, width > 0]);
+    },
+  }), [client]);
+  const ready = connected && sourceKey !== null && width > 0;
+
+  // A change of source, range or width asks at once and supersedes what is pending.
+  useEffect(() => {
+    if (!ready) return;
+    refresher.restart();
+    return () => { refresher.stop(); setLoading(false); };
+  }, [refresher, ready, sourceKey, preset, bucketCount]);
+
+  // The tick asks again only when the last ask has answered (see queryRefresher.ts).
+  useEffect(() => {
+    if (!ready) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') refresher.tick();
+    }, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [refresher, ready]);
 
   // A new source or range clears what the old one answered.
   useEffect(() => { setResult(null); setFailure(null); setFocus(null); }, [sourceKey, preset]);
@@ -91,7 +101,13 @@ export function History({ client, state, config, onFilterCapture }: {
   const select = (next: QueryFocus) => {
     if (sourceKey === null) return;
     const same = focus !== null && JSON.stringify(focus.focus) === JSON.stringify(next);
-    setFocus(same ? null : { focus: next, spec: specFor(sourceKey) });
+    setFocus(same ? null : { focus: next, spec: specFor(sourceKey), asOfMs: Date.now() });
+  };
+
+  /** The selection is a snapshot; this asks for it again over the range as it is now. */
+  const refreshFocus = () => {
+    if (sourceKey === null) return;
+    setFocus((f) => (f === null ? null : { focus: f.focus, spec: specFor(sourceKey), asOfMs: Date.now() }));
   };
 
   const save = async () => {
@@ -175,8 +191,8 @@ export function History({ client, state, config, onFilterCapture }: {
               <Facts result={result} />
               {result.gaps.length > 0 && <Gaps gaps={result.gaps} />}
               {focus && (
-                <Focus client={client} spec={focus.spec} focus={focus.focus} onClear={() => setFocus(null)}
-                  onFilterCapture={onFilterCapture} />
+                <Focus client={client} spec={focus.spec} focus={focus.focus} asOfMs={focus.asOfMs}
+                  onRefresh={refreshFocus} onClear={() => setFocus(null)} onFilterCapture={onFilterCapture} />
               )}
               <div className="grid gap-4 @3xl:grid-cols-2">
                 <TopTable title="Top endpoints" table={result.endpoints} leftColumns={1}
