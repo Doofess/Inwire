@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/Doofess/Inwire/security/advisories/new
-    about: Report privately. Do not open a public issue for a security problem.
+    url: https://github.com/Doofess/Inwire/blob/main/SECURITY.md
+    about: Email Rotem2207@gmail.com privately. Do not post vulnerability details in an issue.
   - name: A protocol Inwire does not dissect yet
     url: https://github.com/Doofess/Inwire/issues/new?labels=dissector&template=feature_request.yml
     about: >

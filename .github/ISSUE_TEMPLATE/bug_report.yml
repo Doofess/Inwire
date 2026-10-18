@@ -7,11 +7,11 @@ body:
       value: |
         Two notes before you start.
 
-        **If this is a security issue, do not file it here.** Use
-        [Security Advisories](../../security/advisories/new) instead — see `SECURITY.md`.
+        **If this is a security issue, do not file it here.**
+        [Email the maintainer privately](mailto:Rotem2207@gmail.com) — see `SECURITY.md`.
 
         **Please do not attach a capture without reading it first.** A `.pcap`
-        contains whoever's traffic was on the wire, and issues here are public.
+        contains whoever's traffic was on the wire; attachments expose it to issue readers.
         `Export → Anonymise` will prefix-preserve the addresses if you need to
         share one.
 

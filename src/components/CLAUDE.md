@@ -613,7 +613,8 @@ with one capture-phase listener on `window` that calls
 works because the dialog is mounted **before `<App/>`** in `main.tsx`. Move it
 inside App and Escape navigates the view behind the confirm.
 
-The React app never dissects and never parses an agent message. That is
-`src/workers/pipeline.worker.ts`, which holds the ordering window, the trackers,
-and `pcapParser.ts`.
+Live agent batches are parsed and dissected in `src/workers/pipeline.worker.ts`,
+which owns the ordering window and trackers. React receives batched summaries
+and bytes. File import currently runs the same parser on the renderer thread;
+see `docs/architecture.md` for that separate path.
 

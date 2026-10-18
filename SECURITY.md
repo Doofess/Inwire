@@ -2,104 +2,104 @@
 
 ## Reporting a vulnerability
 
-Please report privately through GitHub's **[Security Advisories](../../security/advisories/new)**
-rather than opening a public issue. That form is private to the maintainer until
-an advisory is published.
+Email **[Rotem2207@gmail.com](mailto:Rotem2207@gmail.com)** privately.
+Do not open an issue containing vulnerability details or sensitive captures.
 
-Include what you would want if you were fixing it: the Inwire version
-(`Settings → Updates` shows it), the Npcap version, whether the capture agent was
-running, and the smallest sequence of steps that reproduces the problem. If a
-capture file triggers it, please say so before attaching one — captures contain
-whoever's traffic was on the wire, and a public advisory thread is the wrong
-place for that.
+Include the Inwire version (`Settings → Updates`), the Npcap version, whether
+the capture agent was running, and the smallest steps that reproduce the issue.
+If a capture triggers it, describe that before attaching one. Captures can
+contain other people's traffic, credentials and decrypted content; key logs can
+unlock encrypted traffic. Prefer a small synthetic reproduction when possible.
 
-Expect an acknowledgement within a week. This is a single-maintainer project, so
-that is a realistic figure rather than a service level.
+Expect an acknowledgement within a week. This is a single-maintainer project;
+that is a response target, not a service level.
 
-## What the attack surface actually is
+## Supported versions and distribution
 
-Worth stating plainly, because it is unusual for a desktop application and it is
-what shapes which reports matter most.
+Inwire is currently in development with no published releases. Report against
+the current development version. The release policy is latest-only, without
+backports. There is no public installer download yet. See the [README](README.md#build-and-run)
+for building it and the signing limitations below.
 
-**Inwire parses hostile input by design.** Every frame it dissects was written by
-somebody else, and the whole product is a parser for it. Bugs in
-`src/services/dissectors/` are reachable by anyone who can put a packet on a
-network the user is capturing, or who can get the user to open a `.pcap` file.
-That is the highest-value area to look at.
+## Current security boundaries
 
-**The capture agent runs as LocalSystem.** It is a separate process for exactly
-that reason: it holds the capture handle and the driver's user-mode library, and
-the process that parses hostile bytes is the one that does **not** have them.
-It dissects nothing — a record it sends carries no protocol, no addresses and no
-ports (ADR 0010) — so the privileged component's input surface is deliberately
-tiny. On Windows it is a single Rust executable (ADRs 0037 and 0047), installed
-under Program Files, where only administrators can replace it.
+Inwire parses hostile network traffic and imported pcap/pcapng files. Live
+dissection runs in sandboxed renderer Workers; file import currently parses in
+the renderer. Neither has Node access. The renderer uses `sandbox: true`,
+`contextIsolation: true`, `nodeIntegration: false`, no service workers and
+denied browser permission requests. Its bundled preload exposes specific APIs.
 
-**The Electron binary is fused.** `runAsNode`, `enableNodeCliInspectArguments`
-and `enableNodeOptionsEnvironmentVariable` are off, and `onlyLoadAppFromAsar` is
-on. So `ELECTRON_RUN_AS_NODE=1 Inwire.exe` no longer turns the signed app into a
-Node interpreter. A report of a way to run arbitrary code through the shipped
-`Inwire.exe` is a real finding.
+On Windows the separate Rust capture agent runs as LocalSystem. It holds the
+Npcap handle and does not dissect captured protocols. Its control protocol,
+adapter operations and file writer are also privileged attack surfaces. Capture
+files are created and deleted while impersonating the requesting pipe client,
+so their filesystem access is limited to that client's rights.
 
-**The agent is reached over a named pipe, and the pipe's ACL is the
-authorization** (ADR 0029). Its security descriptor is
-`D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`: SYSTEM and administrators get
-everything, the interactive user gets read and write, and nobody else gets
-anything. `WD`, `AN` and `NU` are absent deliberately, because a pipe answers
-over SMB unless the descriptor says otherwise. There is no network listener, no
-port and nothing to pair. A report showing the descriptor does not take effect —
-for instance that a second local user can reach the pipe — is a real finding.
+The Windows agent uses a named pipe with
+`D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)` and rejects remote pipe clients.
+SYSTEM and administrators have full access; **interactive users may connect**.
+Multiple local clients are expected: capture ownership is checked separately,
+and another client must not be able to stop or reconfigure the owner's capture.
+The pipe ACL authenticates local access; it does not verify the connecting
+program's publisher. There is no Windows pairing token or network listener.
+The legacy macOS/Linux Python agent uses an authenticated WebSocket instead;
+there is no desktop app for those platforms yet.
 
-**The renderer is sandboxed.** `sandbox: true`, `contextIsolation: true`,
-`nodeIntegration: false`, no service workers, every permission request denied,
-and a preload that imports only `electron`. Anything that gets Node into the
-renderer is a real finding.
+The capture store is a separate, unprivileged Electron utility process. It owns
+the derived capture files; the agent owns the original pcapng writer. See the
+[architecture reference](docs/architecture.md) for process and data ownership.
 
-**Nothing leaves the machine unasked.** There is no account, no backend and no
-telemetry. Four optional lookups from the renderer and two from the main process
-are the entire outbound surface; each is listed in `electron/csp.ts` with its
-purpose, and each is behind a switch or a click. A request Inwire makes unbidden
-would appear in the user's own capture, which is a trust problem specific to this
-audience — so an unexpected outbound connection is a real finding.
+## Privacy and sensitive data
 
-## Known gaps, deliberately
+There is no account system or telemetry. Captures and session data are stored
+locally, and capture files are sensitive even without decryption keys. The
+application's optional network operations are recorded in `electron/csp.ts`:
 
-These are documented shortcomings, not vulnerabilities to report. They are listed
-because a security policy that only describes strengths is not worth reading.
+| Operation | Destination and trigger |
+|---|---|
+| IP geolocation | Public captured IP addresses to `get.geojs.io`, after geo-IP consent |
+| Reverse DNS | Address queries to `cloudflare-dns.com`, after reverse-DNS consent |
+| Public connection identity | `ipapi.co`, after geo-IP consent |
+| Map | Style, glyphs and tiles from `tiles.openfreemap.org` when the consented map is used |
+| Updates | The configured update feed; automatic launch checks are opt-in and off by default |
+| Npcap download | `npcap.com` or `www.npcap.com`, on an install/reinstall action |
+| Speed test | `speed.cloudflare.com`, on Run; generated upload bytes and network measurements |
 
-- **The Windows build is signed with a certificate only the maintainer's PC
-  trusts** (ADR 0047). It is self-issued, code-signing only, with `cA=FALSE`.
-  On that one machine it is imported into the local Root store, so the
-  installer, the app and the agent verify as Valid there. **On every other
-  machine it is an untrusted root**: Windows shows "Unknown publisher" and
-  SmartScreen warns. Smart App Control never counts it, even on that PC,
-  because it accepts only certificates from CAs in Microsoft's Trusted Root
-  Program. That is why there is no public download yet.
-- **The signing key is a non-exportable software key with no prompt.** A process
-  running as the maintainer's account could sign silently with it. What that
-  buys an attacker is narrow: a binary that shows the Inwire publisher name, on
-  that one PC. The certificate cannot vouch for a TLS server or issue other
-  certificates.
-- **Nothing verifies a signature at runtime.** The app does not check the
-  agent's signature, or the agent the app's. The pipe's descriptor is the
-  authentication.
-- **Authenticode verification of downloads is not implemented.** The Update
-  Center checks a sha256 against the feed and matches the download host against
-  an exact list, but whoever controls the feed also writes the hash. This is
-  written down because a hash check next to an elevation prompt looks like more
-  assurance than it is.
-- **ASAR integrity is stamped but not validated.** The fuse that makes Electron
-  refuse a modified `app.asar` at startup, `enableEmbeddedAsarIntegrityValidation`,
-  is still off. Its failure mode is an app that will not start, so it is a
-  separate decision.
-- **Npcap's default install is open to every local user.** Its installer leaves
-  the capture devices readable and writable by `WD`, meaning any local account
-  can read the machine's traffic and inject raw frames. Because Inwire captures
-  through the agent, restricting the driver to administrators costs its users
-  nothing, and `Settings → Updates` recommends and offers exactly that (ADR
-  0033). This is Npcap's default rather than Inwire's doing, but the
-  recommendation is ours.
+These services see the requesting machine's public address and the data needed
+for that operation. Consent can persist across launches; a new click is not
+required for every lookup. The renderer CSP does not govern main-process traffic.
 
-## Supported versions
+Imported TLS key material is held in memory rather than session storage. When
+following a key-log file, Inwire remembers its **path** and reads it again on
+later launches until following is stopped. The renderer cannot supply an
+arbitrary path: selection happens in main's dialog or through `SSLKEYLOGFILE`.
+Persisted frame records contain neither keys nor decrypted plaintext; derived
+decrypted answers stay in memory. Pcapng export can include decryption secrets
+when the user explicitly chooses that option. Do not share such exports or key
+logs without considering the traffic they expose.
 
-The latest release. This project does not backport.
+NetFlow monitoring is planned in [ADRs 0058–0060](docs/decisions/README.md),
+but its UDP collector and history store are not implemented. Planned behavior
+is not a guarantee about the current build.
+
+## Current limitations
+
+- Local development signing uses a self-issued, code-signing-only certificate.
+  Its trust is limited to machines where it has been explicitly trusted; it is
+  not a publicly trusted release identity. The certificate setup creates a
+  non-exportable software key without a signing consent prompt. Code running
+  as that account can use the key. See [ADR 0047](docs/decisions/0047-windows-ships-the-rust-agent-signed-on-this-pc.md).
+- App and agent do not verify each other's Authenticode signatures. Downloaded
+  installers are checked against the feed's exact size and SHA-256 and permitted
+  HTTPS hosts, but **publisher signatures are not verified by Update Center**.
+  The feed supplies the hash too. Npcap hosts are explicitly listed; Inwire
+  artifacts must use the feed's host. Build-time signature checks are separate.
+- The packaged Electron binary disables RunAsNode, Node inspector arguments and
+  NODE_OPTIONS, and requires ASAR loading. ASAR integrity is stamped during
+  packaging, but embedded ASAR integrity validation is not enabled.
+- Npcap can grant capture-device access to all local users unless its installer's
+  administrator-only option is selected. Inwire recommends that restriction;
+  the LocalSystem agent allows the app to capture with it enabled.
+
+These limitations describe the current design. Reports of new exploits,
+unexpected exposure, or bypasses of the stated boundaries are still welcome.

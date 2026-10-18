@@ -2,13 +2,12 @@
 
 Everything this repository knows to check and **cannot** check by itself.
 
-`npm run check` runs every assertion script under `scripts/` on any machine, with
-no Electron and no browser. That is the point of it, and it is also its ceiling:
-it cannot see a window, it has no second user account, it cannot click a UAC
-prompt, and it cannot tell you that a colour looks right. Three of the worst bugs
-in the Electron migration were invisible to every script here and were all found
-by hand — maplibre's worker URL, `node:os` in the preload, and COEP blocking
-`pipeline.worker`.
+`npm run check` discovers assertions under `scripts/`. Most run under plain
+tsx; on Windows, checks with built artifacts can also drive real Electron.
+The smoke check now covers failures such as maplibre's worker URL, unsupported
+preload imports and COEP blocking the pipeline Worker. It cannot replace
+cross-account checks, UAC interaction or a person's visual inspection.
+See [testing.md](testing.md) for prerequisites, skips and automated coverage.
 
 So this file is the other half. CLAUDE.md and ADR 0029 both refer to "the
 verification matrix"; this is it.
@@ -27,7 +26,8 @@ they are slow or reach outside the process. They cover the half of the app
 below is not also debugging the store.
 
 ```
-npm run build && npm run check          # 156 scripts, the fast suite
+npm run build
+npm run check                                 # includes eligible integration checks
 npx tsx scripts/electron/disk-drive.ts          # ~2 min: past the RAM budget, onto disk
 npx tsx scripts/electron/import-drive.ts        # ~1 min: 400,000 frames, scroll to frame 1
 npx tsx scripts/electron/update-center-drive.ts # ~1 min: a loopback feed, the real app
@@ -135,10 +135,9 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       be wrong after any edit to `BrandMark`. It should read as the app's
       corner, not as a detail in it: 24 in a 32px row, with the art's own 10%
       margin leaving roughly 19px of ink.
-- [ ] **It is legible on both chromes.** The mark carries its own colours rather
-      than inheriting one, and a single ramp serves Day and Night: check the
-      darkest plate has not sunk into `--secondary` on Night, and that the
-      lightest is still distinct from the chrome in Day.
+- [ ] **It is legible in all four themes.** Check Light, Dark, Dim and High
+      Contrast: the darkest plate must remain distinct from `--secondary`,
+      and the lightest from its surrounding chrome.
 - [ ] **The taskbar and Alt-Tab show five plates**, at 32px — that is the
       primary tier, and 32 is exactly where it starts. Explorer at "extra large"
       shows the 256px entry, also five. If the taskbar icon looks like a blue
@@ -177,10 +176,9 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
 - [ ] **The capture it describes is still on screen.** That is the whole reason
       it stopped being a sheet: "Observed (capture)" is a live column, and as a
       sheet it covered its own subject.
-- [ ] **It is gone from Settings.** Open Settings: the tabs run Appearance,
-      Interface, Accessibility, Display Filters, Colouring Rules, Custom
-      Dissectors, Decryption, Driver Info, Updates. No Network tab.
-- [ ] **Settings is the only sheet, and a panel is not one.** Open Network in
+- [ ] **It is gone from Settings.** Open Settings and confirm there is no
+      Network tab; Network lives in the sidebar.
+- [ ] **A panel and a workspace sheet are different surfaces.** Open Network in
       the side bar, then press the rail's Settings icon: Settings takes the
       workspace card and **the Network panel stays open and lit**. That is
       correct — the two are different containers — and it is the item most
@@ -431,12 +429,12 @@ the target size and spacing are what muscle memory aims at.
       destroying would skip the confirm and discard a capture on one click.
       (`smoke.ts` clears `setUnsavedCapture` before closing, or its
       `app.close()` would wait on the confirm for ever.)
-- [ ] In **Settings → Appearance**, switch through both themes — Day and Night.
-      The buttons follow, because they are CSS. Paper and Graphite are gone; the
-      picker's third entry is System, which is a rule rather than a palette.
+- [ ] In **Settings → Appearance**, switch through Light, Dark, Dim and High
+      Contrast. The controls follow the active palette. System follows Windows
+      and resolves to High Contrast when Windows requests it.
 - [ ] **The quit confirm is drawn in the app's theme.** With frames in the
-      buffer, in **Night**, press close: the "Quit Inwire?" confirm is **dark**;
-      in **Day** it is light. It is the renderer's own dialog
+      buffer, check all four themes: the "Quit Inwire?" confirm follows the
+      active palette. It is the renderer's own dialog
       (`QuitConfirmDialog.tsx`), because `showMessageBox` on Windows is a task
       dialog the OS paints light whatever the app's theme. Keep capturing has
       focus; Tab moves between the two buttons only; Enter and Escape keep.
@@ -669,9 +667,8 @@ slack; what it cannot see is whether 36-in-44 reads as icons or as boxes.
 - [ ] With no stream being followed, **Follow Stream is disabled** and its tooltip
       says why. It is disabled rather than hidden: a group that changes length
       would move the divider and the bottom group below it.
-- [ ] The group dividers are visible **in both themes**. On Night, `border` on
-      `card` is #343434 on #1a1a1a and was very nearly invisible at 1px — this is
-      a real defect that shipped and was found only by looking.
+- [ ] The group dividers are visible **in all four themes**, including the
+      dark palettes and High Contrast. Check the 1px lines against their cards.
 - [ ] The brand mark in the title row is **not** read as the same glyph as the
       **Start capture** button below it. **They are on the same axis again** —
       the wordmark is deleted, so the mark is centred in a `w-14` block and sits
@@ -718,14 +715,10 @@ the dragging and the bars lining up.
       read as transparent rather than as missing. The bottom rule under the
       header is the same border with the same bug and must be checked the same
       way.
-- [ ] **The body's column separators go the right way, in both themes.** On
-      **Night** each line is a groove — slightly DARKER than the row it sits on
-      — and on **Day** slightly lighter. A bright cage over dark rows means the
-      step lost its sign, which is the one thing about this token that is
-      per-theme: Day is `+0.02` of oklab lightness and Night is `-0.05`. The
-      rule it replaced was a fraction of white shared by both, which moved a
-      Day row by 0.010 and a Night row by 0.320 — thirty-two times as far, from
-      one number that looked theme-neutral.
+- [ ] **The body's column separators follow the theme.** In Light, Dark, Dim
+      and High Contrast, check coloured rows and uncoloured rows. Separators
+      should remain distinguishable without forming a bright cage over dark
+      rows; use the current theme tokens rather than historic palette values.
 - [ ] **The selected row's separators come from the selection, not the list.**
       Arrow onto a coloured row: its lines step from the accent fill like every
       other row's step from theirs. It is the one row painted by a class rather
@@ -1755,8 +1748,9 @@ Not checkable yet, recorded so it is not mistaken for done.
   ones the feed named. It says nothing about the publisher. A check pinned to
   this PC's certificate would pass here and nowhere else, so it waits on the
   item above.
-- **A UI capture against the installed Rust agent.** See "The Rust agent:
-  installed, signed, and at parity".
+- **A UI capture against the installed Rust agent was verified.** The dated
+  results under "The Rust agent: installed, signed, and at parity" record it;
+  rerun the relevant live drives after capture-path changes.
 - **The update feed.** `updates.inwire.app` does not resolve, so the Inwire row
   reads "Not checked" and every check is a quiet no-op.
 - **`crossOriginIsolated` in the packaged app.** Set via `ISOLATION_HEADERS` and

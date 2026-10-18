@@ -14,8 +14,9 @@ the dissector reasoning, never for a plan.
 **The Status column records supersessions too.** An ADR is never edited after
 acceptance, so this index and the forward banner on each superseded file are the
 only places that say a decision has been overtaken - and a reader scanning the
-column is the reader most likely to act on a stale one. It agrees with
-`CLAUDE.md` §11, which is the same ledger in the same words.
+column is the reader most likely to act on a stale one. This index owns the
+ledger; `CLAUDE.md` links here rather than maintaining a second copy. An accepted
+decision may still be unimplemented: check its status and the current code.
 
 | # | Decision | Status |
 |---|---|---|
