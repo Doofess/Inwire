@@ -111,6 +111,13 @@ const NOT_TESTS: Record<string, string> = {
   'monitoring/measurement.ts':
     'measurement and human step (ADRs 0058-0059); the journal mode writes ~2.7 GB to temp, socket, journal and rollup print '
     + 'machine properties with no pass mark, and the firewall mode needs the installed agent, WSL and a person to answer the Windows Security prompt',
+  'electron/monitoring-drive.ts':
+    'driver; launches the built app a dozen times against its own loopback exporter and kills its Worker, utility and renderer '
+    + 'to prove recovery, quit drain and sidecar rebuild - minutes, and every launch needs a build (Task 8)',
+  'monitoring/interop.ts':
+    'driver; replays softflowd\'s own v5 exports into the built app and compares with tshark - needs WSL, Ubuntu, softflowd '
+    + 'and tshark, and says NOT RUN without them, which is never a pass',
+  'monitoring/load.ts': 'measurement; stepped NetFlow load against the built app for up to ten minutes, with no pass mark',
   'monitoring/fixtures.ts': 'helper, not a test; builds the generated NetFlow v5 payloads and evidence the monitoring scripts assert against',
   'monitoring/queryRig.ts': 'helper, not a test; the in-memory journal, sidecar, runtime and Worker host that rollup.ts and queries.ts drive',
   'perf/xlsx-cost.ts':
