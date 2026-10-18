@@ -119,7 +119,8 @@ console.log('\n--- the window is frameless and draws its own controls ---\n');
     !withoutComments('electron/window.ts').includes('titleBarOverlay')
     && !withoutComments('electron/main.ts').includes('titleBarOverlay'));
   checkTrue('...and so is `titleBarStyle`',
-    !withoutComments('electron/main.ts').includes('titleBarStyle'));
+    !withoutComments('electron/window.ts').includes('titleBarStyle')
+    && !withoutComments('electron/main.ts').includes('titleBarStyle'));
 
   // The renderer's title row is laid out against this, so a change here that
   // did not reach the CSS would leave the controls straddling the row's edge.

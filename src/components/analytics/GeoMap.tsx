@@ -1787,7 +1787,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
    *
    * **A DOM marker rather than a pin in the WebGL layer**, because it carries
    * a label and because a marker is not part of the style: `setStyle` and a lost
-   * GPU context (CLAUDE.md §6) leave it standing, where a layer would have to
+   * GPU context (`styleReadyRef` above) leave it standing, where a layer would have to
    * be re-added on the rebuild path. The arc IS in the style, and rides the
    * routes' own re-add in `syncConnectionsLayer`.
    */

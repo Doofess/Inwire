@@ -4,7 +4,7 @@
 //!
 //! `npcap.rs` and `pipe.rs` both declare their Win32 surface by hand and take no
 //! dependency for it, so the consistent-looking choice here is to do the same
-//! with `StartServiceCtrlDispatcherW`. `CLAUDE.md` §10 says otherwise, having
+//! with `StartServiceCtrlDispatcherW`. ADR 0037 says otherwise, having
 //! looked at this before, and it is right - the difference is what a mistake
 //! costs.
 //!

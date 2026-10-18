@@ -156,7 +156,7 @@ signed `release/win-unpacked` from `main` at 674364c, fuses flipped, and the
 folder was copied to a scratch path with no firewall rule. A fused `Inwire.exe`
 loads only `resources/app.asar`, so the copy's asar was replaced by one holding
 `firewall-probe.cjs` as its main. That works because
-`enableEmbeddedAsarIntegrityValidation` is still off (CLAUDE.md §5), and it
+`enableEmbeddedAsarIntegrityValidation` is still off (`electron/CLAUDE.md`), and it
 changed no source file and no signed byte. The probe bound the WSL adapter's
 address on port 2055, as in the runs above.
 
