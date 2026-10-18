@@ -1,5 +1,12 @@
 # 0059 — Monitoring keeps its own journal of what it received, and derives minute rollups beside it
 
+> **Superseded in part by [0061](0061-monitoring-dataset-location-adoption-discard.md)
+> and [0062](0062-monitoring-segments-retention-archive.md).** The dataset's
+> location is the user's choice (0061). The journal is a run of segments, whole
+> segments expire under a retention policy the user turns on, and an expired
+> minute lives on only in the sealed, aggregate-only archive (0062). The
+> framing, the entry layout, the test vector and the rollup keys stand.
+
 **Status:** accepted 2026-10-17, with the owner's three rulings folded in:
 address-pair conversations, a bound per table, and an 8 GiB default. Measured
 in [`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md).

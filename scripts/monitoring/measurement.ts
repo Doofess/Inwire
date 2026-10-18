@@ -1,14 +1,15 @@
 /**
- * The measurements behind ADRs 0058-0060: what a NetFlow v5 collector costs
+ * The measurements behind ADRs 0058-0063: what a NetFlow v5 collector costs
  * here, before any of it is built.
  *
  *   npx tsx scripts/monitoring/measurement.ts socket            (needs the agent)
  *   npx tsx scripts/monitoring/measurement.ts journal [--quick]
  *   npx tsx scripts/monitoring/measurement.ts rollup  [--quick]
- *   npx tsx scripts/monitoring/measurement.ts vector
+ *   npx tsx scripts/monitoring/measurement.ts vector              (the ADR 0059, 0062 and 0063 test vectors)
  *   npx tsx scripts/monitoring/measurement.ts firewall --electron <electron.exe> [--port n] [--seconds n] [--shot png] [--nic regex] [--listen-only]
  *   npx tsx scripts/monitoring/measurement.ts bindpair --electron <electron.exe>
  *   npx tsx scripts/monitoring/measurement.ts softflowd --pcap <capture> [--port n]
+ *   npx tsx scripts/monitoring/measurement.ts segments [--quick]   (milestone 1.5, ADR 0062)
  *
  * Not a test: every number is a property of the machine it ran on, and the
  * journal mode writes about 2.7 GB under the OS temp folder (and deletes it).
@@ -25,12 +26,17 @@
  * softflowd in WSL and holds `normalizeFlows` to tshark on what it exported.
  * In `check.ts`'s NOT_TESTS.
  *
+ * `segments` runs the product journal (`journal.ts`) over real files: open
+ * cost by segment size and count, a segment roll, one expiry's archive write,
+ * flush and unlink, and adopting an 8 GiB dataset. It writes about 10 GB
+ * under the OS temp folder (`--quick`: about 1.5 GB) and deletes it.
+ *
  * The journal framing and the rollup codec here are prototypes of the ones
  * ADR 0059 pins; product code is written against that ADR under its own tests.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { connect } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -41,6 +47,7 @@ import { FRAME_JSON, FrameReader, encodeFrame } from '../../src/services/agentFr
 import { decodePacketBatch } from '../../src/services/agentBinary';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import { MemoryTemplateStore, normalizeFlows } from '../../src/services/flow/flowExport';
+import { MonitoringJournal, recoverJournal } from '../../src/services/monitoring/journal';
 
 const mode = process.argv[2] ?? 'help';
 const quick = process.argv.includes('--quick');
@@ -76,16 +83,42 @@ const KIND_DATAGRAM = 1;
 const KIND_BOUNDARY = 2;
 const MAX_DATAGRAM_PAYLOAD = 65_507; // IPv4's largest UDP payload
 
-function fileHeader(generation: Uint8Array, createdMs: number, policyVersion = 1): Uint8Array {
+function fileHeader(generation: Uint8Array, createdMs: number, policyVersion = 1, magic = FILE_MAGIC): Uint8Array {
   const b = new Uint8Array(FILE_HEADER_BYTES);
   const v = new DataView(b.buffer);
-  b.set(FILE_MAGIC, 0);
+  b.set(magic, 0);
   v.setUint16(8, 1, true); // format version
   v.setUint16(10, policyVersion, true);
   v.setUint32(12, FILE_HEADER_BYTES, true);
   b.set(generation, 16);
   v.setBigUint64(32, BigInt(createdMs), true);
   v.setUint32(60, crc32(b.subarray(0, 60)), true);
+  return b;
+}
+
+/**
+ * ADR 0062's format-2 segment header, 128 bytes: the format-1 fields, then the
+ * segment's first entry id, the session open when it was created (zero if
+ * none) and the source that session recorded, so a segment whose
+ * predecessors have expired still says whose datagrams it holds.
+ */
+function segmentHeader(generation: Uint8Array, createdMs: number, policyVersion: number, firstEntryId: number,
+  openSession: Uint8Array | null, source: { exporter: string; bind: string; port: number }): Uint8Array {
+  const b = new Uint8Array(128);
+  const v = new DataView(b.buffer);
+  b.set(FILE_MAGIC, 0);
+  v.setUint16(8, 2, true); // format version
+  v.setUint16(10, policyVersion, true);
+  v.setUint32(12, 128, true);
+  b.set(generation, 16);
+  v.setBigUint64(32, BigInt(createdMs), true);
+  v.setBigUint64(40, BigInt(firstEntryId), true);
+  if (openSession) b.set(openSession, 48);
+  b.set(ipv4Bytes(source.exporter), 64);
+  b.set(ipv4Bytes(source.bind), 68);
+  v.setUint16(72, source.port, true);
+  v.setUint16(74, openSession ? 1 : 0, true); // bit 0: a session was open at creation
+  v.setUint32(124, crc32(b.subarray(0, 124)), true);
   return b;
 }
 
@@ -850,6 +883,46 @@ function vectorMode(): void {
   console.log(`entry 1, datagram received 1700000000123 ms at 192.0.2.10:2055 from 192.0.2.1:50000, payload 00 05 00 00:\n  ${hex(e)}`);
   const boundary = entry(2, KIND_BOUNDARY, new TextEncoder().encode('{"action":"start"}'));
   console.log(`entry 2, boundary {"action":"start"}:\n  ${hex(boundary)}`);
+
+  // ADR 0062
+  const gen = Uint8Array.from({ length: 16 }, (_, i) => i);
+  const session = Uint8Array.from({ length: 16 }, (_, i) => 0xa0 + i);
+  const source = { exporter: '192.0.2.1', bind: '192.0.2.10', port: 2055 };
+  console.log(`segment header (format 2, policy 1, generation 00..0f, created 1700000000000 ms, first entry 4097, session a0..af open, exporter 192.0.2.1 to 192.0.2.10:2055):\n  ${hex(segmentHeader(gen, 1_700_000_000_000, 1, 4097, session, source))}`);
+  const expired = '{"action":"expired","sessionId":"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf","receivedMs":1700000600000,"fromEntryId":1,"throughEntryId":4096,'
+    + '"fromMs":1700000000123,"throughMs":1700000599000,"reason":"age","source":{"exporterIPv4":"192.0.2.1","bindIPv4":"192.0.2.10","port":2055}}';
+  console.log(`entry 4200, boundary ${expired}:\n  ${hex(entry(4200, KIND_BOUNDARY, new TextEncoder().encode(expired)))}`);
+  console.log(`archive header (generation 00..0f, created 1700000000000 ms):\n  ${hex(fileHeader(gen, 1_700_000_000_000, 0, new TextEncoder().encode('INWIREMA')))}`);
+  const key = new TextEncoder().encode('192.0.2.1/0/0');
+  const minute = new Uint8Array(2 + key.length + 16 + 4);
+  const mv = new DataView(minute.buffer);
+  mv.setUint16(0, key.length, true);
+  minute.set(key, 2);
+  mv.setBigUint64(2 + key.length, 1_699_999_980_000n, true);
+  mv.setBigUint64(10 + key.length, 4096n, true);
+  minute.set([1, 0, 0xde, 0xad], 18 + key.length); // policy 1, then two body bytes the archive treats as opaque
+  console.log(`archive entry 1, minute fragment for source 192.0.2.1/0/0, minute 1699999980000, through entry 4096, rollup bytes 01 00 de ad:\n  ${hex(entry(1, 1, minute))}`);
+
+  const cut = new Uint8Array(44);
+  const cv = new DataView(cut.buffer);
+  cv.setBigUint64(0, 1n, true);
+  cv.setBigUint64(8, 4096n, true);
+  cv.setBigUint64(16, 1_700_000_000_123n, true);
+  cv.setBigUint64(24, 1_700_000_599_000n, true);
+  cv.setUint32(32, 1, true); // fragments since the previous cut
+  cut[36] = 1; // reason: age
+  // [37,40) reserved; [40,44) checkpoint length, zero until ADR 0064
+  console.log(`archive entry 2, cut of entries 1..4096 (1700000000123..1700000599000 ms), 1 fragment, reason age, no checkpoint:
+  ${hex(entry(2, 2, cut))}`);
+
+  // ADR 0063
+  console.log(`bundle header (generation 00..0f, created 1700000000000 ms):\n  ${hex(fileHeader(gen, 1_700_000_000_000, 0, new TextEncoder().encode('INWIREMB')))}`);
+  const wrapped = new Uint8Array(16 + body.length);
+  new DataView(wrapped.buffer).setBigUint64(0, 4097n, true);
+  wrapped[8] = KIND_DATAGRAM;
+  new DataView(wrapped.buffer).setUint16(10, 1, true); // the policy of the segment it came from
+  wrapped.set(body, 16);
+  console.log(`bundle entry 2, journal entry 4097 (kind 1, policy 1) carrying entry 1's datagram body above:\n  ${hex(entry(2, 2, wrapped))}`);
 }
 
 // --- firewall --------------------------------------------------------------------
@@ -1127,6 +1200,125 @@ async function softflowdMode(): Promise<void> {
   rmSync(dir, { recursive: true, force: true });
 }
 
+// --- segments (milestone 1.5) ----------------------------------------------------------------
+
+/** A journal of generated v5 traffic at 7 a second, written by the product code until it holds `bytes`. */
+function writeProductJournal(path: string, bytes: number): { entries: number; seconds: number } {
+  const { journal } = MonitoringJournal.open(NodeBlockFile.open(path), { limitBytes: 64 * 1024 * MB });
+  const t0 = 1_700_000_000;
+  journal.append([{ kind: 'boundary', sessionId: 'S1', receivedMs: t0 * 1000, action: 'start', reason: '', droppedDatagrams: null }]);
+  const model = new TrafficModel(7, false);
+  const seq = { n: 0 };
+  let s = 0;
+  let written = 0;
+  let entries = 1;
+  while (written < bytes) {
+    const batch = v5Datagrams(model.second(t0 + s), (t0 + s) * 1000, seq).map((d) => ({
+      kind: 'datagram' as const, receivedMs: (t0 + s) * 1000, localIPv4: '192.0.2.10', localPort: 2055,
+      remoteIPv4: '192.0.2.1', remotePort: 50000, bytes: d,
+    }));
+    const r = journal.append(batch);
+    if (r.state !== 'open') throw new Error(`journal stopped: ${r.state}`);
+    entries += r.appended;
+    written = r.snapshot.writtenBytes;
+    s++;
+  }
+  journal.flush();
+  journal.close();
+  return { entries, seconds: s };
+}
+
+/** `recoverJournal` over one file: the scan an open or an adoption runs. */
+function timedRecover(path: string): { ms: number; entries: number; status: string } {
+  const f = NodeBlockFile.open(path);
+  try {
+    const [r, ms] = timeIt(() => recoverJournal(f));
+    return { ms, entries: r.completeEntries, status: r.status };
+  } finally { f.close(); }
+}
+
+async function segmentsMode(): Promise<void> {
+  const dir = join(tmpdir(), `inwire-monitoring-segments-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const sizes = quick ? [64, 256] : [64, 256, 1024];
+    const made = new Map<number, { path: string; seconds: number }>();
+    console.log('Product journal (journal.ts), generated v5 at 7 datagrams a second:');
+    for (const mib of sizes) {
+      const path = join(dir, `single-${mib}.iwmj`);
+      const [w, wMs] = timeIt(() => writeProductJournal(path, mib * MB));
+      made.set(mib, { path, seconds: w.seconds });
+      const heap0 = process.memoryUsage().heapUsed;
+      const f = NodeBlockFile.open(path);
+      const [opened, openMs] = timeIt(() => MonitoringJournal.open(f, { limitBytes: 64 * 1024 * MB }));
+      const heap = process.memoryUsage().heapUsed - heap0;
+      opened.journal.close();
+      const scan = timedRecover(path);
+      console.log(`  ${mib} MiB segment: ${w.entries.toLocaleString()} entries, ${fmt(w.seconds / 3600, 2)} h of traffic, written in ${fmt(wMs / 1000)} s; `
+        + `open ${fmt(openMs, 0)} ms (${fmt(mib / (openMs / 1000), 0)} MiB/s, heap after open +${fmt(heap / MB)} MiB), recover-only ${fmt(scan.ms, 0)} ms, ${scan.status}`);
+    }
+
+    // Per-file cost apart from bytes: open, read the 64-byte header, close, over many tiny segments.
+    const header = new Uint8Array(64);
+    for (const n of [1, 32, 64, 256]) {
+      const paths: string[] = [];
+      for (let i = 0; i < n; i++) { const p = join(dir, `tiny-${n}-${i}.iwmj`); writeProductJournal(p, 1); paths.push(p); }
+      const [, ms] = timeIt(() => { for (const p of paths) { const fd = openSync(p, 'r'); readSync(fd, header, 0, 64, 0); closeSync(fd); } });
+      const [, recMs] = timeIt(() => { for (const p of paths) timedRecover(p); });
+      console.log(`  ${n} segment files: header reads ${fmt(ms, 2)} ms (${fmt((ms * 1000) / n, 0)} µs a file), full recover ${fmt(recMs)} ms`);
+      for (const p of paths) unlinkSync(p);
+    }
+
+    // A roll: create the next segment, write its header, flush. Twenty, averaged.
+    const rolls: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const p = join(dir, `roll-${i}.iwmj`);
+      const [, ms] = timeIt(() => {
+        const rf = NodeBlockFile.open(p);
+        rf.write(0, fileHeader(new Uint8Array(16).fill(3), Date.now(), 1));
+        rf.flush();
+        rf.close();
+      });
+      rolls.push(ms);
+      unlinkSync(p);
+    }
+    console.log(`  segment roll (create, 64-byte header, flush): mean ${fmt(rolls.reduce((a, b) => a + b, 0) / rolls.length, 2)} ms, worst ${fmt(Math.max(...rolls), 2)} ms`);
+
+    // One expiry of a 256 MiB segment: its minutes appended to an archive and flushed, then the unlink.
+    // ADR 0059 measured the deflated sidecar at 59 MiB a day at 7 a second; the archive holds the same
+    // minutes, so one segment's share is its hours' fraction of that, in minute-sized entries.
+    const { path: seg, seconds: segSeconds } = made.get(256)!;
+    const segHours = segSeconds / 3600;
+    const minutes = Math.round(segHours * 60);
+    const perMinute = Math.round((59 * MB) / 1440);
+    const archive = NodeBlockFile.open(join(dir, 'archive.iwma'));
+    archive.write(0, fileHeader(new Uint8Array(16).fill(4), Date.now(), 1));
+    let at = FILE_HEADER_BYTES;
+    const body = new Uint8Array(perMinute).map((_, i) => (i * 2654435761) >>> 24);
+    const [, archiveMs] = timeIt(() => {
+      for (let m = 0; m < minutes; m++) { const e = entry(m + 1, 1, body); archive.write(at, e); at += e.length; }
+      archive.flush();
+    });
+    archive.close();
+    const victim = join(dir, 'victim.iwmj');
+    copyFileSync(seg, victim);
+    const [, unlinkMs] = timeIt(() => unlinkSync(victim));
+    console.log(`  expiry of one 256 MiB segment (${fmt(segHours)} h, ${minutes} minutes): archive append+flush of ${fmt(at / MB)} MiB ${fmt(archiveMs, 0)} ms, unlink ${fmt(unlinkMs)} ms`);
+
+    // Adopting 8 GiB: 32 segments of 256 MiB (copies of one, which costs a scan the same), scanned in turn.
+    const count = quick ? 4 : 32;
+    const copies: string[] = [];
+    for (let i = 0; i < count; i++) { const p = join(dir, `adopt-${i}.iwmj`); copyFileSync(seg, p); copies.push(p); }
+    let entries = 0;
+    const [, adoptMs] = timeIt(() => { for (const p of copies) entries += timedRecover(p).entries; });
+    const total = count * 256;
+    console.log(`  adoption scan of ${count} x 256 MiB = ${fmt(total / 1024, 2)} GiB: ${fmt(adoptMs / 1000)} s (${fmt(total / (adoptMs / 1000), 0)} MiB/s), `
+      + `${entries.toLocaleString()} entries; LIMITS.openScanBytesPerSecond (64 MiB/s) allows ${fmt(total / 64, 0)} s. The files were just written, so the OS cache is warm.`);
+  } finally {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 switch (mode) {
   case 'softflowd': await softflowdMode(); break;
   case 'bindpair': await bindPairMode(); break;
@@ -1135,7 +1327,8 @@ switch (mode) {
   case 'rollup': rollupMode(); break;
   case 'vector': vectorMode(); break;
   case 'firewall': await firewallMode(); break;
+  case 'segments': await segmentsMode(); break;
   default:
-    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe>');
+    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick]');
     process.exitCode = 2;
 }
