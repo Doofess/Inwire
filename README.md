@@ -11,6 +11,10 @@ now you'll need to build it from source.
 
 [![CI](https://github.com/Doofess/Inwire/actions/workflows/ci.yml/badge.svg)](https://github.com/Doofess/Inwire/actions/workflows/ci.yml)
 
+![The packet list, a frame's fields and its bytes, in the dark theme](docs/images/capture.png)
+
+*The screenshots show synthetic traffic from the test harness, not a real capture.*
+
 ## Working with traffic
 
 You can capture from several adapters at once, narrow the capture with a
@@ -58,6 +62,8 @@ filters the capture by it. Collection runs apart from capture, so starting,
 clearing or importing a capture leaves it alone. Its numbers are checked
 against tshark's decode of `softflowd`'s exports.
 
+![The Monitoring sheet receiving NetFlow v5 from one exporter](docs/images/monitoring.png)
+
 NetFlow v9, IPFIX and sFlow can be inspected inside a packet capture, but
 aren't collected.
 
@@ -65,12 +71,22 @@ aren't collected.
 
 Captured packets stay on your machine. There are no accounts or telemetry.
 
-IP lookups and reverse DNS are optional and send address queries to their
-providers. After you enable geo-IP, the map also loads online tiles. Update
-checks are opt-in, and Npcap is downloaded only when you ask to install it.
-The speed test connects to Cloudflare when you press Run and can use up to
-2 GB of traffic. The NetFlow collector only receives: it listens where you tell
-it to and sends nothing.
+Every host the app can reach is listed here, with what turns it on. Nothing on
+this list is contacted until you turn it on or click.
+
+| Host | What it's for | Turned on by |
+|---|---|---|
+| `get.geojs.io` | Locating public addresses for the map | **Locate addresses** in Settings |
+| `ipapi.co` | Your connection's public address and provider, in the Network sidebar | **Locate addresses** |
+| `tiles.openfreemap.org` | Map tiles | The map, which appears only once **Locate addresses** is on |
+| `cloudflare-dns.com` | Reverse DNS for captured addresses, at most four queries at a time | **Reverse DNS** in Settings |
+| `updates.inwire.app` | The update feed | Update checks, off until you turn them on |
+| `npcap.com` | Npcap's official installer | An install or reinstall click in Settings → Updates |
+| `speed.cloudflare.com` | The speed test, up to 2 GB of traffic | Pressing Run |
+
+These services see your public address and the data each lookup needs. The
+NetFlow collector only receives: it listens where you tell it to, accepts only
+the exporter you name, and sends nothing.
 
 Loaded decryption keys stay in memory unless you choose to include them in a
 pcapng export. If you follow a key-log file, the app remembers its path and
@@ -107,6 +123,19 @@ driver access is recommended. The Inwire app itself runs without elevation.
 
 The current signing setup uses a certificate trusted on the maintainer's PC.
 Public downloads are waiting on a publicly trusted certificate.
+
+## Installing
+
+*This applies once a publicly signed release is published; there is no download
+today.* Run `Inwire-Setup.exe`. It installs the app and the capture service, but
+not Npcap. Open Settings → Updates and install Npcap from there: the app
+downloads Npcap's official installer from npcap.com and opens its own wizard,
+which shows Npcap's licence. Inwire never runs that installer silently. Choose
+the option that restricts driver access to administrators. Inwire captures
+through its service, so the setting costs you nothing.
+
+Until a publicly trusted certificate exists, Windows SmartScreen warns when you
+run the installer.
 
 ## Development
 

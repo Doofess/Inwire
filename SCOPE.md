@@ -28,10 +28,28 @@ Capture filters, snaplen, multiple adapters, ring files, autostop and scheduling
 are implemented. The internet speed test uses Cloudflare through its own
 unprivileged engine ([ADR 0054](docs/decisions/0054-an-internet-speed-test-against-cloudflare.md)).
 
-NetFlow v5/v9, IPFIX and sFlow dissectors can inspect captured export datagrams.
-Shared flow decoders are available for future collection, but there is no
-running monitoring collector, monitoring history or monitoring workspace yet.
-The measurement programs under `scripts/monitoring/` are prototypes.
+The dissector set covers the common families of a real network: name and
+address services, TLS and QUIC, HTTP/1-3, SSH, IPsec, WireGuard and OpenVPN,
+Windows networking (SMB, DCE/RPC, NTLMSSP, LDAP, RDP), VoIP (SIP and RTP),
+tunnels and mirrors (GRE, ERSPAN, TZSP) and flow-export protocols. NetFlow
+v5/v9, IPFIX and sFlow datagrams can be inspected inside a capture.
+
+**Network monitoring (NetFlow v5)** is implemented
+([ADRs 0058-0060](docs/decisions/README.md)). Inwire collects from one exporter
+over IPv4: a specific local address and UDP port, started explicitly while the
+app is open. An unprivileged utilityProcess owns the socket and the history; a
+sandboxed Worker decodes the datagrams; the capture agent has no listener and no
+extra privilege ([ADR 0058](docs/decisions/0058-monitoring-intake-and-lifetime.md)).
+A standalone journal is the authority and minute rollups are derived caches.
+History lives apart from captures, survives capture replacement, and stops at a
+storage limit rather than silently expiring data
+([ADR 0059](docs/decisions/0059-monitoring-evidence-journal-and-rollups.md)).
+The Monitoring sheet opens from the Network sidebar and the command palette,
+leaves the five capture views alone, and does not stop collection when closed. A
+talker can apply a filter to the open capture, labelled as that operation
+([ADR 0060](docs/decisions/0060-monitoring-workspace-sheet.md)). The
+measurements behind these choices are in
+[the monitoring measurement report](docs/monitoring-v5-measurements.md).
 
 Windows has the desktop app. macOS and Linux retain the Python capture agent;
 desktop apps for those platforms remain future work.
@@ -41,34 +59,10 @@ reference, not a claim of complete Wireshark parity.
 [ADR 0021](docs/decisions/0021-where-the-parity-chase-stops.md) records where the
 parity chase stops.
 
-## Accepted next milestone — not implemented
-
-ADRs 0058–0060 accept the first monitoring milestone. Acceptance fixes the
-design; it does not mean the feature has landed.
-
-- **Intake and lifetime:** one NetFlow v5 exporter, a specific local IPv4
-  address and UDP port, with collection started explicitly while Inwire is open.
-  An unprivileged utilityProcess owns the socket and journal; a sandboxed Worker
-  decodes the datagrams. The capture agent gains no listener or privilege.
-  See [ADR 0058](docs/decisions/0058-monitoring-intake-and-lifetime.md).
-- **Evidence and history:** a standalone monitoring journal is authoritative;
-  minute rollups are derived caches. Monitoring history lives separately from
-  captures, survives capture replacement, and stops at its storage limit rather
-  than silently expiring data. See
-  [ADR 0059](docs/decisions/0059-monitoring-evidence-journal-and-rollups.md).
-- **Workspace:** a sheet opened from the Network sidebar and command palette,
-  preserving the five capture views and their shortcuts. Leaving the sheet
-  does not stop collection. A talker can apply a filter to the open capture,
-  labelled as that operation. See
-  [ADR 0060](docs/decisions/0060-monitoring-workspace-sheet.md).
-
-The measurements behind these choices are in
-[the monitoring measurement report](docs/monitoring-v5-measurements.md).
-
 ## Later directions
 
 These areas are in scope, but need their own design and evidence before work
-begins. They are not commitments about the first milestone.
+begins. They are not commitments.
 
 - Additional exporters and formats: multiple sources, IPv6, NetFlow v9/IPFIX,
   sFlow flow samples and interface-counter samples.
@@ -120,9 +114,6 @@ These apply to current and future work. A request that breaks one is out of scop
   M-Lab would require separate consent because it publishes client addresses.
   Ookla, fast.com and nPerf cannot be embedded under the researched terms.
 
-The first collector's socket owner is decided by ADR 0058. Its accepted design
-is not an open question merely because implementation has not begun.
-
 ## Rejected directions
 
 Each rejection has a reason and decision reference under [.out-of-scope/](.out-of-scope/):
@@ -143,7 +134,7 @@ A change must meet all three conditions:
    argues for an addition. Include a safe reproducer where possible.
 2. **Holds the invariants.** It breaks none of the product constraints and
    matches no rejected direction.
-3. **Fits the sequence.** It follows the accepted milestone and research order,
+3. **Fits the sequence.** It follows the accepted research order,
    or provides evidence that a different order is cheaper or more valuable.
 
 Size and popularity do not replace these conditions. A request for something
