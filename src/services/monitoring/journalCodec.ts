@@ -412,7 +412,12 @@ export function scanEntries(
     if (!header) return outcome(offset, null);
     const h = parseEntryHeader(framing, header);
     if (!h.ok) {
-      return zeroToEnd(offset) ? outcome(offset, null) : outcome(null, `${h.reason} at offset ${offset}`);
+      // A header written in pieces into a preallocated file leaves some of its
+      // bytes and then zeros: torn if the zeros run from inside the header to
+      // EOF and no valid entry follows. Garbage after the header, or a valid
+      // entry after a zero run, is damage in the middle and stays refused.
+      const torn = zeroToEnd(offset + ENTRY_HEADER_BYTES - 1) && findValidEntry(offset + 1) === null;
+      return torn ? outcome(offset, null) : outcome(null, `${h.reason} at offset ${offset}`);
     }
     const end = offset + ENTRY_HEADER_BYTES + h.bodyLength;
     if (end > size) {

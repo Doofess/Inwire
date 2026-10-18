@@ -11,8 +11,9 @@
  */
 import assert from 'node:assert/strict';
 import { LIMITS } from '../../src/services/monitoring/types';
-import { DEFAULT_PORT, readSourceConfig } from '../../src/services/monitoring/config';
+import { DEFAULT_PORT, MAX_STORAGE_BYTES, readSourceConfig } from '../../src/services/monitoring/config';
 import { decodeV5, sourceKey } from '../../src/services/monitoring/v5';
+import { readDraft } from '../../src/components/monitoring/monitoringCopy';
 import { EXPORTER, evidence, truncatedEvidence, v5Evidence, v5Payload } from './fixtures';
 
 let failures = 0;
@@ -75,6 +76,22 @@ test('storage limit is a safe integer at or above the minimum', () => {
   assert.equal(readSourceConfig({ ...config, storageLimitBytes: LIMITS.minStorageBytes + 0.5 }), null);
   assert.equal(readSourceConfig({ ...config, storageLimitBytes: '8589934592' }), null);
   assert.equal(readSourceConfig({ ...config, storageLimitBytes: Infinity }), null);
+});
+
+test('storage limit has a maximum of 64 TiB, far inside the open deadline timer (M5)', () => {
+  assert.equal(MAX_STORAGE_BYTES, 64 * 1024 ** 4);
+  assert.notEqual(readSourceConfig({ ...config, storageLimitBytes: MAX_STORAGE_BYTES }), null);
+  assert.equal(readSourceConfig({ ...config, storageLimitBytes: MAX_STORAGE_BYTES + 1 }), null);
+  // The point of the bound: a limit near the safe-integer ceiling would overflow setTimeout (2^31-1 ms).
+  assert.equal(readSourceConfig({ ...config, storageLimitBytes: Number.MAX_SAFE_INTEGER }), null);
+});
+
+test('the form inherits the maximum: a draft over it is refused with an error on the limit', () => {
+  const draft = { exporterIPv4: EXPORTER, bindIPv4: '192.0.2.50', port: '2055', limit: '65', unit: 'GiB' as const };
+  assert.notEqual(readDraft(draft).config, null);
+  const over = readDraft({ ...draft, limit: String(64 * 1024 + 1), unit: 'GiB' });
+  assert.equal(over.config, null);
+  assert.ok(over.errors.limit, 'the limit field carries the error');
 });
 
 test('anything that is not an object is refused', () => {

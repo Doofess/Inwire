@@ -19,6 +19,7 @@ import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { Collector, STATUS_COALESCE_MS, type CollectorVolume, type UdpSocket } from '../../electron/monitoring/collector';
 import { readIntakeStatus, type IntakeStatus } from '../../src/services/monitoring/control';
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
+import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, serveRuntime, type RpcPort } from '../../src/services/monitoring/runtimeRpc';
 import { DECODER_POLICY_VERSION, LIMITS, type BoundaryEvidence, type DatagramEvidence, type Evidence, type SourceConfig } from '../../src/services/monitoring/types';
@@ -107,6 +108,12 @@ class FakeSocket implements UdpSocket {
 class TestFile extends MemoryBlockFile {
   failWrites = false;
   failFlush = false;
+  /** Reads served, so a case can tell a rescan of the journal from none. */
+  reads = 0;
+  override read(offset: number, into: Uint8Array): number {
+    this.reads++;
+    return super.read(offset, into);
+  }
   override write(offset: number, from: Uint8Array): void {
     if (this.failWrites) throw new Error('disk full');
     super.write(offset, from);
@@ -336,53 +343,57 @@ async function main(): Promise<void> {
     assert.equal(rig.volume.opens, 1);
   });
 
-  await test('start: a different storage limit while stopped closes and reopens the dataset', async () => {
+  await test('start: a different storage limit while stopped is applied in place: no reopen, the Worker stays attached (I1)', async () => {
     const rig = new Rig();
-    await rig.listen();
+    const port = await rig.listen();
     const first = rig.last.sessionId;
     await rig.collector.stop('user');
     const generation = (await rig.collector.runtime.snapshot()).generation;
     assert.deepEqual(await rig.collector.start({ ...CFG, storageLimitBytes: 32 * MiB }), { ok: true });
-    assert.equal(rig.volume.opens, 2);
-    assert.equal(rig.volume.closes, 1);
+    assert.equal(rig.volume.opens, 1, 'the dataset was not opened again');
+    assert.equal(rig.volume.closes, 0, 'and not closed');
+    assert.equal(port.closed, false, 'the attached port is still open');
+    assert.equal(rig.last.workerAttached, true);
     assert.equal(rig.sockets.length, 2);
     assert.equal(rig.last.storage, 'open');
-    assert.equal((await rig.collector.runtime.snapshot()).generation, generation, 'the same journal, reopened');
+    assert.equal((await rig.collector.runtime.snapshot()).generation, generation, 'the same journal object');
     assert.notEqual(rig.last.sessionId, first);
     assert.deepEqual(actions(await rig.entries()), ['start', 'stop:user', 'start']);
   });
 
-  await test('start: a new limit that fails to open reopens with the old one, so history survives, and says why', async () => {
+  await test('start: a limit change over a large journal does not rescan it (I1)', async () => {
     const rig = new Rig();
     await rig.listen();
-    rig.socket.emit(bytes(50));
-    rig.drain();
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 100; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, round));
+      rig.drain();
+    }
     await rig.collector.stop('user');
-    const before = actions(await rig.entries());
-    rig.openErrors.push(new Error('EPERM: the new limit'));
-    const r = await rig.collector.start({ ...CFG, storageLimitBytes: 32 * MiB });
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.message, /EPERM: the new limit/);
-    assert.equal(rig.volume.opens, 2, 'the old limit was opened again');
-    assert.equal(rig.last.storage, 'open');
-    assert.equal(rig.last.storageError, null);
-    assert.deepEqual(actions(await rig.entries()), before, 'history reads as it did');
-    assert.equal(rig.sockets.length, 1, 'nothing was bound');
-    // And the old limit still works.
-    assert.deepEqual(await rig.collector.start(CFG), { ok: true });
+    assert.ok(rig.volume.journal.size() > 8 * MiB, 'the journal is large');
+    const reads = rig.volume.journal.reads;
+    assert.deepEqual(await rig.collector.start({ ...CFG, storageLimitBytes: 64 * MiB }), { ok: true });
+    assert.equal(rig.volume.journal.reads, reads, 'not one read: a reopen would scan every entry');
+    assert.equal(rig.volume.opens, 1);
+    assert.equal(rig.volume.closes, 0);
   });
 
-  await test('start: a new limit that fails to open, with the old one failing too, leaves the status saying so', async () => {
+  await test('start: raising the limit over a dataset the old limit filled lets Start listen again (I1)', async () => {
     const rig = new Rig();
-    await rig.listen();
-    await rig.collector.stop('user');
-    rig.openErrors.push(new Error('EPERM: first'), new Error('EBUSY: second'));
-    const r = await rig.collector.start({ ...CFG, storageLimitBytes: 32 * MiB });
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.message, /EPERM: first/);
-    assert.equal(rig.last.storage, 'failed');
-    assert.match(rig.last.storageError ?? '', /EBUSY: second/);
-    await assert.rejects(rig.collector.runtime.snapshot(), RuntimeUnavailableError);
+    const port = await rig.listen();
+    for (let round = 0; round < 12 && !rig.socket.closed; round++) {
+      for (let i = 0; i < 100; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, round & 0xff));
+      rig.drain();
+    }
+    assert.equal(rig.last.storage, 'storage-limit');
+    const same = await rig.collector.start(CFG);
+    assert.equal(same.ok, false, 'the same limit still has no room');
+    assert.deepEqual(await rig.collector.start({ ...CFG, storageLimitBytes: 64 * MiB }), { ok: true });
+    assert.equal(rig.last.storage, 'open');
+    assert.equal(rig.last.storageError, null);
+    assert.equal(rig.last.listener, 'listening');
+    assert.equal(rig.volume.opens, 1);
+    assert.equal(port.closed, false);
+    assert.deepEqual(actions(await rig.entries()), ['start', 'stop:storage-limit', 'start']);
   });
 
   await test('start: datagrams shed between the socket and the bind are counted and become a gap', async () => {
@@ -399,6 +410,24 @@ async function main(): Promise<void> {
     rig.drain();
     const gaps = (await rig.entries()).filter(isBoundary).filter((b) => b.action === 'gap');
     assert.deepEqual(gaps.map((g) => g.droppedDatagrams), [5]);
+  });
+
+  await test('start: the senders rejected while a restart binds are counted, and the last session\'s are not carried over', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    rig.socket.emit(bytes(10), '10.9.9.1');
+    rig.clock.advance(STATUS_COALESCE_MS);
+    assert.deepEqual(rig.last.rejectedSenders, [{ address: '10.9.9.1', count: 1 }]);
+    await rig.collector.stop('user');
+    rig.nextBinds.push('hang');
+    const started = rig.collector.start(CFG);
+    await settle();
+    rig.socket.emit(bytes(10), '10.9.9.2');
+    rig.clock.advance(STATUS_COALESCE_MS);
+    rig.socket.release();
+    assert.deepEqual(await started, { ok: true });
+    assert.deepEqual(rig.last.rejectedSenders, [{ address: '10.9.9.2', count: 1 }], 'the new session starts at nothing, and keeps what arrived while it bound');
+    assert.equal(rig.last.rejectedOverflow, 0);
   });
 
   await test('start: the same storage limit while stopped does not reopen the dataset', async () => {
@@ -876,6 +905,21 @@ async function main(): Promise<void> {
     assert.deepEqual(actions(fileEntries(rig.volume.journal)), ['start', 'stop:storage-limit']);
   });
 
+  await test('stopReason: a socket error whose final drain fills the journal leaves the listener as the storage ending set it', async () => {
+    const rig = new Rig();
+    await rig.listen();
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 100; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, round));
+      rig.drain();
+    }
+    for (let i = 0; i < 120; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, 9));
+    rig.socket.fail('ECONNRESET', 'the socket broke');
+    await settle();
+    assert.equal(rig.last.storage, 'storage-limit');
+    assert.equal(rig.last.listener, 'stopped', 'the storage ending closed the session; a socket error does not reopen that account');
+    assert.equal(rig.last.listenerError, null, 'and names no socket error for a stop the journal ended');
+  });
+
   await test('stopReason: a flush that fails says storage-failed', async () => {
     const rig = new Rig();
     await rig.listen();
@@ -1165,6 +1209,51 @@ async function main(): Promise<void> {
     // NaN compares false against every total, so unrefused it would read all nine.
     await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, Number.NaN), RangeError);
     await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, -1), RangeError);
+  });
+
+  // --- appendMinutes from the Worker is bounded (M1) --------------------------------------------------------------
+
+  await test('runtime: appendMinutes refuses a watermark past the journal, a batch past either cap and one past the limit, and writes nothing', async () => {
+    const rig = new Rig();
+    const port = await rig.listen();
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 100; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, round));
+      rig.drain();
+    }
+    const snapshot = await rig.collector.runtime.snapshot();
+    const M0 = 1_700_000_000_000 - (1_700_000_000_000 % 60_000);
+    const mark = (through: number) => ({ generation: snapshot.generation, throughEntryId: through, policyVersion: DECODER_POLICY_VERSION });
+    const minute = (i: number, n: number) => ({ sourceKey: 'a', minuteMs: M0 + i * 60_000, bytes: new Uint8Array(n).fill(3) });
+    const runtime = rig.collector.runtime;
+
+    // The journal's end is the most a watermark may claim to have rolled up.
+    await assert.rejects(runtime.appendMinutes([minute(0, 100)], mark(snapshot.throughEntryId + 1)), RangeError);
+    // Over the minute cap, and over the byte cap in one minute.
+    await assert.rejects(
+      runtime.appendMinutes(Array.from({ length: MAX_APPEND_MINUTES + 1 }, (_, i) => minute(i, 1)), mark(snapshot.throughEntryId)),
+      RangeError,
+    );
+    await assert.rejects(runtime.appendMinutes([minute(0, MAX_APPEND_BYTES + 1)], mark(snapshot.throughEntryId)), RangeError);
+    // Under both caps and still more than the limit leaves: 200 full datagrams are in a 16 MiB journal.
+    const room = CFG.storageLimitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - FILE_HEADER_BYTES;
+    const body = 900_000;
+    const count = Math.ceil(room / body) + 1;
+    assert.ok(count * body <= MAX_APPEND_BYTES && count <= MAX_APPEND_MINUTES, `the case stays under the caps (room ${room})`);
+    await assert.rejects(runtime.appendMinutes(Array.from({ length: count }, (_, i) => minute(i, body)), mark(snapshot.throughEntryId)), RangeError);
+    assert.deepEqual(await runtime.readMinutes('a', M0, M0 + count * 60_000, MiB), [], 'a refusal writes nothing');
+    assert.equal(await runtime.watermark(), null);
+
+    // A batch the room holds goes in.
+    await runtime.appendMinutes([minute(0, 100_000)], mark(snapshot.throughEntryId));
+    assert.equal((await runtime.readMinutes('a', M0, M0 + 60_000, MiB)).length, 1);
+
+    // Over the port a refusal is an error reply, not a throw out of the served call.
+    port.posted.length = 0;
+    port.deliver({ type: 'req', id: 77, method: 'appendMinutes', args: [[minute(1, 100)], mark(snapshot.throughEntryId + 5)] });
+    await settle();
+    const reply = port.posted.find((m) => m.type === 'res' && m.id === 77);
+    assert.equal(reply?.ok, false);
+    assert.equal(reply?.error?.name, 'RangeError');
   });
 
   await test('runtime: it reads the dataset as it is now, across a reopen for a new storage limit', async () => {

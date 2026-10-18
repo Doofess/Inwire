@@ -290,6 +290,10 @@ export class MonitoringJournal {
   private syncedId = 0;
   private status: JournalState;
   private openSession: string | null;
+  /** The ceiling in force: `options.limitBytes` until `setLimit` moves it. */
+  private limit: number;
+  /** The newest entry's own `receivedMs`, which an `interrupted` written by `setLimit` carries. */
+  private lastReceivedMs: number;
   private readonly index: EntryIndex;
   private readonly generationHex: string;
   /**
@@ -304,9 +308,11 @@ export class MonitoringJournal {
     private readonly options: JournalOptions,
     init: {
       generation: string; end: number; lastId: number; state: JournalState; openSession: string | null;
-      index: EntryIndex; boundaries: BoundaryEvidence[];
+      index: EntryIndex; boundaries: BoundaryEvidence[]; lastReceivedMs: number;
     },
   ) {
+    this.limit = options.limitBytes;
+    this.lastReceivedMs = init.lastReceivedMs;
     this.generationHex = init.generation;
     this.end = init.end;
     this.lastId = init.lastId;
@@ -334,7 +340,7 @@ export class MonitoringJournal {
     };
     const refused = (state: JournalState): MonitoringJournal => new MonitoringJournal(file, options, {
       generation: scan.generation ?? '', end: scan.validBytes, lastId: scan.lastEntryId, state,
-      openSession: null, index: scan.index, boundaries: scan.boundaries,
+      openSession: null, index: scan.index, boundaries: scan.boundaries, lastReceivedMs: scan.lastReceivedMs,
     });
 
     if (scan.status === 'corrupt') return { journal: refused('refused-corrupt'), recovery };
@@ -357,7 +363,7 @@ export class MonitoringJournal {
       }
       const journal = new MonitoringJournal(file, options, {
         generation: generationToHex(bytes), end: FILE_HEADER_BYTES, lastId: 0, state,
-        openSession: null, index: new EntryIndex(), boundaries: [],
+        openSession: null, index: new EntryIndex(), boundaries: [], lastReceivedMs: 0,
       });
       return { journal, recovery };
     }
@@ -372,7 +378,7 @@ export class MonitoringJournal {
     }
     const journal = new MonitoringJournal(file, options, {
       generation: scan.generation!, end: scan.validBytes, lastId: scan.lastEntryId, state,
-      openSession: scan.openSession, index: scan.index, boundaries: scan.boundaries,
+      openSession: scan.openSession, index: scan.index, boundaries: scan.boundaries, lastReceivedMs: scan.lastReceivedMs,
     });
     // A session a crash left open. `receivedMs` is the last entry's own, so the
     // gap runs from the last thing seen, and no count is invented.
@@ -386,6 +392,36 @@ export class MonitoringJournal {
   }
 
   get state(): JournalState { return this.status; }
+
+  /** The whole dataset's ceiling now in force (the journal plus the sidecar). */
+  get limitBytes(): number { return this.limit; }
+
+  /**
+   * Moves the ceiling in place. Nothing on disk depends on it, so there is no
+   * rescan and every port and object holding this journal stays valid - which is
+   * the point: the way back from a full dataset is a larger limit, and closing
+   * and reopening the journal to apply one scans every entry under a deadline
+   * shorter than the scan.
+   *
+   * A journal that stopped at its old limit is open again when the new one
+   * leaves room for at least the closing reserve. A session its `stop` did not
+   * fit behind is still open on disk, and gets the `interrupted` an open would
+   * have written, so the next `start` is allowed. Any other state is left as it
+   * is: a refused or failed journal does not become writable by a number.
+   */
+  setLimit(limitBytes: number): void {
+    if (!Number.isSafeInteger(limitBytes) || limitBytes < 1) throw new RangeError(`a limit is a positive safe integer of bytes (got ${limitBytes})`);
+    this.limit = limitBytes;
+    if (this.status !== 'storage-limit') return;
+    if (this.end + this.otherBytes() + LIMITS.closingReserveBytes >= limitBytes) return;
+    this.status = 'open';
+    if (this.openSession !== null) {
+      this.writeBoundary({
+        action: 'interrupted', sessionId: this.openSession, receivedMs: this.lastReceivedMs,
+        reason: 'the previous run ended without a stop', droppedDatagrams: null,
+      });
+    }
+  }
 
   /**
    * The newest boundary in the file, or null for one with none. From the list the open scan already
@@ -455,7 +491,7 @@ export class MonitoringJournal {
     // by the reserve, so the `stop` that explains the end always has room to be
     // written. Refusing one of them with a session open writes that `stop`.
     const closes = boundary !== null && (boundary.action === 'stop' || boundary.action === 'interrupted');
-    const ceiling = closes ? this.options.limitBytes : this.options.limitBytes - LIMITS.closingReserveBytes;
+    const ceiling = closes ? this.limit : this.limit - LIMITS.closingReserveBytes;
     if (total + entryBytes > ceiling) {
       this.enterStorageLimit(input.receivedMs);
       return false;
@@ -512,7 +548,7 @@ export class MonitoringJournal {
    */
   private writeBoundary(b: BoundaryFields): boolean {
     const body = encodeBoundary(b);
-    if (this.end + this.otherBytes() + ENTRY_HEADER_BYTES + body.length > this.options.limitBytes) {
+    if (this.end + this.otherBytes() + ENTRY_HEADER_BYTES + body.length > this.limit) {
       if (this.status === 'open') this.status = 'storage-limit';
       return false;
     }
@@ -541,6 +577,7 @@ export class MonitoringJournal {
       return false;
     }
     this.index.note(id, this.end, this.openSession, receivedMs);
+    this.lastReceivedMs = receivedMs;
     if (boundary !== null) this.boundaryList.push(boundaryEvidence(this.generationHex, id, boundary));
     this.end += bytes.length;
     this.lastId = id;

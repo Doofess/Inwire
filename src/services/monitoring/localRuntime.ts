@@ -17,7 +17,7 @@
 import type { MonitoringJournal } from './journal';
 import type { MinuteInput, RollupOpenStatus, RollupStore } from './rollupStore';
 import type { HostRuntime } from './runtime';
-import type { BoundaryEvidence, Evidence, EvidencePage, EvidenceRef, JournalSnapshot, RollupWatermark, Snapshot } from './types';
+import { LIMITS, type BoundaryEvidence, type Evidence, type EvidencePage, type EvidenceRef, type JournalSnapshot, type RollupWatermark, type Snapshot } from './types';
 
 export class LocalRuntime implements HostRuntime {
   private handlers: ((entries: Evidence[]) => void)[] = [];
@@ -59,8 +59,19 @@ export class LocalRuntime implements HostRuntime {
 
   async sources(): Promise<string[]> { return this.rollups.sources(); }
 
+  /**
+   * The Worker's one write, so it is bounded here where both files are known: a
+   * watermark no further than the journal's end, and a batch that leaves the
+   * journal and the sidecar together inside the limit less the closing reserve,
+   * which the journal's `stop` relies on. A refusal rejects (`RangeError`) and
+   * `runtimeRpc` answers it as an error reply; nothing is written.
+   */
   async appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark): Promise<void> {
-    this.rollups.appendMinutes(minutes, watermark);
+    const snapshot = this.journal.snapshot();
+    this.rollups.appendMinutes(minutes, watermark, {
+      journalThroughEntryId: snapshot.throughEntryId,
+      maxBatchBytes: this.journal.limitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - this.rollups.size(),
+    });
   }
 
   async rollupStatus(): Promise<{ status: RollupOpenStatus; reason?: string }> { return this.opened; }

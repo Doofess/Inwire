@@ -51,7 +51,7 @@ import { isComponentId } from './updateCenter/components';
 import { UpdateCenter } from './updateCenter/host';
 import { SpeedTestHost } from './speedTest/host';
 import { MonitoringHost } from './monitoring/host';
-import { planQuitDrain } from './monitoring/quitDrain';
+import { planQuitDrain, runQuitDrain } from './monitoring/quitDrain';
 import { readMonitoringSettings, saveMonitoringSettings } from './monitoring/settings';
 import { monitoringRoot } from './monitoring/volume';
 import { captureDirectory, CaptureStoreHost } from './store/host';
@@ -340,14 +340,20 @@ async function start(): Promise<void> {
     if (plan === 'quit') { monitoring.release(); return; }
     event.preventDefault();
     if (plan === 'wait') return;
-    monitoringDrain = monitoring.drainForQuit().then((result) => {
-      if (!result.ok || !result.clean) console.error(`[monitoring] quit drain was not clean: ${result.ok ? 'final boundary or flush refused' : result.message}`);
-      monitoringDrained = true;
-      // On a macrotask: a drain that settled through microtasks alone would call
-      // quit inside Electron's own `will-quit` dispatch, where it is ignored, and
-      // leave a windowless process holding the single-instance lock.
-      setImmediate(() => app.quit());
-    });
+    monitoringDrain = runQuitDrain(
+      () => monitoring.drainForQuit(),
+      (result) => {
+        if (!result.ok || !result.clean) console.error(`[monitoring] quit drain was not clean: ${result.ok ? 'final boundary or flush refused' : result.message}`);
+      },
+      (error) => console.error('[monitoring] quit drain failed:', error),
+      () => {
+        monitoringDrained = true;
+        // On a macrotask: a drain that settled through microtasks alone would call
+        // quit inside Electron's own `will-quit` dispatch, where it is ignored, and
+        // leave a windowless process holding the single-instance lock.
+        setImmediate(() => app.quit());
+      },
+    );
   });
   // Sleep ends intake with a boundary; on resume the UI says why it stopped and
   // asks for Start again. Nothing estimates what the sleeping machine missed.

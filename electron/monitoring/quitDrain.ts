@@ -24,3 +24,23 @@ export function planQuitDrain(state: QuitState): 'quit' | 'drain' | 'wait' {
   if (state.running) return 'drain';
   return 'quit';
 }
+
+/**
+ * Runs the one drain and ALWAYS calls `settled` afterwards - a result, a
+ * rejection or a synchronous throw alike. `settled` is what marks the drain
+ * done and quits again, so a drain that failed to answer must not leave the
+ * quit held for ever behind `wait`: a windowless process holding the
+ * single-instance lock. A failure is reported, never rethrown.
+ */
+export function runQuitDrain<R>(
+  drain: () => Promise<R>,
+  report: (result: R) => void,
+  fail: (error: unknown) => void,
+  settled: () => void,
+): Promise<void> {
+  return Promise.resolve()
+    .then(drain)
+    .then(report)
+    .catch(fail)
+    .finally(settled);
+}

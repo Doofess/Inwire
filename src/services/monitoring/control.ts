@@ -16,7 +16,7 @@
  * Plain data throughout, because every one of these crosses a structured
  * clone.
  */
-import { readSourceConfig } from './config';
+import { MAX_STORAGE_BYTES, readSourceConfig } from './config';
 import type { JournalState } from './journal';
 import type { ListenerState, RejectedSender } from './sourceHealth';
 import { LIMITS, type JournalSnapshot, type SourceConfig } from './types';
@@ -209,7 +209,7 @@ export function readToUtility(v: unknown): ToMonitoringUtility | null {
   switch (v.type) {
     case 'open': {
       if (!isText(v.root) || v.root === '') return null;
-      if (!isCount(v.limitBytes) || v.limitBytes < LIMITS.minStorageBytes) return null;
+      if (!isCount(v.limitBytes) || v.limitBytes < LIMITS.minStorageBytes || v.limitBytes > MAX_STORAGE_BYTES) return null;
       return { type: 'open', id, root: v.root, limitBytes: v.limitBytes };
     }
     case 'start': {

@@ -35,7 +35,7 @@ import {
   MonitoringJournal, StaleGenerationError, recoverJournal,
   type EvidenceInput, type JournalOptions,
 } from '../../src/services/monitoring/journal';
-import { RollupStore } from '../../src/services/monitoring/rollupStore';
+import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES, RollupStore } from '../../src/services/monitoring/rollupStore';
 import { MAX_ROLLUP_INFLATED_BYTES, decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { EntryIndex, INDEX_STRIDE } from '../../src/services/monitoring/index';
 import { monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
@@ -657,6 +657,113 @@ function journalCases(kind: 'memory' | 'disk'): void {
     }
   });
 
+  // A header written in pieces into a preallocated file: some of its bytes, then
+  // zeros to EOF. Built from a real entry so the leading bytes are really a header's.
+  test(tag('a torn header (some header bytes, then zeros to EOF) is a torn tail and recovers'), () => {
+    for (const kept of [1, 2, 4]) {
+      const rig = newRig(kind);
+      build(rig.file, [10, 20, 30]);
+      const full = readAll(rig.file);
+      const last = entryStarts(full).at(-1)!;
+      const zeros = 200;
+      const image = Uint8Array.from([...full.subarray(0, last + kept), ...new Uint8Array(zeros)]);
+      assert.equal(parseEntryHeader(JOURNAL_FRAMING, image.subarray(last, last + 24)).ok, false, 'the header is one that fails to parse');
+      const file = rig.load(image);
+      const rec = recoverJournal(file);
+      assert.equal(rec.status, 'ok', `${kept} header bytes`);
+      assert.equal(rec.completeEntries, 3, `${kept} header bytes`);
+      assert.deepEqual(rec.tornTail, { fromOffset: last, bytes: kept + zeros }, `${kept} header bytes`);
+      const { journal } = open(file);
+      assert.equal(journal.state, 'open', `${kept} header bytes`);
+      assert.equal(journal.snapshot().throughEntryId >= 3, true);
+      assert.equal(sha(readAll(file).subarray(0, last)), sha(full.subarray(0, last)), 'the valid part is untouched');
+    }
+  });
+
+  test(tag('a header that fails to parse with garbage after it stays refused-corrupt, and nothing is written'), () => {
+    const rig = newRig(kind);
+    build(rig.file, [10, 20, 30]);
+    const full = readAll(rig.file);
+    const last = entryStarts(full).at(-1)!;
+    // Header bytes, zeros to the end of the header, then a non-zero byte past it.
+    const tail = new Uint8Array(24 + 40);
+    tail.set(full.subarray(last, last + 4), 0);
+    tail[tail.length - 1] = 0x55;
+    const file = rig.load(Uint8Array.from([...full.subarray(0, last), ...tail]));
+    const before = sha(readAll(file));
+    const { journal, recovery } = open(file);
+    assert.equal(recovery.status, 'corrupt');
+    assert.equal(recovery.tornTail, null);
+    assert.equal(journal.state, 'refused-corrupt');
+    assert.equal(sha(readAll(file)), before);
+  });
+
+  test(tag('a header that fails to parse, zeros, and then a valid entry stays refused-corrupt'), () => {
+    const rig = newRig(kind);
+    build(rig.file, [10, 20, 30]);
+    const full = readAll(rig.file);
+    const last = entryStarts(full).at(-1)!;
+    const entry = full.subarray(last);
+    const image = Uint8Array.from([...full.subarray(0, last), ...entry.subarray(0, 4), ...new Uint8Array(40), ...entry]);
+    const file = rig.load(image);
+    const before = sha(readAll(file));
+    const { journal, recovery } = open(file);
+    assert.equal(recovery.status, 'corrupt');
+    assert.equal(recovery.tornTail, null);
+    assert.equal(journal.state, 'refused-corrupt');
+    assert.equal(sha(readAll(file)), before);
+  });
+
+  test(tag('setLimit changes the ceiling in place: a closed-by-limit journal takes Start again, nothing is rescanned'), () => {
+    const reserve = LIMITS.closingReserveBytes;
+    const other = 500;
+    const limit = reserve + 4_000;
+    const rig = newRig(kind);
+    const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
+    journal.append([bnd('start', 'S1', T0)]);
+    for (let i = 0; i < 1_000 && journal.state === 'open'; i++) journal.append([dg(T0 + 1, new Uint8Array(40))]);
+    assert.equal(journal.state, 'storage-limit');
+    assert.equal(journal.limitBytes, limit);
+    const sizeAtLimit = rig.file.size();
+    // Not enough room: the same ceiling, or one too close, changes nothing about the state.
+    journal.setLimit(limit);
+    assert.equal(journal.state, 'storage-limit');
+    journal.setLimit(sizeAtLimit + other + reserve);
+    assert.equal(journal.state, 'storage-limit', 'a ceiling with no room past the reserve is not room');
+    // Room: the state moves back, the same object appends, the closed session needs no marker.
+    journal.setLimit(limit * 4);
+    assert.equal(journal.state, 'open');
+    assert.equal(journal.limitBytes, limit * 4);
+    assert.equal(rig.file.size(), sizeAtLimit, 'raising the ceiling wrote nothing: the session was closed by a stop');
+    assert.equal(journal.append([bnd('start', 'S2', T0 + 5)]).appended, 1);
+    assert.equal(journal.append([dg(T0 + 6, [1])]).appended, 1);
+    // Lowering it below what is held closes the door again at the next write.
+    journal.setLimit(sizeAtLimit);
+    assert.equal(journal.append([dg(T0 + 7, [1])]).appended, 0);
+    assert.equal(journal.state, 'storage-limit');
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(() => journal.setLimit(bad), RangeError, `limit ${bad}`);
+    }
+  });
+
+  test(tag('setLimit on a session the limit could not close writes the interrupted marker a crash would have'), () => {
+    const limit = LIMITS.closingReserveBytes + 2_000;
+    let other = 0;
+    const rig = newRig(kind);
+    const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
+    journal.append([bnd('start', 'S1', T0)]);
+    journal.append([dg(T0 + 1, new Uint8Array(100))]);
+    other = limit - rig.file.size() - 5;
+    assert.equal(journal.append([dg(T0 + 2, new Uint8Array(100))]).refused, 1);
+    assert.equal(journal.state, 'storage-limit');
+    other = 0;
+    journal.setLimit(limit * 2);
+    assert.equal(journal.state, 'open');
+    const marker = journal.readEvidence({ generation: GEN, entryId: journal.snapshot().throughEntryId }) as BoundaryEvidence;
+    assert.deepEqual([marker.action, marker.sessionId], ['interrupted', 'S1']);
+    assert.equal(journal.append([bnd('start', 'S2', T0 + 9)]).appended, 1, 'the new session is accepted behind the marker');
+  });
+
   test(tag('readPage refuses arguments that are not integers in range (they will arrive over IPC)'), () => {
     const rig = newRig(kind);
     const journal = build(rig.file, [1, 2, 3]);
@@ -1185,6 +1292,59 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.deepEqual(got.map((m) => m.bytes), [mb(1), mb(2), mb(3)]);
     assert.deepEqual(got.map((m) => m.throughEntryId), [10, 10, 20], 'each fragment names its own batch watermark');
     assert.throws(() => store.readMinutes('a', M0, M0 + 2 * MIN, 100), /maxBytes|budget|limit/i, 'a range past maxBytes is refused, not clipped');
+  });
+
+  test(tag('a truncate that throws on the torn tail is rebuild-required, not a failed open (M6)'), () => {
+    const rig = newRig(kind);
+    const { store } = openStore(rig.file);
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(10));
+    // A torn batch: zeros past the closed one, which is what a torn append leaves.
+    const closed = rig.file.size();
+    rig.file.write(closed, new Uint8Array(30));
+    const real = rig.reopen();
+    const refusing: BlockFile = {
+      read: (o, b) => real.read(o, b), write: (o, b) => real.write(o, b), flush: () => real.flush(), size: () => real.size(),
+      close: () => real.close(),
+      truncate: () => { throw new Error('the volume refuses'); },
+    } as BlockFile;
+    const opened = openStore(refusing);
+    assert.equal(opened.status, 'rebuild-required');
+    assert.match(opened.reason ?? '', /could not be removed/);
+    assert.equal(real.size(), closed + 30, 'nothing was changed');
+    // The sidecar is a cache: it refuses appends until reset.
+    assert.throws(() => opened.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(20)));
+    // On a volume that can truncate, the same file opens clean and the closed batch is intact.
+    const healthy = openStore(rig.reopen());
+    assert.equal(healthy.status, 'ok');
+    assert.equal(healthy.store.watermark()?.throughEntryId, 10);
+    assert.equal(rig.file.size(), closed, 'the unfinished tail is cut once the volume allows it');
+  });
+
+  test(tag('appendMinutes refuses what the aggregator never sends: a watermark past the journal, too many minutes, too many bytes, a batch over the room (M1)'), () => {
+    const rig = newRig(kind);
+    const { store } = openStore(rig.file);
+    const one = { sourceKey: 'a', minuteMs: M0, bytes: mb(1) };
+    const size = rig.file.size();
+    // 1. A watermark past the journal's end vouches for entries that do not exist.
+    assert.throws(() => store.appendMinutes([one], WM(101), { journalThroughEntryId: 100 }), RangeError);
+    store.appendMinutes([one], WM(100), { journalThroughEntryId: 100 });
+    const afterOk = rig.file.size();
+    assert.ok(afterOk > size, 'a watermark at the journal end is accepted');
+    // 2. Minutes per call.
+    const many = Array.from({ length: MAX_APPEND_MINUTES + 1 }, () => ({ sourceKey: 'a', minuteMs: M0, bytes: new Uint8Array(0) }));
+    assert.throws(() => store.appendMinutes(many, WM(100)), RangeError);
+    assert.doesNotThrow(() => store.appendMinutes(many.slice(1), WM(100)));
+    const afterMany = rig.file.size();
+    // 3. Bytes per call.
+    assert.throws(() => store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: new Uint8Array(MAX_APPEND_BYTES + 1) }], WM(100)), RangeError);
+    // 4. The room the limit leaves.
+    assert.throws(() => store.appendMinutes([one], WM(100), { maxBatchBytes: 10 }), RangeError);
+    assert.doesNotThrow(() => store.appendMinutes([one], WM(100), { maxBatchBytes: 10_000 }));
+    // A refusal writes nothing.
+    const afterRoom = rig.file.size();
+    assert.ok(afterRoom > afterMany);
+    assert.equal(store.watermark()?.throughEntryId, 100);
+    assert.equal(openStore(rig.reopen()).status, 'ok', 'the file is still a clean sidecar');
   });
 
   test(tag('a truncated tail: every offset in the last batch keeps the last closed batch and nothing else'), () => {

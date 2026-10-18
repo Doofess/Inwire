@@ -520,19 +520,15 @@ export class Collector {
       if (notReady !== null) return { ok: false, message: notReady };
       if (abort.aborted) return { ok: false, message: STOPPED_BEFORE_START };
 
-      // The limit is the journal's open option, so a changed one means closing and reopening
-      // both files. Only while stopped: this is that branch.
+      // A changed limit is applied in place. Closing and reopening to apply it rescans every entry
+      // of the journal, which a full dataset cannot do inside Start's deadline, and it would strand
+      // the Worker's view of the objects. Only while stopped: this is that branch.
       if (this.dataset !== null && this.dataset.limitBytes !== config.storageLimitBytes) {
-        const root = this.dataset.root;
-        const oldLimit = this.dataset.limitBytes;
-        this.closeDataset('unopened');
-        const reopened = this.openNow(root, config.storageLimitBytes);
-        if (!reopened.ok) {
-          // History must survive a limit that will not open: the old one is opened again, and the
-          // Start still fails with the new limit's reason. If that fails too, the status says so.
-          this.openNow(root, oldLimit);
-          return reopened;
-        }
+        this.dataset.journal.setLimit(config.storageLimitBytes);
+        this.dataset.limitBytes = config.storageLimitBytes;
+        // The journal may have stopped at the old limit; its refusal text went with that state.
+        if (this.dataset.journal.state === 'open') this.dataset.problem = null;
+        this.publish();
       }
       const dataset = this.dataset;
       if (dataset === null) return { ok: false, message: 'the monitoring dataset is not open' };
@@ -545,10 +541,12 @@ export class Collector {
       this.listenerError = null;
       this.publish();
 
-      // Before the socket exists, so a datagram shed from the moment it can receive is counted
-      // in this session and carried by its first gap, not zeroed after the bind.
+      // Before the socket exists, so a datagram shed or rejected from the moment it can receive is
+      // counted in this session (and a shed one carried by its first gap), not zeroed after the bind.
       this.shed = 0;
       this.shedSinceGap = 0;
+      this.rejected = new Map();
+      this.rejectedOverflow = 0;
       const socket = this.env.createSocket();
       this.socket = socket;
       this.inbox = [];
@@ -578,8 +576,6 @@ export class Collector {
 
       this.session = { id, config };
       this.received = 0;
-      this.rejected = new Map();
-      this.rejectedOverflow = 0;
       this.listener = 'listening';
       this.stopReason = null;
       this.armFlush();
@@ -714,8 +710,12 @@ export class Collector {
       // Before the close, as `stopOp` does: a drain that fills the journal overwrites it.
       this.stopReason = 'socket-error';
       this.closeSession('socket-error', false);
-      this.listener = 'failed';
-      this.listenerError = why;
+      // The drain inside the close can end the session itself, at the storage limit or on a failure;
+      // that ending has already set the truer stop reason and listener, and is not overwritten.
+      if (this.session === null && this.listener === 'listening') {
+        this.listener = 'failed';
+        this.listenerError = why;
+      }
       this.publish();
     }).catch((e) => this.env.log?.(`monitoring socket error handling: ${message(e)}`));
   }

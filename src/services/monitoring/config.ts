@@ -18,6 +18,15 @@ import { LIMITS, type SourceConfig } from './types';
 /** The common NetFlow collector port (ADR 0058); Cisco documents 9995 too. */
 export const DEFAULT_PORT = 2055;
 
+/**
+ * The most a storage limit may be: 64 TiB, far past any disk this runs on and
+ * well below where `openDeadlineMs` (the limit scanned at 64 MiB/s, in ms)
+ * reaches `setTimeout`'s 2^31-1 ms, which Node fires after about a millisecond -
+ * a saved limit past it would fail every connect at once, for good. At the
+ * ceiling the deadline is about 12 days of the 24.8 the timer allows.
+ */
+export const MAX_STORAGE_BYTES = 64 * 1024 ** 4;
+
 const DOTTED_QUAD = /^(0|[1-9]\d{0,2})(?:\.(0|[1-9]\d{0,2})){3}$/;
 
 function isDottedQuad(value: unknown): value is string {
@@ -36,6 +45,6 @@ export function readSourceConfig(value: unknown): SourceConfig | null {
   if (exporterIPv4 === '0.0.0.0' || exporterIPv4 === '255.255.255.255') return null;
   if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65_535) return null;
   if (typeof storageLimitBytes !== 'number' || !Number.isSafeInteger(storageLimitBytes)
-    || storageLimitBytes < LIMITS.minStorageBytes) return null;
+    || storageLimitBytes < LIMITS.minStorageBytes || storageLimitBytes > MAX_STORAGE_BYTES) return null;
   return { exporterIPv4, bindIPv4, port, storageLimitBytes };
 }

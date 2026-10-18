@@ -37,14 +37,32 @@ import {
   decodeFileHeader, encodeEntry, encodeFileHeader, entryCrc, generationFromHex, generationToHex,
   isHeaderPrefix, parseEntryHeader, scanEntries,
 } from './journalCodec';
+import { MAX_ROLLUP_INFLATED_BYTES } from './rollupCodec';
 import { CorruptRollupError } from './runtime';
-import { FORMAT_VERSION, type Generation, type RollupWatermark } from './types';
+import { FORMAT_VERSION, LIMITS, type Generation, type RollupWatermark } from './types';
 
 const KIND_MINUTE = 1;
 const KIND_WATERMARK = 2;
 const WATERMARK_BODY_BYTES = 16 + 8 + 2;
 const utf8 = new TextEncoder();
 const utf8Strict = new TextDecoder('utf-8', { fatal: true });
+
+/**
+ * The most minutes one `appendMinutes` may carry. The Worker posts after each
+ * page it feeds (`LIMITS.pageEntries` entries) and an entry makes at most one
+ * minute, so a post is a page's worth plus the few fragments an earlier,
+ * still-open minute held back; four pages is that with room, and a call past it
+ * did not come from the aggregator.
+ */
+export const MAX_APPEND_MINUTES = 4 * LIMITS.pageEntries;
+
+/**
+ * The most bytes one `appendMinutes` may carry. What a post holds beyond a page
+ * of small fragments is the sources' held-back minutes: at most the engines the
+ * Worker admits plus the exporter's own key, each at most the largest rollup
+ * the codec can hold. Twice that is the cap.
+ */
+export const MAX_APPEND_BYTES = 2 * (LIMITS.enginesPerExporter + 1) * MAX_ROLLUP_INFLATED_BYTES;
 
 /** `failed`: the file could not be given a header; the store is returned, refusing reads and appends. */
 export type RollupOpenStatus = 'ok' | 'rebuild-required' | 'empty' | 'failed';
@@ -195,8 +213,20 @@ export class RollupStore {
       }
       return { store, status: 'empty' };
     }
-    // Minutes after the last watermark vouch for nothing: the batch was torn.
-    if (file.size() > scan.batchEnd) file.truncate(scan.batchEnd);
+    // Minutes after the last watermark vouch for nothing: the batch was torn. A truncate that
+    // fails is no reason to lose the journal's open over a cache: the file is not trusted, so the
+    // sidecar is rebuilt, and a `reset` writes a fresh header over the lot.
+    if (file.size() > scan.batchEnd) {
+      try {
+        file.truncate(scan.batchEnd);
+      } catch (e) {
+        const reason = `the sidecar's unfinished tail could not be removed: ${e instanceof Error ? e.message : String(e)}`;
+        return {
+          store: new RollupStore(file, journal, nowMs, file.size(), 0, null, new Map(), reason),
+          status: 'rebuild-required', reason,
+        };
+      }
+    }
     const store = new RollupStore(file, journal, nowMs, scan.batchEnd, scan.lastEntryId, scan.watermark, scan.minutes, null);
     return { store, status: 'ok' };
   }
@@ -228,15 +258,33 @@ export class RollupStore {
    * The whole batch, its minutes and then its watermark, in one write. Every
    * entry is encoded before the file is touched, so a body over the cap
    * (`RangeError`) writes nothing.
+   *
+   * The caller is the Worker, so the call is bounded here: at most
+   * `MAX_APPEND_MINUTES` minutes and `MAX_APPEND_BYTES` of rollup, a watermark no
+   * further than `journalThroughEntryId` when that is given, and a batch no larger
+   * than `maxBatchBytes` when that is given (the room the dataset's limit leaves).
+   * Each refusal is a `RangeError` and writes nothing.
    */
-  appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark): void {
+  appendMinutes(
+    minutes: MinuteInput[], watermark: RollupWatermark,
+    bounds: { journalThroughEntryId?: number; maxBatchBytes?: number } = {},
+  ): void {
     this.requireUsable();
+    if (!Array.isArray(minutes) || minutes.length > MAX_APPEND_MINUTES) {
+      throw new RangeError(`a batch is at most ${MAX_APPEND_MINUTES} minutes (got ${Array.isArray(minutes) ? minutes.length : 'no list'})`);
+    }
+    let rollupBytes = 0;
+    for (const m of minutes) rollupBytes += m.bytes instanceof Uint8Array ? m.bytes.length : 0;
+    if (rollupBytes > MAX_APPEND_BYTES) throw new RangeError(`a batch is at most ${MAX_APPEND_BYTES} bytes of rollup (got ${rollupBytes})`);
     if (watermark.generation !== this.journal.generation || watermark.policyVersion !== this.journal.policyVersion) {
       throw new Error('a watermark must name the journal generation and policy this sidecar was opened for');
     }
     if (!Number.isSafeInteger(watermark.throughEntryId) || watermark.throughEntryId < 0) throw new RangeError('a watermark is a non-negative entry id');
     if (this.mark !== null && watermark.throughEntryId < this.mark.throughEntryId) {
       throw new RangeError(`a watermark cannot move back from ${this.mark.throughEntryId} to ${watermark.throughEntryId}`);
+    }
+    if (bounds.journalThroughEntryId !== undefined && watermark.throughEntryId > bounds.journalThroughEntryId) {
+      throw new RangeError(`a watermark of ${watermark.throughEntryId} is past the journal's ${bounds.journalThroughEntryId}`);
     }
 
     const encoded: Uint8Array[] = [];
@@ -271,6 +319,9 @@ export class RollupStore {
     const all = new Uint8Array(encoded.reduce((n, e) => n + e.length, 0));
     let w = 0;
     for (const e of encoded) { all.set(e, w); w += e.length; }
+    if (bounds.maxBatchBytes !== undefined && all.length > bounds.maxBatchBytes) {
+      throw new RangeError(`a batch of ${all.length} bytes does not fit the room the storage limit leaves (${Math.max(0, bounds.maxBatchBytes)})`);
+    }
 
     try {
       this.file.write(this.end, all);
