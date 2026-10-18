@@ -48,6 +48,10 @@ const INTAKE_STOP_REASONS: ReadonlySet<string> = new Set<IntakeStopReason>([
   'user', 'quit', 'suspend', 'socket-error', 'storage-limit', 'storage-failed',
 ]);
 
+export function isIntakeStopReason(v: unknown): v is IntakeStopReason {
+  return typeof v === 'string' && INTAKE_STOP_REASONS.has(v);
+}
+
 // --- status ---------------------------------------------------------------------------------
 
 /**

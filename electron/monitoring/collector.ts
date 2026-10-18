@@ -38,7 +38,7 @@
  */
 import type { BlockFile } from '../../src/services/capture/blockFile';
 import { readSourceConfig } from '../../src/services/monitoring/config';
-import type { IntakeStatus, IntakeStopReason, StartResult, StopReason, StopResult } from '../../src/services/monitoring/control';
+import { isIntakeStopReason, type IntakeStatus, type IntakeStopReason, type StartResult, type StopReason, type StopResult } from '../../src/services/monitoring/control';
 import { MonitoringJournal, type EvidenceInput, type JournalState } from '../../src/services/monitoring/journal';
 import { LiveFeed } from '../../src/services/monitoring/liveFeed';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
@@ -387,6 +387,12 @@ export class Collector {
         generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
       }, { nowMs: this.env.now });
       holder.rollups = opened.store;
+      // The last run's stop survives the relaunch in the journal's own boundary. A run that ended
+      // without one leaves `interrupted` or a bare `start`, and its reason has no copy, so none is invented.
+      if (this.stopReason === null && this.session === null) {
+        const last = journal.lastBoundary();
+        if (last !== null && last.action === 'stop' && isIntakeStopReason(last.reason)) this.stopReason = last.reason;
+      }
       const local = new LocalRuntime(journal, opened.store, {
         status: opened.status, ...(opened.reason === undefined ? {} : { reason: opened.reason }),
       });

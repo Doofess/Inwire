@@ -959,6 +959,67 @@ async function main(): Promise<void> {
     assert.equal(rig.clock.pending, 0, 'no timer survives it');
   });
 
+  /** A second process on the same files: the journal's bytes as they are now, in a fresh collector. */
+  function relaunch(from: Rig): Rig {
+    const rig = new Rig();
+    const v: TestVolume = { journal: new TestFile(), rollups: new MemoryBlockFile(), opens: 0, closes: 0 };
+    v.journal.write(0, from.volume.journal.snapshot());
+    rig.volumes.set(ROOT, v);
+    return rig;
+  }
+
+  await test('stopReason: a relaunch after each kind of stop reports the reason the journal holds, and a Start clears it', async () => {
+    for (const reason of ['user', 'quit', 'suspend'] as const) {
+      const first = new Rig();
+      await first.listen();
+      first.socket.emit(bytes(50));
+      first.drain();
+      await first.collector.stop(reason);
+      await first.collector.dispose();
+      const rig = relaunch(first);
+      assert.deepEqual(await rig.collector.open(ROOT, CFG.storageLimitBytes), { ok: true });
+      assert.equal(rig.collector.status().stopReason, reason, reason);
+      assert.equal(rig.last.stopReason, reason, `${reason}: posted, not only held`);
+      assert.equal(rig.last.listener, 'stopped');
+      rig.collector.attach(new FakePort());
+      assert.deepEqual(await rig.collector.start(CFG), { ok: true });
+      assert.equal(rig.collector.status().stopReason, null, `${reason}: a Start clears it`);
+    }
+  });
+
+  await test('stopReason: a relaunch after the journal filled reports storage-limit', async () => {
+    const first = new Rig();
+    await first.listen();
+    for (let round = 0; round < 12 && !first.socket.closed; round++) {
+      for (let i = 0; i < 100; i++) first.socket.emit(bytes(LIMITS.maxPayloadBytes, round & 0xff));
+      first.drain();
+    }
+    assert.equal(first.last.stopReason, 'storage-limit');
+    const rig = relaunch(first);
+    await rig.collector.open(ROOT, CFG.storageLimitBytes);
+    assert.equal(rig.collector.status().stopReason, 'storage-limit');
+  });
+
+  await test('stopReason: a relaunch after a run that never wrote a stop (a crash) reports none, and invents no reason', async () => {
+    const first = new Rig();
+    await first.listen();
+    first.socket.emit(bytes(50));
+    first.drain();
+    // No stop, no dispose: the process is gone with the session open.
+    assert.ok(!actions(fileEntries(first.volume.journal)).some((a) => a.startsWith('stop')), 'the file holds no stop');
+    const rig = relaunch(first);
+    assert.deepEqual(await rig.collector.open(ROOT, CFG.storageLimitBytes), { ok: true });
+    assert.equal(rig.collector.status().stopReason, null);
+    assert.equal(rig.last.stopReason, null);
+    assert.ok(actions(fileEntries(rig.volume.journal)).some((a) => a.startsWith('interrupted')), 'the open recorded the interruption');
+  });
+
+  await test('stopReason: a journal with no boundary at all (a new one) reports none', async () => {
+    const rig = new Rig();
+    await rig.collector.open(ROOT, CFG.storageLimitBytes);
+    assert.equal(rig.collector.status().stopReason, null);
+  });
+
   await test('dispose: afterwards Start is refused, the runtime is unavailable and a new port is closed', async () => {
     const rig = new Rig();
     await rig.listen();

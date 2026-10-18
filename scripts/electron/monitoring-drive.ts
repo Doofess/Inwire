@@ -656,9 +656,9 @@ await scenario('5 and 8. page reload, and no duplicate feed', async () => {
   const t = await tables(p);
   checkTrue('8: ...they stay exact after another refresh', (await read(p)).records === led.records
     && same(t.endpoints, led.endpoints()), `${(await read(p)).records} vs ${led.records}`);
-  const acceptedOnReconnect = (await read(p)).accepted;
-  checkTrue('8: ...and the Source row still shows what was accepted before the reload, without waiting for a new datagram',
-    acceptedOnReconnect === led.datagrams, `${acceptedOnReconnect} vs ${led.datagrams}: after a reload the sheet says "Nothing received from the exporter yet" until the next datagram (health is not replayed on connect)`);
+  const sourceText = (await read(p)).text;
+  checkTrue('8: ...and the Source row still shows that something was received before the reload, without waiting for a new datagram',
+    !/Nothing received from the exporter yet/.test(sourceText), `the sheet reads "Nothing received from the exporter yet" after a reload (the Worker's health restarts on connect; the utility's count does not)`);
   await led.send(port, [B]);
   // Accepted is the Worker's own counter, so it restarts with a new Worker; after one datagram it must be live again.
   checkTrue('8: ...and one more datagram brings the Source row back to life (Accepted counts again)', await until(async () => ((await read(p)).accepted ?? 0) >= 1, 20_000),

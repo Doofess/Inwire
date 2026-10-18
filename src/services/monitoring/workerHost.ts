@@ -45,7 +45,9 @@ export type ToMonitoringWorker =
   | { type: 'query'; requestId: number; viewId: string; spec: QuerySpec }
   | { type: 'cancelQuery'; requestId: number; targetRequestId: number }
   | { type: 'detail'; requestId: number; snapshot: Snapshot; ref: EvidenceRef; recordIndex: number }
-  | { type: 'shutdown'; requestId: number };
+  | { type: 'shutdown'; requestId: number }
+  /** Liveness: no request id, answered with `pong` straight from the message handler. */
+  | { type: 'ping' };
 
 export type RebuildPhase = 'idle' | 'rebuilding' | 'live' | 'failed';
 
@@ -60,6 +62,8 @@ export type FromMonitoringWorker =
   | { type: 'detail-reply'; requestId: number; ok: false; code: DetailFailure; message: string }
   | { type: 'shutdown-reply'; requestId: number }
   | { type: 'error-reply'; requestId: number; message: string }
+  /** The answer to `ping`; any message from the Worker counts as a sign of life, this one exists for when it has nothing else to say. */
+  | { type: 'pong' }
   /** Not a reply: how far the rollups have got, sent as it changes. */
   | { type: 'rebuild'; phase: RebuildPhase; fedThroughEntryId: number; targetEntryId: number; message?: string }
   /**
@@ -163,6 +167,8 @@ export class MonitoringWorkerHost {
   // --- dispatch --------------------------------------------------------------------------------------
 
   handle(message: unknown): void {
+    // Before everything else and synchronous: a pong that waited behind a running query would read as a dead Worker.
+    if (isObject(message) && message.type === 'ping') { this.options.post({ type: 'pong' }); return; }
     if (!isObject(message) || typeof message.type !== 'string' || typeof message.requestId !== 'number') return;
     const requestId = message.requestId;
     switch (message.type) {

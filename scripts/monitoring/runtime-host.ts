@@ -943,11 +943,17 @@ class FakeWorker implements WorkerLike {
   replies: Record<string, (m: Record<string, unknown>) => unknown | 'none'> = {
     connect: (m) => ({ type: 'connect-reply', requestId: m.requestId, ok: true, phase: 'live', watermark: 5 }),
   };
+  /** Like the real Worker, it answers a ping; a test sets this false to make it go silent. */
+  answersPings = true;
   private message: ((e: { data: unknown }) => void)[] = [];
   private error: ((e: { message?: string }) => void)[] = [];
   postMessage(message: unknown, transfer?: unknown[]): void {
     const m = message as Record<string, unknown>;
     this.posts.push({ message: m, transfer });
+    if (m.type === 'ping') {
+      if (this.answersPings) queueMicrotask(() => this.emit({ type: 'pong' }));
+      return;
+    }
     const answer = this.replies[String(m.type)]?.(m);
     if (answer !== undefined && answer !== 'none') queueMicrotask(() => this.emit(answer));
   }
@@ -996,6 +1002,82 @@ function clientRig(over: Partial<MonitoringBridge> & { sendPort?: boolean } = {}
     listeners: () => exitListeners.length + statusListeners.length,
   };
 }
+
+const SILENT = /the monitoring Worker stopped answering/;
+
+test('client: a Worker that goes silent is torn down within the request deadline plus a ping, every pending call settles, and a later connect works', async () => {
+  const r = clientRig();
+  await r.client.connect();
+  const w = r.workers[0];
+  w.answersPings = false;
+  w.replies.query = () => 'none';
+  w.replies.detail = () => 'none';
+  const query = r.client.query('v', { kind: 'raw' } as never);
+  const detail = r.client.detail({} as never, {} as never, 0);
+  await flush();
+  assert.equal(r.client.state.runtime, 'connected');
+  // The last sign of life was the connect-reply at t=0; the deadline is requestMs from it, noticed at most one tick later.
+  await r.clock.advance(LIMITS.requestMs - 1);
+  assert.equal(r.client.state.runtime, 'connected');
+  assert.equal(w.terminated, 0);
+  await r.clock.advance(1);
+  const reply = await query;
+  assert.equal(reply.ok, false);
+  assert.match((reply as { message: string }).message, SILENT);
+  assert.equal(await detail, null);
+  assert.equal(r.client.state.runtime, 'unavailable');
+  assert.match(String(r.client.state.problem), SILENT);
+  assert.equal(w.terminated, 1);
+  assert.ok(w.of('ping').length >= 2, 'it kept pinging while it waited');
+  assert.equal(r.clock.pendingTimers, 0);
+  // Recovery is the ordinary one: a new Worker, a new port.
+  const again = await r.client.connect();
+  assert.equal(again.ok, true);
+  assert.equal(r.workers.length, 2);
+  r.client.dispose();
+});
+
+test('client: a Worker that answers pings is never torn down, however long a query takes', async () => {
+  const r = clientRig();
+  await r.client.connect();
+  const w = r.workers[0];
+  w.replies.query = () => 'none';
+  const query = r.client.query('v', { kind: 'raw' } as never);
+  await r.clock.advance(LIMITS.requestMs * 10);
+  assert.equal(r.client.state.runtime, 'connected');
+  assert.equal(w.terminated, 0);
+  assert.ok(w.of('ping').length >= (LIMITS.requestMs * 10) / 5_000 - 1);
+  w.emit({ type: 'query-reply', requestId: w.of('query')[0].message.requestId, reply: { ok: false, code: 'cancelled', message: 'late' } });
+  await query;
+  r.client.dispose();
+  assert.equal(r.clock.pendingTimers, 0);
+});
+
+test('client: any message from the Worker counts as a sign of life, not only a pong', async () => {
+  const r = clientRig();
+  await r.client.connect();
+  const w = r.workers[0];
+  w.answersPings = false;
+  for (let i = 0; i < 4; i++) {
+    await r.clock.advance(LIMITS.requestMs - 1);
+    w.emit({ type: 'rebuild', phase: 'rebuilding', fedThroughEntryId: i, targetEntryId: 10 });
+  }
+  assert.equal(r.client.state.runtime, 'connected');
+  assert.equal(w.terminated, 0);
+  r.client.dispose();
+});
+
+test('client: the heartbeat stops with the Worker - on an error, an exit and a dispose', async () => {
+  for (const end of ['error', 'exit', 'dispose'] as const) {
+    const r = clientRig();
+    await r.client.connect();
+    if (end === 'error') r.workers[0].fail('boom'); else if (end === 'exit') r.exit(EXIT); else await r.client.dispose();
+    assert.equal(r.clock.pendingTimers, 0, end);
+    const pings = r.workers[0].of('ping').length;
+    await r.clock.advance(LIMITS.requestMs * 3);
+    assert.equal(r.workers[0].of('ping').length, pings, end);
+  }
+});
 
 const EXIT: RuntimeExit = { code: 1, wasRunning: true, message: 'monitoring stopped unexpectedly (exit 1)' };
 
@@ -1096,6 +1178,9 @@ test('client: main may take longer than the port wait to answer - the wait start
   answer();
   const result = await done;
   assert.equal(result.ok, true);
+  // The port wait left nothing behind: the two that remain are the connected Worker's heartbeat (ping and silence).
+  assert.equal(r.clock.pendingTimers, 2);
+  await r.client.dispose();
   assert.equal(r.clock.pendingTimers, 0);
 });
 

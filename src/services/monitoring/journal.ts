@@ -387,6 +387,14 @@ export class MonitoringJournal {
 
   get state(): JournalState { return this.status; }
 
+  /**
+   * The newest boundary in the file, or null for one with none. From the list the open scan already
+   * built, so it costs nothing on top of it; after a crash that is the `interrupted` this open wrote.
+   */
+  lastBoundary(): BoundaryEvidence | null {
+    return this.boundaryList[this.boundaryList.length - 1] ?? null;
+  }
+
   snapshot(): JournalSnapshot {
     return {
       generation: this.generationHex,

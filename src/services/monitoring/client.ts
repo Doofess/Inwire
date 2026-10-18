@@ -9,7 +9,7 @@
  * saved source go to main over the bridge, and the utility's status and exit
  * come back the same way, because control never travels on the runtime port.
  *
- * Four rules, each there because a plausible alternative hangs or lies:
+ * Five rules, each there because a plausible alternative hangs or lies:
  *
  * - **A port is taken only from this window, on the literal channel.** The
  *   preload posts to `'*'`, so the `source === window` check is what makes
@@ -19,6 +19,11 @@
  *   fails each pending query (`runtime-unavailable`), detail (`null`) and
  *   connect, then terminates the Worker. A pending promise that outlives its
  *   runtime is a spinner that never stops.
+ * - **A silent Worker is noticed.** A Worker that ends without an `error` event
+ *   leaves every pending call waiting for ever, and a deadline per request would
+ *   cut off a slow query that is merely working. So a ping goes every
+ *   `PING_MS` and any message at all is a sign of life; `LIMITS.requestMs`
+ *   without one tears the Worker down like an `error` does.
  * - **A dead runtime is replaced, not repaired.** The next `connect` makes a
  *   new Worker and asks for a new port; the old one is never reused.
  * - **Everything from main and the Worker is `unknown` until read** with the
@@ -119,6 +124,8 @@ const UNREADABLE = 'main answered with something this build cannot read';
 const UNAVAILABLE = 'monitoring is not available in this build';
 const REBUILD_PHASES: ReadonlySet<string> = new Set<RebuildPhase>(['idle', 'rebuilding', 'live', 'failed']);
 const FRESHNESS: ReadonlySet<string> = new Set(['never', 'fresh', 'stale']);
+/** How often a ping goes to an adopted Worker. */
+const PING_MS = 5_000;
 
 /**
  * The Worker's `health` push, checked for the shape the sheet reads from. The Worker is ours,
@@ -183,6 +190,8 @@ export class MonitoringClient {
   // would take a port main posted for the previous page's same-numbered attempt.
   private lastNonce = Math.floor(Math.random() * 2 ** 48);
   private disposed = false;
+  private pingTimer: unknown = null;
+  private silenceTimer: unknown = null;
   private readonly unsubscribers: (() => void)[] = [];
 
   constructor(private readonly deps: ClientDeps) {
@@ -352,7 +361,9 @@ export class MonitoringClient {
   private adopt(worker: WorkerLike): void {
     this.worker = worker;
     worker.addEventListener('message', (event) => {
-      if (this.worker === worker) this.onWorkerMessage(event.data);
+      if (this.worker !== worker) return;
+      this.armSilence(worker);
+      this.onWorkerMessage(event.data);
     });
     worker.addEventListener('error', (event) => {
       if (this.worker !== worker) return;
@@ -360,6 +371,38 @@ export class MonitoringClient {
       this.teardown(message);
       this.dispatch({ type: 'unavailable', message });
     });
+    this.armSilence(worker);
+    this.schedulePing(worker);
+  }
+
+  /** Restarts the silence deadline: called on adopt and on every message, whatever it says. */
+  private armSilence(worker: WorkerLike): void {
+    const { timers } = this.deps;
+    if (this.silenceTimer !== null) timers.clearTimeout(this.silenceTimer);
+    this.silenceTimer = timers.setTimeout(() => {
+      this.silenceTimer = null;
+      if (this.worker !== worker) return;
+      const message = 'the monitoring Worker stopped answering';
+      this.teardown(message);
+      this.dispatch({ type: 'unavailable', message });
+    }, LIMITS.requestMs);
+  }
+
+  private schedulePing(worker: WorkerLike): void {
+    this.pingTimer = this.deps.timers.setTimeout(() => {
+      this.pingTimer = null;
+      if (this.worker !== worker) return;
+      try { worker.postMessage({ type: 'ping' } satisfies ToMonitoringWorker); } catch { /* the silence deadline reports it */ }
+      this.schedulePing(worker);
+    }, PING_MS);
+  }
+
+  private stopHeartbeat(): void {
+    const { timers } = this.deps;
+    if (this.pingTimer !== null) timers.clearTimeout(this.pingTimer);
+    if (this.silenceTimer !== null) timers.clearTimeout(this.silenceTimer);
+    this.pingTimer = null;
+    this.silenceTimer = null;
   }
 
   private onWorkerMessage(data: unknown): void {
@@ -414,6 +457,7 @@ export class MonitoringClient {
   private teardown(reason: string): void {
     const worker = this.worker;
     this.worker = null;
+    this.stopHeartbeat();
     this.portWait?.abort(reason);
     this.portWait = null;
     for (const pending of [...this.pending.values()]) pending.settle({ failure: reason });

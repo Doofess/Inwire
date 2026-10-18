@@ -155,8 +155,18 @@ function listenerLine(state: MonitoringState): { text: string; tone: Tone } {
   }
 }
 
+/**
+ * The Worker's health starts again at every connect, so after a page reload it says `never` until the
+ * next datagram. The utility's own count does not reset, and `monitoringSummary` already falls back to it.
+ */
+function receivedBeforeHealth(state: MonitoringState): boolean {
+  const h = state.health;
+  return (!h || h.freshness === 'never') && (state.intake?.received ?? 0) > 0;
+}
+
 function sourceLine(state: MonitoringState): string {
   const h = state.health;
+  if (receivedBeforeHealth(state)) return 'Receiving';
   if (!h || h.freshness === 'never') return 'Nothing received from the exporter yet';
   if (h.freshness === 'stale') return 'No recent export — nothing for over a minute';
   return h.lastValidWallMs === null ? 'Receiving' : `Last export ${localTime(h.lastValidWallMs)}`;
@@ -164,6 +174,7 @@ function sourceLine(state: MonitoringState): string {
 
 function sourceTone(state: MonitoringState): Tone {
   const h = state.health;
+  if (receivedBeforeHealth(state)) return 'good';
   if (!h || h.freshness === 'never') return 'neutral';
   return h.freshness === 'stale' ? 'warn' : 'good';
 }

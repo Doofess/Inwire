@@ -371,4 +371,22 @@ test('health: a fresh health for an unseen exporter is what initialSourceHealth 
   assert.equal(initialSourceHealth(OTHER).exporterIPv4, OTHER);
 });
 
+test('liveness: a ping is answered with a pong in the same call, before a connect, mid-connect and while a query is running', async () => {
+  const rig = new Rig();
+  rig.append([start(m(0))]);
+  const h = new HostRig(rig.runtime);
+  const pongs = (): number => h.posts.filter((p) => p.type === 'pong').length;
+  h.host.handle({ type: 'ping' });
+  assert.equal(pongs(), 1, 'before any connect');
+  const connecting = h.connect();
+  h.host.handle({ type: 'ping' });
+  assert.equal(pongs(), 2, 'while the connect is still awaiting the runtime');
+  await connecting;
+  const id = h.send({ type: 'query', viewId: 'v', spec: { kind: 'raw' } as never });
+  h.host.handle({ type: 'ping' });
+  assert.equal(pongs(), 3, 'with a query started and not finished');
+  assert.deepEqual(h.repliesTo(id), [], 'the query had not answered yet, so the pong did not wait for it');
+  await h.host.settled();
+});
+
 process.exit((await runAll()) === 0 ? 0 : 1);
