@@ -75,6 +75,16 @@ import {
  */
 const BACKGROUND_WINDOW = process.env.INWIRE_BACKGROUND_WINDOW === '1';
 const BACKGROUND_PARK = -20000;
+
+/**
+ * A log line must never take main down. When whatever launched the app goes
+ * away - a script that exits, a terminal that closes - our stdout is a broken
+ * pipe, and Node's `console` reports the failed write as an `'error'` event
+ * with no listener: an uncaught EPIPE, which Electron shows as a modal dialog
+ * on the desktop of whoever is at the machine. A packaged GUI app has no
+ * console and never reaches this; every launch from a script does.
+ */
+for (const stream of [process.stdout, process.stderr]) stream.on('error', () => {});
 /**
  * Where the renderer comes from in development.
  *

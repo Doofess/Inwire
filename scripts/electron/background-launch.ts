@@ -82,5 +82,9 @@ check('main does not track (save) a background window\'s state',
   /if \(!BACKGROUND_WINDOW\) trackWindowState\(window\)/.test(main));
 check('main keeps a parked window out of occlusion throttling',
   /if \(BACKGROUND_WINDOW\) app\.commandLine\.appendSwitch\('disable-features', 'CalculateNativeWinOcclusion'\)/.test(main));
+// A script that exits leaves main writing to a broken pipe; without a listener
+// the next log line is an uncaught EPIPE, shown as a modal on the owner's desktop.
+check('main swallows write errors on stdout and stderr',
+  /for \(const stream of \[process\.stdout, process\.stderr\]\) stream\.on\('error', \(\) => \{\}\)/.test(main));
 
 process.exit(failures === 0 ? 0 : 1);
