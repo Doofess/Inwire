@@ -200,9 +200,10 @@ interface Hole { lo: number; hi: number; reason: string }
  * `start` and `resume` open, `stop`, `suspend` and `interrupted` close, in
  * entry order. An interval whose close is earlier than its open - a clock that
  * stepped back - covers `[min, max)` of the two, so a stepped clock can never
- * make a gap read as observed beyond that span. A session still open covers up
- * to `nowMs`, and time after it, with nothing open, is `not-recording`: the
- * future is not observed.
+ * make a gap read as observed beyond that span. A session still open is still
+ * recording, so it covers the rest of the range: the History asks to the close of
+ * the minute `nowMs` is in, and the part of it still to come is not a period that
+ * was not collected. Time after a session that closed stays a gap, future or not.
  */
 function coverage(boundaries: BoundaryEvidence[], nowMs: number): Interval[] {
   const out: Interval[] = [];
@@ -219,7 +220,7 @@ function coverage(boundaries: BoundaryEvidence[], nowMs: number): Interval[] {
       openAt = null;
     }
   }
-  if (openAt !== null) out.push({ lo: Math.min(openAt, nowMs), hi: Math.max(openAt, nowMs), reason: 'not-recording' });
+  if (openAt !== null) out.push({ lo: Math.min(openAt, nowMs), hi: Infinity, reason: 'not-recording' });
   return out;
 }
 

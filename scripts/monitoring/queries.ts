@@ -19,6 +19,7 @@ import { StaleGenerationError } from '../../src/services/monitoring/journal';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { boundedInflate } from '../../src/services/monitoring/boundedInflate';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
+import { historySpec } from '../../src/services/monitoring/historyRange';
 import { bucketBounds, runHistoryQuery, validateQuery, type QueryOptions } from '../../src/services/monitoring/queries';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
@@ -361,19 +362,38 @@ test('coverage: a stop for the storage limit says so', async () => {
   assert.deepEqual(r.gaps, [{ fromMs: m(2), toMs: m(4), reason: 'storage-limit' }]);
 });
 
-test('coverage: a reopened journal closes the open session as interrupted, and the future is not recording', async () => {
+test('coverage: a reopened journal closes the open session as interrupted, and an open one is not a gap ahead of now', async () => {
   const rig = new Rig();
   rig.append([start(m(0)), dgram(m(5), [{}])]);
-  // A session left open covers up to now and no further.
+  // A session left open is still recording, past now as well.
   const open = await check(rig, spec(NOW - 2 * MIN, NOW + 2 * MIN, 4));
-  assert.deepEqual(open.gaps, [{ fromMs: NOW, toMs: NOW + 2 * MIN, reason: 'not-recording' }]);
-  assert.deepEqual(coverageOf(open), ['no-records', 'no-records', 'collection-gap', 'collection-gap']);
+  assert.deepEqual(open.gaps, []);
+  assert.deepEqual(coverageOf(open), ['no-records', 'no-records', 'no-records', 'no-records']);
 
   rig.reopen();
   const closed = await check(rig, spec(NOW - 2 * MIN, NOW + 2 * MIN, 4));
   // The journal stamps the interruption at the last thing it had on disk (minute 5), not at the reopen: it cannot know when the run died.
   assert.deepEqual(closed.gaps, [{ fromMs: NOW - 2 * MIN, toMs: NOW + 2 * MIN, reason: 'interrupted' }]);
   assert.deepEqual(coverageOf(closed), ['collection-gap', 'collection-gap', 'collection-gap', 'collection-gap']);
+});
+
+test('coverage: the live edge of a running session is its records, not a gap (the History asks to the close of this minute)', async () => {
+  const rig = new Rig();
+  const now = m(59, 37_500);
+  rig.append([start(m(0)), dgram(m(30), [{ octets: 100 }]), dgram(m(59, 10_000), [{ octets: 4321 }])]);
+  await rollUp(rig).then((h) => h.host.settled());
+  const q = historySpec(SRC, 60 * MIN, now, 60);
+  assert.equal(q.toMs, m(60), 'the range runs to the close of the minute now is in');
+  const { fast, raw } = await askBoth(rig, q, { nowMs: now });
+  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
+  assert.equal(fast.buckets.at(-1)!.coverage, 'observed-records', 'the current minute draws its traffic');
+  assert.equal(fast.buckets.at(-1)!.reportedOctets, 4321n);
+  assert.deepEqual(fast.gaps, [], 'the part of this minute still to come is not a period that was not collected');
+  // A stopped collector's time after the stop is still a gap, now and after it.
+  rig.append([stop(m(59, 20_000))]);
+  const stopped = await askOk(rig, q, { nowMs: now });
+  assert.deepEqual(stopped.gaps, [{ fromMs: m(59, 20_000), toMs: m(60), reason: 'stopped' }]);
+  assert.equal(stopped.buckets.at(-1)!.coverage, 'collection-gap');
 });
 
 test('coverage: shed datagrams are a point gap with the count they could be sure of', async () => {
