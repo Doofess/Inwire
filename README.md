@@ -91,6 +91,16 @@ may touch what, and the map from concept to file.
   the capture shows (gateway, resolvers, DHCP lease, IPv6 router, LLDP neighbour)
   and flagging where they disagree. It sits in Settings rather than being a view,
   because it describes the machine and nothing in it changes when a packet arrives.
+- **NetFlow v5 monitoring** (the Network panel's *Monitoring* section, or
+  `Open monitoring` in the palette): a collector for one exporter, such as a router,
+  firewall or `softflowd`. It listens on a local address you choose, port 2055
+  by default. It keeps a history on disk that survives a restart, up to a
+  storage limit you set, and shows totals, top endpoints and top conversations
+  over any range. A host in it filters the capture by one click. It runs apart
+  from capture: starting, clearing or importing a capture leaves it alone. Its
+  numbers are checked against tshark's own decode of `softflowd`'s exports.
+  v5 only; NetFlow v9, IPFIX and sFlow are dissected in a capture but not
+  collected.
 - **A routing map**, one of the five views: every arc on it is a conversation in
   the buffer, and it redraws as packets arrive. Pins are real geometry standing on
   the globe rather than icons pasted over it.

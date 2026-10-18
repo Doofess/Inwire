@@ -224,6 +224,117 @@ flags, protocol, ToS and both AS numbers.
   this exporter counts a few bytes more than the IP headers say.
 - v5 carries IPv4 only, so a fixture's IPv6 traffic exports nothing.
 
+## softflowd through the built app (`scripts/monitoring/interop.ts`)
+
+The same exporter, this time into the built app. A 612-frame capture,
+generated from seed 7911 and checked against tshark first, was replayed by
+softflowd 1.1.1 in WSL. The datagrams went to a keeper there, and their exact
+bytes were sent to the app's loopback port. tshark 4.6.9's `cflow` decode of
+those bytes is the oracle. "All interop checks passed."
+
+| | tshark | the sheet | rollup path | raw path |
+|---|---|---|---|---|
+| datagrams | 4 | 4 accepted | - | - |
+| records | 101 | 101 | 101 | 101 |
+| packets / octets | 605 / 161,372 | as tshark | as tshark | as tshark |
+| top endpoints (6) | sent and received | equal | equal | equal |
+| top conversations (16 directional pairs) | bytes and packets | equal | equal | equal |
+
+- **softflowd has to run with `-a` when it replays a file.** Without it, the
+  header's uptime is about 6 ms and its clock is the wall clock, so every
+  record's First is later than the header's uptime. The app's decoder then
+  refuses all four datagrams as malformed, and the sheet shows Accepted 0.
+  That refusal is correct: a record's time cannot be derived. A live
+  softflowd on an interface does not have this problem.
+- softflowd counts octets past the Ethernet header here too (161,372 against
+  158,912 by `ip.len`).
+- softflowd did not split a UDP flow left idle for 400 s at its 300 s
+  timeout when it replayed with `-r -a`, so there were 101 records rather
+  than 102. That is the exporter's behaviour, and it is recorded rather than
+  asserted.
+- **What was not run:** sending straight from WSL to the app (path (a)). The
+  probe saw softflowd's datagrams reach a plain receiver on the WSL gateway.
+  The Electron exe has no inbound firewall rule, though, so binding that
+  address would raise an administrator prompt. `--try-direct` runs that path.
+- A later re-run of this script was stopped by Claude Code when system
+  memory ran low, and its log is not evidence either way. The figures above
+  come from the run before it.
+
+## Load on the built app (`scripts/monitoring/load.ts`, 379 s)
+
+The built app, with a stub capture running throughout (240 to 58,900
+frames). A sender on loopback offered 10-record v5 datagrams for 12 s at each
+rate. It also sent 11 strays from a second address at every step. Nothing
+else was running on the machine.
+
+| Datagrams/s | Records/s | Accepted | Shed | Strays refused | Query median (under load) | rAF p99 / max |
+|---|---|---|---|---|---|---|
+| 2 | 19 | 100.00% | 0 | 11/11 | 24 ms | 21 / 42 ms |
+| 400 | 3,994 | 100.00% | 0 | 11/11 | 176 ms | 104 / 222 ms |
+| 3,200 | 31,958 | 100.00% | 0 | 11/11 | 1,127 ms | 118 / 313 ms |
+
+- **Every step from 2 to 3,200 a second accepted everything and shed
+  nothing.** Sequence jumps, gaps and duplicates stayed at 0, and the sheet's
+  record count equalled what was sent. 3,200 a second is where the harness
+  stops, so the app's own limit was not reached.
+- The collector's working set peaked at 118 MB. Its CPU averaged 1.4% and
+  peaked at 2.8% at 3,200 a second.
+- The journal grows by 552 B for a 10-record datagram, 120 B for a 1-record
+  one and 1,512 B for a 30-record one.
+- **Query time grows with history, not with rate.** At 763,000 records a
+  range query took about 1.1 s and a Focus about 1.0 s. With 230 records,
+  both took about 20 ms. No long tasks were recorded at any step. At the top
+  rate, 59 animation frames took longer than 100 ms.
+- **At 400 a second with every record a new pair**, the top tables are
+  refused past 50,000 distinct addresses ("The totals are exact; narrow the
+  range."). The totals stay exact. This is the documented bound.
+- **65 s of silence, then a sequence jump of 1,000.** The sheet showed "No
+  recent export" after 63 s. After the resume it read Receiving, and the
+  jump counted as +1,000 flows and +1 gap.
+- **Restart.** The sheet listed 1,058,144 records both before and after the
+  restart. The window was ready at 4,155 ms and the history was back at
+  5,673 ms. The listener read "Stopped when Inwire last quit." and did not
+  start on its own. With the sidecar deleted, the rebuild brought the same
+  count back at 6,766 ms.
+- **The storage limit, at 16 MiB.** The collector stopped 28.7 s in, with
+  "Stopped: the history reached its storage limit." and the meter at 15.9 of
+  16.0 MB. Guidance to raise the limit was shown, 198 more datagrams added
+  nothing, and the history stayed readable.
+
+Three things the collector does not expose: its inbox depth (only the shed
+count shows overflow), its JS heap, and its fsync latency. The settle time,
+3.0 to 4.6 s from the last datagram to Accepted holding still, is the nearest
+observable. An earlier run of this script overlapped another app launch on
+the same machine. Its latency and UI figures were higher, and they are not
+quoted here.
+
+## Faults on the built app (`scripts/electron/monitoring-drive.ts`)
+
+Eleven scenarios against the built app:
+
+1. the golden path
+2. reopening with the same profile
+3. the monitoring Worker terminated, and closing itself silently
+4. the utility process exiting
+5. a page reload
+6. an occupied port
+7. an unsaved capture with the window closed
+8. no duplicate feed after the reload
+9. the sidecar deleted
+10. the storage limit
+11. independence from capture
+
+The full run took 222 s: 101 PASS, 1 FAIL and 1 NOT RUN. The failure was
+scenario 3's silent-Worker check. The drive waited exactly the client's
+15 s heartbeat bound, so the check could not pass. Given that bound plus a
+ping (25 s), scenario 3 alone passed all 15 of its checks in 26 s.
+
+**Not run:** scenario 10's storage-*failed* case. It needs a write to fail
+partway through a run. The built app has no seam for a failing volume, and
+on Windows an open journal handle cannot be broken from outside short of
+filling the disk. The storage-*limit* case did run, in this drive and in
+`load.ts`.
+
 ## The journal (`journal`, ~2.7 GB written to temp and deleted)
 
 The prototype framing is the one ADR 0059 pins: a 64-byte file header, then
@@ -325,6 +436,14 @@ port. *Address pair* is the directional pair of addresses.
   `release/win-unpacked`. An installed `Inwire.exe` under `Program Files`
   carries the same VERSIONINFO, so it should show the same name and
   publisher. That is expected, not measured.
+- **softflowd sending straight to the app over the WSL adapter** (interop
+  path (a)). It needs an inbound firewall rule for the Electron exe.
+- **A storage write failing partway through a run.** The built app has no
+  seam for it (see the fault drive).
+- **Load past 3,200 datagrams a second, or longer than 12 s a step.** The
+  first is the harness's ceiling, not the app's.
+- **The collector's inbox depth, heap and fsync latency.** None of them
+  leaves the process.
 
 ## Exporter survey
 
