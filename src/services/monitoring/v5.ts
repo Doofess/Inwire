@@ -33,6 +33,7 @@
  *
  * No `node:*` and no Electron, like everything under `src/services/`.
  */
+import { exporterKey, exporterOf, isEngineSourceKey, sourceKey } from './sourceKeys';
 import type { DatagramEvidence, DecodeResult, NormalizedV5, Sampling } from './types';
 
 const HEADER_LENGTH = 24;
@@ -41,39 +42,8 @@ const U32 = 2 ** 32;
 /** An age at or past this is a time after the header's uptime, not a flow that old. */
 const FUTURE_AGE = 2 ** 31;
 
-/** A source is the configured exporter plus the v5 engine type and id (ADR 0059). */
-export function sourceKey(exporterIPv4: string, engineType: number, engineId: number): string {
-  return `${exporterIPv4}/${engineType}/${engineId}`;
-}
-
-/**
- * The key a datagram with no engine is rolled up under: the bare exporter
- * address, with no slashes, so it can never equal a `sourceKey`. A malformed or
- * unsupported datagram has no engine to name, and a rollup minute still has to
- * count it (ADR 0059).
- */
-export function exporterKey(exporterIPv4: string): string {
-  return exporterIPv4;
-}
-
-const ENGINE_KEY = /^((?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))\/(0|[1-9]\d{0,2})\/(0|[1-9]\d{0,2})$/;
-
-/**
- * Whether `key` is exactly what `sourceKey` produces: an exporter, an engine
- * type and an engine id, each a canonical number. The bare `exporterKey` is not
- * one - it is where the malformed and unsupported counts live, never a source a
- * query can name or an engine that can be admitted.
- */
-export function isEngineSourceKey(key: string): boolean {
-  const m = ENGINE_KEY.exec(key);
-  return m !== null && Number(m[2]) <= 255 && Number(m[3]) <= 255;
-}
-
-/** The exporter a `sourceKey` or an `exporterKey` belongs to. */
-export function exporterOf(key: string): string {
-  const slash = key.indexOf('/');
-  return slash < 0 ? key : key.slice(0, slash);
-}
+// The source-key helpers moved to `sourceKeys.ts` (ADR 0062); they are re-exported so the v5 callers are unchanged.
+export { exporterKey, exporterOf, isEngineSourceKey, sourceKey };
 
 function ipv4(v: DataView, at: number): string {
   return `${v.getUint8(at)}.${v.getUint8(at + 1)}.${v.getUint8(at + 2)}.${v.getUint8(at + 3)}`;

@@ -26,7 +26,7 @@ import { decodeV5, exporterKey, sourceKey } from '../../src/services/monitoring/
 import type { EvidenceInput } from '../../src/services/monitoring/journal';
 import { EXPORTER, GENERATION, evidence, v5Payload, type FlowSpec, type HeaderSpec } from './fixtures';
 import {
-  BASE, MIN, NOW, SRC, SRC1, Rig, ask, askBoth, askOk, boundary, deflate, dgram, inflate, junk, prng, rollUp, runAll,
+  BASE, MIN, NOW, S1, S2, S3, SRC, SRC1, Rig, ask, askBoth, askOk, boundary, deflate, dgram, inflate, junk, prng, rollUp, runAll,
   spec, start, stop, test, v9, withoutProvenance,
 } from './queryRig';
 
@@ -289,7 +289,7 @@ function buildWorld(seed = 7): World {
   const push = (...inputs: EvidenceInput[]): void => { out().push(...inputs); };
 
   // Session 1: minutes 0..5, stopped part-way through minute 5.
-  push(start(m(0, -1000), 's1'));
+  push(start(m(0, -1000), S1));
   push(...traffic(0, 0, 60_000, 4));
   push(...traffic(1, 0, 60_000, 5));
   push(junk(m(1, 100)), v9(m(1, 150)), junk(m(1, 160), OTHER));
@@ -301,14 +301,14 @@ function buildWorld(seed = 7): World {
   push(v9(m(4, 200)));
   w.bad.push({ ms: m(4, 200), exporter: EXPORTER, kind: 'unsupported' });
   push(...traffic(5, 0, 40_000, 3));
-  push(stop(m(5, 50_000), 's1'));
+  push(stop(m(5, 50_000), S1));
   w.split = w.phase1.length; // everything before is sealed, so a rollup of just this much ends cleanly
 
   // Session 2, after a gap of nearly three minutes in which nothing was collected.
-  push(start(m(8, 10_000), 's2'));
+  push(start(m(8, 10_000), S2));
   push(...traffic(8, 20_000, 60_000, 3));
   push(...traffic(9, 0, 30_000, 3));
-  push(boundary('gap', 's2', m(9, 30_000), 'shed', 7));
+  push(boundary('gap', S2, m(9, 30_000), 'shed', 7));
   push(...traffic(9, 30_000, 60_000, 3));
   // A clock that steps back: minute 10, 11, 10, 11 in entry order, so each is two fragments.
   push(...traffic(10, 0, 60_000, 3));
@@ -328,11 +328,11 @@ function buildWorld(seed = 7): World {
   push(put(m(14, 500), 0, [rflow()]));
   for (let k = 0; k < 4; k++) push(put(m(13, 10_000 + 100 * (k + 1)), 0, block(121, k * 1364, k === 3 ? 408 : 1364)));
   push(put(m(14, 20_000), 1, [rflow()]));
-  push(stop(m(14, 40_000), 's2'));
+  push(stop(m(14, 40_000), S2));
 
   // Phase 2: a third session, never closed, and entries that land in minutes the sidecar already holds.
   phase = 2;
-  push(start(m(15, 5000), 's3'));
+  push(start(m(15, 5000), S3));
   push(...traffic(15, 6000, 60_000, 4));
   push(put(m(13, 20_000), 0, [rflow()])); // into the union minute
   push(put(m(12, 59_000), 0, [rflow()])); // into the incomplete minute

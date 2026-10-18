@@ -15,7 +15,8 @@
  * case fail by name, and putting it back.
  */
 import assert from 'node:assert/strict';
-import { MemoryBlockFile } from '../../src/services/capture/blockFile';
+import { MemoryBlockFile, type BlockFile } from '../../src/services/capture/blockFile';
+import { SEGMENT_HEADER_BYTES, isSegmentFileName, segmentName, type SegmentDirectory } from '../../src/services/monitoring/segments';
 import { Collector, STATUS_COALESCE_MS, type CollectorVolume, type UdpSocket } from '../../electron/monitoring/collector';
 import { readIntakeStatus, type IntakeStatus } from '../../src/services/monitoring/control';
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
@@ -23,7 +24,6 @@ import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES } from '../../src/services/monitor
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, serveRuntime, type RpcPort } from '../../src/services/monitoring/runtimeRpc';
 import { DECODER_POLICY_VERSION, LIMITS, type BoundaryEvidence, type DatagramEvidence, type Evidence, type SourceConfig } from '../../src/services/monitoring/types';
-import { FILE_HEADER_BYTES } from '../../src/services/monitoring/journalCodec';
 
 const MiB = 1024 * 1024;
 const CFG: SourceConfig = { exporterIPv4: '10.0.0.1', bindIPv4: '192.168.1.5', port: 2055, storageLimitBytes: 16 * MiB };
@@ -105,22 +105,64 @@ class FakeSocket implements UdpSocket {
   fail(code: string, message: string): void { this.err?.({ code, message }); }
 }
 
+/** A segment of a `TestSegments`: its reads, flushes and failure switches are the directory's. */
 class TestFile extends MemoryBlockFile {
+  constructor(private readonly owner: TestSegments) { super(); }
+  override read(offset: number, into: Uint8Array): number {
+    this.owner.reads++;
+    return super.read(offset, into);
+  }
+  override write(offset: number, from: Uint8Array): void {
+    if (this.owner.failWrites) throw new Error('disk full');
+    super.write(offset, from);
+  }
+  override flush(): void {
+    if (this.owner.failFlush) throw new Error('flush refused');
+    this.owner.flushes++;
+    super.flush();
+  }
+}
+
+/** The journal's folder, in memory, with the counters and failure switches the intake cases need. */
+class TestSegments implements SegmentDirectory {
   failWrites = false;
   failFlush = false;
   /** Reads served, so a case can tell a rescan of the journal from none. */
   reads = 0;
-  override read(offset: number, into: Uint8Array): number {
-    this.reads++;
-    return super.read(offset, into);
+  /** Successful flushes, over every segment. */
+  flushes = 0;
+  private readonly files = new Map<string, TestFile>();
+
+  /** The directory a second process would see: the same names, a copy of every byte. */
+  static from(bytes: Record<string, Uint8Array>): TestSegments {
+    const dir = new TestSegments();
+    for (const [name, b] of Object.entries(bytes)) dir.create(name).write(0, b);
+    return dir;
   }
-  override write(offset: number, from: Uint8Array): void {
-    if (this.failWrites) throw new Error('disk full');
-    super.write(offset, from);
+
+  list(): string[] { return [...this.files.keys()].sort(); }
+  open(name: string): BlockFile {
+    const f = this.files.get(name);
+    if (f === undefined) throw new Error(`${name} does not exist`);
+    return f;
   }
-  override flush(): void {
-    if (this.failFlush) throw new Error('flush refused');
-    super.flush();
+  create(name: string): BlockFile {
+    if (!isSegmentFileName(name)) throw new RangeError(`not a segment name: ${name}`);
+    if (this.files.has(name)) throw new Error(`${name} already exists`);
+    const f = new TestFile(this);
+    this.files.set(name, f);
+    return f;
+  }
+  unlink(name: string): void {
+    if (!this.files.delete(name)) throw new Error(`${name} does not exist`);
+  }
+  /** Bytes across every segment. */
+  size(): number { let n = 0; for (const f of this.files.values()) n += f.size(); return n; }
+  /** Every segment's bytes by name. */
+  snapshot(): Record<string, Uint8Array> {
+    const out: Record<string, Uint8Array> = {};
+    for (const [name, f] of this.files) out[name] = f.snapshot();
+    return out;
   }
 }
 
@@ -145,7 +187,7 @@ class FakePort implements RpcPort {
   get pushed(): Evidence[] { return this.pushes.flat(); }
 }
 
-interface TestVolume { journal: TestFile; rollups: MemoryBlockFile; opens: number; closes: number }
+interface TestVolume { journal: TestSegments; rollups: MemoryBlockFile; opens: number; closes: number }
 
 class Rig {
   clock = new FakeClock();
@@ -169,10 +211,10 @@ class Rig {
         const once = this.openErrors.shift();
         if (once !== undefined) throw once;
         let v = this.volumes.get(root);
-        if (v === undefined) { v = { journal: new TestFile(), rollups: new MemoryBlockFile(), opens: 0, closes: 0 }; this.volumes.set(root, v); }
+        if (v === undefined) { v = { journal: new TestSegments(), rollups: new MemoryBlockFile(), opens: 0, closes: 0 }; this.volumes.set(root, v); }
         v.opens++;
         const volume = v;
-        return { journal: volume.journal, rollups: volume.rollups, close: () => { volume.closes++; } };
+        return { segments: volume.journal, rollups: volume.rollups, close: () => { volume.closes++; } };
       },
       createSocket: () => {
         const s = new FakeSocket(this.nextBinds.shift() ?? 'ok');
@@ -228,9 +270,8 @@ const isDatagram = (e: Evidence): e is DatagramEvidence => e.kind === 'datagram'
 const actions = (es: Evidence[]): string[] => es.filter(isBoundary).map((b) => (b.reason === '' ? b.action : `${b.action}:${b.reason}`));
 
 /** The bytes of a journal file as a new file, so reading it does not touch the one a collector owns. */
-function fileEntries(file: MemoryBlockFile): Evidence[] {
-  const copy = new MemoryBlockFile();
-  copy.write(0, file.snapshot());
+function fileEntries(dir: TestSegments): Evidence[] {
+  const copy = TestSegments.from(dir.snapshot());
   const { journal } = MonitoringJournal.open(copy, { limitBytes: 64 * MiB });
   const snapshot = journal.snapshot();
   const out: Evidence[] = [];
@@ -1006,8 +1047,7 @@ async function main(): Promise<void> {
   /** A second process on the same files: the journal's bytes as they are now, in a fresh collector. */
   function relaunch(from: Rig): Rig {
     const rig = new Rig();
-    const v: TestVolume = { journal: new TestFile(), rollups: new MemoryBlockFile(), opens: 0, closes: 0 };
-    v.journal.write(0, from.volume.journal.snapshot());
+    const v: TestVolume = { journal: TestSegments.from(from.volume.journal.snapshot()), rollups: new MemoryBlockFile(), opens: 0, closes: 0 };
     rig.volumes.set(ROOT, v);
     return rig;
   }
@@ -1126,12 +1166,13 @@ async function main(): Promise<void> {
     first.drain();
     await first.collector.stop('user');
     await first.collector.dispose();
-    const file = first.volume.journal.snapshot();
+    const segs = first.volume.journal.snapshot();
+    assert.deepEqual(Object.keys(segs), [segmentName(1)], 'one segment holds this journal');
+    const file = segs[segmentName(1)];
     // Interior damage: a byte inside the first entry, with valid entries after it.
-    file[FILE_HEADER_BYTES + 20] ^= 0xff;
+    file[SEGMENT_HEADER_BYTES + 20] ^= 0xff;
     const rig = new Rig();
-    const v: TestVolume = { journal: new TestFile(), rollups: new MemoryBlockFile(), opens: 0, closes: 0 };
-    v.journal.write(0, file);
+    const v: TestVolume = { journal: TestSegments.from(segs), rollups: new MemoryBlockFile(), opens: 0, closes: 0 };
     rig.volumes.set(ROOT, v);
     const opened = await rig.collector.open(ROOT, CFG.storageLimitBytes);
     const attach = new FakePort();
@@ -1141,7 +1182,8 @@ async function main(): Promise<void> {
     assert.equal(rig.last.storage, 'refused-corrupt');
     assert.ok((rig.last.storageError ?? '').length > 0);
     assert.equal(rig.sockets.length, 0, 'nothing was bound for a dataset that cannot be written');
-    assert.deepEqual(Array.from(v.journal.snapshot()), Array.from(file), 'the file is untouched');
+    assert.deepEqual(Array.from(v.journal.snapshot()[segmentName(1)]), Array.from(file), 'the file is untouched');
+    assert.deepEqual(v.journal.list(), [segmentName(1)], 'and no segment was added');
   });
 
   // --- the runtime ------------------------------------------------------------------------------------------------
@@ -1235,7 +1277,7 @@ async function main(): Promise<void> {
     );
     await assert.rejects(runtime.appendMinutes([minute(0, MAX_APPEND_BYTES + 1)], mark(snapshot.throughEntryId)), RangeError);
     // Under both caps and still more than the limit leaves: 200 full datagrams are in a 16 MiB journal.
-    const room = CFG.storageLimitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - FILE_HEADER_BYTES;
+    const room = CFG.storageLimitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - SEGMENT_HEADER_BYTES;
     const body = 900_000;
     const count = Math.ceil(room / body) + 1;
     assert.ok(count * body <= MAX_APPEND_BYTES && count <= MAX_APPEND_MINUTES, `the case stays under the caps (room ${room})`);
@@ -1467,7 +1509,7 @@ async function main(): Promise<void> {
     const { server, client } = portPair();
     const gates: (() => void)[] = [];
     const runtime = stubRuntime({
-      snapshot: () => new Promise((resolve) => { gates.push(() => resolve({ generation: 'a'.repeat(32), throughEntryId: 0, writtenBytes: 0, syncedThroughEntryId: 0 })); }),
+      snapshot: () => new Promise((resolve) => { gates.push(() => resolve({ generation: 'a'.repeat(32), throughEntryId: 0, firstEntryId: 1, writtenBytes: 0, syncedThroughEntryId: 0 })); }),
     });
     serveRuntime(server, runtime, { maxInFlight: 2 });
     const wire = createRuntimeClient(client, { requestMs: 1000, setTimer: () => () => undefined });
@@ -1490,7 +1532,7 @@ async function main(): Promise<void> {
 
   await test('rpc: a failed reply (the client port gone) does not become an unhandled rejection', async () => {
     const { server, client } = portPair();
-    serveRuntime(server, stubRuntime({ snapshot: async () => ({ generation: 'a'.repeat(32), throughEntryId: 0, writtenBytes: 0, syncedThroughEntryId: 0 }) }));
+    serveRuntime(server, stubRuntime({ snapshot: async () => ({ generation: 'a'.repeat(32), throughEntryId: 0, firstEntryId: 1, writtenBytes: 0, syncedThroughEntryId: 0 }) }));
     const original = server.postMessage;
     server.postMessage = () => { throw new Error('closed'); };
     let unhandled = false;

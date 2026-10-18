@@ -37,6 +37,7 @@
  *   (damaged, another version, failed) is reported and left alone.
  */
 import type { BlockFile } from '../../src/services/capture/blockFile';
+import type { SegmentDirectory } from '../../src/services/monitoring/segments';
 import { readSourceConfig } from '../../src/services/monitoring/config';
 import { isIntakeStopReason, type IntakeStatus, type IntakeStopReason, type StartResult, type StopReason, type StopResult } from '../../src/services/monitoring/control';
 import { MonitoringJournal, type EvidenceInput, type JournalState } from '../../src/services/monitoring/journal';
@@ -61,8 +62,8 @@ export interface UdpSocket {
   close(): void;
 }
 
-/** The two files of the monitoring directory; `electron/monitoring/volume.ts` opens the real ones. */
-export interface CollectorVolume { journal: BlockFile; rollups: BlockFile; close(): void }
+/** The journal's segment directory and the rollup file; `electron/monitoring/volume.ts` opens the real ones. */
+export interface CollectorVolume { segments: SegmentDirectory; rollups: BlockFile; close(): void }
 
 export interface CollectorEnv {
   openVolume(root: string): CollectorVolume;
@@ -369,7 +370,7 @@ export class Collector {
     }
     const holder: { rollups: RollupStore | null } = { rollups: null };
     try {
-      const { journal, recovery } = MonitoringJournal.open(volume.journal, {
+      const { journal, recovery } = MonitoringJournal.open(volume.segments, {
         limitBytes,
         // One limit covers both files.
         otherBytes: () => holder.rollups?.size() ?? 0,
@@ -568,6 +569,8 @@ export class Collector {
       const id = toHex(this.env.randomBytes(16));
       const appended = dataset.journal.append([{
         kind: 'boundary', sessionId: id, receivedMs: this.env.now(), action: 'start', reason: '', droppedDatagrams: null,
+        // Recorded so a segment rolled mid-session, and one that outlives its predecessors, says whose datagrams it holds (ADR 0062).
+        source: { exporterIPv4: config.exporterIPv4, bindIPv4: config.bindIPv4, port: config.port },
       }]);
       if (appended.appended !== 1) {
         this.closeSocket();

@@ -15,7 +15,7 @@ import { LIMITS, type Evidence } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import { EXPORTER } from './fixtures';
 import {
-  BASE, HostRig, MIN, Rig, SRC, SRC1, dgram, junk, rollUp, runAll, start, stop, test, v9,
+  BASE, HostRig, MIN, Rig, S2, SRC, SRC1, dgram, junk, rollUp, runAll, start, stop, test, v9,
 } from './queryRig';
 
 const m = (n: number, ms = 0): number => BASE + n * MIN + ms;
@@ -177,7 +177,7 @@ test('sources: the connect\'s sources plus every engine admitted since, sorted a
   h.wall = BASE;
   await h.connect();
   assert.deepEqual(h.healthPosts()[0].sources, [SRC, SRC1], 'what the sidecar knew, sorted');
-  rig.runtime.publishLive(rig.add(start(m(3, 0), 's2')));
+  rig.runtime.publishLive(rig.add(start(m(3, 0), S2)));
   await h.host.settled();
   await push(rig, h, dgram(m(3, 5), [{}], { engineId: 9 }), dgram(m(3, 6), [{}], { engineId: 1 }), dgram(m(3, 7), [{}], { engineId: 9 }));
   h.tick();
@@ -201,7 +201,7 @@ test('health: a datagram from an engine the Worker did not admit is counted agai
   const sixteen = Array.from({ length: LIMITS.enginesPerExporter }, (_, i) => dgram(m(1, i), [{}], { engineId: i }));
   rig.append([start(m(0)), ...sixteen, stop(m(2))]);
   await rollUp(rig);
-  rig.append([start(m(3), 's2')]);
+  rig.append([start(m(3), S2)]);
   const h = new HostRig(rig.runtime);
   h.wall = BASE;
   await h.connect();
@@ -348,7 +348,7 @@ test('health: replay moves neither watermark, including the rolled-up one (M1, R
   // The rebuild posted the replayed minute to the sidecar, so its watermark is the replay's.
   assert.equal(rig.store.watermark()?.throughEntryId, floor);
   // A live datagram in a later minute seals nothing that was open, so nothing new is rolled up.
-  rig.runtime.publishLive(rig.add(start(m(4), 's2'), dgram(m(5), [{}], { sequence: 2 })));
+  rig.runtime.publishLive(rig.add(start(m(4), S2), dgram(m(5), [{}], { sequence: 2 })));
   await h.host.settled();
   h.tick();
   const health = h.healthPosts().at(-1)?.health;
