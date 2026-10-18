@@ -557,9 +557,11 @@ await scenario('3. monitoring Worker terminated', async () => {
   const second = p.workers().find((w) => w.url().includes('monitoring.worker'));
   await second?.evaluate(() => { self.close(); }).catch(() => {});
   await led.send(port, [A]);
+  // The client's heartbeat calls a Worker gone after LIMITS.requestMs (15 s) without a message, so
+  // the bound is that plus one 5 s ping and some slack for the sheet to draw it.
   checkTrue('3: a Worker that closes itself without any error event is noticed by the sheet',
-    await until(async () => (await sheetText(p)).includes('Monitoring is not available'), 15_000),
-    'the client has no handler for a Worker that is gone without an error event (src/services/monitoring/client.ts adopt()), so the history stops refreshing and nothing says so');
+    await until(async () => (await sheetText(p)).includes('Monitoring is not available'), 25_000),
+    'the client\'s heartbeat (src/services/monitoring/client.ts armSilence) did not call the silent Worker gone within requestMs plus a ping');
   await p.reload();
   await p.getByRole('button', { name: 'Skip' }).click({ timeout: 2000 }).catch(() => {});
   await openSheet(p);
