@@ -2,8 +2,8 @@
 
 **Status:** accepted 2026-10-17, with the owner's three rulings folded in:
 address-pair conversations, a bound per table, and an 8 GiB default. Measured
-in [`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md);
-nothing built yet.
+in [`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md).
+Implementation landed 2026-10-18 (merge 41b4a43).
 
 ## Context
 

@@ -1566,6 +1566,69 @@ is a panel that stays empty with nothing erroring.
   write, while `agent.log` itself belongs to SYSTEM and Administrators. Lines
   still reach subscribers and stderr; nothing is kept.
 
+### NetFlow monitoring: the firewall, the lifetime, a real exporter
+
+ADRs 0058-0060. The fault scenarios are a script
+(`scripts/electron/monitoring-drive.ts`) and the sheet's states are another
+(`scripts/electron/monitoring-ui.ts`); both send their own datagrams to
+loopback, which raises no firewall prompt and never suspends the machine. What
+follows is what they structurally cannot reach.
+`docs/monitoring-v5-measurements.md` records what was measured, and its
+**Not run** list is the source of the items marked below.
+
+- [ ] **Start collection on a LAN address** (Monitoring sheet, source = this
+      machine's Ethernet address, not loopback), from a build whose `Inwire.exe`
+      has not been allowed before. Windows Security prompts once, offering Allow
+      or Cancel only (no profile checkbox) and no UAC prompt follows Allow.
+      **While the prompt is open datagrams are dropped silently**, so a sender
+      started first shows nothing until Allow is pressed. A sheet that reads
+      Collecting with zero datagrams after Allow means the bind took a different
+      address than the one chosen: check with `netstat -ano -p udp` that the
+      socket is on the chosen address and not `0.0.0.0`.
+- [ ] **Press Cancel on that prompt** (measured for the dev Electron exe, **not
+      run for the packaged `Inwire.exe`**). Windows files inbound Block rules and
+      does not ask again; the sheet stays silent. Undoing it takes an
+      administrator in `wf.msc`. A sheet that does not tell the user datagrams
+      may be blocked is the failure to record; do this on a scratch profile.
+- [ ] **The prompt names the app.** From the packaged build the prompt reads
+      name `Inwire` and publisher `Rotem Grinhut` (VERSIONINFO). Not measured on
+      an installed copy under `Program Files`; a different name or a blank
+      publisher means the stamp did not reach the exe.
+- [ ] **Send from a hardware exporter** (a router or firewall with NetFlow v5)
+      to the chosen address. Not run: only softflowd on a laptop has sent so
+      far. Records appear under the sheet's source, the exporter's sequence
+      numbers are not reported as loss, and **its address is the one set as the
+      exporter**. A device whose source address differs from its configured one
+      shows as a stray: counted per sender, never journalled.
+- [ ] **softflowd straight to the app over the WSL adapter.** Needs an inbound
+      firewall rule for the Electron exe. Not run (the interop script replays
+      softflowd's exports instead). Datagrams from WSL arrive and match
+      `scripts/monitoring/interop.ts`'s totals.
+- [ ] **Quit with collection running.** Close the window with no unsaved
+      capture. The app exits within about five seconds
+      (`LIMITS.drainMs`), and reopening shows the history up to the quit.
+      **A process still alive well past five seconds after the window is gone,
+      or history missing the last datagrams of a clean quit,** means the drain
+      did not run.
+- [ ] **Sign out, shut down or restart with collection running** (these never
+      reach `will-quit`; the journal is recovered on the next open). Reopen: the
+      history is there up to the last flush. A history that will not open, or
+      one that loses earlier days, means recovery failed.
+- [ ] **Suspend the machine** (Start > Power > Sleep) with collection running,
+      then wake it. Collection is stopped with reason suspend and **is not
+      restarted**; the sheet reads "Stopped while the computer slept - press
+      Start." Collection still
+      running after resume, or a stop with no stated reason, is the failure.
+- [ ] **Collect for a day on a real network, then look at History.** Totals
+      agree with the exporter's own counters within the sampling it reports. The
+      storage figure moves toward the limit at about the rate in the
+      measurements; at the limit collection stops with a stated reason and
+      history stays readable. A stop with no message is the failure.
+- [ ] **A write that fails partway** (storage-failed). Not run: the built app
+      has no seam for a failing volume. Fill the volume holding
+      `<userData>/monitoring` while collecting. Collection stops with a stated
+      storage failure and history stays readable.
+
 ## 6. Exports
 
 Every format is written by `runExport` and read back by something other than
@@ -1751,6 +1814,11 @@ Not checkable yet, recorded so it is not mistaken for done.
 - **A UI capture against the installed Rust agent was verified.** The dated
   results under "The Rust agent: installed, signed, and at parity" record it;
   rerun the relevant live drives after capture-path changes.
+- **NetFlow monitoring, on hardware and on the installed build.** The
+  firewall, hardware-exporter, packaged-Cancel, installed-prompt and
+  storage-failed items in §5 are unrun. Load past 3,200 datagrams a second or
+  steps longer than 12 s were also not run, the first being the harness's
+  ceiling (`docs/monitoring-v5-measurements.md`, "Not run").
 - **The update feed.** `updates.inwire.app` does not resolve, so the Inwire row
   reads "Not checked" and every check is a quiet no-op.
 - **`crossOriginIsolated` in the packaged app.** Set via `ISOLATION_HEADERS` and

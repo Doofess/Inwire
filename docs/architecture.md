@@ -26,6 +26,10 @@ flowchart TD
   ui <-->|client port: queries and lifecycle| store
   pipeline <-->|TCP conversations| shards["Nested shard Workers"]
   store -->|derived indexed capture| disk["Local capture files"]
+  main -.->|forks when the sheet first opens; binds on Start; brokers ports| mon["Monitoring utilityProcess: UDP socket + journal"]
+  mon <-->|runtime port: journal and rollup sidecar| mw["Monitoring Worker: decode, rollups, queries"]
+  mw <-->|MonitoringClient: live feed, history| ui
+  mon -->|journal.iwmj, rollups.iwmr| mdisk["userData/monitoring"]
 ```
 
 Main owns OS resources, the custom protocol, windows, native dialogs, quit
@@ -59,8 +63,10 @@ own activation. `src/lib/commands.ts` supplies the shared shortcut/palette
 vocabulary. UI layout, drag regions and render-path rules live in
 [src/components/CLAUDE.md](../src/components/CLAUDE.md).
 
-The speed test has another utility process, forked for an explicit test by
-`electron/speedTest/host.ts`. It uses Node HTTPS for controlled measurement,
+Besides the store, main forks two more utility processes, each for an explicit
+user action: the speed test by `electron/speedTest/host.ts`, and the monitoring
+collector by `electron/monitoring/host.ts` (see [NetFlow monitoring](#netflow-monitoring)).
+The speed test uses Node HTTPS for controlled measurement,
 not the capture agent. Its method and result state live under
 `src/services/speedTest/`; see [ADR 0054](decisions/0054-an-internet-speed-test-against-cloudflare.md).
 
@@ -359,8 +365,11 @@ cannot be attached to anonymised pcapng.
 - Map code is lazy and warmed in idle time. A GPU context loss invalidates the
   cached style-ready state; restoration must let layer synchronization retry.
 - Frameless controls use `close()`, not `destroy()`, so the unsaved-capture guard
-  runs. Keep Windows' default thick frame and rounded corners; do not add native
-  caption overlays over the app's own buttons. Detailed UI rules live in
+  runs. Never set `thickFrame` or `roundedCorners`, at any value: both default to
+  true, which is what keeps edge resizing, the shadow and Windows 11's corner
+  radius (`scripts/electron/shell.ts` fails when either word appears in
+  `electron/window.ts` or `electron/main.ts`). Never add `titleBarOverlay` or
+  `titleBarStyle`: Windows would draw caption buttons over the app's own. Detailed UI rules live in
   [src/components/CLAUDE.md](../src/components/CLAUDE.md).
 - The window's cached theme and bounds are in `window-state.json`; renderer
   preferences remain the theme source of truth. Caption reserve is CSS-sized.
@@ -402,12 +411,70 @@ there is no required `.env` setup. The command/check catalog belongs in the
 root guide, and runtime drives and accepted manual gaps in
 [verification.md](verification.md).
 
-## Planned monitoring is separate
+## NetFlow monitoring
 
-[ADRs 0058–0060](decisions/README.md) describe a future explicitly started UDP
-NetFlow collector, its own journal/rollups and workspace. None is implemented.
-Current NetFlow/IPFIX dissection reads captured frames and is not a listener.
-The planned collector's source-address filter is not authentication; its future
-socket, filesystem and hostile-decoder boundaries need verification when built.
-Do not route monitoring retention through capture pruning or describe planned
-firewall/lifetime guarantees as current behavior.
+Implemented by [ADRs 0058-0060](decisions/README.md) (merge `41b4a43`);
+numbers are in [monitoring-v5-measurements.md](monitoring-v5-measurements.md).
+It is a NetFlow v5 **collector** for one exporter, independent of captures: it
+reads no adapter, uses no agent or Npcap, and a capture started, cleared or
+imported leaves its totals untouched (scenario 11 of
+`scripts/electron/monitoring-drive.ts`). Dissecting NetFlow/IPFIX frames inside
+a capture is a separate path (`src/services/flow/`) and is not a listener.
+
+**Placement.** Each piece is split so that the process holding a resource never
+parses hostile bytes.
+
+| Piece | Where | Owns |
+|---|---|---|
+| Collector | unprivileged `utilityProcess`, `serviceName: 'inwire-monitoring'` (`electron/monitoring/host.ts`, `entry.ts`, `collector.ts`) | the UDP socket (`udp.ts`: specific IPv4 bind, no `reuseAddr`, 8 MiB receive buffer), the exporter-address filter, entry ids, `journal.iwmj` and `rollups.iwmr` in the `monitoring` folder under userData (`volume.ts`) |
+| Decoder | sandboxed Worker `src/workers/monitoring.worker.ts`, rules in `src/services/monitoring/workerHost.ts` | v5 decoding, minute rollups, queries. Holds no file: reads and posts over a `MessagePort` the collector gave it, through `runtimeRpc.ts` |
+| Client | renderer, `src/services/monitoring/client.ts` and `appClient.ts` | one `MonitoringClient` outliving the sheet; ferries main's port into the Worker without reading it (no datagram crosses the main thread), sends queries, folds state. Built on first ask; connects only when the sheet opens |
+| Host | main, `electron/monitoring/hostCore.ts` and `host.ts` | forks the collector, brokers the `MessageChannelMain`, the start/stop IPC and the saved source (`settings.ts`). Sees no datagram |
+| Sheet | `sheet: 'monitoring'` in `src/App.tsx`, the third sheet after settings and speed test | the UI; `APP_VIEWS` and `Ctrl+1..5` are unchanged |
+
+**The collector never decodes.** The Worker does, so a decoder fault cannot
+corrupt evidence. The journal (CRC-32 framed, pinned by a test vector) is the
+authority; `rollups.iwmr` is a cache that is rebuilt by streaming when missing
+or behind (scenario 9 of the drive). Rollups are keyed by directional address
+pair with a per-minute key budget; a table past its bound is refused while the
+totals stay exact (ADR 0059). A torn tail is the only truncation.
+
+**Intake rules** (`src/services/monitoring/config.ts`): the source is an
+exporter IPv4, a *specific* local IPv4 and a UDP port; `0.0.0.0` is refused for
+the bind, and the exporter may not be `0.0.0.0` or `255.255.255.255`. The
+exporter address is an intake filter and **not authentication**: UDP source
+addresses can be forged, and datagrams from other addresses are counted per
+sender (at most 16 addresses plus an overflow count) and never journalled.
+There is no firewall change by the app: Windows raises its own prompt at the
+first bind; see [verification.md](verification.md).
+
+**Lifetime.** Start is explicit on every launch; opening history binds nothing
+and the app never remembers "was running". Collection runs only while Inwire is
+open and survives minimising, leaving the sheet, a renderer reload and a
+Worker crash (the new Worker catches up from its cursor). It ends by:
+
+- Stop (`stopReason: 'user'`);
+- quit: `will-quit` in `electron/main.ts` is prevented once, the collector
+  stops intake, writes the final boundary and flushes, then quit resumes
+  (`electron/monitoring/quitDrain.ts`; `LIMITS.drainMs` is 5 s, past which the
+  utility is killed and the journal is recovered on the next open). Windows
+  shutdown, logoff and the installer's Restart Manager never reach `will-quit`
+  and rely on that recovery. `guardClose` is untouched, so an unsaved-capture
+  close that is cancelled never reaches monitoring;
+- system suspend: `powerMonitor.on('suspend')` calls `monitoring.suspend()`;
+  resume shows the gap and does not restart;
+- a fault: `socket-error`, `storage-limit` or `storage-failed`.
+
+`IntakeStopReason` in `src/services/monitoring/control.ts` is exactly
+`'user' | 'quit' | 'suspend' | 'socket-error' | 'storage-limit' | 'storage-failed'`.
+A collector that exits fails pending queries, reports through the runtime-exit
+channel and needs Start again.
+
+**Storage.** The limit is part of the saved source: default 8 GiB, minimum
+16 MiB (`LIMITS` in `src/services/monitoring/types.ts`). Reaching it stops
+collection with `storage-limit` and leaves history readable; nothing is
+pruned. This is not capture pruning: never route monitoring through
+`planPrune` or `CAPTURE_ID_PATTERN` (ADR 0012 covers captures only).
+
+Scripts that hold each rule are in the monitoring rows of
+[testing.md](testing.md).

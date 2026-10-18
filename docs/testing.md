@@ -78,6 +78,10 @@ Read each driver's prerequisites before starting it.
 | GeoMap style or layer lifecycle | `scripts/electron/gpu-restore-drive.ts` with a map visible; packaged GPU checks |
 | Export | Relevant `scripts/export/` assertions and a capture beyond the RAM window; open exports in their target programs |
 | Speed test | Relevant `scripts/speed-test/` assertions; `scripts/electron/speed-test-drive.ts` performs an outbound real test |
+| Monitoring collector, host, journal, rollups, queries or sheet | The assertions in `scripts/monitoring/` (`runtime.ts`, `runtime-host.ts`, `rollup.ts`, `queries.ts`, `query-refresher.ts`, `quit-drain.ts`, `sheet-source.ts`, `config-v5.ts`, `export.ts`, `health-budget.ts`, `health-push.ts`, `history-range.ts`, `journal.ts`) all run in `check`. Then `scripts/electron/monitoring-ui.ts` (in `check`; skips without a build or Playwright) and `scripts/electron/monitoring-drive.ts` (twelve fault scenarios: Worker, utility process and page killed, occupied port, unsaved capture then close, sidecar deleted, storage limit, capture independence; minutes, needs a fresh build; in `NOT_TESTS`). Firewall, suspend and hardware items stay manual in [verification.md](verification.md) |
+| Monitoring decoder or exporter compatibility | `scripts/monitoring/interop.ts` replays softflowd's v5 exports and compares with tshark. It needs WSL, softflowd and tshark and prints `NOT RUN` without them, which is not a pass. In `NOT_TESTS`. `scripts/monitoring/fixtures.ts` and `scripts/monitoring/queryRig.ts` are helpers, not tests |
+| Monitoring performance, storage or socket behaviour | `scripts/monitoring/load.ts` (stepped load, up to ten minutes, no pass mark) and `scripts/monitoring/measurement.ts` (socket, journal and firewall modes; the journal mode writes about 2.7 GB; firewall mode needs the agent, WSL and a person; probes `scripts/monitoring/bind-pair-probe.cjs` and `scripts/monitoring/firewall-probe.cjs`). Both in `NOT_TESTS`; results go in [monitoring-v5-measurements.md](monitoring-v5-measurements.md) |
+| Monitoring sheet appearance | `scripts/electron/monitoring-shots.ts` photographs each state against datagrams it sends itself; no pass mark, in `NOT_TESTS`. Review every state in both themes |
 | Fonts, colours or brand mark | Theme assertions in `check`, [visual design guidance](../.claude/skills/inwire-visual-design/SKILL.md) and visual verification |
 
 The disk driver captures beyond the RAM budget, filters the whole capture and
@@ -87,6 +91,69 @@ installed service, Npcap, traffic and an Ethernet adapter; it compares rebuilt
 details against ordered dissection. Capture-options and capture-file drivers
 exercise a real installed agent, including filter/snaplen and file ownership.
 The update driver uses a loopback feed and installs nothing.
+
+## Invariants and their enforcers
+
+Run the named script after touching the code it guards. "Unenforced" means
+nothing fails if the rule is broken. Run scripts with `npx tsx`.
+
+| Invariant | Enforcer |
+|---|---|
+| A capture is deleted only when the user asks; `planPrune` removes only `CAPTURE_ID_PATTERN` directories (ADR 0012) | `scripts/capture/prune-guard.ts` |
+| Exception: a capture following the agent's ring loses a segment when the agent deletes its file, floor first (ADR 0052) | `scripts/capture/segment-guard.ts` |
+| A torn trailing chunk loses only that chunk | `scripts/capture/recovery-on-disk.ts` |
+| `NodeBlockFile` loops short reads and writes | `scripts/capture/block-file.ts` |
+| `append` cannot overtake an async `open` | `scripts/capture/serial-queue.ts` |
+| No captured frame crosses the renderer's main thread (ADR 0007) | Unenforced: nothing fails if a frame-carrying message joins `FromPipeline` |
+| The renderer does not iterate the capture to answer a question about it | Partial: `scripts/session/row-source.ts` covers the row path |
+| A display filter has one answer, computed by the store over the whole capture (ADR 0031) | `scripts/capture/store-protocol.ts` (scan ordinals against the in-memory filter); `scripts/session/capture-row-space.ts` (list length equals matches, counted two ways) |
+| A message to the store is a snapshot: frames are flattened and copied | `scripts/capture/store-protocol.ts` (every appended frame goes through `v8.serialize`/`deserialize`); `scripts/electron/disk-drive.ts` (real app, past the RAM budget) |
+| The store's two ports keep their roles | `scripts/electron/store-ports.ts` |
+| The store stops whole at its heap ceiling | `scripts/capture/heap-guard.ts` |
+| Native zlib output and `fflate` read each other | `scripts/capture/native-zlib.ts` |
+| Buffer trim is reachable before auto-pause | `scripts/session/buffer-budget.ts` |
+| An import matches the whole-array result with the patch window forced small | `scripts/capture/import-stream.ts` |
+| Trackers keep nothing a transfer detaches | `scripts/pipeline/moved-bytes.ts`, `scripts/pipeline/arrival.ts` |
+| Catch-up from the agent's file equals an uninterrupted run | `scripts/pipeline/catch-up.ts` |
+| Parallel dissection equals the single Worker | `scripts/pipeline/parallel.ts` |
+| Every frame's tree is rebuilt from its record | `scripts/pipeline/revisit.ts` |
+| No Node in the renderer; the preload imports only `electron` (reads the built bundle) | `scripts/electron/preload-sandbox.ts` |
+| `src/services/` and `src/lib/` import no Electron or `node:*`; `nodeBlockFile.ts` is unreachable from `src/main.tsx` (import-graph walk) | `scripts/capture/node-safe.ts` |
+| Two tsconfigs with matching strictness flags; `electron/` excluded from the root program | `scripts/electron/tsconfigs.ts` |
+| Fuses: `runAsNode`, inspector arguments and `NODE_OPTIONS` off; `onlyLoadAppFromAsar` on. The wire holds ASCII digits, 49 set and 48 cleared, so `Boolean(value)` is true for both | `scripts/electron/fuses.ts` (reads `getCurrentFuseWire`; skips when nothing is packed; never test by running the exploit, it launches the app) |
+| `thickFrame`, `roundedCorners`, `titleBarOverlay` and `titleBarStyle` never appear | `scripts/electron/shell.ts` (comment-stripped words in `electron/window.ts` and `electron/main.ts`) |
+| CSP is a header; `OUTBOUND_HOSTS` is the renderer's whole list; port 8999 is absent; `MAIN_OUTBOUND_HOSTS` are absent from the policy and match what main dials | `scripts/electron/shell.ts` |
+| The CSP is actually applied: a page-made `<img>` from a blocked origin must raise `securitypolicyviolation` (a CDP `eval` is exempt from page CSP and proves nothing) | `scripts/electron/smoke.ts` |
+| Cross-origin isolation is on | `scripts/electron/smoke.ts` (`crossOriginIsolated`); the packaged build is by hand |
+| COEP headers on `app://` Worker responses | `scripts/electron/smoke.ts` (a COEP-blocked pipeline Worker yields no rows); the packaged build is by hand |
+| MapLibre's worker URL is set before the RTL plugin | `scripts/electron/smoke.ts` (no request may fail) |
+| A lost GPU context restores without throwing | `scripts/electron/gpu-restore-drive.ts` (by hand; needs a map on screen) |
+| Every signature goes through `scripts/sign/sign.ps1`; no tracked `.cer` or `.pfx`; this machine's thumbprint in no committable file | `scripts/sign/signing.ts`; `scripts/sign/verify-payload.ps1` refuses an unsigned PE in the payload under `iscc /DSIGN`. Nothing verifies a signature at runtime |
+| No `auth*` key in the Windows agent's messages | `scripts/agent/control-vectors.ts` |
+| The app reads no message the Rust agent never emits; both agents share byte vectors | `scripts/agent/message-coverage.ts`, `scripts/agent/binary.ts`, `scripts/agent/pipe-framing.ts`, `local-agent/test_protocol.py`; inbound commands by `scripts/agent/command-vectors.ts` and `agent-rs`'s `command_vectors` test |
+| The pipe's SDDL has `IU` and none of `WD`, `AN`, `NU` | `local-agent/test_protocol.py` for the Python literal only. The Rust `PIPE_SDDL` in `agent-rs/src/pipe.rs` is unenforced; its effect needs a second account ([verification.md](verification.md)) |
+| One version number, derived from `package.json` | `scripts/agent/version.ts` |
+| The renderer's weight only falls | `scripts/perf/bundle-size.ts` against `test/perf/ceilings.json`; skips without `dist/` |
+| Dissection matches tshark; floors only rise, ceilings only fall | `scripts/parity/parity-check.ts` (not in `check`), `scripts/parity/tree-coverage.ts`, `scripts/parity/snaplen.ts`, `scripts/parity/acceptance.ts` (compares with `HEAD`) |
+| Registry abbreviations exist in Wireshark | `scripts/dissect/wireshark-abbrevs.ts` |
+| The filter engine holds its 50,000-frame budget | `scripts/filter/engine.ts` |
+| No handler or preload method for the key log takes a path | `scripts/electron/keylog-follow.ts` |
+| Reverse DNS has at most four lookups in flight | `scripts/geoip/reverse-dns-queue.ts` |
+| One icon set; `Map` and `Image` aliased | `scripts/themes/icon-set.ts` |
+| Scripts launch the app in the background | `scripts/electron/background-launch.ts` |
+| `reg query` error shapes read correctly | `scripts/electron/agent-health.ts` |
+| Update Center scripts keep no bare `-ArgumentList` | `scripts/electron/update-center.ts` |
+| The monitoring quit drain always settles | `scripts/monitoring/quit-drain.ts` |
+| A rollup answer equals the raw-journal answer | `scripts/monitoring/rollup.ts` |
+| Monitoring starts only on an explicit Start; its history is independent of captures; storage limit stops with a stated reason | `scripts/electron/monitoring-drive.ts` (Start: scenarios 1-2; independence: 11; storage limit: 10; by hand, in `NOT_TESTS`) |
+| A monitoring stop reason survives quit and suspend | `scripts/monitoring/runtime-host.ts` |
+
+Scripts that build their own captures exist because the fixtures hold no ICMP
+error frame, no real HTTP and no readable certificate (both negotiate TLS 1.3):
+`scripts/icmp/dissect.ts`, `scripts/http/dissect.ts`, `scripts/tls/certificate.ts`
+and `scripts/parity/synthetic.ts`. A measurement that cannot see a feature
+cannot defend it. The `bulk` fixture has one SYN across 30 TCP streams, so it
+catches anything assuming a capture opens with a handshake.
 
 ## Safe Electron launches
 
