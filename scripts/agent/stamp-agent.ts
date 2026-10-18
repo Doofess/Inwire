@@ -28,7 +28,7 @@
  *   (`scripts/brand/icon.ts`).
  * - **A manifest that says `asInvoker`.** The PyInstaller agent said
  *   `requireAdministrator`, which is why `--version` raised a UAC prompt
- *   (CLAUDE.md §6). The SCM ignores the level when it starts a service, the
+ *   (`local-agent/CLAUDE.md`). The SCM ignores the level when it starts a service, the
  *   installer is already elevated, and a person running `install` unelevated
  *   gets `main.rs`'s "needs an elevated prompt" - so the level bought nothing
  *   but the prompt. The `supportedOS` list is the PyInstaller one, so Npcap's

@@ -1,8 +1,8 @@
 # 0058 — Monitoring receives NetFlow v5 in its own utilityProcess, only while the app is open and only after Start
 
 **Status:** accepted 2026-10-17. Measured in
-[`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md);
-nothing built yet.
+[`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md).
+Implementation landed 2026-10-18 (merge 41b4a43).
 
 ## Context
 

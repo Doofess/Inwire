@@ -132,8 +132,9 @@ is the larger project this brief does not cover (ADR 0027 says desktop app;
 
 **6. Retire the Python agent on Unix.** When the drives pass on both OSes,
 `local-agent/` keeps its one remaining job: the Windows baseline for
-`switch-agent.ps1 -Python`. CLAUDE.md §10's trigger for this ("a desktop app
-there to talk to") has fired; update it and ADR 0037 §1.
+`switch-agent.ps1 -Python`. The trigger for this, a desktop app there to talk
+to, has fired; update `SCOPE.md`'s line that macOS and Linux retain the Python
+agent, and ADR 0037 §1.
 
 ## If Phase 0 still says dumpcap: how to do it properly
 

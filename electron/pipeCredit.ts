@@ -25,7 +25,7 @@
  * app believing a stopped capture is running. Main can tell a control message
  * from a batch by its frame kind alone, so it sheds only batches and passes
  * every control message on. Reading at wire rate costs main little: the pipe
- * was measured at 487 MB/s (CLAUDE.md §3).
+ * was measured at 487 MB/s (ADR 0029).
  *
  * **With hysteresis, so a hole is one hole.** Shedding starts past the budget
  * and stops only once the backlog is back under half of it. Admitting and

@@ -7,15 +7,15 @@ split out so the document every session reads at startup costs what the current
 design costs, and no more.
 
 Read this when you want to know *why* something is not in the app, or when a
-change looks like it is re-opening a settled question. Read `CLAUDE.md` for what
-is true now.
+change looks like it is re-opening a settled question. `CLAUDE.md` routes current
+work; [architecture.md](architecture.md) describes the current implementation.
 
 Two warnings. **Paths here are not checked.** `scripts/docs/claude-md-refs.ts`
 resolves every backticked path in `CLAUDE.md`, `local-agent/CLAUDE.md` and
 `README.md`; this file is deliberately not in that list, because most of what it
 names no longer exists. **And the reasoning here is as of its deletion.** A
-decision recorded as won may have been reversed since; `CLAUDE.md` is the status
-of record and this is the trail.
+decision recorded as won may have been reversed since; check the decision index
+and current code before treating this trail as guidance.
 
 ---
 
@@ -397,7 +397,7 @@ to be at least the highest either half ever shipped, and the agent had shipped
 
 ## 4. The Electron migration
 
-*The table is a record of what landed when. Read `CLAUDE.md` §3 for the result;
+*The table is a record of what landed when. Read `docs/architecture.md` for the result;
 read this for the order things happened in.*
 
 | Phase | What | Landed |

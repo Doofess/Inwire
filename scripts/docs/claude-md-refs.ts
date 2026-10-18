@@ -52,7 +52,42 @@ function check(name: string, actual: unknown, expected: unknown): void {
   }
 }
 
-const DOCS = ['CLAUDE.md', 'local-agent/CLAUDE.md', 'README.md'];
+/**
+ * The public documents, each of which must exist. SECURITY.md and SCOPE.md
+ * joined when the root CLAUDE.md started pointing at them for detail it no
+ * longer carries itself - a pointer into a document nothing checks is the same
+ * rot one hop further away.
+ */
+const PUBLIC_DOCS = ['README.md', 'SECURITY.md', 'SCOPE.md', 'CONTRIBUTING.md'];
+
+/** Where the root CLAUDE.md sends a session for the detail it moved out. */
+const REFERENCE_DOCS = ['docs/architecture.md', 'docs/testing.md'];
+
+/**
+ * Every CLAUDE.md in the tree, found by walking rather than listed, for the
+ * reason `check.ts` discovers scripts: a list is the thing that silently stops
+ * including the newest file, and a path-scoped CLAUDE.md is exactly the file a
+ * session reads without anyone having checked it.
+ */
+function findClaudeMds(dir: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      found.push(...findClaudeMds(path.join(dir, entry.name)));
+    } else if (entry.name === 'CLAUDE.md') {
+      found.push(path.join(dir, entry.name).split(path.sep).join('/'));
+    }
+  }
+  return found;
+}
+const SKIP_DIRS = new Set([
+  'node_modules', 'dist', 'dist-electron', 'release', 'release-artifacts', 'target', '__pycache__', 'test',
+]);
+
+const DOCS = [
+  ...findClaudeMds('.').map((p) => p.replace(/^\.\//, '')).sort(), ...REFERENCE_DOCS, ...PUBLIC_DOCS,
+];
 
 /** Extensions that make a backticked token a path even without a slash. */
 const EXTENSIONS = /\.(ts|tsx|py|md|json|css|cjs|mjs|iss|spec|sh|yml|html|ico)$/;
@@ -203,7 +238,7 @@ const ELSEWHERE = new Map<string, string>([
 /** Where the prose's relative paths are rooted. */
 const ROOTS = ['', 'src/', 'src/services/', 'electron/', 'local-agent/'];
 /** Trees searched when resolving a bare filename. */
-const TREES = ['src', 'electron', 'scripts', 'local-agent', 'docs'];
+const TREES = ['src', 'electron', 'scripts', 'local-agent', 'docs', '.out-of-scope'];
 
 let basenames: Set<string> | null = null;
 function indexBasenames(): Set<string> {
@@ -234,6 +269,8 @@ function looksLikePath(token: string): boolean {
   if (/^[a-z]+:\/\//.test(token)) return false;
   if (token.startsWith('%') || token.startsWith('~') || token.startsWith('\\')) return false;
   if (token.includes(' ') || token.includes('*') || token.includes('|')) return false;
+  // A key chord, such as `Ctrl+/`, ends in a slash and is not a directory.
+  if (/^(Ctrl|Alt|Shift)\+/.test(token)) return false;
   if (token.startsWith('.') && !token.includes('/')) return false;
   if (!token.includes('/')) return EXTENSIONS.test(token);
   return EXTENSIONS.test(token) || token.endsWith('/');
@@ -326,8 +363,11 @@ for (const item of ['pairing token', 'origin allowlist', 'nodeIntegration']) {
 const scripts = Object.keys(
   (JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> }).scripts,
 );
-const named = [...root.matchAll(/`npm run ([a-z:]+)`/g)].map((m) => m[1]);
-check('every `npm run` the document names is a real script',
+// Every document, not only the root: a lean root sends a reader to the scoped
+// files for the commands, so a stale script name there is just as wrong.
+const named = DOCS.filter((doc) => existsSync(doc))
+  .flatMap((doc) => [...readFileSync(doc, 'utf8').matchAll(/`npm run ([a-z:]+)`/g)].map((m) => m[1]));
+check('every `npm run` the documents name is a real script',
   [...new Set(named)].filter((s) => !scripts.includes(s)), []);
 
 // The reverse, which is how a new script goes undocumented.

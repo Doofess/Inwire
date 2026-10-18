@@ -32,11 +32,11 @@ import { StatusItem } from './StatusItem';
  * is learning an address. The abbreviations are the bar's width budget at the
  * 1024px minimum; the tooltip spells both out.
  *
- * The basemap tiles are the one outbound thing this cannot speak for: they load
- * whenever the Routing Map is shown, behind neither switch. That gap is
- * recorded in `electron/csp.ts` and in CLAUDE.md's Direction section as
- * something to close, and this item deliberately does not paper over it - which
- * is why the quiet label says what it says rather than "offline".
+ * The basemap tiles have no switch of their own: the Routing Map renders only
+ * once `geoIp` is on (`GeoMap.tsx`), so the tiles ride that consent and the
+ * `geo-IP` label already covers them. The quiet label still says "no lookups"
+ * rather than "offline", because the speed test and update checks are main's
+ * and this item cannot speak for them.
  */
 export interface OutboundStatusProps {
   geoIp: boolean;

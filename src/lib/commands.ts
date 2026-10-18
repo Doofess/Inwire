@@ -7,7 +7,7 @@ import { APP_VIEWS } from '../services/viewPrefs';
  * every keyed tooltip reads its "(Ctrl+X)" from here - so a key is written
  * once. **There is no `run` in this file**, deliberately: the actions are
  * App's handlers, bound in `App.tsx` by id, and a callback in `App.tsx` is
- * unreachable from any script (CLAUDE.md §6). Everything worth asserting -
+ * unreachable from any script (`scripts/CLAUDE.md`). Everything worth asserting -
  * which keys exist, which commands are offered when, how a title reads - is
  * here, where `scripts/commands/registry.ts` can import it.
  *

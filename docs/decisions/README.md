@@ -14,8 +14,15 @@ the dissector reasoning, never for a plan.
 **The Status column records supersessions too.** An ADR is never edited after
 acceptance, so this index and the forward banner on each superseded file are the
 only places that say a decision has been overtaken - and a reader scanning the
-column is the reader most likely to act on a stale one. It agrees with
-`CLAUDE.md` §11, which is the same ledger in the same words.
+column is the reader most likely to act on a stale one. This index owns the
+ledger; `CLAUDE.md` links here rather than maintaining a second copy. An accepted
+decision may still be unimplemented: check its status and the current code.
+
+**A "CLAUDE.md §n" in an ADR or in this index cites the numbered root guide as it
+stood when the decision was written.** That guide has since been split: its
+rules are in the root `CLAUDE.md` and the path-scoped `CLAUDE.md` files it lists,
+its mechanics in `docs/architecture.md` and `docs/testing.md`, and its retired
+explanations in `docs/history.md`. The ADRs keep the old citations unedited.
 
 | # | Decision | Status |
 |---|---|---|
@@ -76,9 +83,9 @@ column is the reader most likely to act on a stale one. It agrees with
 | [0055](0055-a-stream-is-told-as-its-states.md) | A stream is told as its states - the capture store folds every row into a per-stream digest (RFC 793 states inferred from one vantage point, totals, outcome), snapshot in a sixth file and rebuilt from the rows when stale; Follow Stream's ladder paints by colour rule, folds quiet runs and docks an RFC 793 state map; the conversation list gains an outcome column over the whole capture | Accepted 2026-10-09; nothing landed |
 | [0056](0056-four-themes-and-preset-accents.md) | Four themes - Light, Dark (near black, `#101112`), Dim (a grey) and High Contrast (7:1) - with Follow Windows resolving to High Contrast when Windows asks; selection mixed from the accent at a share per theme; theme tiles drawn through `.theme-scope`; seven preset accents, the brand mark fixed | Accepted 2026-10-16; themes landed |
 | [0057](0057-command-registry-and-palette.md) | One command registry - data only in `src/lib/commands.ts`, `run` bound by id in App - that the Ctrl+K palette (`>` `:` `?`), the analyst keys (Ctrl+/, Ctrl+G, Ctrl+E) and every keyed tooltip read; no palette-only features (`d3b4326`); the palette heads 0034's Escape chain; recent filters and a match chip, settings search with per-row reset, and two motion tokens that reduced motion zeroes | Accepted 2026-10-16; landed |
-| [0058](0058-monitoring-intake-and-lifetime.md) | NetFlow v5 intake in its own unprivileged `utilityProcess`: one exporter IPv4 as an intake filter, one specific bind (never `0.0.0.0`), an 8 MiB receive buffer, collection only while open and only after an explicit Start, ended by Stop, quit (a 5 s drain) and suspend; the firewall prompt is explained and observed, never changed | Accepted 2026-10-17; nothing landed |
-| [0059](0059-monitoring-evidence-journal-and-rollups.md) | A standalone dataset in `userData/monitoring`: a CRC-32-framed journal of every received datagram is the authority, pinned by a test vector; minute rollups keyed by directional address pair (budget 16,384) are a cache rebuilt by streaming; receipt-time buckets, gaps never zeros, a torn tail the only truncation, an 8 GiB default; tables bounded one by one, totals always exact | Accepted 2026-10-17; nothing landed |
-| [0060](0060-monitoring-workspace-sheet.md) | Monitoring is a third sheet on the speed test's precedent, opened from the Network panel and a palette command; `APP_VIEWS`, `Ctrl+1..5` and the rail unchanged; leaving it keeps collecting; Allow, not "Private networks", before the first Start | Accepted 2026-10-17; nothing landed |
+| [0058](0058-monitoring-intake-and-lifetime.md) | NetFlow v5 intake in its own unprivileged `utilityProcess`: one exporter IPv4 as an intake filter, one specific bind (never `0.0.0.0`), an 8 MiB receive buffer, collection only while open and only after an explicit Start, ended by Stop, quit (a 5 s drain) and suspend; the firewall prompt is explained and observed, never changed | Accepted 2026-10-17; landed 2026-10-18 (merge 41b4a43) |
+| [0059](0059-monitoring-evidence-journal-and-rollups.md) | A standalone dataset in `userData/monitoring`: a CRC-32-framed journal of every received datagram is the authority, pinned by a test vector; minute rollups keyed by directional address pair (budget 16,384) are a cache rebuilt by streaming; receipt-time buckets, gaps never zeros, a torn tail the only truncation, an 8 GiB default; tables bounded one by one, totals always exact | Accepted 2026-10-17; landed 2026-10-18 (merge 41b4a43) |
+| [0060](0060-monitoring-workspace-sheet.md) | Monitoring is a third sheet on the speed test's precedent, opened from the Network panel and a palette command; `APP_VIEWS`, `Ctrl+1..5` and the rail unchanged; leaving it keeps collecting; Allow, not "Private networks", before the first Start | Accepted 2026-10-17; landed 2026-10-18 (merge 41b4a43) |
 
 ## Review outcome: amendments to the spec's execution order
 

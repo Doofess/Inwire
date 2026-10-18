@@ -8,8 +8,8 @@
  * otherwise after a delay that grows - and one that another attempt cannot fix
  * is not retried at all.
  *
- * **Bounded, because consent is about how many as well as whether** (the root
- * CLAUDE.md's Direction section, on reverse DNS): every attempt is a request to
+ * **Bounded, because consent is about how many as well as whether** (`SCOPE.md`'s
+ * first invariant): every attempt is a request to
  * ipapi.co that shows in the user's own capture, so a lookup that cannot
  * succeed must not keep knocking. Three retries over about two and a half
  * minutes, then it waits for the panel to be opened again.
