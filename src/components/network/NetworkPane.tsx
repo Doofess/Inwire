@@ -11,6 +11,7 @@ import type { NetworkFacts } from '../../services/networkFacts';
 import { Row, Section, Empty, Compare, Value } from './rows';
 import { PublicIdentity } from './PublicIdentity';
 import { SpeedTestSection } from '../speedtest/SpeedTestSection';
+import { MonitoringSection } from '../monitoring/MonitoringSection';
 
 /**
  * What this machine's network actually looks like - configured, and observed.
@@ -115,6 +116,8 @@ interface NetworkPaneProps {
    * summary and its Run button; the charts are the sheet's.
    */
   onOpenSpeedTest?: () => void;
+  /** Opens NetFlow monitoring's sheet (ADRs 0058-0060); the panel holds its one-line state. */
+  onOpenMonitoring?: () => void;
   /**
    * No longer a prop, for the second time.
    *
@@ -161,7 +164,7 @@ function countdown(seconds: number | null, now: number): string | null {
 }
 
 export const NetworkPane: React.FC<NetworkPaneProps> = ({
-  adapters, facts, captureInterfaces, agentConnected, onOpenSpeedTest,
+  adapters, facts, captureInterfaces, agentConnected, onOpenSpeedTest, onOpenMonitoring,
 }) => {
   /**
    * Whether the one section that reaches the internet has been asked for.
@@ -269,6 +272,7 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
       {/* First: it is the one thing on this panel a reader comes to DO, and a
           measurement of exactly the connection the rest of it describes. */}
       {onOpenSpeedTest && <SpeedTestSection onOpen={onOpenSpeedTest} />}
+      {onOpenMonitoring && <MonitoringSection onOpen={onOpenMonitoring} />}
 
                           <Section title="Capture adapter">
                 {adapter === null ? noAdapter : (

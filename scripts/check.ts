@@ -104,12 +104,22 @@ const NOT_TESTS: Record<string, string> = {
   'perf/ui-burst-drive.ts': 'measurement and driver; launches the built app against a replay of a real burst and prints fps, long tasks and profiles, with no pass mark',
   'electron/palette-shots.ts': 'photographs the command palette, the filter recents and match chip, and settings search and Reset in all four themes, for looking at; its one assertion (Escape closes only the palette) needs the built app launched',
   'electron/speed-test-shots.ts': 'photographs every state of the speed test against a local speed server, for looking at; a few minutes and no pass mark',
+  'electron/monitoring-shots.ts': 'photographs every state of NetFlow monitoring against datagrams it sends itself, for looking at; a few minutes and no pass mark',
   'electron/speed-test-drive.ts': 'runs one real speed test against Cloudflare in the built app and prints the numbers - an outbound test by design, and the network decides the answer',
   'speed-test/gen-colos.ts': 'generator; fetches Cloudflare\'s data-centre list and WRITES src/services/speedTest/colos.ts - run by hand, committed with its output',
   'perf/parallel-threads.ts': 'measurement; dissects a capture on worker_threads shards and prints frames a second against one core, with no pass mark (ADR 0053 phase 3)',
   'monitoring/measurement.ts':
     'measurement and human step (ADRs 0058-0059); the journal mode writes ~2.7 GB to temp, socket, journal and rollup print '
     + 'machine properties with no pass mark, and the firewall mode needs the installed agent, WSL and a person to answer the Windows Security prompt',
+  'electron/monitoring-drive.ts':
+    'driver; launches the built app a dozen times against its own loopback exporter and kills its Worker, utility and renderer '
+    + 'to prove recovery, quit drain and sidecar rebuild - minutes, and every launch needs a build (Task 8)',
+  'monitoring/interop.ts':
+    'driver; replays softflowd\'s own v5 exports into the built app and compares with tshark - needs WSL, Ubuntu, softflowd '
+    + 'and tshark, and says NOT RUN without them, which is never a pass',
+  'monitoring/load.ts': 'measurement; stepped NetFlow load against the built app for up to ten minutes, with no pass mark',
+  'monitoring/fixtures.ts': 'helper, not a test; builds the generated NetFlow v5 payloads and evidence the monitoring scripts assert against',
+  'monitoring/queryRig.ts': 'helper, not a test; the in-memory journal, sidecar, runtime and Worker host that rollup.ts and queries.ts drive',
   'perf/xlsx-cost.ts':
     'measurement; sizes the Excel export budget (XLSX_BYTES_PER_CELL) on the real captures, '
     + 'needs the fixtures and --expose-gc, and has no pass mark',

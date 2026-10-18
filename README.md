@@ -47,6 +47,20 @@ exports, use CSV.
 The app has Light, Dark, Dim and High Contrast themes, plus an option to follow
 Windows.
 
+## Watching a network
+
+Inwire can also collect NetFlow v5 from one router, firewall or `softflowd`.
+It listens on an address and port you choose (2055 by default) and keeps a
+history on disk, up to a storage limit you set, that survives a restart. The
+Monitoring screen, opened from the Network sidebar, shows traffic over time,
+top endpoints and top conversations for any range, and one click on a host
+filters the capture by it. Collection runs apart from capture, so starting,
+clearing or importing a capture leaves it alone. Its numbers are checked
+against tshark's decode of `softflowd`'s exports.
+
+NetFlow v9, IPFIX and sFlow can be inspected inside a packet capture, but
+aren't collected.
+
 ## What connects to the internet?
 
 Captured packets stay on your machine. There are no accounts or telemetry.
@@ -55,7 +69,8 @@ IP lookups and reverse DNS are optional and send address queries to their
 providers. After you enable geo-IP, the map also loads online tiles. Update
 checks are opt-in, and Npcap is downloaded only when you ask to install it.
 The speed test connects to Cloudflare when you press Run and can use up to
-2 GB of traffic.
+2 GB of traffic. The NetFlow collector only receives: it listens where you tell
+it to and sends nothing.
 
 Loaded decryption keys stay in memory unless you choose to include them in a
 pcapng export. If you follow a key-log file, the app remembers its path and
@@ -104,10 +119,7 @@ Use `npm run dev` for UI work and `npm run check` to run the checks.
 handled. The [architecture decisions](docs/decisions/README.md) explain the
 choices behind the code.
 
-Network-wide monitoring is next. The NetFlow v5 collector, history journal and
-monitoring screen have accepted designs, but aren't built yet. Today, Inwire
-can inspect NetFlow, IPFIX and sFlow messages inside a packet capture.
-[SCOPE.md](SCOPE.md) describes that direction and what's in scope.
+[SCOPE.md](SCOPE.md) describes where the project is going and what's in scope.
 
 ## License
 

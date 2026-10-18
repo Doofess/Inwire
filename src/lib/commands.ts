@@ -97,6 +97,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { id: 'sidebar.schedule', title: 'Capture schedule', group: 'Window', keywords: ['timer', 'autostop'] },
   { id: 'sidebar.transfer', title: 'Export / Import PCAP', group: 'Window', keywords: ['save', 'open', 'csv', 'pdf'] },
   { id: 'sidebar.network', title: 'Network', group: 'Window', keywords: ['dns', 'public ip', 'speed'] },
+  { id: 'monitoring.open', title: 'Open monitoring', group: 'Window', keywords: ['netflow', 'flow', 'exporter', 'collector'] },
   { id: 'settings.open', title: 'Open settings', group: 'Window', keywords: ['preferences', 'options', 'theme'] },
   {
     id: 'palette.open', title: 'Open command palette', group: 'Window',

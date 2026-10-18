@@ -167,6 +167,19 @@ declare global {
       onSpeedTestEvent?(listener: (event: unknown) => void): () => void;
 
       /**
+       * NetFlow monitoring (ADRs 0058, 0059). The port is ferried on
+       * `inwire:monitoring-port`; every answer is `unknown` here and read by
+       * `src/services/monitoring/control.ts`.
+       */
+      requestMonitoringPort?(nonce: number): Promise<unknown>;
+      getMonitoringConfig?(): Promise<unknown>;
+      saveMonitoringConfig?(config: unknown): Promise<unknown>;
+      startMonitoring?(config: unknown): Promise<unknown>;
+      stopMonitoring?(): Promise<unknown>;
+      onMonitoringRuntimeExit?(listener: (exit: unknown) => void): () => void;
+      onMonitoringStatus?(listener: (status: unknown) => void): () => void;
+
+      /**
        * The followed TLS key log. None takes a path - see
        * `electron/keyLogFollower.ts`. Statuses are `unknown` here and narrowed
        * by `src/lib/keyLogFollow.ts`, like every other value from main.

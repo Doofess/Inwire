@@ -299,9 +299,11 @@ console.log('\n--- Settings is a pane and not a view ---\n');
   // one slot would have to be won again. And it did join: the speed test is
   // the second member (ADR 0054), which is exactly the case this was kept for.
   checkTrue('a sheet is one state, not a flag each',
-    /const \[sheet, setSheet\] = useState<'settings' \| 'speedtest' \| null>/.test(app));
+    /const \[sheet, setSheet\] = useState<'settings' \| 'speedtest' \| 'monitoring' \| null>/.test(app));
   checkTrue('...and the speed test renders in that one slot',
     app.includes("sheet === 'speedtest' ? (") && !/useState<boolean>\([^)]*\)[^\n]*speed/i.test(app));
+  // And monitoring is the third (ADRs 0058-0060): same slot, no flag of its own.
+  checkTrue('...and so does monitoring', app.includes("sheet === 'monitoring' ? ("));
   checkTrue('...and Network is not one any more', !app.includes("sheet === 'network'"));
   // `ids` is typed `AppView[]`, and `'network'` is not in that union - which is
   // itself half the answer, and is why this is written against `string[]`

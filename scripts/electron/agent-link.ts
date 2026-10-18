@@ -194,6 +194,27 @@ async function main(): Promise<void> {
   }
 
   {
+    // `will-quit` runs every listener again when another one prevents the quit,
+    // so `AgentLink.detach()` - which is `pipe.close()` and a null port - is
+    // called twice. The second must not throw and must not bring the link back.
+    const pipePath = testPipePath('close-twice');
+    const { server, nth } = await serve(pipePath, () => undefined);
+    const seen = recorder();
+    const pipe = new PipeTransport(seen.events, pipePath, 50);
+    pipe.open();
+    await until(() => seen.statuses.includes('connected'));
+    let threw = false;
+    try { pipe.close(); pipe.close(); } catch { threw = true; }
+    check('closing twice does not throw', threw, false);
+    const connects = seen.statuses.filter((s) => s === 'connected').length;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    check('...and nothing reconnects afterwards', seen.statuses.filter((s) => s === 'connected').length, connects);
+    check('...and the last status is disconnected', seen.statuses[seen.statuses.length - 1], 'disconnected');
+    server.close();
+    (await nth(0)).destroy();
+  }
+
+  {
     // The greeting (ADR 0052): main says where its captures live first, on
     // every connection - a reconnect is a new client to the agent, which has
     // forgotten the last one's root - and before anything else can be sent.

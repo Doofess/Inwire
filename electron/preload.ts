@@ -26,6 +26,9 @@ import {
   SAVE_STREAM_CLOSE_CHANNEL, SAVE_STREAM_OPEN_CHANNEL, SAVE_STREAM_WRITE_CHANNEL, SAVE_CAPTURED_CHANNEL,
   KEYLOG_ATTACH_CHANNEL, KEYLOG_CHOOSE_CHANNEL, KEYLOG_FOLLOW_SUGGESTED_CHANNEL,
   KEYLOG_FORGET_CHANNEL, KEYLOG_STATUS_CHANNEL, KEYLOG_TEXT_CHANNEL,
+  MONITORING_CONFIG_GET_CHANNEL, MONITORING_CONFIG_SAVE_CHANNEL, MONITORING_EXIT_CHANNEL,
+  MONITORING_PORT_CHANNEL, MONITORING_PORT_REQUEST, MONITORING_START_CHANNEL,
+  MONITORING_STATUS_CHANNEL, MONITORING_STOP_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_INGEST_PORT_REQUEST,
   STORE_PORT_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
@@ -267,6 +270,41 @@ const api = {
   },
 
   /**
+   * NetFlow monitoring (ADRs 0058, 0059). The port arrives on
+   * `inwire:monitoring-port` and goes straight into the monitoring Worker;
+   * asking for it opens the history without listening. Start is the only
+   * thing that binds the socket, and every value back is `unknown` until
+   * `src/services/monitoring/control.ts` has read it.
+   */
+  requestMonitoringPort(nonce: number): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_PORT_REQUEST, nonce);
+  },
+  getMonitoringConfig(): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_CONFIG_GET_CHANNEL);
+  },
+  saveMonitoringConfig(config: unknown): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_CONFIG_SAVE_CHANNEL, config);
+  },
+  startMonitoring(config: unknown): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_START_CHANNEL, config);
+  },
+  stopMonitoring(): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_STOP_CHANNEL);
+  },
+  /** The utility exited; returns the unsubscribe. */
+  onMonitoringRuntimeExit(listener: (exit: unknown) => void): () => void {
+    const handler = (_event: unknown, exit: unknown): void => listener(exit);
+    ipcRenderer.on(MONITORING_EXIT_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(MONITORING_EXIT_CHANNEL, handler); };
+  },
+  /** Intake's status whenever it changes; returns the unsubscribe. */
+  onMonitoringStatus(listener: (status: unknown) => void): () => void {
+    const handler = (_event: unknown, status: unknown): void => listener(status);
+    ipcRenderer.on(MONITORING_STATUS_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(MONITORING_STATUS_CHANNEL, handler); };
+  },
+
+  /**
    * The followed TLS key log (`electron/keyLogFollower.ts`).
    *
    * **No method here takes a path**, and that is deliberate rather than an
@@ -394,6 +432,15 @@ ipcRenderer.on(STORE_INGEST_PORT_CHANNEL, (event) => {
 // the renderer's main thread carries it once and never sees a frame.
 ipcRenderer.on(AGENT_PORT_CHANNEL, (event) => {
   window.postMessage({ channel: AGENT_PORT_CHANNEL }, '*', event.ports);
+});
+
+// The monitoring runtime's port, the same route again: the page hands it to the
+// monitoring Worker and reads nothing from it. The nonce is the request's own,
+// echoed by main, so a port from a connect that already timed out is told apart
+// from the one the current connect is waiting for.
+ipcRenderer.on(MONITORING_PORT_CHANNEL, (event, data: unknown) => {
+  const nonce = typeof data === 'object' && data !== null ? (data as { nonce?: unknown }).nonce : undefined;
+  window.postMessage({ channel: MONITORING_PORT_CHANNEL, nonce }, '*', event.ports);
 });
 
 contextBridge.exposeInMainWorld('inwire', api);

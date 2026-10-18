@@ -207,3 +207,31 @@ export const QUIT_CONFIRM_CHANNEL = 'inwire:quit-confirm';
 
 /** Renderer -> main: `shown`, `quit` or `keep`, for one confirm by id. */
 export const QUIT_CONFIRM_REPLY_CHANNEL = 'inwire:quit-confirm-reply';
+
+/**
+ * Renderer -> main: open the monitoring dataset and hand this page a runtime
+ * port (ADR 0059). Answered on `MONITORING_PORT_CHANNEL`. Opening never binds
+ * the socket; only Start does.
+ */
+export const MONITORING_PORT_REQUEST = 'inwire:monitoring-port-request';
+
+/** Main -> renderer: the monitoring Worker's end of the runtime port, as `ports[0]`. */
+export const MONITORING_PORT_CHANNEL = 'inwire:monitoring-port';
+
+/** Renderer -> main (invoke): start the listener with a `SourceConfig`; answers a `StartResult`. */
+export const MONITORING_START_CHANNEL = 'inwire:monitoring-start';
+
+/** Renderer -> main (invoke): stop the listener; answers a `StopResult`. */
+export const MONITORING_STOP_CHANNEL = 'inwire:monitoring-stop';
+
+/** Renderer -> main (invoke): the saved source, or why it could not be read. */
+export const MONITORING_CONFIG_GET_CHANNEL = 'inwire:monitoring-config-get';
+
+/** Renderer -> main (invoke): save a source; refused, never silently, when it does not validate. */
+export const MONITORING_CONFIG_SAVE_CHANNEL = 'inwire:monitoring-config-save';
+
+/** Main -> renderer: the utility's `IntakeStatus` whenever it changes. */
+export const MONITORING_STATUS_CHANNEL = 'inwire:monitoring-status';
+
+/** Main -> renderer: the monitoring utility exited; every pending request has already failed (`RuntimeExit`). */
+export const MONITORING_EXIT_CHANNEL = 'inwire:monitoring-runtime-exit';

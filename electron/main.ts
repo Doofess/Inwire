@@ -23,7 +23,7 @@
  * files into it.
  */
 import {
-  app, BrowserWindow, dialog, ipcMain, Menu, protocol, session, shell,
+  app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, protocol, session, shell,
 } from 'electron';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -35,6 +35,8 @@ import {
   WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
   SPEEDTEST_CANCEL_CHANNEL, SPEEDTEST_START_CHANNEL,
+  MONITORING_CONFIG_GET_CHANNEL, MONITORING_CONFIG_SAVE_CHANNEL, MONITORING_PORT_REQUEST,
+  MONITORING_START_CHANNEL, MONITORING_STOP_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
   QUIT_CONFIRM_CHANNEL, QUIT_CONFIRM_REPLY_CHANNEL,
 } from './channels';
@@ -48,6 +50,10 @@ import { AgentPipeLink } from './agentPipe';
 import { isComponentId } from './updateCenter/components';
 import { UpdateCenter } from './updateCenter/host';
 import { SpeedTestHost } from './speedTest/host';
+import { MonitoringHost } from './monitoring/host';
+import { planQuitDrain, runQuitDrain } from './monitoring/quitDrain';
+import { readMonitoringSettings, saveMonitoringSettings } from './monitoring/settings';
+import { monitoringRoot } from './monitoring/volume';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
 import { buildMenu } from './menu';
@@ -69,6 +75,16 @@ import {
  */
 const BACKGROUND_WINDOW = process.env.INWIRE_BACKGROUND_WINDOW === '1';
 const BACKGROUND_PARK = -20000;
+
+/**
+ * A log line must never take main down. When whatever launched the app goes
+ * away - a script that exits, a terminal that closes - our stdout is a broken
+ * pipe, and Node's `console` reports the failed write as an `'error'` event
+ * with no listener: an uncaught EPIPE, which Electron shows as a modal dialog
+ * on the desktop of whoever is at the machine. A packaged GUI app has no
+ * console and never reaches this; every launch from a script does.
+ */
+for (const stream of [process.stdout, process.stderr]) stream.on('error', () => {});
 /**
  * Where the renderer comes from in development.
  *
@@ -287,6 +303,61 @@ async function start(): Promise<void> {
   ipcMain.handle(SPEEDTEST_START_CHANNEL, () => speedTest.start());
   ipcMain.handle(SPEEDTEST_CANCEL_CHANNEL, () => speedTest.cancel());
   app.on('will-quit', () => speedTest.dispose());
+  // NetFlow monitoring (ADRs 0058, 0059). Asking for the port opens the
+  // history and binds nothing; only Start does, and only for the window that
+  // asked for the port (`hostCore.ts` holds the binding).
+  const monitoringDirectory = monitoringRoot(app.getPath('userData'));
+  const monitoring = new MonitoringHost(monitoringDirectory);
+  ipcMain.handle(MONITORING_PORT_REQUEST, async (event, nonce: unknown) => {
+    try {
+      await monitoring.connect(event.sender, nonce);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  });
+  ipcMain.handle(MONITORING_START_CHANNEL, (event, config: unknown) => monitoring.start(event.sender, config));
+  ipcMain.handle(MONITORING_STOP_CHANNEL, (event) => monitoring.stop(event.sender, 'user'));
+  // The saved source is not control: like every other settings handler here it
+  // answers any window, and only Start, which binds the socket, is held to the
+  // connected one.
+  ipcMain.handle(MONITORING_CONFIG_GET_CHANNEL, () => readMonitoringSettings(monitoringDirectory));
+  ipcMain.handle(MONITORING_CONFIG_SAVE_CHANNEL, (_event, config: unknown) =>
+    saveMonitoringSettings(monitoringDirectory, config));
+  // A running listener is drained before the app goes: stop intake, write the
+  // final boundary, flush, then quit again. `will-quit` is the one place that
+  // is late enough - every window has already passed `guardClose` - and a
+  // prevented quit re-runs every other `will-quit` listener, which is why each
+  // of them is idempotent. The drain is bounded by `LIMITS.drainMs` inside the
+  // host; past it the utility is killed and the journal left for recovery.
+  // Windows shutdown, logoff and the installer's Restart Manager never reach
+  // `will-quit`; that journal is recovered on the next open too, and that is
+  // the design - not a gap to close with `session-end` and a blocking drain.
+  let monitoringDrain: Promise<void> | null = null;
+  let monitoringDrained = false;
+  app.on('will-quit', (event) => {
+    const plan = planQuitDrain({ running: monitoring.isRunning(), draining: monitoringDrain !== null, drained: monitoringDrained });
+    if (plan === 'quit') { monitoring.release(); return; }
+    event.preventDefault();
+    if (plan === 'wait') return;
+    monitoringDrain = runQuitDrain(
+      () => monitoring.drainForQuit(),
+      (result) => {
+        if (!result.ok || !result.clean) console.error(`[monitoring] quit drain was not clean: ${result.ok ? 'final boundary or flush refused' : result.message}`);
+      },
+      (error) => console.error('[monitoring] quit drain failed:', error),
+      () => {
+        monitoringDrained = true;
+        // On a macrotask: a drain that settled through microtasks alone would call
+        // quit inside Electron's own `will-quit` dispatch, where it is ignored, and
+        // leave a windowless process holding the single-instance lock.
+        setImmediate(() => app.quit());
+      },
+    );
+  });
+  // Sleep ends intake with a boundary; on resume the UI says why it stopped and
+  // asks for Start again. Nothing estimates what the sleeping machine missed.
+  powerMonitor.on('suspend', () => { void monitoring.suspend(); });
   // The store seals whatever is open when it goes; killing it here rather than
   // leaving it to be orphaned is what keeps a clean quit from looking like a
   // crash to the next launch's recovery pass.
