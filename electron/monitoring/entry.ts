@@ -13,7 +13,7 @@
  * files are `volume.ts`. This file only moves messages between
  * `process.parentPort`, a `MessagePortMain` and the collector.
  *
- * Control (open, inspect, discard, discard-preview, retention, start, stop, dispose, status) travels on `parentPort`. The
+ * Control (open, inspect, discard, discard-preview, retention, retention-preview, start, stop, dispose, status) travels on `parentPort`. The
  * Worker's runtime port carries reads and live evidence and nothing else, so a
  * Stop is never queued behind a page (`control.ts`).
  *
@@ -78,7 +78,7 @@ process.parentPort.on('message', (event) => {
     if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) {
       const why = 'monitoring was sent a request it cannot read';
       const result = type === 'stop' || type === 'dispose' ? failure(why)
-        : type === 'inspect' || type === 'discard' || type === 'discard-preview' || type === 'retention' ? { ok: false as const, reason: 'failed' as const, message: why }
+        : type === 'inspect' || type === 'discard' || type === 'discard-preview' || type === 'retention' || type === 'retention-preview' ? { ok: false as const, reason: 'failed' as const, message: why }
           : { ok: false as const, message: why };
       post({ type: 'reply', id, result });
     }
@@ -106,8 +106,11 @@ process.parentPort.on('message', (event) => {
     case 'retention':
       void collector.setRetention(message.policy).then((result) => post({ type: 'reply', id: message.id, result }));
       return;
+    case 'retention-preview':
+      void collector.retentionPreview(message.policy).then((result) => post({ type: 'reply', id: message.id, result }));
+      return;
     case 'start':
-      void collector.start(message.config).then((result) => post({ type: 'reply', id: message.id, result }));
+      void collector.start(message.config, message.sourceChangeConfirmed).then((result) => post({ type: 'reply', id: message.id, result }));
       return;
     case 'stop':
       void collector.stop(message.reason).then((result) => post({ type: 'reply', id: message.id, result }));

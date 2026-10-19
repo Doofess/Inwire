@@ -40,9 +40,10 @@
 import type { BundleChunkResult, BundleOpenResult } from './bundle';
 import { readSourceConfig } from './config';
 import {
-  readIntakeStatus, readRuntimeExit, readStartResult, readStopResult,
-  type StartResult, type StopResult,
+  readDiscardResult, readIntakeStatus, readLocationReply, readRetentionSaveReply, readRuntimeExit, readStartResult, readStopResult,
+  type DiscardResult, type DiscardScope, type LocationReply, type RetentionSaveReply, type StartResult, type StopResult,
 } from './control';
+import { DEFAULT_RETENTION, validateRetentionPolicy, type RetentionPolicy } from './retention';
 import type { SourceHealth } from './sourceHealth';
 import {
   initialMonitoringState, reduceMonitoring, type MonitoringEvent, type MonitoringState,
@@ -63,6 +64,9 @@ export interface MonitoringBridge {
   requestMonitoringPort?(nonce: number): Promise<unknown>;
   getMonitoringConfig?(): Promise<unknown>;
   saveMonitoringConfig?(config: unknown): Promise<unknown>;
+  chooseMonitoringLocation?(intent: 'pick' | 'default'): Promise<unknown>;
+  discardMonitoring?(scope: unknown): Promise<unknown>;
+  saveMonitoringRetention?(policy: unknown): Promise<unknown>;
   startMonitoring?(config: unknown): Promise<unknown>;
   stopMonitoring?(): Promise<unknown>;
   onMonitoringRuntimeExit?(listener: (exit: unknown) => void): () => void;
@@ -120,7 +124,9 @@ export type ConnectResult =
 /** A datagram and the record decoded from it (the Worker answers both; the UI needs both). */
 export interface DetailResult { evidence: DatagramEvidence; record: NormalizedV5 }
 
-export type ConfigReadReply = { ok: true; config: SourceConfig | null } | { ok: false; message: string };
+export type ConfigReadReply =
+  | { ok: true; config: SourceConfig | null; location: string | null; retention: RetentionPolicy }
+  | { ok: false; message: string };
 export type ConfigSaveReply = { ok: true; config: SourceConfig } | { ok: false; message: string };
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -164,9 +170,20 @@ export function readConfigReply(v: unknown): ConfigReadReply {
   if (!isObject(v)) return { ok: false, message: UNREADABLE };
   if (v.ok === false && typeof v.message === 'string') return { ok: false, message: v.message };
   if (v.ok !== true) return { ok: false, message: UNREADABLE };
-  if (v.config === null) return { ok: true, config: null };
+  let location: string | null = null;
+  if (v.location !== undefined) {
+    if (v.location !== null && typeof v.location !== 'string') return { ok: false, message: UNREADABLE };
+    location = v.location;
+  }
+  let retention: RetentionPolicy = { ...DEFAULT_RETENTION };
+  if (v.retention !== undefined) {
+    const read = validateRetentionPolicy(v.retention);
+    if (read === null) return { ok: false, message: UNREADABLE };
+    retention = read;
+  }
+  if (v.config === null) return { ok: true, config: null, location, retention };
   const config = readSourceConfig(v.config);
-  return config === null ? { ok: false, message: UNREADABLE } : { ok: true, config };
+  return config === null ? { ok: false, message: UNREADABLE } : { ok: true, config, location, retention };
 }
 
 export function readSaveReply(v: unknown): ConfigSaveReply {
@@ -593,6 +610,36 @@ export class MonitoringClient {
       return readSaveReply(await save.call(this.deps.bridge, config));
     } catch (e) {
       return { ok: false, message: `The source could not be saved (${describe(e)})` };
+    }
+  }
+
+  async chooseLocation(intent: 'pick' | 'default'): Promise<LocationReply> {
+    const choose = this.deps.bridge.chooseMonitoringLocation;
+    if (choose === undefined) return { ok: false, reason: 'failed', message: UNAVAILABLE };
+    try {
+      return readLocationReply(await choose.call(this.deps.bridge, intent));
+    } catch (e) {
+      return { ok: false, reason: 'failed', message: `The location could not be changed (${describe(e)})` };
+    }
+  }
+
+  async discard(scope: DiscardScope): Promise<DiscardResult> {
+    const discard = this.deps.bridge.discardMonitoring;
+    if (discard === undefined) return { ok: false, reason: 'failed', message: UNAVAILABLE };
+    try {
+      return readDiscardResult(await discard.call(this.deps.bridge, scope));
+    } catch (e) {
+      return { ok: false, reason: 'failed', message: `The data could not be discarded (${describe(e)})` };
+    }
+  }
+
+  async saveRetention(policy: RetentionPolicy): Promise<RetentionSaveReply> {
+    const save = this.deps.bridge.saveMonitoringRetention;
+    if (save === undefined) return { ok: false, reason: 'failed', message: UNAVAILABLE };
+    try {
+      return readRetentionSaveReply(await save.call(this.deps.bridge, policy));
+    } catch (e) {
+      return { ok: false, reason: 'failed', message: `The retention policy could not be saved (${describe(e)})` };
     }
   }
 

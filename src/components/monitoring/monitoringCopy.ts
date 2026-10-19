@@ -9,7 +9,8 @@
 import { MAX_STORAGE_BYTES, readSourceConfig } from '../../services/monitoring/config';
 import type { IntakeStopReason } from '../../services/monitoring/control';
 import { nothingArriving, type MonitoringState } from '../../services/monitoring/state';
-import { LIMITS, type SourceConfig } from '../../services/monitoring/types';
+import { DEFAULT_RETENTION, validateRetentionPolicy, type RetentionPolicy } from '../../services/monitoring/retention';
+import { LIMITS, type ExpiryCause, type SourceConfig } from '../../services/monitoring/types';
 
 export type Tone = 'neutral' | 'progress' | 'good' | 'warn' | 'bad';
 
@@ -132,6 +133,51 @@ export function readDraft(draft: SourceDraft): { config: SourceConfig | null; er
 export const sameConfig = (a: SourceConfig | null, b: SourceConfig | null): boolean =>
   a !== null && b !== null && a.exporterIPv4 === b.exporterIPv4 && a.bindIPv4 === b.bindIPv4
   && a.port === b.port && a.storageLimitBytes === b.storageLimitBytes;
+
+// --- storage: retention and expiry ---------------------------------------------------------------
+
+export interface RetentionDraft {
+  /** Whether raw evidence expires by age at all. */
+  keep: boolean;
+  /** Whole days, as typed. */
+  days: string;
+  atLimit: RetentionPolicy['atLimit'];
+}
+
+export function retentionDraftFrom(policy: RetentionPolicy): RetentionDraft {
+  return { keep: policy.keepRawDays !== null, days: String(policy.keepRawDays ?? 30), atLimit: policy.atLimit };
+}
+
+export const DEFAULT_RETENTION_DRAFT: RetentionDraft = retentionDraftFrom(DEFAULT_RETENTION);
+
+/** The draft as a policy the service accepts, or the reason it would not. */
+export function readRetentionDraft(draft: RetentionDraft): { policy: RetentionPolicy | null; error?: string } {
+  const days = draft.keep ? Number(draft.days.trim()) : null;
+  const policy = validateRetentionPolicy({ keepRawDays: days, atLimit: draft.atLimit });
+  return policy === null ? { policy: null, error: 'Days is a whole number from 1 to 36500.' } : { policy };
+}
+
+export const sameRetention = (a: RetentionPolicy, b: RetentionPolicy): boolean =>
+  a.keepRawDays === b.keepRawDays && a.atLimit === b.atLimit;
+
+export const EVIDENCE_EXPIRED_LEGEND = 'Evidence expired';
+export const INCOMPLETE_EXPIRED_MINUTE = 'Not available: this minute exceeded the key budget, and its evidence has expired.';
+export const RETENTION_OFF_NOTE = 'Nothing expires unless you turn this on';
+
+export const expiryDate = (ms: number): string =>
+  new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+/** Why a range has totals and no detail, said by what removed the detail. */
+export function evidenceExpiredText(expiry: ExpiryCause | null, expiredMs: number): string {
+  const tail = 'Totals come from retained minute rollups.';
+  if (expiry?.kind === 'retention') {
+    return `Detailed evidence for this range expired on ${expiryDate(expiry.atMs)} under the retention policy. ${tail}`;
+  }
+  if (expiry?.kind === 'discard') {
+    return `Detailed evidence for this range was discarded before ${expiryDate(expiry.atMs)}. ${tail}`;
+  }
+  return `Detailed evidence for this range expired before ${expiryDate(expiredMs + 1)}. ${tail}`;
+}
 
 // --- numbers and times -------------------------------------------------------------------------------
 

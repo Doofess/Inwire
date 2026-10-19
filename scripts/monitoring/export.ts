@@ -137,8 +137,8 @@ async function main(): Promise<void> {
         { fromMs: T0, toMs: T0 + 1_800_000, reportedOctets: 10n, reportedPackets: 2n, records: 0, coverage: 'aggregate-only' },
         { fromMs: T0 + 1_800_000, toMs: T0 + 3_600_000, reportedOctets: null, reportedPackets: null, records: 0, coverage: 'history-lost' },
       ],
-      endpoints: { status: 'evidence-expired', expiredMs: T0 + 900_000 },
-      conversations: { status: 'evidence-expired', expiredMs: T0 + 900_000 },
+      endpoints: { status: 'evidence-expired', expiredMs: T0 + 900_000, expiry: null, incomplete: false },
+      conversations: { status: 'evidence-expired', expiredMs: T0 + 900_000, expiry: null, incomplete: false },
     }), sink);
     const rows = parseCsv(sink.text());
     const b = section(rows, 'buckets');

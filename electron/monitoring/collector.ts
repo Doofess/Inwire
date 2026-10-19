@@ -41,7 +41,7 @@ import type { BlockFile } from '../../src/services/capture/blockFile';
 import type { SegmentDirectory } from '../../src/services/monitoring/segments';
 import { ArchiveStore, resumeExpiry, runExpiry, type ArchiveStatus } from '../../src/services/monitoring/archive';
 import { readSourceConfig } from '../../src/services/monitoring/config';
-import { isIntakeStopReason, type DiscardPreviewResult, type DiscardResult, type DiscardScope, type InspectResult, type IntakeStatus, type IntakeStopReason, type RetentionResult, type StartResult, type StopReason, type StopResult } from '../../src/services/monitoring/control';
+import { isIntakeStopReason, type DiscardPreviewResult, type DiscardResult, type DiscardScope, type InspectResult, type IntakeStatus, type IntakeStopReason, type RetentionPreviewResult, type RetentionResult, type StartResult, type StopReason, type StopResult } from '../../src/services/monitoring/control';
 import {
   DATASET_FILE, classifyAdoption, encodeDatasetFile, newDatasetFile, planMonitoringDiscard, readDatasetFile,
   type AdoptionResult, type DatasetFile,
@@ -497,6 +497,24 @@ export class Collector {
       .catch((e): DiscardPreviewResult => ({ ok: false, reason: 'failed', message: `monitoring could not preview its discard: ${message(e)}` }));
   }
 
+  /**
+   * What saving `policy` would expire right now, from the same selection the expiry step runs and without
+   * writing a byte: the figures main's confirmation states. On the chain, so it never reads a dataset an
+   * expiry is changing. A dataset that cannot expire anything has nothing due, which is a preview of zero,
+   * not a refusal: saving a policy against a read-only or closed dataset is not blocked by it.
+   */
+  retentionPreview(policy: RetentionPolicy): Promise<RetentionPreviewResult> {
+    return this.run((): RetentionPreviewResult => {
+      if (this.disposed) return { ok: false, reason: 'failed', message: 'monitoring has shut down' };
+      if (this.session !== null) return { ok: false, reason: 'busy', message: BUSY };
+      const d = this.dataset;
+      const due = d === null ? null : this.dueSegments(d, policy);
+      if (d === null || due === null) return { ok: true, segments: 0, fromMs: null, cutMs: null, cause: null };
+      const cause = due.plan.reason === 'limit' ? 'limit' : 'age';
+      return { ok: true, segments: due.plan.segments.length, fromMs: firstJournalMs(d.journal), cutMs: due.plan.throughMs, cause };
+    }).catch((e): RetentionPreviewResult => ({ ok: false, reason: 'failed', message: `monitoring could not preview its retention: ${message(e)}` }));
+  }
+
   /** A new retention policy, applied at once. Only while stopped, like the location and a discard. */
   setRetention(policy: RetentionPolicy): Promise<RetentionResult> {
     return this.run((): RetentionResult => {
@@ -531,9 +549,13 @@ export class Collector {
     this.wake();
   }
 
-  start(config: SourceConfig): Promise<StartResult> {
+  /**
+   * `sourceChangeConfirmed` is main's word that the user was asked and said yes to recording a different
+   * exporter into this history; without it a Start that would do so is refused before anything is bound or written.
+   */
+  start(config: SourceConfig, sourceChangeConfirmed: boolean = false): Promise<StartResult> {
     const epoch = this.stopEpoch;
-    return this.run(() => this.startOp(config, epoch))
+    return this.run(() => this.startOp(config, epoch, sourceChangeConfirmed))
       .catch((e): StartResult => ({ ok: false, message: `monitoring could not start: ${message(e)}` }));
   }
 
@@ -875,7 +897,7 @@ export class Collector {
     if (refused !== null) return { ok: false, reason: 'failed', message: refused };
     const d = this.dataset;
     // The selection `discardBefore` loops over one segment at a time, taken whole.
-    const due = d === null ? null : this.dueSegments(d, scope.beforeMs);
+    const due = d === null ? null : this.dueSegments(d, this.retention, scope.beforeMs);
     if (d === null || due === null) return { ok: true, scope: 'before', segments: 0, fromMs: null, throughMs: null, cutMs: null };
     return {
       ok: true, scope: 'before', segments: due.plan.segments.length,
@@ -963,7 +985,7 @@ export class Collector {
   private expireStep(beforeMs?: number): 'done' | 'none' | 'failed' {
     const d = this.dataset;
     if (d === null) return 'none';
-    const due = this.dueSegments(d, beforeMs);
+    const due = this.dueSegments(d, this.retention, beforeMs);
     if (due === null || d.archive === null) return 'none';
     const { plan, segments } = due;
     const first = segments[0];
@@ -981,13 +1003,13 @@ export class Collector {
    * dialog states is the cut that runs. Null where nothing is due or the dataset cannot expire anything
    * (read-only, or a journal that is neither open nor at its limit). `segments` is the journal's, oldest first.
    */
-  private dueSegments(d: Dataset, beforeMs?: number): { plan: ExpiryPlan; segments: SegmentInfo[] } | null {
+  private dueSegments(d: Dataset, policy: RetentionPolicy, beforeMs?: number): { plan: ExpiryPlan; segments: SegmentInfo[] } | null {
     if (d.readOnly || d.archive === null) return null;
     if (d.journal.state !== 'open' && d.journal.state !== 'storage-limit') return null;
     const segments = d.journal.segments();
     let used = d.rollups.size() + d.archive.bytes();
     for (const s of segments) used += s.bytes;
-    const plan = planExpiry(segments, this.retention, this.env.now(), used, d.limitBytes, beforeMs);
+    const plan = planExpiry(segments, policy, this.env.now(), used, d.limitBytes, beforeMs);
     return plan === null ? null : { plan, segments };
   }
 
@@ -1096,7 +1118,7 @@ export class Collector {
     });
   }
 
-  private async startOp(requested: SourceConfig, epoch: number): Promise<StartResult> {
+  private async startOp(requested: SourceConfig, epoch: number, sourceChangeConfirmed: boolean): Promise<StartResult> {
     if (this.disposed) return { ok: false, message: 'monitoring has shut down' };
     const config = readSourceConfig(requested);
     if (config === null) return { ok: false, message: 'the monitoring source is not valid' };
@@ -1114,6 +1136,18 @@ export class Collector {
       const notReady = await this.awaitReady(abort);
       if (notReady !== null) return { ok: false, message: notReady };
       if (abort.aborted) return { ok: false, message: STOPPED_BEFORE_START };
+
+      // A history recorded from one exporter is not silently continued with another's: refuse before the limit
+      // is touched, a socket is bound or a boundary is written, and let main ask. The exporter address is all
+      // that is compared; a dataset that recorded no source has nothing to differ from.
+      const open = this.dataset;
+      const recorded = open === null || open.readOnly || open.journal.state !== 'open' ? null : open.recordedSource;
+      if (!sourceChangeConfirmed && recorded !== null && recorded !== config.exporterIPv4) {
+        return {
+          ok: false, reason: 'source-differs', recordedExporter: recorded,
+          message: `this monitoring history was recorded from ${recorded}; starting ${config.exporterIPv4} needs confirmation`,
+        };
+      }
 
       // A changed limit is applied in place. Closing and reopening to apply it rescans every entry
       // of the journal, which a full dataset cannot do inside Start's deadline, and it would strand

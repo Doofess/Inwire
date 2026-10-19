@@ -2,9 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Filter, Loader2, RefreshCw, X } from 'lucide-react';
 import type { DetailResult, MonitoringClient } from '../../services/monitoring/client';
 import type { HistoryResult, QueryFocus, QuerySpec } from '../../services/monitoring/types';
-import { count, localTime } from './monitoringCopy';
+import { count, evidenceExpiredText, localTime } from './monitoringCopy';
 import { DatagramDetail } from './DatagramDetail';
 import { BUTTON_SECONDARY } from './parts';
+
+/** Reopens in a row before the reply's own message is shown; Refresh starts the count again. */
+const MAX_STALE = 3;
 
 /**
  * A selected endpoint or conversation: the same range asked again with a
@@ -33,25 +36,37 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
 }) {
   const [result, setResult] = useState<HistoryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expired, setExpired] = useState<string | null>(null);
   const [again, setAgain] = useState(0);
   const [reading, setReading] = useState(false);
   const [detail, setDetail] = useState<DetailResult | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const staleRun = useRef(0);
   const key = focus.kind === 'endpoint' ? focus.address : `${focus.srcAddr}>${focus.dstAddr}`;
 
   useEffect(() => {
     let live = true;
     setError(null);
+    setExpired(null);
     setReading(true);
     void client.query('monitoring-focus', { ...spec, focus }).then((reply) => {
       if (!live) return;
       setReading(false);
-      if (reply.ok) { setResult(reply.value); return; }
+      if (reply.ok) { staleRun.current = 0; setResult(reply.value); return; }
       // The journal moved between asking and answering: ask again, as the
-      // detail path does. Neither is something to show as an error.
-      if (reply.code === 'stale-generation') { setAgain((n) => n + 1); return; }
-      if (reply.code !== 'cancelled') setError(reply.message);
+      // detail path does. Neither is something to show as an error, unless it
+      // keeps happening.
+      if (reply.code === 'stale-generation') {
+        if (++staleRun.current < MAX_STALE) { setAgain((n) => n + 1); return; }
+      }
+      staleRun.current = 0;
+      if (reply.code === 'cancelled') return;
+      // Neither note may sit under a list from an older answer.
+      setResult(null);
+      // Expired evidence is a fact about the range, not a failure: said in the sheet's own words.
+      if (reply.code === 'evidence-expired') { setExpired(evidenceExpiredText(reply.expiry ?? null, reply.expiredMs ?? 0)); return; }
+      setError(reply.message);
     });
     return () => { live = false; };
     // `spec` is rebuilt per render by its owner; its fields are the dependency.
@@ -86,6 +101,15 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
     ? <>Host <span className="font-mono">{focus.address}</span></>
     : <>Conversation <span className="font-mono">{focus.srcAddr}</span> to <span className="font-mono">{focus.dstAddr}</span></>;
 
+  // One button, shown beside whichever answer is up: an expired range or a
+  // failure is as much a snapshot as a list.
+  const refresh = (
+    <button type="button" className={BUTTON_SECONDARY} disabled={reading} onClick={onRefresh}>
+      <RefreshCw className={`h-3.5 w-3.5 ${reading ? 'motion-safe:animate-spin' : ''}`} aria-hidden />
+      {reading ? 'Refreshing…' : 'Refresh'}
+    </button>
+  );
+
   return (
     <section aria-label="Selection" className="space-y-3 rounded-md border border-primary/40 bg-card px-3.5 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -110,8 +134,19 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
           not to this history.
         </p>
       )}
-      {error && <p role="alert" className="text-xs text-danger">{error}</p>}
-      {!error && !result && (
+      {error && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <p role="alert" className="text-xs text-danger">{error}</p>
+          {refresh}
+        </div>
+      )}
+      {expired && !error && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <p role="status" className="text-xs leading-relaxed text-muted-foreground">{expired}</p>
+          {refresh}
+        </div>
+      )}
+      {!error && !expired && !result && (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden />Reading the supporting records…
         </p>
@@ -126,10 +161,7 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
               )}
               <span className="tabular-nums text-muted-foreground"> · as of {localTime(asOfMs)}</span>
             </p>
-            <button type="button" className={BUTTON_SECONDARY} disabled={reading} onClick={onRefresh}>
-              <RefreshCw className={`h-3.5 w-3.5 ${reading ? 'motion-safe:animate-spin' : ''}`} aria-hidden />
-              {reading ? 'Refreshing…' : 'Refresh'}
-            </button>
+            {refresh}
           </div>
           {result.evidence.length > 0 && (
             <ul className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto" aria-label="Supporting references">

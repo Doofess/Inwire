@@ -39,7 +39,7 @@ import { MINUTE_MS, EngineAdmission, MinuteAccumulator, ipv4Number, minuteOf } f
 import { CorruptRollupError, RuntimeUnavailableError, type ArchiveSource, type EvidenceReader, type RollupReader } from './runtime';
 import {
   DECODER_POLICY_VERSION, LIMITS, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
-  type EvidenceRef, type HistoryBucket, type HistoryReply, type HistoryResult, type HistoryTable, type MinuteRollup,
+  type EvidenceRef, type ExpiryCause, type HistoryBucket, type HistoryReply, type HistoryResult, type HistoryTable, type MinuteRollup,
   type NormalizedV5, type QueryFocus, type QuerySpec, type SegmentSource, type Snapshot,
 } from './types';
 import { decodeV5, exporterKey, exporterOf, isEngineSourceKey, sourceKey } from './v5';
@@ -70,9 +70,26 @@ export interface QueryOptions {
   archive?: ArchiveSource;
 }
 
+interface Cut { fromMs: number; throughMs: number; reason: string; receivedMs: number }
+
+/** The cut whose expiry reaches furthest, or null for none. */
+function newestCut(cuts: Cut[]): Cut | null {
+  let best: Cut | null = null;
+  for (const c of cuts) if (best === null || c.throughMs > best.throughMs) best = c;
+  return best;
+}
+
+/** Why and when a cut's raw evidence went; null for a reason this reader does not know. */
+function expiryOf(cut: Cut | null): ExpiryCause | null {
+  if (cut === null) return null;
+  if (cut.reason === 'age' || cut.reason === 'limit') return { kind: 'retention', atMs: cut.receivedMs };
+  if (cut.reason === 'user-before') return { kind: 'discard', atMs: cut.throughMs + 1 };
+  return null;
+}
+
 /** A refusal the query decided on, as opposed to a failure it suffered. */
 class Refusal extends Error {
-  constructor(readonly code: 'range-too-large' | 'invalid-query' | 'stale-generation' | 'evidence-expired', message: string, readonly expiredMs?: number) {
+  constructor(readonly code: 'range-too-large' | 'invalid-query' | 'stale-generation' | 'evidence-expired', message: string, readonly expiredMs?: number, readonly expiry?: ExpiryCause | null) {
     super(message);
     this.name = 'Refusal';
   }
@@ -83,7 +100,7 @@ class Refusal extends Error {
  * `runHistoryQuery` plans again against the journal and the archive as they are now.
  */
 class RestartQuery extends Error {
-  constructor(readonly expiredMs = 0) {
+  constructor() {
     super('the journal expired while the query ran');
     this.name = 'RestartQuery';
   }
@@ -393,18 +410,17 @@ export async function runHistoryQuery(
   if (invalid !== null) return { ok: false, code: 'invalid-query', message: invalid };
   try {
     // An expiry that overtakes the query leaves it holding pages of the journal as it was; it plans
-    // again from the start (never mixing the two) and says `evidence-expired` if that keeps happening.
-    let expiredMs = 0;
+    // again from the start (never mixing the two). If that keeps happening it names no expiry, which it
+    // does not know: it says `stale-generation`, and the sheet asks again as it does after a reopen.
     for (let attempt = 1; ; attempt++) {
       try {
         return { ok: true, value: await answer(reader, rollups, spec, signal, options) };
       } catch (e) {
         if (!(e instanceof RestartQuery) && !(e instanceof ExpiredRangeError)) throw e;
-        if (e instanceof RestartQuery) expiredMs = Math.max(expiredMs, e.expiredMs);
         if (signal.aborted) throw new QueryCancelled();
         if (attempt >= MAX_RESTARTS) {
           return {
-            ok: false, code: 'evidence-expired', expiredMs,
+            ok: false, code: 'stale-generation',
             message: 'The journal expired while this query ran, more than once. Ask again.',
           };
         }
@@ -413,7 +429,8 @@ export async function runHistoryQuery(
   } catch (e) {
     if (signal.aborted || (e instanceof Error && e.name === 'AbortError')) return { ok: false, code: 'cancelled', message: 'the query was cancelled' };
     if (e instanceof Refusal) {
-      return e.expiredMs === undefined ? { ok: false, code: e.code, message: e.message } : { ok: false, code: e.code, message: e.message, expiredMs: e.expiredMs };
+      if (e.expiredMs === undefined) return { ok: false, code: e.code, message: e.message };
+      return e.expiry ? { ok: false, code: e.code, message: e.message, expiredMs: e.expiredMs, expiry: e.expiry } : { ok: false, code: e.code, message: e.message, expiredMs: e.expiredMs };
     }
     if (e instanceof StaleGenerationError) return { ok: false, code: 'stale-generation', message: e.message };
     if (e instanceof RuntimeUnavailableError) return { ok: false, code: 'runtime-unavailable', message: e.message };
@@ -464,7 +481,7 @@ class Query {
   /** Where the raw tail begins: after the sidecar's watermark, and never inside expired ids. */
   private tailAfter = 0;
   /** The expired cuts the journal's boundaries record, and the receipt time through which raw evidence is gone. */
-  private cuts: { fromMs: number; throughMs: number }[] = [];
+  private cuts: { fromMs: number; throughMs: number; reason: string; receivedMs: number }[] = [];
   private horizon: number | null = null;
   /** Time the query cannot answer: expired minutes the archive could not give back, or only gives whole. */
   private readonly lost: Window[] = [];
@@ -565,7 +582,7 @@ class Query {
 
     const boundaries = await (this.options.boundaries ?? new BoundaryCache()).upTo(this.reader, this.snapshot, this.firstEntryId);
     this.horizon = expiredHorizon(boundaries);
-    this.cuts = boundaries.flatMap((b) => (b.action === 'expired' && b.expired ? [{ fromMs: b.expired.fromMs, throughMs: b.expired.throughMs }] : []));
+    this.cuts = boundaries.flatMap((b) => (b.action === 'expired' && b.expired ? [{ fromMs: b.expired.fromMs, throughMs: b.expired.throughMs, reason: b.reason, receivedMs: b.receivedMs }] : []));
     if (mark !== null) this.checkCacheAgainstExpiry(mark.throughEntryId, boundaries);
     this.refuseFocusedOverExpired();
     await this.tick();
@@ -585,11 +602,11 @@ class Query {
     await this.scanRaw(windows);
 
     // An expiry that ran meanwhile reset the sidecar and moved the journal's start under what was read.
-    if (await this.archiveCut() !== this.cutAtStart) throw new RestartQuery(this.horizon ?? 0);
+    if (await this.archiveCut() !== this.cutAtStart) throw new RestartQuery();
     // So does a reset that is not an expiry's: the fragments read were of a sidecar that is now empty.
     if (this.markAtStart > 0 && !this.cacheStale) {
       const now = await this.rollupCall(() => this.rollups.watermark());
-      if ((now === null ? 0 : now.throughEntryId) < this.markAtStart) throw new RestartQuery(this.horizon ?? 0);
+      if ((now === null ? 0 : now.throughEntryId) < this.markAtStart) throw new RestartQuery();
     }
 
     return this.result(boundaries, nowMs, rollupMinutes, windows);
@@ -642,6 +659,7 @@ class Query {
       'evidence-expired',
       'The raw records for part of this range have expired, so the records behind a conversation or an address are no longer here. The totals of the range are still available without a focus.',
       expiredMs,
+      expiryOf(newestCut(hits)),
     );
   }
 
@@ -1129,7 +1147,11 @@ class Query {
       };
     });
     const unavailable = this.tablesExpired || this.lost.length > 0;
-    const expiredTable = <Row>():HistoryTable<Row> => ({ status: 'evidence-expired', expiredMs: this.horizon ?? 0 });
+    const overlapping = this.cuts.filter((c) => c.fromMs < this.to && this.from <= c.throughMs);
+    const cut = newestCut(overlapping);
+    const expiry = expiryOf(cut);
+    const incomplete = this.tablesExpired && this.lost.length === 0;
+    const expiredTable = <Row>():HistoryTable<Row> => ({ status: 'evidence-expired', expiredMs: this.horizon ?? 0, expiry, incomplete });
 
     const gaps = [
       ...holes.map((h) => ({ fromMs: h.lo, toMs: h.hi, reason: h.reason })),

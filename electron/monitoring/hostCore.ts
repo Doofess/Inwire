@@ -30,13 +30,13 @@
  */
 import { readSourceConfig } from '../../src/services/monitoring/config';
 import {
-  readDiscardPreviewResult, readDiscardResult, readDiscardScope, readFromUtility, readInspectResult, readRetentionResult,
+  readDiscardPreviewResult, readDiscardResult, readDiscardScope, readFromUtility, readInspectResult, readRetentionPreviewResult, readRetentionResult,
   readStartResult, readStopReason, readStopResult,
-  type DiscardPreviewResult, type DiscardResult, type InspectResult, type RetentionResult, type RuntimeExit, type StartResult, type StopReason,
+  type DiscardPreviewResult, type DiscardResult, type InspectResult, type RetentionPreviewResult, type RetentionResult, type RuntimeExit, type StartResult, type StopReason,
   type StopResult, type ToMonitoringUtility,
 } from '../../src/services/monitoring/control';
 import type { RetentionPolicy } from '../../src/services/monitoring/retention';
-import { LIMITS } from '../../src/services/monitoring/types';
+import { LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
 import { MONITORING_EXIT_CHANNEL, MONITORING_PORT_CHANNEL, MONITORING_STATUS_CHANNEL } from '../channels';
 
 // --- what is injected -------------------------------------------------------------------------------
@@ -114,7 +114,12 @@ const failDiscard = (reason: 'busy' | 'failed' | 'cancelled', message: string): 
 
 /** Main's dialog, as the core sees it: shown the preview, true to go ahead. */
 export type DiscardConfirm = (preview: Extract<DiscardPreviewResult, { ok: true }>) => Promise<boolean>;
-const failRetention = (reason: 'busy' | 'failed', message: string): RetentionResult => ({ ok: false, reason, message });
+const failRetention = (reason: 'busy' | 'failed' | 'cancelled', message: string): RetentionResult => ({ ok: false, reason, message });
+
+/** Main's start dialog: told which exporter the history recorded and which one Start would add, true to go ahead. */
+export type StartConfirm = (recordedExporter: string, configuredExporter: string) => Promise<boolean>;
+/** Main's retention dialog: shown what the candidate policy would expire now, true to go ahead. */
+export type RetentionConfirm = (preview: Extract<RetentionPreviewResult, { ok: true }>, policy: RetentionPolicy) => Promise<boolean>;
 
 /**
  * How long `open` may take: the ordinary request, plus a scan of the whole
@@ -208,17 +213,34 @@ export class MonitoringHostCore {
 
   // --- start and stop ---------------------------------------------------------------------------------------
 
-  async start(sender: ContentsLike, config: unknown): Promise<StartResult> {
+  /**
+   * A Start against a history recorded from another exporter is refused by the utility, before it binds or
+   * writes anything, with `source-differs`. With a `confirm` the user is asked (main's dialog): yes sends the
+   * Start again with the confirmation, no is a `cancelled` failure with nothing said. With no `confirm` the
+   * refusal is the answer. The dialog is waited on outside `startsOutstanding`: a user deciding is not a
+   * listener starting, and the quit drain must not wait on it.
+   */
+  async start(sender: ContentsLike, config: unknown, confirm?: StartConfirm): Promise<StartResult> {
     if (this.quitting) return failStart(QUITTING);
     const session = this.session;
     if (session === null || !this.isBound(sender)) return failStart(NOT_CONNECTED);
     const source = readSourceConfig(config);
     if (source === null) return failStart('that is not a valid monitoring source');
+    const first = await this.sendStart(session, source, false);
+    if (first.ok || first.reason !== 'source-differs' || first.recordedExporter === undefined || confirm === undefined) return first;
+    if (!(await confirm(first.recordedExporter, source.exporterIPv4))) return { ok: false, reason: 'cancelled', message: '' };
+    // The dialog took as long as the user took: whatever it was waiting on may have changed.
+    if (this.quitting) return failStart(QUITTING);
+    if (this.session !== session || session.ended || !this.isBound(sender)) return failStart(NOT_CONNECTED);
+    return this.sendStart(session, source, true);
+  }
+
+  private async sendStart(session: Session, source: SourceConfig, sourceChangeConfirmed: boolean): Promise<StartResult> {
     // A Start can wait out the handshake inside the utility, so its deadline
     // is that wait and then the ordinary one.
     session.startsOutstanding++;
     const result = await this.ask(
-      session, (id) => ({ type: 'start', id, config: source }),
+      session, (id) => ({ type: 'start', id, config: source, sourceChangeConfirmed }),
       readStartResult, failStart, LIMITS.handshakeMs + LIMITS.requestMs,
     ).finally(() => { session.startsOutstanding--; });
     if (result.ok) session.running = true;
@@ -331,12 +353,39 @@ export class MonitoringHostCore {
     );
   }
 
-  /** Hands the utility a new policy. With no utility the settings carry it to the next open. */
-  async setRetention(policy: RetentionPolicy): Promise<RetentionResult> {
+  /**
+   * Hands the utility a new policy, which expires what is due at once, so it is asked about first: the
+   * utility previews the candidate (the selection the expiry step runs), and a preview with segments in it
+   * is shown to `confirm` before anything is sent. Nothing due asks nothing. With segments due and no
+   * `confirm` there is no change at all, so a caller that forgot the dialog cannot expire anything.
+   * `beforeApply` runs after the answer is yes and before the policy is sent, so the caller persists the
+   * policy only once it is certain to go ahead; it returns a sentence to refuse with, or null. With no
+   * utility one is started and opened first: the next open would otherwise expire what is due unasked.
+   */
+  async setRetention(policy: RetentionPolicy, confirm?: RetentionConfirm, beforeApply?: () => string | null): Promise<RetentionResult> {
     if (this.quitting) return failRetention('failed', QUITTING);
     if (this.isRunning()) return failRetention('busy', BUSY);
-    const session = this.session;
-    if (session === null) return { ok: true };
+    let session = this.session;
+    if (session === null) {
+      const opened = await this.ensureOpen();
+      if (!opened.ok) return failRetention('failed', opened.message);
+      session = opened.session;
+    }
+    const preview = await this.ask(
+      session, (id) => ({ type: 'retention-preview', id, policy }),
+      readRetentionPreviewResult, (message): RetentionPreviewResult => ({ ok: false, reason: 'failed', message }), LIMITS.requestMs,
+    );
+    if (!preview.ok) return failRetention(preview.reason, preview.message);
+    if (preview.segments > 0) {
+      if (confirm === undefined) return failRetention('failed', 'this retention policy expires evidence and needs a confirmation');
+      if (!(await confirm(preview, policy))) return failRetention('cancelled', '');
+      // The dialog took as long as the user took: whatever it was waiting on may have changed.
+      if (this.quitting) return failRetention('failed', QUITTING);
+      if (this.isRunning()) return failRetention('busy', BUSY);
+      if (this.session !== session || session.ended) return failRetention('failed', 'monitoring stopped while it was waiting');
+    }
+    const refused = beforeApply?.() ?? null;
+    if (refused !== null) return failRetention('failed', refused);
     return this.ask(
       session, (id) => ({ type: 'retention', id, policy }),
       readRetentionResult, (message) => failRetention('failed', message), LIMITS.requestMs,

@@ -80,13 +80,15 @@ class FakePort implements RpcPort {
 class Disk {
   t = 1_700_000_000_000;
   sockets: FakeSocket[] = [];
+  /** Timers the collector armed and has not cancelled. */
+  readonly timers: { fn: () => void; ms: number }[] = [];
   readonly collector = new Collector({
     openVolume: openMonitoringVolume,
     openFolder: openMonitoringFolder,
     createSocket: () => { const s = new FakeSocket(); this.sockets.push(s); return s; },
     now: () => this.t,
     randomBytes: (n) => new Uint8Array(randomBytes(n)),
-    setTimer: () => () => {},
+    setTimer: (fn, ms) => { const e = { fn, ms }; this.timers.push(e); return () => { const i = this.timers.indexOf(e); if (i >= 0) this.timers.splice(i, 1); }; },
     defer: (fn) => { setImmediate(fn); },
     postStatus: () => {},
   });
@@ -103,6 +105,18 @@ class Disk {
     }
     await settle();
     if (opts.keepRunning !== true) assert.equal((await this.collector.stop('user')).ok, true);
+  }
+
+  /** Fires the zero-delay timers (an expiry armed by open or by a policy change) until none is left. */
+  async runImmediate(): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      const at = this.timers.findIndex((e) => e.ms === 0);
+      if (at < 0) { await settle(); if (this.timers.every((e) => e.ms !== 0)) return; continue; }
+      const [entry] = this.timers.splice(at, 1);
+      entry.fn();
+      await settle();
+    }
+    throw new Error('the expiry never settled');
   }
 
   async close(): Promise<void> { await this.collector.dispose(); }
@@ -620,6 +634,92 @@ async function main(): Promise<void> {
       channel.port2.close();
       await disk.close();
     }
+  });
+
+  // Start against a history recorded from another exporter asks first; the utility refuses it untouched.
+  await test('a Start for a different exporter writes nothing and binds nothing until it is confirmed, then records a start boundary with the new source', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const disk = new Disk();
+    try {
+      await disk.record(root);
+      const other: SourceConfig = { ...CFG, exporterIPv4: '10.0.0.9' };
+      const stamp = stampOf(root);
+      const bytes = readdirSync(root).filter(isSegmentFileName).map((n) => readFileSync(path.join(root, n)).toString('hex'));
+      const sockets = disk.sockets.length;
+      const refused = await disk.collector.start(other);
+      assert.equal(refused.ok, false);
+      assert.deepEqual(
+        refused.ok ? null : { reason: refused.reason, recordedExporter: refused.recordedExporter },
+        { reason: 'source-differs', recordedExporter: '10.0.0.1' },
+      );
+      assert.equal(disk.sockets.length, sockets, 'no socket was created, so nothing was bound');
+      assert.equal(stampOf(root), stamp, 'the folder is as it was: names, sizes and times');
+      assert.deepEqual(readdirSync(root).filter(isSegmentFileName).map((n) => readFileSync(path.join(root, n)).toString('hex')), bytes, 'the journal bytes are unchanged');
+      assert.equal(disk.collector.status().listener, 'stopped');
+
+      // The same exporter needs no confirmation, whatever else differs.
+      assert.deepEqual(await disk.collector.start({ ...CFG, port: 2056 }), { ok: true });
+      assert.equal((await disk.collector.stop('user')).ok, true);
+
+      assert.deepEqual(await disk.collector.start(other, true), { ok: true });
+      assert.equal((await disk.collector.stop('user')).ok, true);
+      const snapshot = await disk.collector.runtime.snapshot();
+      const page = await disk.collector.runtime.readPage(snapshot, snapshot.firstEntryId - 1, 100_000, 1 << 24);
+      const starts = page.entries.flatMap((e) => (e.kind === 'boundary' && e.action === 'start' ? [e.source?.exporterIPv4 ?? null] : []));
+      assert.deepEqual(starts, ['10.0.0.1', '10.0.0.1', '10.0.0.9'], 'each Start recorded its own source, the confirmed one the new exporter');
+      // The history now says 10.0.0.9: starting it again asks nothing, and the old one asks.
+      assert.deepEqual(await disk.collector.start(other), { ok: true });
+      assert.equal((await disk.collector.stop('user')).ok, true);
+      const back = await disk.collector.start(CFG);
+      assert.equal(!back.ok && back.reason, 'source-differs');
+      assert.equal(!back.ok && back.recordedExporter, '10.0.0.9');
+    } finally { await disk.close(); }
+  });
+
+  // The dialog states what the policy expires, so the preview must be the selection the expiry step then runs.
+  await test('a retention preview counts the segments the policy then expires, and writes nothing', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const disk = new Disk();
+    try {
+      const { t0 } = await recordSegments(disk, root, 60);
+      const total = segmentsIn(root).length;
+      assert.ok(total >= 3, `the run rolled segments (${total})`);
+      const first = await firstMs(disk);
+      const DAY = 86_400_000;
+      disk.t = t0 + DAY + 30_000;
+      const policy = { keepRawDays: 1, atLimit: 'stop' as const };
+      const stamp = stampOf(root);
+      const preview = await disk.collector.retentionPreview(policy);
+      assert.equal(preview.ok, true, JSON.stringify(preview));
+      if (!preview.ok) return;
+      assert.equal(stampOf(root), stamp, 'a preview writes nothing');
+      assert.ok(preview.segments >= 1 && preview.segments < total, `some but not all are due (${preview.segments} of ${total})`);
+      assert.equal(preview.cause, 'age');
+      assert.equal(preview.fromMs, first);
+      assert.ok(preview.cutMs !== null && preview.cutMs < disk.t - DAY, 'the cut is older than the policy keeps');
+      assert.equal(segmentsIn(root).length, total, 'asking expired nothing');
+
+      assert.deepEqual(await disk.collector.setRetention(policy), { ok: true });
+      await disk.runImmediate();
+      assert.equal(total - segmentsIn(root).length, preview.segments, 'the preview counted exactly what the policy expired');
+      assert.ok((await firstMs(disk)) > preview.cutMs!, 'what remains starts after the stated cut');
+      assert.deepEqual(await disk.collector.retentionPreview(policy), { ok: true, segments: 0, fromMs: null, cutMs: null, cause: null }, 'nothing is left due');
+    } finally { await disk.close(); }
+  });
+
+  await test('a retention preview is busy while collecting, and nothing due where nothing can expire', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const disk = new Disk();
+    try {
+      await disk.record(root, { keepRunning: true });
+      const busy = await disk.collector.retentionPreview({ keepRawDays: 1, atLimit: 'stop' });
+      assert.equal(!busy.ok && busy.reason, 'busy');
+      assert.equal((await disk.collector.stop('user')).ok, true);
+    } finally { await disk.close(); }
+    const unopened = new Disk();
+    try {
+      assert.deepEqual(await unopened.collector.retentionPreview({ keepRawDays: 1, atLimit: 'stop' }), { ok: true, segments: 0, fromMs: null, cutMs: null, cause: null });
+    } finally { await unopened.close(); }
   });
 
   console.log(`\n${passes} passed, ${failures} failed`);

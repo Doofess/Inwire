@@ -2296,6 +2296,97 @@ test('a focused query over an expired range says the evidence expired, and throu
   assert.equal(kept.ok, true);
 });
 
+test('an expired range says why its evidence is gone, and when', async () => {
+  // user-before: the fixture's plan is a "discard before".
+  {
+    const { rig, plan } = await expiryWorld();
+    assert.equal(plan.reason, 'user-before');
+    const hi = minuteOf(plan.throughMs);
+    expire(rig, plan);
+    await rollUp(rig).then((h) => h.host.settled());
+    const wide = await askOk(rig, perMinute(m(WIDE_MINUTE), m(WIDE_MINUTE + 1)));
+    assert.ok(wide.endpoints.status === 'evidence-expired');
+    if (wide.endpoints.status === 'evidence-expired') assert.deepEqual(wide.endpoints.expiry, { kind: 'discard', atMs: plan.throughMs + 1 });
+    const focused = await ask(rig, { ...perMinute(m(6), hi), focus: { kind: 'endpoint', address: '10.1.0.1' } });
+    assert.ok(!focused.ok);
+    if (!focused.ok) assert.deepEqual(focused.expiry, { kind: 'discard', atMs: plan.throughMs + 1 });
+  }
+  // age: the boundary's receipt time is the nowMs the expiry ran with.
+  {
+    const { rig } = await expiryWorld();
+    const ranAt = NOW + 40 * 86_400_000;
+    const plan = planExpiry(rig.journal.segments(), { keepRawDays: 1, atLimit: 'stop' }, ranAt, 0, SEG_LIMIT);
+    assert.ok(plan !== null && plan.reason === 'age', 'an age plan');
+    assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: ranAt, deflate }), 'done');
+    rig.reopen();
+    await rollUp(rig).then((h) => h.host.settled());
+    const cause = { kind: 'retention', atMs: ranAt };
+    const wide = await askOk(rig, perMinute(m(WIDE_MINUTE), m(WIDE_MINUTE + 1)));
+    assert.ok(wide.endpoints.status === 'evidence-expired', 'the wide minute loses its tables');
+    if (wide.endpoints.status === 'evidence-expired') {
+      assert.deepEqual(wide.endpoints.expiry, cause);
+      assert.equal(wide.endpoints.incomplete, true, 'an over-budget archived minute with nothing lost is incomplete');
+    }
+    const focused = await ask(rig, { ...perMinute(m(6), minuteOf(plan.throughMs)), focus: { kind: 'endpoint', address: '10.1.0.1' } });
+    assert.ok(!focused.ok);
+    if (!focused.ok) assert.deepEqual(focused.expiry, cause);
+  }
+});
+
+test('a range whose own expiry boundary has itself expired names no cause, never a newer cut\'s', async () => {
+  // A discard before a date, then more traffic seals the segment that holds its boundary, then an age
+  // expiry takes that segment too: the discarded range's own cut is gone from the journal.
+  const { rig, plan } = await expiryWorld();
+  expire(rig, plan);
+  const later: EvidenceInput[] = [{ ...start(NOW + 500, S2), source: EXP_SOURCE } as never];
+  for (let i = 0; i < 3600; i++) {
+    const flows = Array.from({ length: 20 }, (_, j) => ({ src: `10.9.${j}.1`, dst: '172.16.0.1', octets: 100 + j, packets: 1, srcPort: 1000 + j, dstPort: 443 }));
+    later.push(dgram(NOW + 1000 + i * 1000, flows, { engineId: 0, sequence: 4000 + i }));
+  }
+  for (let at = 0; at < later.length; at += 100) rig.append(later.slice(at, at + 100));
+  const ranAt = NOW + 40 * 86_400_000;
+  const age = planExpiry(rig.journal.segments(), { keepRawDays: 1, atLimit: 'stop' }, ranAt, 0, SEG_LIMIT);
+  assert.ok(age !== null && age.reason === 'age', 'an age plan');
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, age, { nowMs: ranAt, deflate }), 'done');
+  rig.reopen();
+  await rollUp(rig).then((h) => h.host.settled());
+  const wide = await askOk(rig, perMinute(m(WIDE_MINUTE), m(WIDE_MINUTE + 1)));
+  assert.ok(wide.endpoints.status === 'evidence-expired', 'the wide minute has no tables');
+  if (wide.endpoints.status === 'evidence-expired') {
+    assert.equal(wide.endpoints.expiry, null, 'the discard is not reported as the newer age expiry');
+  }
+});
+
+test('a query the journal keeps expiring under asks again; it never names an expiry it does not know', async () => {
+  const { rig } = await expiryWorld();
+  const overtaken = wrap(rig.runtime, {
+    readBoundaries: () => { throw new ExpiredRangeError(1); },
+    readPage: () => { throw new ExpiredRangeError(1); },
+  } as Over);
+  const reply = await runHistoryQuery(overtaken, overtaken, spec(m(0), m(5), 5), new AbortController().signal, { inflate, nowMs: NOW });
+  assert.equal(reply.ok, false);
+  if (!reply.ok) {
+    assert.equal(reply.code, 'stale-generation', 'the sheet asks again, as it does for a reopen');
+    assert.equal(reply.expiredMs, undefined, 'no "expired before 1 Jan 1970"');
+  }
+});
+
+test('a lost minute is not incomplete', async () => {
+  const { rig, plan } = await expiryWorld();
+  const hi = minuteOf(plan.throughMs);
+  expire(rig, plan);
+  const bytes = new Uint8Array(rig.afile.size());
+  rig.afile.read(0, bytes);
+  const at = bytes.length >> 1;
+  rig.afile.write(at, Uint8Array.of(bytes[at] ^ 0xff));
+  rig.openArchive();
+  rig.openSidecar();
+  await rollUp(rig).then((h) => h.host.settled());
+  const lost = await askOk(rig, perMinute(m(6), hi));
+  assert.ok(lost.endpoints.status === 'evidence-expired');
+  if (lost.endpoints.status === 'evidence-expired') assert.equal(lost.endpoints.incomplete, false);
+});
+
 test('a query planned before an expiry restarts or says evidence-expired; it never throws or mixes pages', async () => {
   for (const focused of [false, true]) {
     const { rig, plan } = await expiryWorld();

@@ -29,7 +29,7 @@ flowchart TD
   main -.->|forks when the sheet first opens; binds on Start; brokers ports| mon["Monitoring utilityProcess: UDP socket + journal"]
   mon <-->|runtime port: journal and rollup sidecar| mw["Monitoring Worker: decode, rollups, queries"]
   mw <-->|MonitoringClient: live feed, history| ui
-  mon -->|journal.iwmj, rollups.iwmr| mdisk["userData/monitoring"]
+  mon -->|journal segments, rollups.iwmr, archive.iwma| mdisk["dataset folder (default userData/monitoring)"]
 ```
 
 Main owns OS resources, the custom protocol, windows, native dialogs, quit
@@ -413,7 +413,8 @@ root guide, and runtime drives and accepted manual gaps in
 
 ## NetFlow monitoring
 
-Implemented by [ADRs 0058-0060](decisions/README.md) (merge `41b4a43`);
+Implemented by [ADRs 0058-0060](decisions/README.md) (merge `41b4a43`), with
+location, retention and the evidence bundle by ADRs 0061-0063;
 numbers are in [monitoring-v5-measurements.md](monitoring-v5-measurements.md).
 It is a NetFlow v5 **collector** for one exporter, independent of captures: it
 reads no adapter, uses no agent or Npcap, and a capture started, cleared or
@@ -426,10 +427,10 @@ parses hostile bytes.
 
 | Piece | Where | Owns |
 |---|---|---|
-| Collector | unprivileged `utilityProcess`, `serviceName: 'inwire-monitoring'` (`electron/monitoring/host.ts`, `entry.ts`, `collector.ts`) | the UDP socket (`udp.ts`: specific IPv4 bind, no `reuseAddr`, 8 MiB receive buffer), the exporter-address filter, entry ids, `journal.iwmj` and `rollups.iwmr` in the `monitoring` folder under userData (`volume.ts`) |
+| Collector | unprivileged `utilityProcess`, `serviceName: 'inwire-monitoring'` (`electron/monitoring/host.ts`, `entry.ts`, `collector.ts`) | the UDP socket (`udp.ts`: specific IPv4 bind, no `reuseAddr`, 8 MiB receive buffer), the exporter-address filter, entry ids, the journal segments (`journal-<first id>.iwmj`), `rollups.iwmr`, `archive.iwma` and dataset.json in the dataset folder, by default the `monitoring` folder under userData (`volume.ts`, `location.ts`) |
 | Decoder | sandboxed Worker `src/workers/monitoring.worker.ts`, rules in `src/services/monitoring/workerHost.ts` | v5 decoding, minute rollups, queries. Holds no file: reads and posts over a `MessagePort` the collector gave it, through `runtimeRpc.ts` |
 | Client | renderer, `src/services/monitoring/client.ts` and `appClient.ts` | one `MonitoringClient` outliving the sheet; ferries main's port into the Worker without reading it (no datagram crosses the main thread), sends queries, folds state. Built on first ask; connects only when the sheet opens |
-| Host | main, `electron/monitoring/hostCore.ts` and `host.ts` | forks the collector, brokers the `MessageChannelMain`, the start/stop IPC and the saved source (`settings.ts`). Sees no datagram |
+| Host | main, `electron/monitoring/hostCore.ts` and `host.ts` | forks the collector, brokers the `MessageChannelMain`, the start/stop IPC, the saved source, location and retention (`settings.ts`), and the folder, discard and save dialogs. Sees no datagram |
 | Sheet | `sheet: 'monitoring'` in `src/App.tsx`, the third sheet after settings and speed test | the UI; `APP_VIEWS` and `Ctrl+1..5` are unchanged |
 
 **The collector never decodes.** The Worker does, so a decoder fault cannot
@@ -471,10 +472,26 @@ A collector that exits fails pending queries, reports through the runtime-exit
 channel and needs Start again.
 
 **Storage.** The limit is part of the saved source: default 8 GiB, minimum
-16 MiB (`LIMITS` in `src/services/monitoring/types.ts`). Reaching it stops
-collection with `storage-limit` and leaves history readable; nothing is
-pruned. This is not capture pruning: never route monitoring through
-`planPrune` or `CAPTURE_ID_PATTERN` (ADR 0012 covers captures only).
+16 MiB (`LIMITS` in `src/services/monitoring/types.ts`). By default reaching
+it stops collection with `storage-limit` and leaves history readable. This is
+not capture pruning: never route monitoring through `planPrune` or
+`CAPTURE_ID_PATTERN` (ADR 0012 covers captures only).
+
+**Location, retention and export** (ADRs 0061-0063). The renderer sends an
+intent (`'pick'`, `'default'`, a discard scope) and never a path; main's own
+dialog picks the folder, which becomes `<picked>/Inwire Monitoring` unless it
+already holds a journal, and overlap with the captures folder is refused.
+Adoption inspects first: a folder with a name Inwire did not write is refused
+untouched, and damaged history opens read-only with Start off. A discard is
+previewed by the collector and confirmed by main's dialog, then deletes only
+recognized names (`classifyMonitoringName`). Retention is off unless turned on;
+it expires whole segments by age, or the oldest at the limit if the user chose
+that over stopping, after writing their minute rollups to `archive.iwma`, a
+sealed file that is never rebuilt or repaired. Expired time keeps exact totals
+and answers `aggregate-only`; its tables and records say "Evidence expired"
+and why. A `.iwmon` bundle is assembled in the Worker and streamed into a file
+the user chose in main's save dialog: raw journal entries contiguous by id,
+the archived minutes of expired parts, and a manifest.
 
 Scripts that hold each rule are in the monitoring rows of
 [testing.md](testing.md).

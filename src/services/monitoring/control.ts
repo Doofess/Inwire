@@ -24,7 +24,14 @@ import { LIMITS, type JournalSnapshot, type SourceConfig } from './types';
 
 // --- results ------------------------------------------------------------------------------
 
-export type StartResult = { ok: true } | { ok: false; message: string };
+/**
+ * A refused Start. `source-differs` is the utility's: the open dataset recorded `recordedExporter` and the
+ * configuration names another, so nothing was bound or written until main's dialog says yes. `cancelled`
+ * is main's own: that dialog was declined and the message is empty.
+ */
+export type StartResult =
+  | { ok: true }
+  | { ok: false; message: string; reason?: 'source-differs' | 'cancelled'; recordedExporter?: string };
 
 /**
  * `clean` is false when the final boundary or the flush did not happen - a
@@ -119,14 +126,15 @@ export type ToMonitoringUtility =
   | { type: 'discard'; id: number; scope: DiscardScope }
   | { type: 'discard-preview'; id: number; scope: DiscardScope }
   | { type: 'retention'; id: number; policy: RetentionPolicy }
+  | { type: 'retention-preview'; id: number; policy: RetentionPolicy }
   | { type: 'attach' }
-  | { type: 'start'; id: number; config: SourceConfig }
+  | { type: 'start'; id: number; config: SourceConfig; sourceChangeConfirmed: boolean }
   | { type: 'stop'; id: number; reason: StopReason }
   | { type: 'dispose'; id: number };
 
-/** Utility -> main. A `reply` answers the request with its `id`: `open` and `start` with a `StartResult`, `stop` and `dispose` with a `StopResult`, `inspect` with an `InspectResult`, `discard` with a `DiscardResult`, `discard-preview` with a `DiscardPreviewResult`, `retention` with a `RetentionResult`. */
+/** Utility -> main. A `reply` answers the request with its `id`: `open` and `start` with a `StartResult`, `stop` and `dispose` with a `StopResult`, `inspect` with an `InspectResult`, `discard` with a `DiscardResult`, `discard-preview` with a `DiscardPreviewResult`, `retention` with a `RetentionResult`, `retention-preview` with a `RetentionPreviewResult`. */
 export type FromMonitoringUtility =
-  | { type: 'reply'; id: number; result: StartResult | StopResult | InspectResult | DiscardResult | DiscardPreviewResult | RetentionResult }
+  | { type: 'reply'; id: number; result: StartResult | StopResult | InspectResult | DiscardResult | DiscardPreviewResult | RetentionResult | RetentionPreviewResult }
   | { type: 'status'; status: IntakeStatus };
 
 // --- location and discard (ADR 0061) -----------------------------------------------------------
@@ -163,8 +171,22 @@ export type DiscardPreviewResult =
   | { ok: true; scope: 'all' | 'before'; segments: number; fromMs: number | null; throughMs: number | null; cutMs: number | null }
   | { ok: false; reason: 'busy' | 'failed'; message: string };
 
-/** A retention policy is changed only while stopped, like the location and a discard. */
-export type RetentionResult = { ok: true } | { ok: false; reason: 'busy' | 'failed'; message: string };
+/**
+ * A retention policy is changed only while stopped, like the location and a discard. `cancelled` is main's
+ * own: the dialog that states what the policy expires now was declined, and nothing was sent.
+ */
+export type RetentionResult = { ok: true } | { ok: false; reason: 'busy' | 'failed' | 'cancelled'; message: string };
+
+/**
+ * What saving a candidate policy would expire right now, from the same selection the expiry step runs and
+ * writing nothing: the figures main's confirmation states. `segments` is how many sealed segments go (0 for
+ * a dataset that cannot expire anything), `fromMs` the first retained entry's received time and `cutMs` the
+ * last removed segment's last: the cut that actually happens. `cause` is the plan's reason, null when
+ * nothing is due.
+ */
+export type RetentionPreviewResult =
+  | { ok: true; segments: number; fromMs: number | null; cutMs: number | null; cause: 'age' | 'limit' | null }
+  | { ok: false; reason: 'busy' | 'failed'; message: string };
 
 // --- main -> renderer: location and retention (ADR 0061) ---------------------------------------
 
@@ -184,7 +206,7 @@ export type LocationReply =
 /** What saving a retention policy answers: the policy now in force, or why it is not. */
 export type RetentionSaveReply =
   | { ok: true; retention: RetentionPolicy }
-  | { ok: false; reason: 'busy' | 'failed'; message: string };
+  | { ok: false; reason: 'busy' | 'failed' | 'cancelled'; message: string };
 
 // --- readers ----------------------------------------------------------------------------------
 
@@ -215,7 +237,14 @@ export function readJournalSnapshot(v: unknown): JournalSnapshot | null {
 
 export function readStartResult(v: unknown): StartResult {
   if (isObject(v) && v.ok === true) return { ok: true };
-  if (isObject(v) && v.ok === false && isText(v.message)) return { ok: false, message: v.message };
+  if (isObject(v) && v.ok === false && isText(v.message)) {
+    if (v.reason === 'cancelled') return { ok: false, message: v.message, reason: 'cancelled' };
+    // A refusal that does not say what was recorded cannot be asked about: it is an ordinary failure.
+    if (v.reason === 'source-differs' && isText(v.recordedExporter)) {
+      return { ok: false, message: v.message, reason: 'source-differs', recordedExporter: v.recordedExporter };
+    }
+    return { ok: false, message: v.message };
+  }
   return { ok: false, message: UNREADABLE };
 }
 
@@ -276,6 +305,18 @@ export function readInspectResult(v: unknown): InspectResult {
   return bad;
 }
 
+export function readRetentionPreviewResult(v: unknown): RetentionPreviewResult {
+  if (isObject(v) && v.ok === true) {
+    const { segments, fromMs, cutMs, cause } = v;
+    if (isCount(segments) && timeOrNull(fromMs) && timeOrNull(cutMs) && (cause === null || cause === 'age' || cause === 'limit')) {
+      return { ok: true, segments, fromMs, cutMs, cause };
+    }
+  } else if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
+    return { ok: false, reason: v.reason, message: v.message };
+  }
+  return { ok: false, reason: 'failed', message: UNREADABLE };
+}
+
 export function readRetentionResult(v: unknown): RetentionResult {
   if (isObject(v) && v.ok === true) return { ok: true };
   if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
@@ -309,7 +350,7 @@ export function readRetentionSaveReply(v: unknown): RetentionSaveReply {
   if (isObject(v) && v.ok === true) {
     const retention = validateRetentionPolicy(v.retention);
     if (retention !== null) return { ok: true, retention };
-  } else if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
+  } else if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed' || v.reason === 'cancelled') && isText(v.message)) {
     return { ok: false, reason: v.reason, message: v.message };
   }
   return { ok: false, reason: 'failed', message: UNREADABLE };
@@ -388,9 +429,13 @@ export function readToUtility(v: unknown): ToMonitoringUtility | null {
       const policy = validateRetentionPolicy(v.policy);
       return policy === null ? null : { type: 'retention', id, policy };
     }
+    case 'retention-preview': {
+      const policy = validateRetentionPolicy(v.policy);
+      return policy === null ? null : { type: 'retention-preview', id, policy };
+    }
     case 'start': {
       const config = readSourceConfig(v.config);
-      return config === null ? null : { type: 'start', id, config };
+      return config === null ? null : { type: 'start', id, config, sourceChangeConfirmed: v.sourceChangeConfirmed === true };
     }
     case 'stop': {
       const reason = readStopReason(v.reason);
