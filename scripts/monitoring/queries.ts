@@ -2149,7 +2149,11 @@ async function crashedAfterBoundary(how: 'dies-before-reset' | 'unlink-fails'): 
   const wm = rig.store.watermark();
   const [boundary] = await expiredBoundaryIds(rig);
   assert.ok(boundary !== undefined, 'the boundary is durable');
-  assert.ok(wm !== null && wm.throughEntryId < boundary, `the cache still describes the world before the boundary (${wm?.throughEntryId} < ${boundary})`);
+  if (how === 'dies-before-reset') {
+    assert.ok(wm !== null && wm.throughEntryId < boundary, `the cache still describes the world before the boundary (${wm?.throughEntryId} < ${boundary})`);
+  } else {
+    assert.equal(wm, null, 'a refused unlink still resets the cache, since the boundary is durable');
+  }
   assert.equal(rig.journal.snapshot().firstEntryId, plan.throughEntryId + 1, 'the journal finished the unlink');
   return { rig, plan, before };
 }
@@ -2165,7 +2169,7 @@ for (const how of ['dies-before-reset', 'unlink-fails'] as const) {
   test(`C1 (${how}): resumeExpiry resets the cache, a rebuild follows and the totals stay exact`, async () => {
     const { rig, before } = await crashedAfterBoundary(how);
     const archived = rig.archive.bytes();
-    assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'resumed');
+    assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), how === 'dies-before-reset' ? 'resumed' : 'none');
     assert.equal(rig.store.watermark(), null, 'the cache was reset');
     assert.equal(rig.archive.bytes(), archived, 'nothing was archived again');
     assert.equal((await expiredBoundaryIds(rig)).length, 1, 'and no second boundary');
@@ -2187,6 +2191,25 @@ for (const how of ['dies-before-reset', 'unlink-fails'] as const) {
     assert.deepEqual(totals(await askOk(rig, WIDE)), before);
   });
 }
+
+test('C1 (unlink-fails, live): the process carries on, and a batch continuing from the old watermark is refused', async () => {
+  // No reopen: the boundary is durable, the unlink was not, and the live Worker's next batch continues from
+  // where the cache was. Accepted, it would lift the watermark past the boundary with the expired minutes
+  // still inside, and the stale-cache rule would then trust it.
+  const dir = new FlakyDirectory();
+  const { rig, plan } = await expiryWorld(dir);
+  const before = totals(await askOk(rig, WIDE));
+  const old = rig.store.watermark();
+  assert.ok(old !== null);
+  dir.failUnlink = true;
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'failed');
+  dir.failUnlink = false;
+  const [boundary] = await expiredBoundaryIds(rig);
+  assert.ok(boundary !== undefined, 'the boundary is durable');
+  const next = { ...old, throughEntryId: Math.max(old.throughEntryId, boundary) + 1 };
+  assert.throws(() => rig.store.appendMinutes([], next, old.throughEntryId), RangeError, 'a batch from the old watermark');
+  assert.deepEqual(totals(await askOk(rig, WIDE)), before);
+});
 
 // --- engine admission across an expiry (I4) ---------------------------------------------------------------
 

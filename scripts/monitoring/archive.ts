@@ -537,7 +537,7 @@ test('crash (b): a cut and no boundary - the next open resumes: the boundary onc
   assertTotalsEqualBefore(w);
 });
 
-test('crash (c): the boundary written, the segments still there - journal open finishes the unlink, and the resume only resets the cache', async () => {
+test('crash (c): the boundary written, the unlink refused - the failed run still resets the cache, and journal open finishes the unlink', async () => {
   const dir = new FlakyDirectory();
   const w = world(dir);
   const { rig } = w;
@@ -545,17 +545,16 @@ test('crash (c): the boundary written, the segments still there - journal open f
   dir.failUnlink = true;
   assert.equal(runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'failed');
   assert.ok(rig.archive.lastCut() !== null);
+  assert.equal(rig.store.watermark(), null, 'a durable boundary makes the cache stale, unlinked or not');
   const archived = bytesOf(rig.afile);
   dir.failUnlink = false;
   rig.reopen();
   assert.equal(rig.jdir.list().length, rig.journal.segments().length, 'open removed the leftovers');
   assert.equal(rig.journal.snapshot().firstEntryId, w.plan.throughEntryId + 1);
   assert.equal(expiredBoundaries(rig).length, 1, 'the boundary the first run wrote');
-  assert.ok(rig.store.watermark() !== null, 'the cache was not reset: the process died first');
-  assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'resumed');
+  assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'none', 'nothing left to resume');
   assert.equal(expiredBoundaries(rig).length, 1, 'and no second one');
   assert.equal(hex(bytesOf(rig.afile)), hex(archived));
-  assert.equal(rig.store.watermark(), null, 'the cache was reset on the way');
   assert.deepEqual(await queryTotals(rig), before);
   assertTotalsEqualBefore(w);
 });

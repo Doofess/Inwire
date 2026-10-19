@@ -417,6 +417,22 @@ export interface RunExpiryOptions {
 }
 
 /** The newest `expired` boundary the journal still holds: its own entry id and the last entry id it took out. */
+/**
+ * Resets a cache whose watermark is below the newest retained `expired` boundary. The new base is where the
+ * journal begins once that boundary's segments are gone, even while a failed unlink still lists them, so a
+ * batch the Worker had in flight from the old watermark is refused rather than carried past the boundary.
+ */
+function resetIfStale(journal: MonitoringJournal, cache: RollupStore, coveringThrough = Infinity): boolean {
+  const boundary = newestExpiredBoundary(journal);
+  const mark = cache.watermark();
+  if (boundary === null) return false;
+  // An expiry that has just written its boundary resets even an empty cache, for the base.
+  const fresh = boundary.throughEntryId >= coveringThrough;
+  if (!fresh && (mark === null || mark.throughEntryId >= boundary.entryId)) return false;
+  cache.reset(Math.max(journal.snapshot().firstEntryId - 1, boundary.throughEntryId));
+  return true;
+}
+
 function newestExpiredBoundary(journal: MonitoringJournal): { entryId: number; throughEntryId: number } | null {
   const snap = journal.snapshot();
   let after = snap.firstEntryId - 1;
@@ -461,16 +477,17 @@ export function resumeExpiry(journal: MonitoringJournal, cache: RollupStore, arc
       const boundary = newestExpiredBoundary(journal);
       if (boundary !== null && boundary.throughEntryId >= cut.throughEntryId) return 'failed';
       if (!journal.canDropSegments(names, cut.reason, nowMs)) return 'failed';
-      const r = journal.dropSegments(names, cut.reason, nowMs);
+      let r: ReturnType<MonitoringJournal['dropSegments']>;
+      try {
+        r = journal.dropSegments(names, cut.reason, nowMs);
+      } finally {
+        // A boundary written before a failed unlink still makes the cache stale.
+        resetIfStale(journal, cache);
+      }
       if (r.refused > 0 || r.state === 'failed') return 'failed';
       did = true;
     }
-    const boundary = newestExpiredBoundary(journal);
-    const mark = cache.watermark();
-    if (boundary !== null && mark !== null && mark.throughEntryId < boundary.entryId) {
-      cache.reset(journal.snapshot().firstEntryId - 1);
-      did = true;
-    }
+    if (resetIfStale(journal, cache)) did = true;
     return did ? 'resumed' : 'none';
   } catch {
     return 'failed';
@@ -533,10 +550,15 @@ export function runExpiry(
       fromEntryId: first.firstEntryId, throughEntryId: plan.throughEntryId, fromMs: entries[0].receivedMs, throughMs: plan.throughMs,
       fragments: fragments.length, reason: plan.reason, checkpoint: new Uint8Array(0),
     });
-    const r = journal.dropSegments(plan.segments, plan.reason, nowMs);
+    let r: ReturnType<MonitoringJournal['dropSegments']>;
+    try {
+      r = journal.dropSegments(plan.segments, plan.reason, nowMs);
+    } finally {
+      // Once the boundary is durable the cache is stale, whether or not the unlink then failed. The new
+      // sidecar continues from where the journal begins without those segments; a batch that does not is refused.
+      resetIfStale(journal, cache, plan.throughEntryId);
+    }
     if (r.refused > 0 || r.state === 'failed') return 'failed';
-    // The new sidecar continues from where the journal now begins, so a batch that does not is refused.
-    cache.reset(journal.snapshot().firstEntryId - 1);
     return 'done';
   } catch {
     return 'failed';
