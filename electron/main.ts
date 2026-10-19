@@ -55,6 +55,8 @@ import { SpeedTestHost } from './speedTest/host';
 import { MonitoringHost } from './monitoring/host';
 import { planQuitDrain, runQuitDrain } from './monitoring/quitDrain';
 import { discardConfirmation } from './monitoring/discardConfirm';
+import { retentionConfirmation } from './monitoring/retentionConfirm';
+import { startConfirmation } from './monitoring/startConfirm';
 import { resolveDatasetFolder } from './monitoring/location';
 import { readMonitoringSettings, saveMonitoringSettings } from './monitoring/settings';
 import { readDiscardScope, type LocationReply, type RetentionSaveReply } from '../src/services/monitoring/control';
@@ -322,7 +324,16 @@ async function start(): Promise<void> {
       return { ok: false, message: e instanceof Error ? e.message : String(e) };
     }
   });
-  ipcMain.handle(MONITORING_START_CHANNEL, (event, config: unknown) => monitoring.start(event.sender, config));
+  // A history recorded from another exporter is not continued with this one unasked: the utility refuses
+  // such a Start untouched, this dialog says both addresses, and only a yes sends it again. The renderer
+  // sends the configuration and nothing else.
+  ipcMain.handle(MONITORING_START_CHANNEL, (event, config: unknown) =>
+    monitoring.start(event.sender, config, async (recorded, configured) => {
+      const options = startConfirmation(recorded, configured);
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const { response } = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+      return response === 1;
+    }));
   ipcMain.handle(MONITORING_STOP_CHANNEL, (event) => monitoring.stop(event.sender, 'user'));
   // The saved source is not control: like every other settings handler here it
   // answers any window, and only Start, which binds the socket, is held to the
@@ -403,7 +414,7 @@ async function start(): Promise<void> {
       return response === 1;
     });
   });
-  ipcMain.handle(MONITORING_RETENTION_SAVE_CHANNEL, async (_event, policy: unknown): Promise<RetentionSaveReply> => {
+  ipcMain.handle(MONITORING_RETENTION_SAVE_CHANNEL, async (event, policy: unknown): Promise<RetentionSaveReply> => {
     if (monitoring.isRunning()) {
       return { ok: false, reason: 'busy', message: 'Stop monitoring first: its data and where it is kept change only while it is stopped.' };
     }
@@ -412,12 +423,28 @@ async function start(): Promise<void> {
       return { ok: false, reason: 'failed', message: 'That is not a valid retention policy: keep raw evidence for a whole number of days from 1, or leave it off, and choose what happens at the limit.' };
     }
     const before = readMonitoringSettings(monitoringDirectory);
-    const saved = saveMonitoringSettings(monitoringDirectory, undefined, { retention: valid });
-    if (!saved.ok) return { ok: false, reason: 'failed', message: saved.message };
-    const applied = await monitoring.setRetention(valid);
+    let written = false;
+    // Saving expires what the policy makes due, at once, so the utility previews it and this dialog states
+    // it first; settings.json is written only after the answer is yes (or nothing was due), so a declined
+    // dialog changes nothing on disk.
+    const applied = await monitoring.setRetention(
+      valid,
+      async (preview, candidate) => {
+        const options = retentionConfirmation(preview, candidate, { formatTime: (ms) => new Date(ms).toLocaleString() });
+        const owner = BrowserWindow.fromWebContents(event.sender);
+        const { response } = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+        return response === 1;
+      },
+      () => {
+        const saved = saveMonitoringSettings(monitoringDirectory, undefined, { retention: valid });
+        if (!saved.ok) return saved.message;
+        written = true;
+        return null;
+      },
+    );
     if (!applied.ok) {
       // The utility did not take it, so the file must not hold what the dataset does not obey.
-      if (before.ok) saveMonitoringSettings(monitoringDirectory, undefined, { retention: before.retention });
+      if (written && before.ok) saveMonitoringSettings(monitoringDirectory, undefined, { retention: before.retention });
       return applied;
     }
     return { ok: true, retention: valid };

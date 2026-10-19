@@ -30,7 +30,7 @@ import type { Page } from 'playwright';
 import { startStubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
 import { v5Payload, type FlowSpec } from '../monitoring/fixtures';
-import { FOREIGN_NAME, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
+import { FOREIGN_NAME, seedAged, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
 
 const OUT = process.argv[2];
 if (!OUT) { console.log('usage: monitoring-shots.ts <out-dir> [--widths 1024,1600] [--themes light,dark,dim,contrast]'); process.exit(2); }
@@ -316,7 +316,8 @@ for (const width of WIDTHS) {
     const readOnly = await seedReadOnly(seeds, { nowMs });
     const expired = await seedExpired(seeds, { nowMs });
     const incomplete = await seedIncomplete(seeds, { nowMs });
-    const { pick, saveTo } = await stubDialogs(app);
+    const aged = await seedAged(seeds, { nowMs });
+    const { pick, saveTo, answer } = await stubDialogs(app);
     const sheet = p.locator(SHEET);
     const change = async (folder: string) => {
       await pick(folder);
@@ -399,6 +400,18 @@ for (const width of WIDTHS) {
     await scrollTo(`${SHEET} >> button:has-text("Export evidence bundle")`);
     await sleep(300);
     await shot('bundle-export');
+
+    // A retention save that would expire the aged seed's segments, declined in main's dialog.
+    await change(aged.folder);
+    await until(() => sheet.getByRole('button', { name: 'Start', exact: true }).isEnabled().catch(() => false), 10_000);
+    const keep = sheet.getByRole('checkbox', { name: 'Keep raw evidence for' });
+    if (!(await keep.isChecked())) await keep.check();
+    await sheet.getByLabel('Days of raw evidence').fill('1');
+    await answer(0);
+    await sheet.getByRole('button', { name: 'Save', exact: true }).click();
+    await until(() => text('Retention not changed.'), 15_000);
+    await toStorage();
+    await shot('storage-retention-declined');
     rmSync(seeds, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 

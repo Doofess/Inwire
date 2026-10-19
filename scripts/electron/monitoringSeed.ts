@@ -248,6 +248,19 @@ export async function seedReadOnly(dir: string, opts: { nowMs?: number } = {}): 
   return { folder, inspect };
 }
 
+/**
+ * A plain dataset recorded three days before `nowMs`, with every sealed segment older than a day: a one-day
+ * retention policy has raw evidence due at once, which is what makes main's retention confirmation appear. Its
+ * recorded exporter is `EXPORTER`, like every seed's.
+ */
+export async function seedAged(dir: string, opts: { nowMs: number }): Promise<Seeded> {
+  const folder = path.join(dir, 'seed-aged');
+  plainDataset(folder, opts.nowMs - 3 * DAY);
+  const inspect = await inspectFolder(folder);
+  assert.equal(inspect.ok && inspect.kind, 'adopt', JSON.stringify(inspect));
+  return { folder, inspect };
+}
+
 /** A dataset beside a file Inwire did not write: refused untouched as `foreign-files`, naming the file. */
 export async function seedForeign(dir: string, opts: { nowMs?: number } = {}): Promise<Seeded> {
   const folder = path.join(dir, 'seed-foreign');
@@ -263,6 +276,10 @@ export interface Dialogs {
   pick(folder: string): Promise<void>;
   /** How many message boxes main has shown since the stub went in, and the options of the last. */
   boxes(): Promise<{ n: number; last: Record<string, unknown> | undefined }>;
+  /** The options of every message box main has shown since the stub went in, in the order shown. */
+  allBoxes(): Promise<Record<string, unknown>[]>;
+  /** The button the next message boxes answer, one each in order; with none queued a box answers button 1. */
+  answer(...responses: number[]): Promise<void>;
   /** The file main's save dialog answers with from now on. */
   saveTo(file: string): Promise<void>;
 }
@@ -277,16 +294,17 @@ export interface Dialogs {
  */
 export async function stubDialogs(app: ElectronApplication): Promise<Dialogs> {
   await app.evaluate(({ dialog }) => {
-    const g = globalThis as unknown as { __pick: string; __saveTo: string; __boxes: unknown[]; __lastMessageBox: unknown };
+    const g = globalThis as unknown as { __pick: string; __saveTo: string; __boxes: unknown[]; __answers: number[]; __lastMessageBox: unknown };
     g.__pick = '';
     g.__saveTo = '';
     g.__boxes = [];
+    g.__answers = [];
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [g.__pick] })) as unknown as typeof dialog.showOpenDialog;
     dialog.showSaveDialog = (async () => ({ canceled: g.__saveTo === '', filePath: g.__saveTo })) as unknown as typeof dialog.showSaveDialog;
     dialog.showMessageBox = (async (first: unknown, second?: unknown) => {
       g.__lastMessageBox = second ?? first;
       g.__boxes.push(second ?? first);
-      return { response: 1, checkboxChecked: false };
+      return { response: g.__answers.length > 0 ? g.__answers.shift() as number : 1, checkboxChecked: false };
     }) as unknown as typeof dialog.showMessageBox;
   });
   return {
@@ -295,6 +313,8 @@ export async function stubDialogs(app: ElectronApplication): Promise<Dialogs> {
       const g = globalThis as unknown as { __boxes: unknown[]; __lastMessageBox: unknown };
       return { n: g.__boxes.length, last: g.__lastMessageBox as Record<string, unknown> | undefined };
     }),
+    allBoxes: () => app.evaluate(() => (globalThis as unknown as { __boxes: Record<string, unknown>[] }).__boxes.slice()),
+    answer: (...responses) => app.evaluate((_main, r) => { (globalThis as unknown as { __answers: number[] }).__answers = r.slice(); }, responses),
     saveTo: (file) => app.evaluate((_main, f) => { (globalThis as unknown as { __saveTo: string }).__saveTo = f; }, file),
   };
 }

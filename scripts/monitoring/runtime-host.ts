@@ -93,6 +93,7 @@ class FakeChild implements ChildLike {
     open: { ok: true }, inspect: { ok: true, kind: 'new', truncatedTailBytes: null, problem: null, exporterIPv4: null },
     discard: { ok: true, removedSegments: 2 },
     'discard-preview': { ok: true, scope: 'before', segments: 2, fromMs: 1_000, throughMs: null, cutMs: 5_000 },
+    'retention-preview': { ok: true, segments: 0, fromMs: null, cutMs: null, cause: null },
     retention: { ok: true }, start: { ok: true }, stop: { ok: true, clean: true, snapshot: null }, dispose: { ok: true, clean: true, snapshot: null },
   };
   private messageListeners: ((m: unknown) => void)[] = [];
@@ -101,7 +102,8 @@ class FakeChild implements ChildLike {
   postMessage(message: unknown, ports?: unknown[]): void {
     const m = message as Record<string, unknown>;
     this.sent.push({ message: m, ports });
-    const answer = this.replies[String(m.type)];
+    const raw = this.replies[String(m.type)];
+    const answer = typeof raw === 'function' ? (raw as (m: Record<string, unknown>) => unknown)(m) : raw;
     if (typeof m.id === 'number' && answer !== 'none' && answer !== undefined) {
       queueMicrotask(() => this.emitMessage({ type: 'reply', id: m.id, result: answer }));
     }
@@ -408,17 +410,138 @@ test('host: relocate with no session is ok and sends nothing; with one it asks o
   assert.deepEqual(open.retention, policy);
 });
 
-test('host: setRetention with no session is ok; with one it asks retention', async () => {
+test('host: setRetention with no session opens one first; with one it previews, then sends retention', async () => {
   const idle = hostRig();
-  assert.deepEqual(await idle.core.setRetention({ keepRawDays: 7, atLimit: 'stop' }), { ok: true });
-  assert.equal(idle.children.length, 0);
+  const done = idle.core.setRetention({ keepRawDays: 7, atLimit: 'stop' });
+  await flush();
+  assert.equal(idle.children.length, 1, 'a policy that may expire evidence is previewed, so there is a utility to ask');
+  idle.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: true });
+  assert.deepEqual(idle.children[0].types(), ['open', 'retention-preview', 'retention']);
   const r = hostRig();
   const child = await connect(r, new FakeContents(1));
   assert.deepEqual(await r.core.setRetention({ keepRawDays: 7, atLimit: 'expire-oldest' }), { ok: true });
+  assert.deepEqual(child.of('retention-preview')[0].message.policy, { keepRawDays: 7, atLimit: 'expire-oldest' });
   assert.deepEqual(child.of('retention')[0].message.policy, { keepRawDays: 7, atLimit: 'expire-oldest' });
   child.replies.retention = { ok: false, reason: 'failed', message: 'disk said no' };
   const refused = await r.core.setRetention({ keepRawDays: 7, atLimit: 'stop' });
   assert.deepEqual(refused, { ok: false, reason: 'failed', message: 'disk said no' });
+});
+
+const DUE = { ok: true, segments: 3, fromMs: 1_000, cutMs: 5_000, cause: 'age' };
+const POLICY: RetentionPolicy = { keepRawDays: 7, atLimit: 'stop' };
+
+test('host: setRetention with segments due and no confirmation is refused, and sends no retention', async () => {
+  const r = hostRig();
+  const child = await connect(r, new FakeContents(1));
+  child.replies['retention-preview'] = DUE;
+  const result = await r.core.setRetention(POLICY);
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, 'failed');
+  assert.match((result as { message: string }).message, /needs a confirmation/);
+  assert.equal(child.of('retention').length, 0);
+});
+
+test('host: a declined retention confirmation is cancelled, persists nothing and sends no retention', async () => {
+  const r = hostRig();
+  const child = await connect(r, new FakeContents(1));
+  child.replies['retention-preview'] = DUE;
+  const asked: unknown[] = [];
+  let applied = 0;
+  const result = await r.core.setRetention(POLICY, (preview, policy) => { asked.push([preview, policy]); return Promise.resolve(false); }, () => { applied++; return null; });
+  assert.deepEqual(result, { ok: false, reason: 'cancelled', message: '' });
+  assert.deepEqual(asked, [[DUE, POLICY]], "the dialog is shown the utility's own preview and the candidate");
+  assert.equal(child.of('retention').length, 0);
+  assert.equal(applied, 0, 'nothing is persisted for a declined dialog');
+});
+
+test('host: an accepted retention confirmation persists, then sends retention, in that order', async () => {
+  const r = hostRig();
+  const child = await connect(r, new FakeContents(1));
+  child.replies['retention-preview'] = DUE;
+  const order: string[] = [];
+  const result = await r.core.setRetention(
+    POLICY,
+    () => { order.push(`ask after ${child.types().at(-1)}`); return YES(); },
+    () => { order.push(`persist after ${child.types().at(-1)}`); return null; },
+  );
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(order, ['ask after retention-preview', 'persist after retention-preview']);
+  assert.deepEqual(child.of('retention')[0].message.policy, POLICY);
+});
+
+test('host: nothing due asks nothing, and a persist that fails refuses before retention is sent', async () => {
+  const r = hostRig();
+  const child = await connect(r, new FakeContents(1));
+  const result = await r.core.setRetention(POLICY, () => { throw new Error('asked about nothing'); });
+  assert.deepEqual(result, { ok: true });
+  const failed = await r.core.setRetention(POLICY, undefined, () => 'settings.json is read-only');
+  assert.deepEqual(failed, { ok: false, reason: 'failed', message: 'settings.json is read-only' });
+  assert.equal(child.of('retention').length, 1, 'only the first, unrefused save reached the utility');
+});
+
+test('host: a retention preview the utility refuses is the answer, and nothing is asked', async () => {
+  const r = hostRig();
+  const child = await connect(r, new FakeContents(1));
+  child.replies['retention-preview'] = { ok: false, reason: 'busy', message: 'm' };
+  const result = await r.core.setRetention(POLICY, () => { throw new Error('asked about a refusal'); });
+  assert.deepEqual(result, { ok: false, reason: 'busy', message: 'm' });
+  assert.equal(child.of('retention').length, 0);
+});
+
+const DIFFERS = { ok: false, reason: 'source-differs', recordedExporter: '198.51.100.7', message: 'recorded from another exporter' };
+
+/** A child that refuses a Start for a differing exporter until the message says the user agreed. */
+function differing(child: FakeChild): void {
+  child.replies.start = (m: Record<string, unknown>) => (m.sourceChangeConfirmed === true ? { ok: true } : DIFFERS);
+}
+
+test('host: a start refused for a differing exporter with no confirmation is the answer, and nothing second is sent', async () => {
+  const r = hostRig();
+  const contents = new FakeContents(1);
+  const child = await connect(r, contents);
+  differing(child);
+  const result = await r.core.start(contents, CONFIG);
+  assert.deepEqual(result, DIFFERS);
+  assert.equal(child.of('start').length, 1);
+  assert.equal(child.of('start')[0].message.sourceChangeConfirmed, false);
+  assert.equal(r.core.isRunning(), false);
+});
+
+test('host: a declined start confirmation is cancelled and no second start is sent', async () => {
+  const r = hostRig();
+  const contents = new FakeContents(1);
+  const child = await connect(r, contents);
+  differing(child);
+  const asked: unknown[] = [];
+  const result = await r.core.start(contents, CONFIG, (recorded, configured) => { asked.push([recorded, configured]); return Promise.resolve(false); });
+  assert.deepEqual(result, { ok: false, reason: 'cancelled', message: '' });
+  assert.deepEqual(asked, [['198.51.100.7', CONFIG.exporterIPv4]]);
+  assert.equal(child.of('start').length, 1);
+  assert.equal(r.core.isRunning(), false);
+});
+
+test('host: an accepted start confirmation sends the second start with the flag, the dialog held outside startsOutstanding', async () => {
+  const r = hostRig();
+  const contents = new FakeContents(1);
+  const child = await connect(r, contents);
+  differing(child);
+  let runningWhileAsked: boolean | null = null;
+  const result = await r.core.start(contents, CONFIG, () => { runningWhileAsked = r.core.isRunning(); return YES(); });
+  assert.deepEqual(result, { ok: true });
+  assert.equal(runningWhileAsked, false, 'a dialog is not a listener starting: it holds no start outstanding');
+  assert.deepEqual(child.of('start').map((s) => s.message.sourceChangeConfirmed), [false, true]);
+  assert.equal(r.core.isRunning(), true);
+});
+
+test('host: a start whose window went away during the dialog is not sent again', async () => {
+  const r = hostRig();
+  const contents = new FakeContents(1);
+  const child = await connect(r, contents);
+  differing(child);
+  const result = await r.core.start(contents, CONFIG, () => { contents.destroy(); return YES(); });
+  assert.equal(result.ok, false);
+  assert.equal(child.of('start').length, 1);
 });
 
 test('host: after quit, inspect, relocate, discard and setRetention are refused', async () => {

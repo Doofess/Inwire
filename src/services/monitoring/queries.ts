@@ -100,7 +100,7 @@ class Refusal extends Error {
  * `runHistoryQuery` plans again against the journal and the archive as they are now.
  */
 class RestartQuery extends Error {
-  constructor(readonly expiredMs = 0) {
+  constructor() {
     super('the journal expired while the query ran');
     this.name = 'RestartQuery';
   }
@@ -410,18 +410,17 @@ export async function runHistoryQuery(
   if (invalid !== null) return { ok: false, code: 'invalid-query', message: invalid };
   try {
     // An expiry that overtakes the query leaves it holding pages of the journal as it was; it plans
-    // again from the start (never mixing the two) and says `evidence-expired` if that keeps happening.
-    let expiredMs = 0;
+    // again from the start (never mixing the two). If that keeps happening it names no expiry, which it
+    // does not know: it says `stale-generation`, and the sheet asks again as it does after a reopen.
     for (let attempt = 1; ; attempt++) {
       try {
         return { ok: true, value: await answer(reader, rollups, spec, signal, options) };
       } catch (e) {
         if (!(e instanceof RestartQuery) && !(e instanceof ExpiredRangeError)) throw e;
-        if (e instanceof RestartQuery) expiredMs = Math.max(expiredMs, e.expiredMs);
         if (signal.aborted) throw new QueryCancelled();
         if (attempt >= MAX_RESTARTS) {
           return {
-            ok: false, code: 'evidence-expired', expiredMs,
+            ok: false, code: 'stale-generation',
             message: 'The journal expired while this query ran, more than once. Ask again.',
           };
         }
@@ -603,11 +602,11 @@ class Query {
     await this.scanRaw(windows);
 
     // An expiry that ran meanwhile reset the sidecar and moved the journal's start under what was read.
-    if (await this.archiveCut() !== this.cutAtStart) throw new RestartQuery(this.horizon ?? 0);
+    if (await this.archiveCut() !== this.cutAtStart) throw new RestartQuery();
     // So does a reset that is not an expiry's: the fragments read were of a sidecar that is now empty.
     if (this.markAtStart > 0 && !this.cacheStale) {
       const now = await this.rollupCall(() => this.rollups.watermark());
-      if ((now === null ? 0 : now.throughEntryId) < this.markAtStart) throw new RestartQuery(this.horizon ?? 0);
+      if ((now === null ? 0 : now.throughEntryId) < this.markAtStart) throw new RestartQuery();
     }
 
     return this.result(boundaries, nowMs, rollupMinutes, windows);
@@ -1149,7 +1148,7 @@ class Query {
     });
     const unavailable = this.tablesExpired || this.lost.length > 0;
     const overlapping = this.cuts.filter((c) => c.fromMs < this.to && this.from <= c.throughMs);
-    const cut = newestCut(overlapping) ?? this.cuts.find((c) => c.throughMs === this.horizon) ?? null;
+    const cut = newestCut(overlapping);
     const expiry = expiryOf(cut);
     const incomplete = this.tablesExpired && this.lost.length === 0;
     const expiredTable = <Row>():HistoryTable<Row> => ({ status: 'evidence-expired', expiredMs: this.horizon ?? 0, expiry, incomplete });

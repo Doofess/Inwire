@@ -89,7 +89,13 @@ export function SourceForm({ client, state, onConfig }: {
     }
     if (!sameRetention(policy, savedRetention)) {
       const reply = await client.saveRetention(policy);
-      if (!reply.ok) { setMessage({ tone: 'bad', text: `Not saved: ${reply.message}` }); return false; }
+      if (!reply.ok) {
+        // A declined confirmation is the user's own answer, not a failure: nothing was saved and nothing is wrong.
+        setMessage(reply.reason === 'cancelled'
+          ? { tone: 'neutral', text: 'Retention not changed.' }
+          : { tone: 'bad', text: `Not saved: ${reply.message}` });
+        return false;
+      }
       setSavedRetention(reply.retention);
     }
     return true;
@@ -117,6 +123,11 @@ export function SourceForm({ client, state, onConfig }: {
       // never reached Windows' firewall prompt, so the next one is still the first.
       if (result.ok) remember(config);
       if (!result.ok) {
+        // A declined confirmation is the user's own answer: nothing started and nothing failed.
+        if (result.reason === 'cancelled') {
+          setMessage({ tone: 'neutral', text: 'Not started.' });
+          return;
+        }
         // The status is the truth; the reply only says how the request went.
         if (client.state.intake?.listener === 'listening') {
           remember(config);

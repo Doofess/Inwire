@@ -103,4 +103,17 @@ test('Task 6: Focus words an expired range from the copy function, not the reply
   assert.match(src, /evidenceExpiredText\(/);
 });
 
+test('Final: an expired or failed Focus drops the old list and can still be refreshed; a stale journal is asked again a bounded number of times', () => {
+  const src = read('Focus.tsx');
+  const failures = src.slice(src.indexOf("reply.code === 'cancelled'"), src.indexOf('setError(reply.message)'));
+  assert.match(failures, /'evidence-expired'/);
+  assert.match(failures, /setResult\(null\)[\s\S]*'evidence-expired'/, 'the expired note and the error do not sit under an older list');
+  const staleBranch = src.slice(src.indexOf("reply.code === 'stale-generation'"));
+  assert.match(staleBranch.slice(0, 300), /MAX_STALE/, 'a journal that keeps reopening ends in a message, not an endless re-ask');
+  const resultBlock = src.indexOf('{result && (');
+  assert.ok(resultBlock > 0);
+  const refreshUses = [...src.matchAll(/onClick=\{onRefresh\}/g)].map((m) => m.index ?? 0);
+  assert.ok(refreshUses.length === 1 && refreshUses[0] < resultBlock, 'Refresh is defined once, outside the result block, so the expired and error states reach it');
+});
+
 process.exit((await runAll()) === 0 ? 0 : 1);

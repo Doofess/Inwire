@@ -16,9 +16,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
-import { v5Payload } from '../monitoring/fixtures';
+import { EXPORTER, v5Payload } from '../monitoring/fixtures';
 import { BUNDLE_FRAMING } from '../../src/services/monitoring/bundle';
-import { FOREIGN_NAME, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
+import { FOREIGN_NAME, seedAged, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
 
 let failures = 0;
 function checkTrue(name: string, ok: boolean, detail = ''): void {
@@ -210,11 +210,12 @@ try {
   const readOnly = await seedReadOnly(seeds, { nowMs });
   const expired = await seedExpired(seeds, { nowMs });
   const incomplete = await seedIncomplete(seeds, { nowMs });
+  const aged = await seedAged(seeds, { nowMs });
   checkTrue('the seeds classify as intended (new, refused, read-only, adopt, adopt)',
     empty.inspect.ok && empty.inspect.kind === 'new' && !foreign.inspect.ok && foreign.inspect.reason === 'foreign-files'
     && readOnly.inspect.ok && readOnly.inspect.kind === 'adopt-read-only'
     && expired.inspect.ok && expired.inspect.kind === 'adopt' && incomplete.inspect.ok && incomplete.inspect.kind === 'adopt');
-  const { pick, boxes, saveTo } = await stubDialogs(app);
+  const { pick, boxes, allBoxes, answer, saveTo } = await stubDialogs(app);
   const change = async (folder: string) => {
     await pick(folder);
     await sheet.getByRole('button', { name: 'Change…' }).click();
@@ -231,6 +232,7 @@ try {
   await sheet.getByLabel('Days of raw evidence').fill('30');
   await sheet.getByRole('button', { name: 'Save', exact: true }).click();
   checkTrue('Retention: Save says Saved.', await until(() => visible('Saved.'), 10_000));
+  checkTrue('...and a policy that expires nothing asks nothing', (await boxes()).n === 0);
   await p.keyboard.press('Escape');
   await until(sheetClosed, 5_000);
   await p.getByRole('button', { name: 'Open monitoring' }).click();
@@ -301,7 +303,84 @@ try {
   checkTrue('Discard sits below Start and Save',
     startBox !== null && discardBox !== null && discardBox.y > startBox.y + startBox.height, JSON.stringify({ startBox, discardBox }));
 
+  // --- Start and a retention save each ask first when they would change what is recorded or kept -----------
+  // The stub answers button 1 (the confirming one) unless `answer(0)` queues a Cancel for the next box.
+  const startButton = sheet.getByRole('button', { name: 'Start', exact: true });
+  const stopButton = sheet.getByRole('button', { name: 'Stop', exact: true });
+  const listening = () => stopButton.isVisible().catch(() => false);
+  const stopListening = async () => {
+    await stopButton.click();
+    return until(async () => !(await listening()), 10_000);
+  };
+  const status = (text: string) => sheet.locator('[role="status"]').filter({ hasText: text }).count().then((n) => n > 0).catch(() => false);
+  const notSaved = () => sheet.getByText('Not saved', { exact: false }).count().then((n) => n > 0).catch(() => false);
+
+  // The open dataset (the seeded expired one) was recorded from EXPORTER.
+  await sheet.getByRole('textbox', { name: 'Exporter', exact: true }).fill(EXPORTER);
+  const startBefore = (await boxes()).n;
+  await startButton.click();
+  checkTrue('Start with the exporter the history was recorded from listens', await until(listening, 15_000));
+  checkTrue('...and shows no start confirmation', (await boxes()).n === startBefore, `calls ${(await boxes()).n - startBefore}`);
+  checkTrue('...and Stop stops it', await stopListening());
+
+  await sheet.getByRole('textbox', { name: 'Exporter', exact: true }).fill('127.0.0.1');
+  await answer(0);
+  const differing = (await boxes()).n;
+  await startButton.click();
+  checkTrue('Start with a different exporter, declined: the sheet says "Not started." as a neutral status',
+    await until(() => status('Not started.'), 15_000));
+  const declinedStart = await allBoxes();
+  const startDialog = declinedStart[declinedStart.length - 1] ?? {};
+  checkTrue('...main asked exactly once, naming both exporters, in startConfirmation\'s words',
+    declinedStart.length - differing === 1 && startDialog.title === 'Start with a different exporter'
+    && startDialog.message === 'Record a different exporter into this history?'
+    && String(startDialog.detail).includes(`recorded from ${EXPORTER}.`) && String(startDialog.detail).includes('record 127.0.0.1 into the same history'),
+    JSON.stringify(startDialog).slice(0, 400));
+  checkTrue('...Cancel is the default and the cancel button',
+    JSON.stringify(startDialog.buttons) === JSON.stringify(['Cancel', 'Start recording']) && startDialog.defaultId === 0 && startDialog.cancelId === 0);
+  checkTrue('...nothing listens, and the declined answer is not "Not saved"', !(await listening()) && !(await notSaved()));
+
+  await startButton.click();
+  checkTrue('Start with a different exporter, confirmed: it listens', await until(listening, 15_000));
+  checkTrue('...after exactly one more confirmation', (await boxes()).n - differing === 2, `calls ${(await boxes()).n - differing}`);
+  checkTrue('...and Stop stops it', await stopListening());
+
+  // A retention save that expires segments at once. The aged seed was recorded three days ago.
+  await change(aged.folder);
+  checkTrue('Change... onto the aged dataset adopts it',
+    await until(() => sheet.getByRole('button', { name: 'Start', exact: true }).isEnabled().catch(() => false), 10_000));
+  await sheet.getByLabel('Days of raw evidence').fill('1');
+  await answer(0);
+  const retentionBefore = (await boxes()).n;
+  await sheet.getByRole('button', { name: 'Save', exact: true }).click();
+  checkTrue('A retention save that expires segments, declined: "Retention not changed." as a neutral status',
+    await until(() => status('Retention not changed.'), 15_000));
+  const declinedRetention = await allBoxes();
+  const retentionBox = declinedRetention[declinedRetention.length - 1] ?? {};
+  const retentionDetail = String(retentionBox.detail ?? '');
+  checkTrue('...main asked exactly once, in retentionConfirmation\'s words',
+    declinedRetention.length - retentionBefore === 1 && retentionBox.title === 'Expire raw evidence now'
+    && /^Keeping raw evidence for 1 day expires the raw evidence of \d+ segments? now\.$/.test(String(retentionBox.message))
+    && retentionDetail.includes('What goes:') && retentionDetail.includes('What stays:')
+    && retentionDetail.includes('"Evidence expired"') && retentionDetail.includes('This cannot be undone.'),
+    JSON.stringify(retentionBox).slice(0, 500));
+  checkTrue('...Cancel is the default and the cancel button',
+    JSON.stringify(retentionBox.buttons) === JSON.stringify(['Cancel', 'Expire evidence']) && retentionBox.defaultId === 0 && retentionBox.cancelId === 0);
+  checkTrue('...and the declined answer is not "Not saved"', !(await notSaved()));
+  await p.keyboard.press('Escape');
+  await until(sheetClosed, 5_000);
+  await p.getByRole('button', { name: 'Open monitoring' }).click();
+  await until(sheetOpen, 5_000);
+  checkTrue('...and the policy was not written: reopening still says 30 days',
+    await until(async () => await sheet.getByLabel('Days of raw evidence').inputValue().catch(() => '') === '30', 10_000));
+
+  await sheet.getByLabel('Days of raw evidence').fill('1');
+  await sheet.getByRole('button', { name: 'Save', exact: true }).click();
+  checkTrue('The same save, confirmed: it says Saved.', await until(() => status('Saved.'), 15_000));
+  checkTrue('...after exactly one more confirmation', (await boxes()).n - retentionBefore === 2, `calls ${(await boxes()).n - retentionBefore}`);
+
   await change(incomplete.folder);
+  await scopeRange('6 h'); // reopening the sheet above reset the range
   checkTrue('an incomplete expired minute: the tables say why it is not available',
     await until(() => visible('Not available: this minute exceeded the key budget, and its evidence has expired.'), 30_000));
 
