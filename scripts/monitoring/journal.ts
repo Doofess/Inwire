@@ -1391,7 +1391,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
       { sourceKey: 'a', minuteMs: M0, bytes: mb(1) },
       { sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) },
       { sourceKey: 'b', minuteMs: M0, bytes: mb(3, 0) },
-    ], WM(10));
+    ], WM(10), 0);
     assert.deepEqual(first.store.watermark(), WM(10));
     const check = (store: RollupStore) => {
       assert.deepEqual(store.readMinutes('a', M0, M0 + 2 * MIN, 1 << 20), [
@@ -1412,8 +1412,8 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
   test(tag('several fragments of one minute are all returned, in journal order'), () => {
     const rig = newRig(kind);
     const { store } = openStore(rig.file);
-    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(1) }, { sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(10));
-    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(3) }], WM(20));
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(1) }, { sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(10), 0);
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(3) }], WM(20), 10);
     const got = openStore(rig.reopen()).store.readMinutes('a', M0, M0 + 2 * MIN, 1 << 20);
     assert.deepEqual(got.map((m) => m.minuteMs), [M0 + MIN, M0, M0 + MIN]);
     assert.deepEqual(got.map((m) => m.bytes), [mb(1), mb(2), mb(3)]);
@@ -1424,7 +1424,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
   test(tag('a truncate that throws on the torn tail is rebuild-required, not a failed open (M6)'), () => {
     const rig = newRig(kind);
     const { store } = openStore(rig.file);
-    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(10));
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(10), 0);
     // A torn batch: zeros past the closed one, which is what a torn append leaves.
     const closed = rig.file.size();
     rig.file.write(closed, new Uint8Array(30));
@@ -1439,7 +1439,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.match(opened.reason ?? '', /could not be removed/);
     assert.equal(real.size(), closed + 30, 'nothing was changed');
     // The sidecar is a cache: it refuses appends until reset.
-    assert.throws(() => opened.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(20)));
+    assert.throws(() => opened.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(20), 10));
     // On a volume that can truncate, the same file opens clean and the closed batch is intact.
     const healthy = openStore(rig.reopen());
     assert.equal(healthy.status, 'ok');
@@ -1453,20 +1453,20 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     const one = { sourceKey: 'a', minuteMs: M0, bytes: mb(1) };
     const size = rig.file.size();
     // 1. A watermark past the journal's end vouches for entries that do not exist.
-    assert.throws(() => store.appendMinutes([one], WM(101), { journalThroughEntryId: 100 }), RangeError);
-    store.appendMinutes([one], WM(100), { journalThroughEntryId: 100 });
+    assert.throws(() => store.appendMinutes([one], WM(101), 0, { journalThroughEntryId: 100 }), RangeError);
+    store.appendMinutes([one], WM(100), 0, { journalThroughEntryId: 100 });
     const afterOk = rig.file.size();
     assert.ok(afterOk > size, 'a watermark at the journal end is accepted');
     // 2. Minutes per call.
     const many = Array.from({ length: MAX_APPEND_MINUTES + 1 }, () => ({ sourceKey: 'a', minuteMs: M0, bytes: new Uint8Array(0) }));
-    assert.throws(() => store.appendMinutes(many, WM(100)), RangeError);
-    assert.doesNotThrow(() => store.appendMinutes(many.slice(1), WM(100)));
+    assert.throws(() => store.appendMinutes(many, WM(100), 100), RangeError);
+    assert.doesNotThrow(() => store.appendMinutes(many.slice(1), WM(100), 100));
     const afterMany = rig.file.size();
     // 3. Bytes per call.
-    assert.throws(() => store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: new Uint8Array(MAX_APPEND_BYTES + 1) }], WM(100)), RangeError);
+    assert.throws(() => store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: new Uint8Array(MAX_APPEND_BYTES + 1) }], WM(100), 100), RangeError);
     // 4. The room the limit leaves.
-    assert.throws(() => store.appendMinutes([one], WM(100), { maxBatchBytes: 10 }), RangeError);
-    assert.doesNotThrow(() => store.appendMinutes([one], WM(100), { maxBatchBytes: 10_000 }));
+    assert.throws(() => store.appendMinutes([one], WM(100), 100, { maxBatchBytes: 10 }), RangeError);
+    assert.doesNotThrow(() => store.appendMinutes([one], WM(100), 100, { maxBatchBytes: 10_000 }));
     // A refusal writes nothing.
     const afterRoom = rig.file.size();
     assert.ok(afterRoom > afterMany);
@@ -1474,12 +1474,42 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.equal(openStore(rig.reopen()).status, 'ok', 'the file is still a clean sidecar');
   });
 
+  test(tag('I2: an append continues from the watermark, or from the base a reset recorded; a batch from anywhere else is refused and writes nothing'), () => {
+    const rig = newRig(kind);
+    const { store } = openStore(rig.file);
+    const one = { sourceKey: 'a', minuteMs: M0, bytes: mb(1) };
+    // An empty sidecar continues from nothing: entry 0.
+    assert.throws(() => store.appendMinutes([one], WM(10), 5), RangeError, 'not from the middle of the journal');
+    store.appendMinutes([one], WM(10), 0);
+    assert.throws(() => store.appendMinutes([one], WM(30), 20), RangeError, 'a gap after the watermark');
+    assert.throws(() => store.appendMinutes([one], WM(30), 0), RangeError, 'and not from before it, which would count entries twice');
+    store.appendMinutes([one], WM(20), 10);
+    // Entries 1-60 expire and the cache is reset: what was in flight (a batch the Worker already built) is not the cache's to take.
+    store.reset(60);
+    assert.equal(store.watermark(), null);
+    const size = rig.file.size();
+    assert.throws(() => store.appendMinutes([one], WM(110), 20), RangeError, 'an in-flight append that continues from the old watermark');
+    assert.throws(() => store.appendMinutes([one], WM(110), 100), RangeError, 'one that continues from the live point');
+    assert.throws(() => store.appendMinutes([one], WM(110), 0), RangeError, 'one that covers the expired entries');
+    assert.equal(rig.file.size(), size, 'each refusal wrote nothing');
+    assert.equal(store.watermark(), null);
+    store.appendMinutes([one], WM(110), 60);
+    assert.deepEqual(store.watermark(), WM(110), 'from the base is accepted');
+    assert.throws(() => store.appendMinutes([one], WM(120), 60), RangeError, 'and the base is spent once there is a watermark');
+    store.appendMinutes([one], WM(120), 110);
+    // A reset with no argument is a reset to the start of the journal.
+    store.reset();
+    assert.throws(() => store.appendMinutes([one], WM(5), 60), RangeError);
+    store.appendMinutes([one], WM(5), 0);
+    assert.equal(openStore(rig.reopen()).store.watermark()?.throughEntryId, 5, 'what was accepted is what reopens');
+  });
+
   test(tag('a truncated tail: every offset in the last batch keeps the last closed batch and nothing else'), () => {
     const rig = newRig(kind);
     const { store } = openStore(rig.file);
-    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }, { sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) }], WM(10));
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }, { sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) }], WM(10), 0);
     const batch1End = rig.file.size();
-    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + 2 * MIN, bytes: mb(3) }, { sourceKey: 'a', minuteMs: M0 + 3 * MIN, bytes: mb(4) }], WM(20));
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + 2 * MIN, bytes: mb(3) }, { sourceKey: 'a', minuteMs: M0 + 3 * MIN, bytes: mb(4) }], WM(20), 10);
     const full = readAll(rig.file);
     for (let cut = batch1End; cut < full.length; cut++) {
       const file = rig.load(full.subarray(0, cut));
@@ -1505,8 +1535,8 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
   test(tag('rebuild-required: watermark past the journal, wrong generation, wrong policy, bad CRC, bad header'), () => {
     const rig = newRig(kind);
     const seed = openStore(rig.file);
-    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50));
-    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) }], WM(60));
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50), 0);
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) }], WM(60), 50);
     const good = readAll(rig.file);
     const behind = openStore(rig.reopen(), { ...JOURNAL_INFO, throughEntryId: 1000 });
     assert.equal(behind.status, 'ok', 'behind is fine; the missing tail is appended later');
@@ -1519,7 +1549,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
       assert.equal(r.status, 'rebuild-required', name);
       assert.ok(r.reason, name);
       assert.equal(sha(readAll(rig.file)), sha(good), `${name}: nothing is mutated until reset`);
-      assert.throws(() => r.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(70)), /rebuild/i, name);
+      assert.throws(() => r.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(70), 60), /rebuild/i, name);
       assert.throws(() => r.store.readMinutes('a', 0, M0 + 9 * MIN, 1 << 20), /rebuild/i, name);
     }
     // A CRC failure in the middle (a flipped body byte of the first minute entry).
@@ -1544,7 +1574,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.equal(stale.store.size(), 64);
     assert.equal(stale.store.watermark(), null);
     assert.equal(rig.file.size(), 64);
-    stale.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(9) }], WM(1));
+    stale.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(9) }], WM(1), 0);
     const reopened = openStore(rig.reopen(), { ...JOURNAL_INFO, throughEntryId: 1 });
     assert.equal(reopened.status, 'ok');
     assert.deepEqual(reopened.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20), [{ minuteMs: M0, throughEntryId: 1, bytes: mb(9) }]);
@@ -1555,8 +1585,8 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
   test(tag('a corrupted interior length is rebuild-required, never a torn tail; the file is not touched'), () => {
     const rig = newRig(kind);
     const seed = openStore(rig.file);
-    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50));
-    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) }], WM(60));
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50), 0);
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(2) }], WM(60), 50);
     const good = readAll(rig.file);
     // The first minute entry starts at 64. 500000 is in the 1 MiB cap and far past this file's end.
     for (const [how, length] of [['extent past EOF', 500_000], ['extent ends mid-file on non-entry bytes', 40]] as const) {
@@ -1587,7 +1617,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
   test(tag('every minute entry of a batch must name the batch\'s closing watermark, otherwise rebuild-required'), () => {
     const rig = newRig(kind);
     const seed = openStore(rig.file);
-    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50));
+    seed.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(50), 0);
     const good = readAll(rig.file);
     assert.equal(openStore(rig.load(good.slice())).status, 'ok', 'the control: the untouched file opens');
     // The minute entry starts at 64 with a 24-byte header: u16 key length, 'a', u64 minuteMs, then u64 through.
@@ -1611,7 +1641,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.doesNotThrow(() => { r = openStore(faulty); });
     assert.equal(r.status, 'failed');
     assert.match(r.reason ?? '', /header/i);
-    assert.throws(() => r.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(1)));
+    assert.throws(() => r.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(1), 0));
     assert.throws(() => r.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20));
   });
 
@@ -1619,10 +1649,10 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     const rig = newRig(kind);
     const { store } = openStore(rig.file);
     const big = new Uint8Array(700_000).map((_, i) => i & 0xff);
-    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: big }], WM(1));
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: big }], WM(1), 0);
     assert.deepEqual(openStore(rig.reopen()).store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 22)[0].bytes, big);
     const before = rig.file.size();
-    assert.throws(() => store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: new Uint8Array(1 << 20) }], WM(2)), RangeError);
+    assert.throws(() => store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: new Uint8Array(1 << 20) }], WM(2), 1), RangeError);
     assert.equal(rig.file.size(), before, 'a refused batch writes nothing');
     assert.deepEqual(store.watermark(), WM(1));
   });
@@ -1645,7 +1675,7 @@ test('volume: opens both files under a temp root, creates the directory, plain t
     assert.deepEqual(volume.segments.list(), [segmentName(1)]);
     assert.equal(existsSync(path.join(root, 'journal.iwmj')), false, 'the milestone-1 name is only ever read');
     const store = RollupStore.open(volume.rollups, { generation: GEN, throughEntryId: 2, policyVersion: DECODER_POLICY_VERSION });
-    store.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(2));
+    store.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(2), 0);
     assert.ok(statSync(path.join(root, segmentName(1))).size > SEGMENT_HEADER_BYTES);
   } finally {
     volume.close();
@@ -1767,7 +1797,7 @@ function timeIndexCases(kind: 'memory' | 'disk'): void {
     store.appendMinutes([
       { sourceKey: 'b/0/1', minuteMs: M0, bytes: mb(1) }, { sourceKey: 'a/0/0', minuteMs: M0, bytes: mb(2) },
       { sourceKey: 'a/0/0', minuteMs: M0 + MIN, bytes: mb(3) }, { sourceKey: 'a', minuteMs: M0, bytes: mb(4) },
-    ], WM(4));
+    ], WM(4), 0);
     assert.deepEqual(store.sources(), ['a', 'a/0/0', 'b/0/1']);
     const stale = RollupStore.open(rig.reopen(), { ...JOURNAL_INFO, generation: 'f'.repeat(32) }, { nowMs: () => T0 });
     assert.equal(stale.status, 'rebuild-required');
@@ -1777,8 +1807,8 @@ function timeIndexCases(kind: 'memory' | 'disk'): void {
   test(tag('sidecar: each fragment keeps its own batch watermark across a reopen'), () => {
     const rig = newRig(kind);
     const first = RollupStore.open(rig.file, JOURNAL_INFO, { nowMs: () => T0 }).store;
-    first.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(5));
-    first.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }, { sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(3) }], WM(9));
+    first.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(5), 0);
+    first.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }, { sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(3) }], WM(9), 5);
     const expected = [[0, 5], [0, 9], [MIN, 9]];
     const read = (s: RollupStore) => s.readMinutes('a', M0, M0 + 2 * MIN, 1 << 20).map((m) => [m.minuteMs - M0, m.throughEntryId]);
     assert.deepEqual(read(first), expected);

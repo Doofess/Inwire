@@ -14,6 +14,7 @@ import type {
   BoundaryEvidence, Evidence, EvidencePage, EvidenceRef, JournalSnapshot, RollupWatermark, Snapshot,
 } from './types';
 import type { MinuteInput, RollupOpenStatus } from './rollupStore';
+import type { ArchiveCut, ArchivedMinute } from './archive';
 
 /** The journal's side: read-only, and always against a snapshot the caller froze. */
 export interface EvidenceReader {
@@ -40,14 +41,32 @@ export interface RollupReader {
 }
 
 export interface RollupWriter {
-  /** One batch, its minutes and then its watermark, in one write. */
-  appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark): Promise<void>;
+  /** One batch, its minutes and then its watermark, in one write; `afterEntryId` is where its aggregation began, and the sidecar refuses a batch that does not continue it. */
+  appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number): Promise<void>;
+}
+
+/**
+ * The sealed archive's read side (ADR 0062): the minutes of what expired. Optional on a runtime, because
+ * one that never expired anything has none, and a query without it answers only from the journal.
+ */
+export interface ArchiveSource {
+  /** `history-lost` when the archive is damaged or unreadable; `range-too-large` past `maxBytes`. */
+  read(
+    sourceKey: string, fromMs: number, toMs: number, maxBytes: number,
+  ): Promise<ArchivedMinute[] | 'history-lost' | 'range-too-large'>;
+  /** The receipt time through which the archive holds the minutes of what expired; null before any cut. */
+  coveredThroughMs(): Promise<number | null>;
+  lastCut(): Promise<ArchiveCut | null>;
+  /** Every source key the archive holds a minute for, sorted: the engines the expired entries admitted. */
+  sources(): Promise<string[]>;
 }
 
 export interface MonitoringRuntime extends EvidenceReader, RollupReader, RollupWriter {
   /** How the sidecar opened; `rebuild-required` is answered with `resetRollups()`. */
   rollupStatus(): Promise<{ status: RollupOpenStatus; reason?: string }>;
   resetRollups(): Promise<void>;
+  /** Absent until the runtime has an archive to serve. */
+  readonly archive?: ArchiveSource;
 }
 
 /**

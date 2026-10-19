@@ -31,12 +31,12 @@
 import { StaleGenerationError } from './journal';
 import { BoundaryCache, runHistoryQuery } from './queries';
 import { encodeMinuteRollup, type Deflate, type Inflate } from './rollupCodec';
-import { EngineAdmission, MinuteAggregator, minuteOf } from './rollup';
+import { EngineAdmission, MinuteAggregator, feedEntry } from './rollup';
 import { RuntimeUnavailableError, type HostRuntime } from './runtime';
 import { initialSourceHealth, reduceSourceHealth, type HealthEvent, type SourceHealth } from './sourceHealth';
 import {
   DECODER_POLICY_VERSION, LIMITS, type DatagramEvidence, type Evidence, type EvidenceRef, type HistoryReply, type NormalizedV5,
-  type QuerySpec, type Snapshot,
+  type JournalSnapshot, type QuerySpec, type Snapshot,
 } from './types';
 import { decodeV5, sourceKey } from './v5';
 
@@ -221,6 +221,42 @@ export class MonitoringWorkerHost {
 
   // --- connect and the rollups ---------------------------------------------------------------------------
 
+  /**
+   * The watermark a rebuild may continue from, after wiping a sidecar that cannot be continued: one of
+   * another generation or policy; one that ends before the journal's first retained entry (it counts
+   * entries the journal no longer has); one that ends before the newest retained `expired` boundary (it
+   * still counts entries the archive now holds, and a query would add the two: a crash between the
+   * boundary and the reset leaves exactly this, and `resumeExpiry` is what normally closes it). An empty
+   * sidecar is reset too when entries have expired, so its base is the journal's start and not entry 0.
+   */
+  private async settleSidecar(
+    runtime: HostRuntime, mark: Awaited<ReturnType<HostRuntime['watermark']>>, snapshot: JournalSnapshot,
+  ): Promise<Awaited<ReturnType<HostRuntime['watermark']>>> {
+    let wipe = false;
+    if (mark !== null) {
+      if (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION) wipe = true;
+      else if (mark.throughEntryId < snapshot.firstEntryId - 1) wipe = true;
+      else if (mark.throughEntryId < await this.newestExpiredBoundary(runtime, snapshot)) wipe = true;
+    } else if (snapshot.firstEntryId > 1) {
+      wipe = true;
+    }
+    if (!wipe) return mark;
+    await runtime.resetRollups();
+    return runtime.watermark();
+  }
+
+  /** The entry id of the newest `expired` boundary the journal still holds, 0 for none. */
+  private async newestExpiredBoundary(runtime: HostRuntime, snapshot: JournalSnapshot): Promise<number> {
+    let newest = 0;
+    let after = snapshot.firstEntryId - 1;
+    for (;;) {
+      const page = await runtime.readBoundaries(snapshot, after, LIMITS.pageEntries);
+      for (const b of page.entries) if (b.action === 'expired') newest = Math.max(newest, b.ref.entryId);
+      if (page.done) return newest;
+      after = page.nextAfterId;
+    }
+  }
+
   private async connect(requestId: number, port: unknown): Promise<void> {
     const post = this.options.post;
     if (this.shuttingDown) return post({ type: 'connect-reply', requestId, ok: false, code: 'cancelled', message: 'the Worker is shutting down' });
@@ -253,11 +289,12 @@ export class MonitoringWorkerHost {
         try {
           // The store already refuses a sidecar of another generation or policy;
           // a disagreement here is a runtime that did not, so it is wiped, not trusted.
-          if (mark !== null && (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION)) {
-            await runtime.resetRollups();
-            mark = await runtime.watermark();
-          }
+          mark = await this.settleSidecar(runtime, mark, snapshot);
           sources = mark === null ? [] : await runtime.sources();
+          // What expired is no longer in the journal to re-admit from: its engines are in the archive.
+          if (snapshot.firstEntryId > 1 && runtime.archive !== undefined) {
+            sources = [...new Set([...sources, ...await runtime.archive.sources()])].sort();
+          }
         } catch (e) {
           if (e instanceof RuntimeUnavailableError) throw e;
           sidecarFault = e;
@@ -272,7 +309,7 @@ export class MonitoringWorkerHost {
       this.analyzedThrough = null;
       this.rolledUpThrough = null;
       this.admission = new EngineAdmission(sources);
-      this.aggregator = new MinuteAggregator(mark === null ? 0 : mark.throughEntryId);
+      this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
       this.runtime = runtime;
       runtime.onLive((entries) => this.onLive(entries));
       this.phase = status.status === 'failed' || sidecarFault !== null ? 'failed' : 'rebuilding';
@@ -363,12 +400,9 @@ export class MonitoringWorkerHost {
     const runtime = this.runtime;
     if (runtime === null || this.shuttingDown || this.phase !== 'rebuilding') return;
     try {
-      let mark = await runtime.watermark();
-      if (mark !== null && (mark.generation !== this.generation || mark.policyVersion !== DECODER_POLICY_VERSION)) {
-        await runtime.resetRollups();
-        mark = await runtime.watermark();
-      }
-      this.aggregator = new MinuteAggregator(mark === null ? 0 : mark.throughEntryId);
+      const snapshot = await runtime.snapshot();
+      const mark = await this.settleSidecar(runtime, await runtime.watermark(), snapshot);
+      this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
     } catch (e) {
       this.rollupFault(e);
       return;
@@ -517,31 +551,14 @@ export class MonitoringWorkerHost {
 
   /** One entry into the aggregator, in strict id order; an id already fed is ignored. */
   private feed(e: Evidence): void {
-    const id = e.ref.entryId;
-    const agg = this.aggregator;
-    if (id <= agg.fedThrough) return;
-    if (e.kind === 'boundary') {
-      agg.fed(id);
-      // A stop, a suspend and a reopen after a crash all end the collector's
-      // run: the minutes it was building are done, whatever the clock says.
-      if (e.action === 'stop' || e.action === 'suspend' || e.action === 'interrupted') agg.seal(Infinity);
-      return;
+    // The aggregator's own steps are `feedEntry`'s, shared with the expiry's replay; the health and
+    // the source list are this host's.
+    const fed = feedEntry(this.aggregator, this.admission, e);
+    if (fed === null || e.kind !== 'datagram') return;
+    if (fed.decoded.kind === 'valid' && fed.admitted) {
+      this.knownSources.add(sourceKey(e.remoteIPv4, fed.decoded.engineType, fed.decoded.engineId));
     }
-    const decoded = decodeV5(e, e.remoteIPv4);
-    const admitted = this.admit(e, decoded);
-    if (decoded.kind === 'valid') {
-      if (!admitted) agg.fed(id);
-      else if (decoded.flows.length === 0) agg.touch(sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId), e.receivedMs, id);
-      else for (const flow of decoded.flows) agg.add(flow);
-    } else if (decoded.kind === 'malformed') {
-      agg.addMalformed(e.remoteIPv4, e.receivedMs, id);
-    } else {
-      agg.addUnsupported(e.remoteIPv4, e.receivedMs, id);
-    }
-    this.watch(e, decoded, admitted);
-    // Receipt time has passed every earlier minute; the watermark, not the
-    // wall clock, is what makes it safe to post them.
-    agg.seal(minuteOf(e.receivedMs));
+    this.watch(e, fed.decoded, fed.admitted);
   }
 
   /** Engine admission and the source list: the Worker's own facts, replay included, and independent of the aggregator. */
@@ -601,7 +618,9 @@ export class MonitoringWorkerHost {
       bytes: encodeMinuteRollup(f.rollup, this.options.deflate),
     }));
     try {
-      await runtime.appendMinutes(minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION });
+      await runtime.appendMinutes(
+        minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION }, drained.afterEntryId,
+      );
     } catch (e) {
       // Only the sidecar's refusal; a RangeError from encoding the batch above is thrown before this.
       if (e instanceof RangeError) throw new AppendRefused(e.message);
@@ -673,6 +692,7 @@ export class MonitoringWorkerHost {
         inflate: this.options.inflate,
         nowMs: this.options.wallNow,
         boundaries: this.boundaries,
+        ...(runtime.archive !== undefined ? { archive: runtime.archive } : {}),
         checkpoint: () => slicer.checkpoint(),
         rebuildNote: () => this.rebuildNote(),
         // A failed rebuild leaves the sidecar behind the journal for good, and

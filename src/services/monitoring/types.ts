@@ -33,6 +33,9 @@ export const DECODER_POLICY_VERSION = 1;
  */
 export const ACCEPTED_POLICIES: readonly number[] = [1];
 
+/** The policy a rollup, a segment or an archived minute is written under: the newest accepted. */
+export const WRITE_POLICY_VERSION: number = Math.max(...ACCEPTED_POLICIES);
+
 const KiB = 1024;
 const MiB = 1024 * KiB;
 const GiB = 1024 * MiB;
@@ -60,6 +63,8 @@ export const LIMITS = {
   pageBytes: 1 * MiB,
   /** One `readMinutes` answer; `readMinutes` refuses past it rather than clipping, so it is the queries' chunk as well. */
   rollupReadBytes: 8 * MiB,
+  /** One archive read; past it the read is refused rather than clipped (ADR 0062). */
+  archiveReadBytes: 8 * MiB,
   rawQueryDatagrams: 100_000,
   rawQueryKeys: 50_000,
   /** Per table: a table past it comes back refused while the totals stay exact. */
@@ -231,7 +236,12 @@ export interface QuerySpec {
   focus?: QueryFocus;
 }
 
-export type BucketCoverage = 'observed-records' | 'no-records' | 'collection-gap';
+/**
+ * `aggregate-only`: the minutes came, wholly or partly, from the archive after
+ * their raw datagrams expired. `history-lost`: the archive could not give them
+ * back, so the bucket is unknown, never zero.
+ */
+export type BucketCoverage = 'observed-records' | 'no-records' | 'collection-gap' | 'aggregate-only' | 'history-lost';
 
 export interface HistoryBucket {
   fromMs: number;
@@ -246,7 +256,9 @@ export interface HistoryBucket {
 /** Each table is bounded on its own, so a table past its bound never refuses the totals (ADR 0059). */
 export type HistoryTable<Row> =
   | { status: 'ok'; rows: Row[] }
-  | { status: 'range-too-large'; message: string };
+  | { status: 'range-too-large'; message: string }
+  /** The minute's raw datagrams expired and its tables were never archived whole; totals are still exact. */
+  | { status: 'evidence-expired'; expiredMs: number };
 
 export interface HistoryResult {
   snapshot: Snapshot;
@@ -272,6 +284,19 @@ export type HistoryReply =
   | { ok: true; value: HistoryResult }
   | {
     ok: false;
-    code: 'range-too-large' | 'invalid-query' | 'cancelled' | 'stale-generation' | 'runtime-unavailable' | 'storage-failed';
+    code: 'range-too-large' | 'invalid-query' | 'cancelled' | 'stale-generation' | 'runtime-unavailable' | 'storage-failed' | 'evidence-expired';
     message: string;
+    /** For `evidence-expired`: the receipt time up to which raw evidence is gone. */
+    expiredMs?: number;
   };
+
+/**
+ * What a replay of expiring entries needs to know of the world before them:
+ * the sources already admitted (admission freezes at a cap, so the set decides
+ * who is admitted next) and the session and source open at the first entry.
+ */
+export interface SessionContext {
+  knownSources: readonly string[];
+  sessionId?: string | null;
+  source?: SegmentSource | null;
+}

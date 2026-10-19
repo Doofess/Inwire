@@ -298,6 +298,8 @@ function TopTable<Row>({ title, table, head, rows, leftColumns }: {
       <h3 className="border-b border-border px-3 py-2 text-xs font-semibold text-foreground">{title}</h3>
       {table.status === 'range-too-large' ? (
         <p className="px-3 py-3 text-xs text-muted-foreground">{table.message} Choose a shorter range to see this table.</p>
+      ) : table.status === 'evidence-expired' ? (
+        <p className="px-3 py-3 text-xs text-muted-foreground">The records for this range have expired, so this table is not available. The totals are kept.</p>
       ) : table.rows.length === 0 ? (
         <p className="px-3 py-3 text-xs text-muted-foreground">No records in this range.</p>
       ) : (

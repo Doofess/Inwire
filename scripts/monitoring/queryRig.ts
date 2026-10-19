@@ -13,7 +13,8 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
 import { MonitoringJournal, type AppendResult, type EvidenceInput } from '../../src/services/monitoring/journal';
-import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
+import { ArchiveStore } from '../../src/services/monitoring/archive';
+import { LocalArchiveSource, LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { runHistoryQuery, type QueryOptions } from '../../src/services/monitoring/queries';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import type { HostRuntime } from '../../src/services/monitoring/runtime';
@@ -93,24 +94,52 @@ export const stop = (receivedMs: number, sessionId = S1, reason = ''): EvidenceI
 
 // --- the journal, the sidecar and the runtime ---------------------------------------------------------
 
+/** A directory whose unlink can be made to fail: the disk going away between an `expired` boundary and its unlinks. */
+export class FlakyDirectory extends MemorySegmentDirectory {
+  failUnlink = false;
+  override unlink(name: string): void {
+    if (this.failUnlink) throw new Error('the disk went away');
+    super.unlink(name);
+  }
+}
+
 export class Rig {
-  jdir = new MemorySegmentDirectory();
+  jdir: MemorySegmentDirectory;
   sfile = new MemoryBlockFile();
+  /** The sealed archive's file (ADR 0062): it outlives a cache reset, a reopen and an expiry. */
+  afile = new MemoryBlockFile();
   journal!: MonitoringJournal;
   store!: RollupStore;
+  archive!: ArchiveStore;
   runtime!: LocalRuntime;
   sidecarStatus = '';
+  archiveStatus = '';
 
-  /** `seed` picks the generation: two rigs with different seeds are two journals. */
-  constructor(readonly seed = 0xa0) {
+  /**
+   * `seed` picks the generation: two rigs with different seeds are two journals. `limitBytes` is the
+   * dataset's bound and with it the segment size (a 32nd of it, 1 MiB at least): 32 MiB gives the
+   * smallest segments a test can fill. `jdir` lets a test hand in a directory that misbehaves.
+   */
+  constructor(readonly seed = 0xa0, readonly limitBytes = 1 << 30, jdir: MemorySegmentDirectory = new MemorySegmentDirectory()) {
+    this.jdir = jdir;
+    this.openArchive();
     this.openJournal();
     this.openSidecar();
   }
 
   private rnd = (n: number): Uint8Array => Uint8Array.from({ length: n }, (_, i) => (this.seed + i) & 0xff);
 
+  openArchive(): void {
+    const r = ArchiveStore.open(this.afile, { generation: this.rnd(16).map((b) => b ^ 0x5a), createdMs: NOW });
+    this.archive = r.store;
+    this.archiveStatus = r.status;
+  }
+
   openJournal(): void {
-    this.journal = MonitoringJournal.open(this.jdir, { limitBytes: 1 << 30, randomBytes: this.rnd, nowMs: () => NOW }).journal;
+    this.journal = MonitoringJournal.open(this.jdir, {
+      limitBytes: this.limitBytes, randomBytes: this.rnd, nowMs: () => NOW,
+      lastCutThroughEntryId: this.archive.lastCut()?.throughEntryId ?? 0,
+    }).journal;
   }
 
   /** Opens the sidecar file as it stands against the journal as it stands, and wraps both in a runtime. */
@@ -123,7 +152,10 @@ export class Rig {
     );
     this.sidecarStatus = r.status;
     this.store = r.store;
-    this.runtime = new LocalRuntime(this.journal, r.store, r.reason === undefined ? { status: r.status } : { status: r.status, reason: r.reason });
+    this.runtime = new LocalRuntime(
+      this.journal, r.store, r.reason === undefined ? { status: r.status } : { status: r.status, reason: r.reason },
+      new LocalArchiveSource(this.archive),
+    );
   }
 
   get generation(): string { return this.journal.snapshot().generation; }
@@ -153,6 +185,7 @@ export class Rig {
 
   /** A fresh process: the same files, opened again. A session left open is closed by an `interrupted` boundary. */
   reopen(): void {
+    this.openArchive();
     this.openJournal();
     this.openSidecar();
   }
@@ -297,7 +330,7 @@ export const spec = (fromMs: number, toMs: number, bucketCount: number, over: Pa
   ({ sourceKey: SRC, fromMs, toMs, bucketCount, ...over });
 
 export function ask(rig: Rig, query: QuerySpec, over: Partial<QueryOptions> = {}): Promise<HistoryReply> {
-  return runHistoryQuery(rig.runtime, rig.runtime, query, new AbortController().signal, { inflate, nowMs: NOW, ...over });
+  return runHistoryQuery(rig.runtime, rig.runtime, query, new AbortController().signal, { inflate, nowMs: NOW, archive: rig.runtime.archive, ...over });
 }
 
 export async function askOk(rig: Rig, query: QuerySpec, over: Partial<QueryOptions> = {}): Promise<HistoryResult> {

@@ -231,7 +231,7 @@ export class Collector {
       sourceKey, from, to, clampSize(maxBytes, LIMITS.rollupReadBytes),
     ),
     sources: async () => this.local().sources(),
-    appendMinutes: async (minutes, watermark) => this.local().appendMinutes(minutes, watermark),
+    appendMinutes: async (minutes, watermark, afterEntryId) => this.local().appendMinutes(minutes, watermark, afterEntryId),
     rollupStatus: async () => this.local().rollupStatus(),
     resetRollups: async () => this.local().resetRollups(),
   };
