@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import { MemoryBlockFile, type BlockFile } from '../../src/services/capture/blockFile';
 import {
-  ARCHIVE_FRAMING, ArchiveStore, expiryFragments, runExpiry, type ArchiveCut, type ArchivedMinute,
+  ARCHIVE_FRAMING, ArchiveStore, expiryFragments, resumeExpiry, runExpiry, type ArchiveCut, type ArchivedMinute,
 } from '../../src/services/monitoring/archive';
 import { ENTRY_HEADER_BYTES, FILE_HEADER_BYTES, encodeEntry } from '../../src/services/monitoring/journalCodec';
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
@@ -25,7 +25,7 @@ import { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
 import type { Evidence, MinuteRollup, SegmentSource } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import { EXPORTER } from './fixtures';
-import { BASE, MIN, NOW, Rig, SRC, SRC1, deflate, dgram, inflate, runAll, start, test } from './queryRig';
+import { BASE, FlakyDirectory, MIN, NOW, Rig, SRC, SRC1, askOk, deflate, dgram, inflate, runAll, spec, start, test } from './queryRig';
 
 // --- the ADR's vectors -----------------------------------------------------------------------------------
 
@@ -299,6 +299,7 @@ function world(jdir?: MemorySegmentDirectory): World {
   rig.store.appendMinutes(
     rolled.map((r) => ({ sourceKey: r.rollup.sourceKey, minuteMs: r.rollup.minuteMs, bytes: r.bytes })),
     { generation: rig.generation, throughEntryId: rig.through, policyVersion: 1 },
+    0,
   );
   const before = new Map<string, MinuteRollup>();
   for (const r of rolled) before.set(keyOf(r.rollup.sourceKey, r.rollup.minuteMs), r.rollup);
@@ -446,6 +447,22 @@ test('after an expiry the cache is empty, and a rebuild from the retained journa
   assert.equal(rig.archive.bytes(), archiveBytes);
 });
 
+test('I2: the cache an expiry resets continues from where the journal now begins: an append from anywhere else is refused', () => {
+  const w = world();
+  const { rig } = w;
+  const wasThrough = rig.through;
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'done');
+  const base = rig.journal.snapshot().firstEntryId - 1;
+  assert.ok(base > 0);
+  const one = [{ sourceKey: SRC, minuteMs: BASE, bytes: new Uint8Array(0) }];
+  const mark = { generation: rig.generation, throughEntryId: wasThrough, policyVersion: 1 };
+  assert.throws(() => rig.store.appendMinutes(one, mark, wasThrough), RangeError, 'a batch continuing from the live point the old cache had');
+  assert.throws(() => rig.store.appendMinutes(one, mark, 0), RangeError, 'one that covers the entries that expired');
+  assert.equal(rig.store.watermark(), null, 'a refusal writes nothing');
+  rig.store.appendMinutes(one, mark, base);
+  assert.equal(rig.store.watermark()?.throughEntryId, wasThrough, 'from the base it is accepted');
+});
+
 test('the default policy never plans an expiry, so nothing runs', () => {
   const w = world();
   const { rig } = w;
@@ -486,37 +503,45 @@ function dyingJournal(journal: MonitoringJournal): MonitoringJournal {
   return o;
 }
 
-test('crash (b): a cut and no boundary - the next run resumes: the boundary once, the segments gone, nothing archived twice', () => {
+/** What History queries over the whole hour answer, for both engines: the numbers an expiry, a crash and a resume must not change. */
+async function queryTotals(rig: Rig): Promise<string[]> {
+  const out: string[] = [];
+  for (const src of SOURCES) {
+    const r = await askOk(rig, spec(BASE, BASE + 61 * MIN, 61, { sourceKey: src }));
+    out.push(`${src}: ${r.matchingRecords} matching, ${r.malformed} malformed`);
+    for (const b of r.buckets) out.push(`${src} ${(b.fromMs - BASE) / MIN}: ${b.records} records, ${b.reportedOctets} octets, ${b.reportedPackets} packets`);
+  }
+  return out;
+}
+
+test('crash (b): a cut and no boundary - the next open resumes: the boundary once, the segments gone, nothing archived twice', async () => {
   const w = world();
   const { rig } = w;
+  const before = await queryTotals(rig);
   assert.equal(runExpiry(dyingJournal(rig.journal), rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'failed');
   const archived = bytesOf(rig.afile);
   assert.ok(rig.archive.lastCut() !== null, 'the cut is durable');
   assert.equal(rig.journal.snapshot().firstEntryId, 1);
   assert.equal(expiredBoundaries(rig).length, 0);
-  // A fresh process: the archive and the journal reopen as they were.
+  // A fresh process: the archive and the journal reopen as they were. No plan is at hand, and none is needed.
   rig.reopen();
   assert.equal(rig.archiveStatus, 'ok');
-  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'resumed');
+  assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'resumed');
   assert.equal(hex(bytesOf(rig.afile)), hex(archived), 'nothing was archived again');
   assert.equal(expiredBoundaries(rig).length, 1);
   assert.equal(rig.journal.snapshot().firstEntryId, w.plan.throughEntryId + 1);
   assert.deepEqual(rig.jdir.list().length, rig.journal.segments().length);
+  assert.equal(rig.store.watermark(), null, 'the cache was reset on the way');
+  assert.deepEqual(await queryTotals(rig), before, 'a query answers what it did before the crash');
+  assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'none', 'and there is nothing left to resume');
   assertTotalsEqualBefore(w);
 });
 
-class FlakyDirectory extends MemorySegmentDirectory {
-  failUnlink = false;
-  override unlink(name: string): void {
-    if (this.failUnlink) throw new Error('the disk went away');
-    super.unlink(name);
-  }
-}
-
-test('crash (c): the boundary written, the segments still there - journal open finishes the unlink and no second boundary appears', () => {
+test('crash (c): the boundary written, the segments still there - journal open finishes the unlink, and the resume only resets the cache', async () => {
   const dir = new FlakyDirectory();
   const w = world(dir);
   const { rig } = w;
+  const before = await queryTotals(rig);
   dir.failUnlink = true;
   assert.equal(runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'failed');
   assert.ok(rig.archive.lastCut() !== null);
@@ -526,13 +551,66 @@ test('crash (c): the boundary written, the segments still there - journal open f
   assert.equal(rig.jdir.list().length, rig.journal.segments().length, 'open removed the leftovers');
   assert.equal(rig.journal.snapshot().firstEntryId, w.plan.throughEntryId + 1);
   assert.equal(expiredBoundaries(rig).length, 1, 'the boundary the first run wrote');
-  const outcome = runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate });
-  assert.equal(outcome, 'resumed');
+  assert.ok(rig.store.watermark() !== null, 'the cache was not reset: the process died first');
+  assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'resumed');
   assert.equal(expiredBoundaries(rig).length, 1, 'and no second one');
   assert.equal(hex(bytesOf(rig.afile)), hex(archived));
   assert.equal(rig.store.watermark(), null, 'the cache was reset on the way');
+  assert.deepEqual(await queryTotals(rig), before);
   assertTotalsEqualBefore(w);
 });
+
+test('I3: a drop the journal would refuse writes no cut: the run fails with nothing written, whichever way the journal refuses', () => {
+  for (const how of ['no room for the boundary', 'a closed journal'] as const) {
+    const w = world();
+    const { rig } = w;
+    const names = w.plan.segments;
+    assert.equal(rig.journal.canDropSegments(names), true, `the control: the plan's segments can go (${how})`);
+    if (how === 'a closed journal') rig.journal.close();
+    else rig.journal.setLimit(1 << 20);
+    assert.equal(rig.journal.canDropSegments(names), false, how);
+    assert.equal(rig.journal.canDropSegments(names.slice().reverse()), false, 'and names that are not the oldest, in order, never');
+    const archived = bytesOf(rig.afile);
+    assert.equal(runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'failed', how);
+    assert.equal(rig.archive.lastCut(), null, `no cut was promised (${how})`);
+    assert.equal(hex(bytesOf(rig.afile)), hex(archived), `nothing was written to the archive (${how})`);
+    assert.equal(rig.journal.snapshot().firstEntryId, 1);
+    assert.equal(expiredBoundaries(rig).length, 0);
+  }
+});
+
+/** A journal whose first `dropSegments` is refused, as a disk that hiccuped would: nothing written, the next call is the real one. */
+function refusingOnce(journal: MonitoringJournal): MonitoringJournal {
+  const o = Object.create(journal) as MonitoringJournal;
+  let refused = false;
+  o.dropSegments = (names, reason, nowMs) => {
+    if (refused) return journal.dropSegments(names, reason, nowMs);
+    refused = true;
+    return { snapshot: journal.snapshot(), appended: 0, refused: 1, state: 'open' };
+  };
+  return o;
+}
+
+for (const finish of ['resumeExpiry', 'runExpiry'] as const) {
+  test(`I3: a cut whose drop failed transiently is finished by the next ${finish}: the boundary once, nothing archived twice`, async () => {
+    const w = world();
+    const { rig } = w;
+    const before = await queryTotals(rig);
+    assert.equal(runExpiry(refusingOnce(rig.journal), rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'failed');
+    const archived = bytesOf(rig.afile);
+    assert.ok(rig.archive.lastCut() !== null, 'the cut is durable');
+    assert.equal(expiredBoundaries(rig).length, 0, 'the drop did not happen');
+    const done = finish === 'resumeExpiry'
+      ? resumeExpiry(rig.journal, rig.store, rig.archive)
+      : runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate });
+    assert.equal(done, 'resumed');
+    assert.equal(hex(bytesOf(rig.afile)), hex(archived), 'nothing was archived again');
+    assert.equal(expiredBoundaries(rig).length, 1);
+    assert.equal(rig.journal.snapshot().firstEntryId, w.plan.throughEntryId + 1);
+    assert.equal(rig.store.watermark(), null, 'the cache was reset');
+    assert.deepEqual(await queryTotals(rig), before);
+  });
+}
 
 test('a replay that throws, or a cache that cannot say who is admitted, fails the run and changes nothing', () => {
   const w = world();

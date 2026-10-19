@@ -206,10 +206,13 @@ export class MinuteAggregator {
   private readonly open = new Map<string, OpenMinute>();
   private held: Fragment[] = [];
   private lastFed: number;
+  /** The watermark of the last batch drained, or the one this aggregator began after: where the next batch continues from. */
+  private drainedThrough: number;
 
   /** `afterEntryId` is the watermark the sidecar already holds: the first entry fed is the one after it. */
   constructor(afterEntryId = 0) {
     this.lastFed = afterEntryId;
+    this.drainedThrough = afterEntryId;
   }
 
   /** The highest entry id fed so far. */
@@ -272,6 +275,9 @@ export class MinuteAggregator {
    * The fragments that can be posted now, with the watermark to post them at -
    * or null when none can.
    *
+   * `afterEntryId` is the watermark of the batch before (or the one this aggregator began after): the
+   * sidecar takes a batch only if it continues from its own.
+   *
    * The watermark is "everything before the earliest entry not in a posted
    * fragment": the first entry of any open minute and of any sealed fragment
    * not posted with this batch, minus one. A fragment may be posted only if its
@@ -281,7 +287,7 @@ export class MinuteAggregator {
    * the watermark back, which can drop another, so this settles by iteration; it
    * only ever shrinks, so it ends.
    */
-  drain(): { fragments: Fragment[]; watermark: number } | null {
+  drain(): { fragments: Fragment[]; watermark: number; afterEntryId: number } | null {
     let post = this.held.slice();
     let posted = new Set(post);
     let watermark = this.lastFed;
@@ -297,7 +303,9 @@ export class MinuteAggregator {
     }
     if (post.length === 0) return null;
     this.held = this.held.filter((f) => !posted.has(f));
-    return { fragments: post, watermark };
+    const afterEntryId = this.drainedThrough;
+    this.drainedThrough = watermark;
+    return { fragments: post, watermark, afterEntryId };
   }
 }
 

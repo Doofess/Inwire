@@ -416,42 +416,41 @@ export interface RunExpiryOptions {
   replay?: (entries: Evidence[], sessionAtStart: SessionContext) => ArchivedMinute[];
 }
 
-/** Whether the journal already records an `expired` boundary that reaches `throughEntryId`. */
-function hasExpiredBoundary(journal: MonitoringJournal, throughEntryId: number): boolean {
+/** The newest `expired` boundary the journal still holds: its own entry id and the last entry id it took out. */
+function newestExpiredBoundary(journal: MonitoringJournal): { entryId: number; throughEntryId: number } | null {
   const snap = journal.snapshot();
   let after = snap.firstEntryId - 1;
+  let newest: { entryId: number; throughEntryId: number } | null = null;
   for (;;) {
     const page = journal.readBoundaries(snap, after, LIMITS.pageEntries);
-    for (const b of page.entries) if (b.action === 'expired' && b.expired !== undefined && b.expired !== null && b.expired.throughEntryId >= throughEntryId) return true;
-    if (page.done) return false;
+    for (const b of page.entries) {
+      if (b.action === 'expired' && b.expired !== undefined && b.expired !== null) newest = { entryId: b.ref.entryId, throughEntryId: b.expired.throughEntryId };
+    }
+    if (page.done) return newest;
     after = page.nextAfterId;
   }
 }
 
 /**
- * Takes the planned segments out of the journal, keeping what a query needs of them (ADR 0062's order):
- * replay, archive fragments and cut and flush, the journal's `expired` boundary and unlink, then the
- * cache reset. Each step that is already done is not done again.
+ * Finishes an expiry an earlier process began, from what is on disk and nothing else: call it on every
+ * open, before anything is answered from the cache (ADR 0062's order, read from the end).
  *
- * - `done`: the whole run.
- * - `resumed`: an earlier run got as far as its cut. A cut with the segments still in the journal gets its
- *   boundary and unlink now (a cut is a promise the archive has the minutes; nothing is archived twice),
- *   and one whose boundary and unlink are already done (the journal's open finishes an interrupted unlink)
- *   needs only the cache reset. The plan is not consulted past what the cut already covers: the next plan
- *   takes whatever else is due.
- * - `failed`: a refusal or a throw. Nothing a later run cannot repeat or resume was left half done.
+ * - The archive's last cut covers segments the journal still holds and no `expired` boundary records it:
+ *   the process died, or the drop was refused, between the cut and the boundary. The cut is a promise the
+ *   archive has those minutes, so the boundary and unlink are done now and nothing is archived twice.
+ * - The cache's watermark is below the newest retained `expired` boundary: it still holds minutes of
+ *   entries that are gone and the archive holds, and a query would add the two. It is reset.
+ *
+ * `resumed` if either was done, `none` if there was nothing to do, `failed` if one could not be (a later
+ * call repeats it; nothing was left half done that this cannot finish).
  */
-export function runExpiry(
-  journal: MonitoringJournal, cache: RollupStore, archive: ArchiveStore, plan: ExpiryPlan, opts: RunExpiryOptions = {},
-): 'done' | 'resumed' | 'failed' {
+export function resumeExpiry(journal: MonitoringJournal, cache: RollupStore, archive: ArchiveStore, nowMs: number = Date.now()): 'none' | 'resumed' | 'failed' {
   try {
-    const nowMs = opts.nowMs ?? Date.now();
-    const snap = journal.snapshot();
-    const segs = journal.segments();
+    let did = false;
     const cut = archive.lastCut();
-
-    if (cut !== null && cut.throughEntryId >= snap.firstEntryId) {
+    if (cut !== null && cut.throughEntryId >= journal.snapshot().firstEntryId) {
       // The cut is durable and the journal still holds what it took out.
+      const segs = journal.segments();
       const names: string[] = [];
       for (const s of segs) {
         if (s.lastEntryId > cut.throughEntryId) break;
@@ -459,24 +458,56 @@ export function runExpiry(
       }
       const last = segs[names.length - 1];
       if (names.length === 0 || last === undefined || last.lastEntryId !== cut.throughEntryId || segs[0].firstEntryId !== cut.fromEntryId) return 'failed';
-      if (hasExpiredBoundary(journal, cut.throughEntryId)) return 'failed';
+      const boundary = newestExpiredBoundary(journal);
+      if (boundary !== null && boundary.throughEntryId >= cut.throughEntryId) return 'failed';
+      if (!journal.canDropSegments(names, cut.reason, nowMs)) return 'failed';
       const r = journal.dropSegments(names, cut.reason, nowMs);
       if (r.refused > 0 || r.state === 'failed') return 'failed';
-      cache.reset();
-      return 'resumed';
+      did = true;
     }
-    if (cut !== null && cut.throughEntryId >= plan.throughEntryId) {
-      // Cut, boundary and unlink all done; only the cache may still describe what is gone.
-      cache.reset();
-      return 'resumed';
+    const boundary = newestExpiredBoundary(journal);
+    const mark = cache.watermark();
+    if (boundary !== null && mark !== null && mark.throughEntryId < boundary.entryId) {
+      cache.reset(journal.snapshot().firstEntryId - 1);
+      did = true;
     }
+    return did ? 'resumed' : 'none';
+  } catch {
+    return 'failed';
+  }
+}
 
+/**
+ * Takes the planned segments out of the journal, keeping what a query needs of them (ADR 0062's order):
+ * replay, archive fragments and cut and flush, the journal's `expired` boundary and unlink, then the
+ * cache reset. A cut or a boundary an earlier run left is finished first (`resumeExpiry`), never redone.
+ *
+ * - `done`: the whole run.
+ * - `resumed`: an earlier run's leftovers were finished; the plan is not run on top of them, since the
+ *   next plan takes whatever else is due. A plan that an earlier run already carried out is not
+ *   recognised by its numbers: its segments are gone, so it is `failed` like any plan that is not a
+ *   prefix of the journal.
+ * - `failed`: a refusal or a throw. Nothing a later run cannot repeat or resume was left half done.
+ */
+export function runExpiry(
+  journal: MonitoringJournal, cache: RollupStore, archive: ArchiveStore, plan: ExpiryPlan, opts: RunExpiryOptions = {},
+): 'done' | 'resumed' | 'failed' {
+  try {
+    const nowMs = opts.nowMs ?? Date.now();
+    const resumed = resumeExpiry(journal, cache, archive, nowMs);
+    if (resumed !== 'none') return resumed;
+
+    const snap = journal.snapshot();
+    const segs = journal.segments();
     if (plan.segments.length === 0 || plan.segments.length > segs.length) return 'failed';
     for (let i = 0; i < plan.segments.length; i++) {
       if (segs[i].name !== plan.segments[i] || !segs[i].sealed) return 'failed';
     }
     const first = segs[0];
     if (segs[plan.segments.length - 1].lastEntryId !== plan.throughEntryId) return 'failed';
+    // A cut the journal then refuses to match is a promise nothing keeps (and a drop that can never be made
+    // would wedge every later run behind it): ask first, and write nothing if the answer is no.
+    if (!journal.canDropSegments(plan.segments, plan.reason, nowMs)) return 'failed';
 
     const entries: Evidence[] = [];
     const readThrough = { generation: snap.generation, throughEntryId: plan.throughEntryId };
@@ -504,7 +535,8 @@ export function runExpiry(
     });
     const r = journal.dropSegments(plan.segments, plan.reason, nowMs);
     if (r.refused > 0 || r.state === 'failed') return 'failed';
-    cache.reset();
+    // The new sidecar continues from where the journal now begins, so a batch that does not is refused.
+    cache.reset(journal.snapshot().firstEntryId - 1);
     return 'done';
   } catch {
     return 'failed';

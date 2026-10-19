@@ -466,6 +466,10 @@ class Query {
   private tablesExpired = false;
   /** The archive's last cut when the query began: a different one at the end means an expiry overtook it. */
   private cutAtStart: number | null = null;
+  /** The sidecar's watermark when the query began (0 with none): a lower one at the end means it was reset under the query. */
+  private markAtStart = 0;
+  /** The sidecar describes the world before the newest expiry: none of it is read (see `checkCacheAgainstExpiry`). */
+  private cacheStale = false;
 
   constructor(
     private readonly reader: EvidenceReader, private readonly rollups: RollupReader, private readonly spec: QuerySpec,
@@ -525,13 +529,15 @@ class Query {
     const clock = this.options.nowMs;
     const nowMs = typeof clock === 'function' ? clock() : clock ?? Date.now();
 
-    // Watermark first, journal second: the sidecar can only cover what the
-    // journal already held, so W <= S and the tail (W, S] is well defined.
+    // The archive's cut first, then the watermark, then the journal: the sidecar can only cover what
+    // the journal already held, so W <= S and the tail (W, S] is well defined; and an expiry that ran
+    // after the cut was read is seen at the end, whichever of the other two reads it fell between.
+    this.cutAtStart = await this.archiveCut();
     const mark = this.unusable === null ? await this.rollupCall(() => this.rollups.watermark()) : null;
+    this.markAtStart = mark === null ? 0 : mark.throughEntryId;
     const snap = await this.reader.snapshot();
     this.snapshot = { generation: snap.generation, throughEntryId: snap.throughEntryId };
     this.firstEntryId = snap.firstEntryId;
-    this.cutAtStart = await this.archiveCut();
     if (mark !== null) {
       // A sidecar of another journal, another decoder or the future vouches for
       // nothing here; it is not the journal's fault, so it is not `stale-generation`.
@@ -544,10 +550,6 @@ class Query {
       if (mark.throughEntryId > snap.throughEntryId) {
         throw new RollupUnusable(`the rollups claim entry ${mark.throughEntryId}, the journal ends at ${snap.throughEntryId}`);
       }
-      // A sidecar that stops short of the oldest retained entry describes entries that no longer exist.
-      if (mark.throughEntryId < this.firstEntryId - 1) {
-        throw new RollupUnusable(`the rollups end at entry ${mark.throughEntryId}, and the journal begins at ${this.firstEntryId}`);
-      }
       this.watermark = mark.throughEntryId;
     }
     this.tailAfter = Math.max(this.watermark, this.firstEntryId - 1);
@@ -556,6 +558,7 @@ class Query {
     const boundaries = await (this.options.boundaries ?? new BoundaryCache()).upTo(this.reader, this.snapshot, this.firstEntryId);
     this.horizon = expiredHorizon(boundaries);
     this.cuts = boundaries.flatMap((b) => (b.action === 'expired' && b.expired ? [{ fromMs: b.expired.fromMs, throughMs: b.expired.throughMs }] : []));
+    if (mark !== null) this.checkCacheAgainstExpiry(mark.throughEntryId, boundaries);
     this.refuseFocusedOverExpired();
     await this.tick();
     await this.admit();
@@ -575,8 +578,33 @@ class Query {
 
     // An expiry that ran meanwhile reset the sidecar and moved the journal's start under what was read.
     if (await this.archiveCut() !== this.cutAtStart) throw new RestartQuery(this.horizon ?? 0);
+    // So does a reset that is not an expiry's: the fragments read were of a sidecar that is now empty.
+    if (this.markAtStart > 0 && !this.cacheStale) {
+      const now = await this.rollupCall(() => this.rollups.watermark());
+      if ((now === null ? 0 : now.throughEntryId) < this.markAtStart) throw new RestartQuery(this.horizon ?? 0);
+    }
 
     return this.result(boundaries, nowMs, rollupMinutes, windows);
+  }
+
+  /**
+   * A cache is valid only at or past the entry id of the newest `expired` boundary the journal retains:
+   * an expiry resets the cache after that boundary, so one still below it is the world from before the
+   * expiry, whose minutes are in the archive as well and would be counted twice. It is then not read
+   * at all: the query runs as it would over an empty cache (the archive for what expired, the journal
+   * from its first retained entry for the rest). One that stops short of the journal's start with no
+   * boundary to explain it is not trusted at all.
+   */
+  private checkCacheAgainstExpiry(watermark: number, boundaries: BoundaryEvidence[]): void {
+    let expiredAt = 0;
+    for (const b of boundaries) if (b.action === 'expired') expiredAt = Math.max(expiredAt, b.ref.entryId);
+    if (watermark >= expiredAt && watermark >= this.firstEntryId - 1) return;
+    if (expiredAt === 0) {
+      throw new RollupUnusable(`the rollups end at entry ${watermark}, and the journal begins at ${this.firstEntryId}`);
+    }
+    this.cacheStale = true;
+    this.watermark = 0;
+    this.tailAfter = this.firstEntryId - 1;
   }
 
   // --- expired time -------------------------------------------------------------------------------------
@@ -720,7 +748,7 @@ class Query {
    * strand a source.
    */
   private async admit(): Promise<void> {
-    const known = this.unusable === null ? [...await this.rollupCall(() => this.rollups.sources())] : [];
+    const known = this.unusable === null && !this.cacheStale ? [...await this.rollupCall(() => this.rollups.sources())] : [];
     // The engines the expired entries admitted are in the archive; admission freezes at its cap, so they decide who is next.
     const archive = this.options.archive;
     if (this.horizon !== null && archive !== undefined) {
@@ -881,6 +909,7 @@ class Query {
    */
   private async fragments(key: string, a: number, b: number, unreadable: Set<number>): Promise<Map<number, MinuteRollup[]>> {
     const out = new Map<number, MinuteRollup[]>();
+    if (this.cacheStale) return out;
     const stack: [number, number][] = [[a, b]];
     while (stack.length > 0) {
       await this.tick();

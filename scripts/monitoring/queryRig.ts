@@ -94,6 +94,15 @@ export const stop = (receivedMs: number, sessionId = S1, reason = ''): EvidenceI
 
 // --- the journal, the sidecar and the runtime ---------------------------------------------------------
 
+/** A directory whose unlink can be made to fail: the disk going away between an `expired` boundary and its unlinks. */
+export class FlakyDirectory extends MemorySegmentDirectory {
+  failUnlink = false;
+  override unlink(name: string): void {
+    if (this.failUnlink) throw new Error('the disk went away');
+    super.unlink(name);
+  }
+}
+
 export class Rig {
   jdir: MemorySegmentDirectory;
   sfile = new MemoryBlockFile();

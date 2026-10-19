@@ -1036,8 +1036,8 @@ export class MonitoringJournal {
     const bytes = encodeEntry(JOURNAL_FRAMING, id, kind, body);
     let seg = this.segs[this.segs.length - 1];
     if (seg === undefined) return 'failed';
-    const roll = seg.legacy || (seg.lastId >= seg.firstId && seg.bytes + bytes.length > seg.maxBytes);
-    if (this.totalBytes() + this.otherBytes() + (roll ? SEGMENT_HEADER_BYTES : 0) + bytes.length > ceiling) return 'over';
+    const roll = this.rollsFor(bytes.length);
+    if (this.overCeiling(bytes.length, roll, ceiling)) return 'over';
     if (roll) {
       const next = this.roll(id, boundary !== null && boundary.action === 'interrupted');
       if (next === null) return 'failed';
@@ -1060,6 +1060,16 @@ export class MonitoringJournal {
     this.lastId = id;
     if (boundary !== null) applyBoundary(this.track, boundary);
     return 'written';
+  }
+
+  /** Whether an entry of `entryBytes` starts a new segment: the newest is full or is the sealed legacy file. */
+  private rollsFor(entryBytes: number): boolean {
+    const seg = this.segs[this.segs.length - 1];
+    return seg.legacy || (seg.lastId >= seg.firstId && seg.bytes + entryBytes > seg.maxBytes);
+  }
+
+  private overCeiling(entryBytes: number, roll: boolean, ceiling: number): boolean {
+    return this.totalBytes() + this.otherBytes() + (roll ? SEGMENT_HEADER_BYTES : 0) + entryBytes > ceiling;
   }
 
   private fail(problem: string): void {
@@ -1129,22 +1139,8 @@ export class MonitoringJournal {
    */
   dropSegments(names: string[], reason: 'age' | 'limit' | 'user-before', nowMs: number): AppendResult {
     const refuse = (): AppendResult => ({ snapshot: this.snapshot(), appended: 0, refused: 1, state: this.status });
-    if (this.status !== 'open' && this.status !== 'storage-limit') return refuse();
-    if (reason !== 'age' && reason !== 'limit' && reason !== 'user-before') return refuse();
-    if (!Number.isSafeInteger(nowMs) || nowMs < 0) return refuse();
-    if (!Array.isArray(names) || names.length === 0 || names.length > this.segs.length) return refuse();
-    const listed = new Set(this.dir.list());
-    for (let i = 0; i < names.length; i++) {
-      const s = this.segs[i];
-      if (names[i] !== s.name || !(s.legacy || i < this.segs.length - 1) || !listed.has(s.name)) return refuse();
-    }
-    const first = this.segs[0];
-    const last = this.segs[names.length - 1];
-    const boundary: BoundaryFields = {
-      action: 'expired', sessionId: this.track.open ?? '', receivedMs: nowMs, reason, droppedDatagrams: null,
-      source: this.track.recordedSource,
-      expired: { fromEntryId: first.firstId, throughEntryId: last.lastId, fromMs: first.firstMs, throughMs: last.lastMs },
-    };
+    const boundary = this.dropBoundary(names, reason, nowMs);
+    if (boundary === null) return refuse();
     // With the legacy file alone, this append is the roll that makes it something other than the newest.
     if (this.commit(KIND_BOUNDARY, encodeBoundaryBody(boundary), nowMs, boundary, this.limit) !== 'written') return refuse();
     this.flush();
@@ -1161,6 +1157,40 @@ export class MonitoringJournal {
       while (this.boundaryList.length > 0 && this.boundaryList[0].ref.entryId <= s.lastId) this.boundaryList.shift();
     }
     return { snapshot: this.snapshot(), appended: 1, refused: 0, state: this.status };
+  }
+
+  /**
+   * Whether `dropSegments(names, ...)` would write its boundary: the state, the names (the oldest segments,
+   * in order, whole and sealed, all still listed) and the room, the closing reserve included. Retention asks
+   * before it makes a cut durable, because a cut the drop then refuses is a promise nothing keeps. `reason`
+   * and `nowMs` only size the boundary; the defaults are the widest it can be, so a yes holds for any real call.
+   */
+  canDropSegments(names: string[], reason: 'age' | 'limit' | 'user-before' = 'user-before', nowMs: number = Number.MAX_SAFE_INTEGER): boolean {
+    const boundary = this.dropBoundary(names, reason, nowMs);
+    if (boundary === null) return false;
+    let bytes: number;
+    try { bytes = encodeEntry(JOURNAL_FRAMING, this.lastId + 1, KIND_BOUNDARY, encodeBoundaryBody(boundary)).length; } catch { return false; }
+    return !this.overCeiling(bytes, this.rollsFor(bytes), this.limit);
+  }
+
+  /** The `expired` boundary a drop of `names` would write, or null for a drop that is refused before any room is asked of. */
+  private dropBoundary(names: string[], reason: 'age' | 'limit' | 'user-before', nowMs: number): BoundaryFields | null {
+    if (this.status !== 'open' && this.status !== 'storage-limit') return null;
+    if (reason !== 'age' && reason !== 'limit' && reason !== 'user-before') return null;
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) return null;
+    if (!Array.isArray(names) || names.length === 0 || names.length > this.segs.length) return null;
+    const listed = new Set(this.dir.list());
+    for (let i = 0; i < names.length; i++) {
+      const s = this.segs[i];
+      if (names[i] !== s.name || !(s.legacy || i < this.segs.length - 1) || !listed.has(s.name)) return null;
+    }
+    const first = this.segs[0];
+    const last = this.segs[names.length - 1];
+    return {
+      action: 'expired', sessionId: this.track.open ?? '', receivedMs: nowMs, reason, droppedDatagrams: null,
+      source: this.track.recordedSource,
+      expired: { fromEntryId: first.firstId, throughEntryId: last.lastId, fromMs: first.firstMs, throughMs: last.lastMs },
+    };
   }
 
   /** Moves `syncedThroughEntryId` and nothing else. A flush that throws fails the journal and moves nothing. */

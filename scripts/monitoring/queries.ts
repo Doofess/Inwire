@@ -21,7 +21,8 @@ import { boundedInflate } from '../../src/services/monitoring/boundedInflate';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { historySpec } from '../../src/services/monitoring/historyRange';
 import { bucketBounds, recordedSource, runHistoryQuery, validateQuery, type QueryOptions } from '../../src/services/monitoring/queries';
-import { runExpiry } from '../../src/services/monitoring/archive';
+import { resumeExpiry, runExpiry } from '../../src/services/monitoring/archive';
+import type { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan } from '../../src/services/monitoring/retention';
 import { minuteOf } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
@@ -35,7 +36,7 @@ import {
 import { sourceKey } from '../../src/services/monitoring/v5';
 import type { FromMonitoringWorker } from '../../src/services/monitoring/workerHost';
 import {
-  BASE, HostRig, MIN, NOW, Rig, S1, S2, SRC, SRC1, ask, askBoth, askOk, deflate, dgram, inflate, junk, rollUp, runAll, spec, start, stop,
+  BASE, FlakyDirectory, HostRig, MIN, NOW, Rig, S1, S2, SRC, SRC1, ask, askBoth, askOk, deflate, dgram, inflate, junk, rollUp, runAll, spec, start, stop,
   test, v9, waitTick, withoutProvenance, boundary,
 } from './queryRig';
 import { EXPORTER } from './fixtures';
@@ -112,7 +113,7 @@ class Gate {
   }
 }
 
-type Gateable = 'snapshot' | 'readPage' | 'appendMinutes' | 'readEvidence';
+type Gateable = 'snapshot' | 'readPage' | 'appendMinutes' | 'readEvidence' | 'sources';
 
 function gatedRuntime(rt: HostRuntime, method: Gateable, gate: Gate): HostRuntime {
   const call = (rt[method] as (...a: unknown[]) => Promise<unknown>).bind(rt);
@@ -1928,8 +1929,8 @@ function expiryInputs(): EvidenceInput[] {
 }
 
 /** A rig whose Worker has rolled up the whole journal, and the plan that expires its first two sealed segments. */
-async function expiryWorld(): Promise<{ rig: Rig; plan: ExpiryPlan }> {
-  const rig = new Rig(0xa0, SEG_LIMIT);
+async function expiryWorld(jdir?: MemorySegmentDirectory): Promise<{ rig: Rig; plan: ExpiryPlan }> {
+  const rig = new Rig(0xa0, SEG_LIMIT, jdir);
   const inputs = expiryInputs();
   for (let at = 0; at < inputs.length; at += 100) rig.append(inputs.slice(at, at + 100));
   await rollUp(rig).then((h) => h.host.settled());
@@ -2070,6 +2071,170 @@ test('a query planned before an expiry restarts or says evidence-expired; it nev
       assert.deepEqual(reply, fresh);
     }
   }
+});
+
+// --- an expiry between a query's reads (I1) ---------------------------------------------------------------
+
+test('I1: a whole expiry, cache reset included, between the watermark read and the snapshot read never answers zeros', async () => {
+  const { rig, plan } = await expiryWorld();
+  const wide = perMinute(m(6), m(40));
+  const before = totals(await askOk(rig, wide));
+  const gate = new Gate();
+  gate.held = true;
+  const gated = gatedRuntime(rig.runtime, 'snapshot', gate);
+  const pending = runHistoryQuery(gated, gated, wide, new AbortController().signal, { inflate, nowMs: NOW, archive: rig.runtime.archive });
+  await ticks();
+  assert.ok(gate.entered > 0, 'the query has read what it reads before the snapshot and is waiting for it');
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'done');
+  assert.equal(rig.store.watermark(), null, 'the cache was reset under it');
+  gate.release();
+  const reply = await pending;
+  assert.equal(reply.ok, true, reply.ok ? '' : `${reply.code}: ${reply.message}`);
+  if (!reply.ok) return;
+  // Exact, never the zeros of retained minutes a reset cache and a stale watermark would give.
+  assert.deepEqual(totals(reply.value), before);
+});
+
+test('I1: an expiry after the query has read the boundaries and before it reads the sidecar is seen at the end, and restarts it', async () => {
+  // The boundaries the query holds are from before the expiry, so the stale-cache rule cannot see it:
+  // only the check at the end (the cut moved, or the watermark fell) stands between the query and the
+  // reset sidecar's empty answer for every retained minute.
+  const { rig, plan } = await expiryWorld();
+  const before = totals(await askOk(rig, WIDE));
+  const gate = new Gate();
+  gate.held = true;
+  const gated = gatedRuntime(rig.runtime, 'sources', gate);
+  const pending = runHistoryQuery(gated, gated, WIDE, new AbortController().signal, { inflate, nowMs: NOW, archive: rig.runtime.archive });
+  await ticks();
+  assert.ok(gate.entered > 0, 'the query has read its boundaries and is waiting to ask the sidecar who it knows');
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'done');
+  assert.equal(rig.store.watermark(), null, 'the cache was reset under it');
+  gate.release();
+  const reply = await pending;
+  assert.equal(reply.ok, true, reply.ok ? '' : `${reply.code}: ${reply.message}`);
+  if (!reply.ok) return;
+  assert.deepEqual(totals(reply.value), before);
+});
+
+// --- a crash after the boundary, before the cache reset (C1) ----------------------------------------------
+
+/** The journal's `expired` boundaries, as a reader sees them. */
+async function expiredBoundaryIds(rig: Rig): Promise<number[]> {
+  const snap = rig.journal.snapshot();
+  const page = await rig.runtime.readBoundaries(snap, snap.firstEntryId - 1, 1000);
+  return page.entries.filter((b) => b.action === 'expired').map((b) => b.ref.entryId);
+}
+
+const WIDE = perMinute(m(6), m(40));
+
+/**
+ * The state a crash leaves when the cut and the boundary are durable and the cache is not reset: `how` is
+ * the process dying inside `cache.reset()`, or the disk refusing the unlink after the boundary. Reopened
+ * from the same files, as a new process would. Returns the totals the range had before any of it.
+ */
+async function crashedAfterBoundary(how: 'dies-before-reset' | 'unlink-fails'): Promise<{ rig: Rig; plan: ExpiryPlan; before: ReturnType<typeof totals> }> {
+  const dir = new FlakyDirectory();
+  const { rig, plan } = await expiryWorld(dir);
+  const before = totals(await askOk(rig, WIDE));
+  if (how === 'dies-before-reset') {
+    const cache = Object.create(rig.store) as RollupStore;
+    cache.reset = () => { throw new Error('the process died'); };
+    assert.equal(runExpiry(rig.journal, cache, rig.archive, plan, { nowMs: NOW, deflate }), 'failed');
+  } else {
+    dir.failUnlink = true;
+    assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'failed');
+    dir.failUnlink = false;
+  }
+  rig.reopen();
+  const wm = rig.store.watermark();
+  const [boundary] = await expiredBoundaryIds(rig);
+  assert.ok(boundary !== undefined, 'the boundary is durable');
+  assert.ok(wm !== null && wm.throughEntryId < boundary, `the cache still describes the world before the boundary (${wm?.throughEntryId} < ${boundary})`);
+  assert.equal(rig.journal.snapshot().firstEntryId, plan.throughEntryId + 1, 'the journal finished the unlink');
+  return { rig, plan, before };
+}
+
+for (const how of ['dies-before-reset', 'unlink-fails'] as const) {
+  test(`C1 (${how}): a cache no one reset, below the boundary, does not double the expired minutes in a query`, async () => {
+    const { rig, before } = await crashedAfterBoundary(how);
+    const after = await askOk(rig, WIDE);
+    assert.deepEqual(totals(after), before);
+    assert.ok(after.buckets.some((b) => b.coverage === 'aggregate-only'), 'the expired minutes come from the archive');
+  });
+
+  test(`C1 (${how}): resumeExpiry resets the cache, a rebuild follows and the totals stay exact`, async () => {
+    const { rig, before } = await crashedAfterBoundary(how);
+    const archived = rig.archive.bytes();
+    assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'resumed');
+    assert.equal(rig.store.watermark(), null, 'the cache was reset');
+    assert.equal(rig.archive.bytes(), archived, 'nothing was archived again');
+    assert.equal((await expiredBoundaryIds(rig)).length, 1, 'and no second boundary');
+    assert.equal(resumeExpiry(rig.journal, rig.store, rig.archive), 'none', 'nothing left to resume');
+    assert.deepEqual(totals(await askOk(rig, WIDE)), before, 'before the rebuild');
+    await rollUp(rig).then((h) => h.host.settled());
+    assert.ok(rig.store.watermark() !== null);
+    assert.deepEqual(totals(await askOk(rig, WIDE)), before, 'after the rebuild');
+  });
+
+  test(`C1 (${how}): a Worker host that connects to the crashed cache resets it itself, rebuilds, and answers exactly`, async () => {
+    const { rig, before } = await crashedAfterBoundary(how);
+    const [boundary] = await expiredBoundaryIds(rig);
+    const h = await rollUp(rig);
+    await h.host.settled();
+    const wm = rig.store.watermark();
+    assert.ok(wm !== null && wm.throughEntryId >= boundary, `the host did not keep a cache below the boundary (${wm?.throughEntryId} vs ${boundary})`);
+    assert.ok(!h.posts.some((p) => p.type === 'rebuild' && p.phase === 'failed'), 'the rebuild did not fail');
+    assert.deepEqual(totals(await askOk(rig, WIDE)), before);
+  });
+}
+
+// --- engine admission across an expiry (I4) ---------------------------------------------------------------
+
+/** Sixteen engines in the first stretch (what the first expiry takes), a seventeenth only later, in a retained segment. */
+function admissionInputs(): EvidenceInput[] {
+  const out: EvidenceInput[] = [start(BASE)];
+  for (let i = 0; i < 6000; i++) {
+    const flows = Array.from({ length: 20 }, (_, j) => ({
+      src: `10.${i % 5}.${j}.1`, dst: `172.16.${j % 4}.${(i % 9) + 1}`, octets: 100 + j, packets: 1, srcPort: 1000 + j, dstPort: 443,
+    }));
+    const engineId = i < 1500 ? i % 16 : i >= 3500 && i < 3700 ? 16 : 0;
+    out.push(dgram(BASE + 1000 + i * 1000, flows, { engineId, sequence: i }));
+  }
+  return out;
+}
+
+test('I4: engine admission after an expiry is what a rebuild gives: the sixteen that expired keep the exporter full', async () => {
+  const rig = new Rig(0xa0, SEG_LIMIT);
+  const inputs = admissionInputs();
+  for (let at = 0; at < inputs.length; at += 100) rig.append(inputs.slice(at, at + 100));
+  const SRC16 = sourceKey(EXPORTER, 0, 16);
+  const q16 = spec(BASE, BASE + 120 * MIN, 120, { sourceKey: SRC16 });
+  const q0 = spec(BASE, BASE + 120 * MIN, 120, { sourceKey: SRC });
+  await rollUp(rig).then((h) => h.host.settled());
+  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'the seventeenth is not admitted over the whole journal');
+  assert.ok(!rig.store.sources().includes(SRC16));
+  const wide = totals(await askOk(rig, q0));
+
+  const segs = rig.journal.segments();
+  assert.ok(segs.filter((s) => s.sealed).length >= 4, `the fixture seals four segments (got ${segs.length})`);
+  const plan = planExpiry(segs, DEFAULT_RETENTION, NOW, 0, SEG_LIMIT, segs[1].lastReceivedMs + 1);
+  assert.ok(plan !== null);
+  expire(rig, plan);
+  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'after the expiry and a reopen, before any rebuild: the query\'s admission');
+  assert.ok(rig.archive.sources().includes(SRC), 'the archive holds the engines that expired');
+
+  await rollUp(rig).then((h) => h.host.settled());
+  assert.ok(!rig.store.sources().includes(SRC16), 'the Worker host rebuilt with the sixteen known, not the seventeenth admitted');
+  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'after the rebuild');
+
+  // The segments holding the seventeenth expire next: the archive must not admit it either.
+  const next = rig.journal.segments();
+  const plan2 = planExpiry(next, DEFAULT_RETENTION, NOW, 0, SEG_LIMIT, next[1].lastReceivedMs + 1);
+  assert.ok(plan2 !== null);
+  expire(rig, plan2);
+  assert.ok(!rig.archive.sources().includes(SRC16), 'expiryFragments did not admit the seventeenth');
+  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'after the second expiry');
+  assert.deepEqual(totals(await askOk(rig, q0)), wide, 'and the admitted engine\'s totals are exact throughout');
 });
 
 test('the recorded exporter survives the expiry of the only start boundary', async () => {

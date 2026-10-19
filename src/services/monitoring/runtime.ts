@@ -41,8 +41,8 @@ export interface RollupReader {
 }
 
 export interface RollupWriter {
-  /** One batch, its minutes and then its watermark, in one write. */
-  appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark): Promise<void>;
+  /** One batch, its minutes and then its watermark, in one write; `afterEntryId` is where its aggregation began, and the sidecar refuses a batch that does not continue it. */
+  appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number): Promise<void>;
 }
 
 /**

@@ -180,6 +180,9 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
 }
 
 export class RollupStore {
+  /** The entry a batch must begin after while there is no watermark; set by `reset`, 0 for a file that was never reset. */
+  private base = 0;
+
   private constructor(
     private readonly file: BlockFile,
     private readonly journal: { generation: Generation; throughEntryId: number; policyVersion: number },
@@ -264,9 +267,14 @@ export class RollupStore {
    * further than `journalThroughEntryId` when that is given, and a batch no larger
    * than `maxBatchBytes` when that is given (the room the dataset's limit leaves).
    * Each refusal is a `RangeError` and writes nothing.
+   *
+   * `afterEntryId` is the entry the batch's aggregation began after. It must be the watermark the sidecar
+   * holds, or, with none, the base the last `reset` recorded (0 for a new file): a batch that began anywhere
+   * else leaves entries out or counts them twice, and one the Worker built before an expiry reset the cache
+   * (so it covers entries that are gone, and the archive holds) is refused here rather than trusted.
    */
   appendMinutes(
-    minutes: MinuteInput[], watermark: RollupWatermark,
+    minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number,
     bounds: { journalThroughEntryId?: number; maxBatchBytes?: number } = {},
   ): void {
     this.requireUsable();
@@ -285,6 +293,10 @@ export class RollupStore {
     }
     if (bounds.journalThroughEntryId !== undefined && watermark.throughEntryId > bounds.journalThroughEntryId) {
       throw new RangeError(`a watermark of ${watermark.throughEntryId} is past the journal's ${bounds.journalThroughEntryId}`);
+    }
+    const continuesFrom = this.mark === null ? this.base : this.mark.throughEntryId;
+    if (afterEntryId !== continuesFrom) {
+      throw new RangeError(`a batch after entry ${afterEntryId} does not continue the sidecar, which continues from entry ${continuesFrom}`);
     }
 
     const encoded: Uint8Array[] = [];
@@ -379,8 +391,14 @@ export class RollupStore {
     return [...this.minutes.keys()].sort();
   }
 
-  /** Back to an empty sidecar with a fresh header: how a `rebuild-required` one recovers. */
-  reset(): void {
+  /**
+   * Back to an empty sidecar with a fresh header: how a `rebuild-required` one recovers, and what an expiry
+   * does once its entries are gone. `baseEntryId` is the entry the next batch must begin after: the one before
+   * the journal's first retained entry (0 while nothing has expired).
+   */
+  reset(baseEntryId = 0): void {
+    if (!Number.isSafeInteger(baseEntryId) || baseEntryId < 0) throw new RangeError('a base is a non-negative entry id');
     this.writeFreshHeader();
+    this.base = baseEntryId;
   }
 }

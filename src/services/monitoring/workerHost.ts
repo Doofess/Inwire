@@ -36,7 +36,7 @@ import { RuntimeUnavailableError, type HostRuntime } from './runtime';
 import { initialSourceHealth, reduceSourceHealth, type HealthEvent, type SourceHealth } from './sourceHealth';
 import {
   DECODER_POLICY_VERSION, LIMITS, type DatagramEvidence, type Evidence, type EvidenceRef, type HistoryReply, type NormalizedV5,
-  type QuerySpec, type Snapshot,
+  type JournalSnapshot, type QuerySpec, type Snapshot,
 } from './types';
 import { decodeV5, sourceKey } from './v5';
 
@@ -221,6 +221,42 @@ export class MonitoringWorkerHost {
 
   // --- connect and the rollups ---------------------------------------------------------------------------
 
+  /**
+   * The watermark a rebuild may continue from, after wiping a sidecar that cannot be continued: one of
+   * another generation or policy; one that ends before the journal's first retained entry (it counts
+   * entries the journal no longer has); one that ends before the newest retained `expired` boundary (it
+   * still counts entries the archive now holds, and a query would add the two: a crash between the
+   * boundary and the reset leaves exactly this, and `resumeExpiry` is what normally closes it). An empty
+   * sidecar is reset too when entries have expired, so its base is the journal's start and not entry 0.
+   */
+  private async settleSidecar(
+    runtime: HostRuntime, mark: Awaited<ReturnType<HostRuntime['watermark']>>, snapshot: JournalSnapshot,
+  ): Promise<Awaited<ReturnType<HostRuntime['watermark']>>> {
+    let wipe = false;
+    if (mark !== null) {
+      if (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION) wipe = true;
+      else if (mark.throughEntryId < snapshot.firstEntryId - 1) wipe = true;
+      else if (mark.throughEntryId < await this.newestExpiredBoundary(runtime, snapshot)) wipe = true;
+    } else if (snapshot.firstEntryId > 1) {
+      wipe = true;
+    }
+    if (!wipe) return mark;
+    await runtime.resetRollups();
+    return runtime.watermark();
+  }
+
+  /** The entry id of the newest `expired` boundary the journal still holds, 0 for none. */
+  private async newestExpiredBoundary(runtime: HostRuntime, snapshot: JournalSnapshot): Promise<number> {
+    let newest = 0;
+    let after = snapshot.firstEntryId - 1;
+    for (;;) {
+      const page = await runtime.readBoundaries(snapshot, after, LIMITS.pageEntries);
+      for (const b of page.entries) if (b.action === 'expired') newest = Math.max(newest, b.ref.entryId);
+      if (page.done) return newest;
+      after = page.nextAfterId;
+    }
+  }
+
   private async connect(requestId: number, port: unknown): Promise<void> {
     const post = this.options.post;
     if (this.shuttingDown) return post({ type: 'connect-reply', requestId, ok: false, code: 'cancelled', message: 'the Worker is shutting down' });
@@ -253,10 +289,7 @@ export class MonitoringWorkerHost {
         try {
           // The store already refuses a sidecar of another generation or policy;
           // a disagreement here is a runtime that did not, so it is wiped, not trusted.
-          if (mark !== null && (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION)) {
-            await runtime.resetRollups();
-            mark = await runtime.watermark();
-          }
+          mark = await this.settleSidecar(runtime, mark, snapshot);
           sources = mark === null ? [] : await runtime.sources();
           // What expired is no longer in the journal to re-admit from: its engines are in the archive.
           if (snapshot.firstEntryId > 1 && runtime.archive !== undefined) {
@@ -367,12 +400,8 @@ export class MonitoringWorkerHost {
     const runtime = this.runtime;
     if (runtime === null || this.shuttingDown || this.phase !== 'rebuilding') return;
     try {
-      let mark = await runtime.watermark();
-      if (mark !== null && (mark.generation !== this.generation || mark.policyVersion !== DECODER_POLICY_VERSION)) {
-        await runtime.resetRollups();
-        mark = await runtime.watermark();
-      }
       const snapshot = await runtime.snapshot();
+      const mark = await this.settleSidecar(runtime, await runtime.watermark(), snapshot);
       this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
     } catch (e) {
       this.rollupFault(e);
@@ -589,7 +618,9 @@ export class MonitoringWorkerHost {
       bytes: encodeMinuteRollup(f.rollup, this.options.deflate),
     }));
     try {
-      await runtime.appendMinutes(minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION });
+      await runtime.appendMinutes(
+        minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION }, drained.afterEntryId,
+      );
     } catch (e) {
       // Only the sidecar's refusal; a RangeError from encoding the batch above is thrown before this.
       if (e instanceof RangeError) throw new AppendRefused(e.message);

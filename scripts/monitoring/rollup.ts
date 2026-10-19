@@ -720,10 +720,10 @@ function recordPosts(rig: Rig): { posts: Posted[]; marks: number[] } {
   const posts: Posted[] = [];
   const marks: number[] = [];
   const original = rig.runtime.appendMinutes.bind(rig.runtime);
-  rig.runtime.appendMinutes = async (minutes, watermark) => {
+  rig.runtime.appendMinutes = async (minutes, watermark, afterEntryId) => {
     for (const x of minutes) posts.push({ sourceKey: x.sourceKey, minuteMs: x.minuteMs, hex: Buffer.from(x.bytes).toString('hex') });
     marks.push(watermark.throughEntryId);
-    return original(minutes, watermark);
+    return original(minutes, watermark, afterEntryId);
   };
   return { posts, marks };
 }

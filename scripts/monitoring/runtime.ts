@@ -1243,7 +1243,7 @@ async function main(): Promise<void> {
     const minutes = Array.from({ length: 9 }, (_, i) => ({ sourceKey: 'a', minuteMs: M0 + i * 60_000, bytes: body }));
     await rig.collector.runtime.appendMinutes(minutes, {
       generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
-    });
+    }, 0);
     await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, Infinity), RangeError);
     await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, 1e12), RangeError);
     const under = await rig.collector.runtime.readMinutes('a', M0, M0 + 7 * 60_000, Infinity);
@@ -1269,29 +1269,29 @@ async function main(): Promise<void> {
     const runtime = rig.collector.runtime;
 
     // The journal's end is the most a watermark may claim to have rolled up.
-    await assert.rejects(runtime.appendMinutes([minute(0, 100)], mark(snapshot.throughEntryId + 1)), RangeError);
+    await assert.rejects(runtime.appendMinutes([minute(0, 100)], mark(snapshot.throughEntryId + 1), 0), RangeError);
     // Over the minute cap, and over the byte cap in one minute.
     await assert.rejects(
-      runtime.appendMinutes(Array.from({ length: MAX_APPEND_MINUTES + 1 }, (_, i) => minute(i, 1)), mark(snapshot.throughEntryId)),
+      runtime.appendMinutes(Array.from({ length: MAX_APPEND_MINUTES + 1 }, (_, i) => minute(i, 1)), mark(snapshot.throughEntryId), 0),
       RangeError,
     );
-    await assert.rejects(runtime.appendMinutes([minute(0, MAX_APPEND_BYTES + 1)], mark(snapshot.throughEntryId)), RangeError);
+    await assert.rejects(runtime.appendMinutes([minute(0, MAX_APPEND_BYTES + 1)], mark(snapshot.throughEntryId), 0), RangeError);
     // Under both caps and still more than the limit leaves: 200 full datagrams are in a 16 MiB journal.
     const room = CFG.storageLimitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - SEGMENT_HEADER_BYTES;
     const body = 900_000;
     const count = Math.ceil(room / body) + 1;
     assert.ok(count * body <= MAX_APPEND_BYTES && count <= MAX_APPEND_MINUTES, `the case stays under the caps (room ${room})`);
-    await assert.rejects(runtime.appendMinutes(Array.from({ length: count }, (_, i) => minute(i, body)), mark(snapshot.throughEntryId)), RangeError);
+    await assert.rejects(runtime.appendMinutes(Array.from({ length: count }, (_, i) => minute(i, body)), mark(snapshot.throughEntryId), 0), RangeError);
     assert.deepEqual(await runtime.readMinutes('a', M0, M0 + count * 60_000, MiB), [], 'a refusal writes nothing');
     assert.equal(await runtime.watermark(), null);
 
     // A batch the room holds goes in.
-    await runtime.appendMinutes([minute(0, 100_000)], mark(snapshot.throughEntryId));
+    await runtime.appendMinutes([minute(0, 100_000)], mark(snapshot.throughEntryId), 0);
     assert.equal((await runtime.readMinutes('a', M0, M0 + 60_000, MiB)).length, 1);
 
     // Over the port a refusal is an error reply, not a throw out of the served call.
     port.posted.length = 0;
-    port.deliver({ type: 'req', id: 77, method: 'appendMinutes', args: [[minute(1, 100)], mark(snapshot.throughEntryId + 5)] });
+    port.deliver({ type: 'req', id: 77, method: 'appendMinutes', args: [[minute(1, 100)], mark(snapshot.throughEntryId + 5), snapshot.throughEntryId] });
     await settle();
     const reply = port.posted.find((m) => m.type === 'res' && m.id === 77);
     assert.equal(reply?.ok, false);

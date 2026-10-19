@@ -83,9 +83,9 @@ export class LocalRuntime implements HostRuntime {
    * which the journal's `stop` relies on. A refusal rejects (`RangeError`) and
    * `runtimeRpc` answers it as an error reply; nothing is written.
    */
-  async appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark): Promise<void> {
+  async appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number): Promise<void> {
     const snapshot = this.journal.snapshot();
-    this.rollups.appendMinutes(minutes, watermark, {
+    this.rollups.appendMinutes(minutes, watermark, afterEntryId, {
       journalThroughEntryId: snapshot.throughEntryId,
       maxBatchBytes: this.journal.limitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - this.rollups.size(),
     });
@@ -93,8 +93,9 @@ export class LocalRuntime implements HostRuntime {
 
   async rollupStatus(): Promise<{ status: RollupOpenStatus; reason?: string }> { return this.opened; }
 
+  /** The sidecar starts over from the journal's first retained entry: what expired is the archive's, never the cache's. */
   async resetRollups(): Promise<void> {
-    this.rollups.reset();
+    this.rollups.reset(this.journal.snapshot().firstEntryId - 1);
     this.opened = { status: 'empty' };
   }
 

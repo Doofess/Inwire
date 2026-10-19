@@ -225,7 +225,7 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
     watermark: () => call('watermark'),
     readMinutes: (sourceKey, from, to, maxBytes) => call('readMinutes', sourceKey, from, to, maxBytes),
     sources: () => call('sources'),
-    appendMinutes: (minutes, watermark) => call('appendMinutes', minutes, watermark),
+    appendMinutes: (minutes, watermark, afterEntryId) => call('appendMinutes', minutes, watermark, afterEntryId),
     rollupStatus: () => call('rollupStatus'),
     resetRollups: () => call('resetRollups'),
     onLive: (handler) => { live.push(handler); },
