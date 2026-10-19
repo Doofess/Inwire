@@ -13,7 +13,7 @@
  * files are `volume.ts`. This file only moves messages between
  * `process.parentPort`, a `MessagePortMain` and the collector.
  *
- * Control (open, start, stop, dispose, status) travels on `parentPort`. The
+ * Control (open, inspect, discard, discard-preview, retention, start, stop, dispose, status) travels on `parentPort`. The
  * Worker's runtime port carries reads and live evidence and nothing else, so a
  * Stop is never queued behind a page (`control.ts`).
  *
@@ -26,7 +26,7 @@ import { readToUtility, type FromMonitoringUtility, type StartResult, type StopR
 import type { RpcPort } from '../../src/services/monitoring/runtimeRpc';
 import { Collector } from './collector';
 import { createUdpSocket } from './udp';
-import { openMonitoringVolume } from './volume';
+import { openMonitoringFolder, openMonitoringVolume } from './volume';
 
 const post = (message: FromMonitoringUtility): void => {
   process.parentPort.postMessage(message);
@@ -34,6 +34,7 @@ const post = (message: FromMonitoringUtility): void => {
 
 const collector = new Collector({
   openVolume: openMonitoringVolume,
+  openFolder: openMonitoringFolder,
   createSocket: createUdpSocket,
   now: () => Date.now(),
   randomBytes: (n) => new Uint8Array(randomBytes(n)),
@@ -75,9 +76,10 @@ process.parentPort.on('message', (event) => {
     const id = (raw as { id?: unknown } | null)?.id;
     const type = (raw as { type?: unknown } | null)?.type;
     if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) {
-      const result = type === 'stop' || type === 'dispose'
-        ? failure('monitoring was sent a request it cannot read')
-        : { ok: false as const, message: 'monitoring was sent a request it cannot read' };
+      const why = 'monitoring was sent a request it cannot read';
+      const result = type === 'stop' || type === 'dispose' ? failure(why)
+        : type === 'inspect' || type === 'discard' || type === 'discard-preview' || type === 'retention' ? { ok: false as const, reason: 'failed' as const, message: why }
+          : { ok: false as const, message: why };
       post({ type: 'reply', id, result });
     }
     return;
@@ -89,7 +91,20 @@ process.parentPort.on('message', (event) => {
       return;
     }
     case 'open':
-      void collector.open(message.root, message.limitBytes).then((result) => post({ type: 'reply', id: message.id, result }));
+      void collector.open(message.root, message.limitBytes, { isDefaultLocation: message.isDefaultLocation, retention: message.retention })
+        .then((result) => post({ type: 'reply', id: message.id, result }));
+      return;
+    case 'inspect':
+      post({ type: 'reply', id: message.id, result: collector.inspect(message.root, message.isDefaultLocation) });
+      return;
+    case 'discard':
+      void collector.discard(message.scope).then((result) => post({ type: 'reply', id: message.id, result }));
+      return;
+    case 'discard-preview':
+      void collector.discardPreview(message.scope).then((result) => post({ type: 'reply', id: message.id, result }));
+      return;
+    case 'retention':
+      void collector.setRetention(message.policy).then((result) => post({ type: 'reply', id: message.id, result }));
       return;
     case 'start':
       void collector.start(message.config).then((result) => post({ type: 'reply', id: message.id, result }));

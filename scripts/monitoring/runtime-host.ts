@@ -28,6 +28,7 @@ import {
   type MonitoringBridge, type PortMessageEvent, type WorkerLike,
 } from '../../src/services/monitoring/client';
 import type { IntakeStatus, RuntimeExit, StartResult, StopResult } from '../../src/services/monitoring/control';
+import { DEFAULT_RETENTION, type RetentionPolicy } from '../../src/services/monitoring/retention';
 import {
   initialMonitoringState, nothingArriving, reduceMonitoring, type MonitoringState,
 } from '../../src/services/monitoring/state';
@@ -76,7 +77,7 @@ function status(over: Partial<IntakeStatus> = {}): IntakeStatus {
   return {
     listener: 'listening', listenerError: null, storage: 'open', storageError: null, source: CONFIG, sessionId: 'session-1',
     received: 0, rejectedSenders: [], rejectedOverflow: 0, shedDatagrams: 0, snapshot: null, workerAttached: true,
-    stopReason: null, ...over,
+    stopReason: null, datasetSource: null, ...over,
   };
 }
 
@@ -89,7 +90,10 @@ class FakeChild implements ChildLike {
   killed = 0;
   /** What each request type answers; `'none'` stays silent. */
   replies: Record<string, Reply> = {
-    open: { ok: true }, start: { ok: true }, stop: { ok: true, clean: true, snapshot: null }, dispose: { ok: true, clean: true, snapshot: null },
+    open: { ok: true }, inspect: { ok: true, kind: 'new', truncatedTailBytes: null, problem: null, exporterIPv4: null },
+    discard: { ok: true, removedSegments: 2 },
+    'discard-preview': { ok: true, scope: 'before', segments: 2, fromMs: 1_000, throughMs: null, cutMs: 5_000 },
+    retention: { ok: true }, start: { ok: true }, stop: { ok: true, clean: true, snapshot: null }, dispose: { ok: true, clean: true, snapshot: null },
   };
   private messageListeners: ((m: unknown) => void)[] = [];
   private spawnListeners: (() => void)[] = [];
@@ -128,11 +132,13 @@ class FakeContents implements ContentsLike {
   sent(channel: string): unknown[][] { return this.sends.filter((s) => s.channel === channel).map((s) => s.args); }
 }
 
-function hostRig(saved: number | null = null) {
+function hostRig(saved: number | null = null, location: string | null = null, retention: RetentionPolicy = DEFAULT_RETENTION) {
   const clock = new Clock();
   const children: FakeChild[] = [];
   const channels: { port1: { name: string }; port2: { name: string } }[] = [];
   let limit = saved;
+  const where = location;
+  const policy = retention;
   const core = new MonitoringHostCore({
     directory: 'monitoring-dir',
     fork: () => { const c = new FakeChild(); children.push(c); return c; },
@@ -143,7 +149,7 @@ function hostRig(saved: number | null = null) {
       return pair;
     },
     timers: clock,
-    savedLimitBytes: () => limit,
+    settings: () => ({ limitBytes: limit, location: where, retention: policy }),
   });
   return { core, clock, children, channels, setLimit: (v: number | null) => { limit = v; } };
 }
@@ -199,6 +205,230 @@ test('host: open carries the saved storage limit, or 8 GiB when none is saved', 
   const b = await connect(fresh, new FakeContents(1));
   assert.equal(b.of('open')[0].message.limitBytes, LIMITS.defaultStorageBytes);
   assert.equal(LIMITS.defaultStorageBytes, 8 * 1024 * 1024 * 1024);
+});
+
+test('host: open carries the saved location (or the directory), whether it is the default, and the retention', async () => {
+  const policy: RetentionPolicy = { keepRawDays: 14, atLimit: 'expire-oldest' };
+  const moved = await connect(hostRig(null, 'D:\\evidence', policy), new FakeContents(1));
+  const a = moved.of('open')[0].message;
+  assert.equal(a.root, 'D:\\evidence');
+  assert.equal(a.isDefaultLocation, false);
+  assert.deepEqual(a.retention, policy);
+  const plain = await connect(hostRig(), new FakeContents(1));
+  const b = plain.of('open')[0].message;
+  assert.equal(b.root, 'monitoring-dir');
+  assert.equal(b.isDefaultLocation, true);
+  assert.deepEqual(b.retention, DEFAULT_RETENTION);
+});
+
+// --- the host: location, discard and retention (ADR 0061) --------------------------------------------------------
+
+const BUSY_TEXT = /Stop monitoring first/;
+
+/** A connected, listening host: the child answers start and reports `listening`. */
+async function listening(r: ReturnType<typeof hostRig>, contents = new FakeContents(1)): Promise<FakeChild> {
+  const child = await connect(r, contents);
+  assert.equal((await r.core.start(contents, CONFIG)).ok, true);
+  child.emitMessage({ type: 'status', status: status() });
+  assert.equal(r.core.isRunning(), true);
+  return child;
+}
+
+test('host: discard, setRetention and relocate while running are busy and send nothing', async () => {
+  const r = hostRig();
+  const child = await listening(r);
+  const before = child.sent.length;
+  const discard = await r.core.discard({ scope: 'all' }, () => { throw new Error('asked while collecting'); });
+  assert.equal(discard.ok, false);
+  assert.equal((discard as { reason: string }).reason, 'busy');
+  assert.match((discard as { message: string }).message, BUSY_TEXT);
+  const retention = await r.core.setRetention({ keepRawDays: 7, atLimit: 'stop' });
+  assert.equal((retention as { reason: string }).reason, 'busy');
+  const relocate = await r.core.relocate('D:\\elsewhere', false);
+  assert.equal(relocate.ok, false);
+  assert.match((relocate as { message: string }).message, BUSY_TEXT);
+  assert.equal(child.sent.length, before);
+});
+
+const YES = (): Promise<boolean> => Promise.resolve(true);
+
+test('host: discard with no session launches, opens, previews, asks, then discards with an open-sized deadline', async () => {
+  const r = hostRig(64 * 1024 * 1024);
+  const done = r.core.discard({ scope: 'before', beforeMs: 1_000 }, YES);
+  await flush();
+  assert.equal(r.children.length, 1);
+  assert.deepEqual(r.children[0].sent, []);
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: true, removedSegments: 2 });
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview', 'discard']);
+  assert.deepEqual(r.children[0].of('discard-preview')[0].message.scope, { scope: 'before', beforeMs: 1_000 });
+  assert.deepEqual(r.children[0].of('discard')[0].message.scope, { scope: 'before', beforeMs: 1_000 });
+});
+
+test('host: a declined confirmation answers cancelled and sends no discard', async () => {
+  const r = hostRig();
+  const asked: unknown[] = [];
+  const done = r.core.discard({ scope: 'before', beforeMs: 9_000 }, (preview) => { asked.push(preview); return Promise.resolve(false); });
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: false, reason: 'cancelled', message: '' });
+  assert.deepEqual(asked, [{ ok: true, scope: 'before', segments: 2, fromMs: 1_000, throughMs: null, cutMs: 5_000 }], 'the dialog is shown the utility\'s own preview');
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+});
+
+test('host: the confirmation comes after the preview and before the discard', async () => {
+  const r = hostRig();
+  let seenWhenAsked: string[] = [];
+  const done = r.core.discard({ scope: 'all' }, () => { seenWhenAsked = r.children[0].types(); return Promise.resolve(true); });
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: true, removedSegments: 2 });
+  assert.deepEqual(seenWhenAsked, ['open', 'discard-preview']);
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview', 'discard']);
+});
+
+test('host: a discard waits for the answer; it is not sent while the dialog is still open', async () => {
+  const r = hostRig();
+  let answer!: (v: boolean) => void;
+  const done = r.core.discard({ scope: 'all' }, () => new Promise<boolean>((resolve) => { answer = resolve; }));
+  r.children[0].emitSpawn();
+  await flush();
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+  answer(true);
+  assert.deepEqual(await done, { ok: true, removedSegments: 2 });
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview', 'discard']);
+});
+
+test('host: a preview that says nothing would go neither asks nor discards', async () => {
+  const r = hostRig();
+  const done = r.core.discard({ scope: 'before', beforeMs: 1 }, () => { throw new Error('asked about nothing'); });
+  r.children[0].replies['discard-preview'] = { ok: true, scope: 'before', segments: 0, fromMs: null, throughMs: null, cutMs: null };
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: true, removedSegments: 0 });
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+});
+
+test('host: no confirmation means no discard: refused, nothing forked or sent', async () => {
+  const r = hostRig();
+  const result = await r.core.discard({ scope: 'all' });
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, 'failed');
+  assert.match((result as { message: string }).message, /needs a confirmation/);
+  assert.equal(r.children.length, 0);
+});
+
+test('host: a preview the utility refuses is the discard\'s answer, and nothing is asked', async () => {
+  const r = hostRig();
+  const done = r.core.discard({ scope: 'before', beforeMs: 1 }, () => { throw new Error('asked about a refusal'); });
+  r.children[0].replies['discard-preview'] = { ok: false, reason: 'failed', message: 'the monitoring dataset cannot be written' };
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: false, reason: 'failed', message: 'the monitoring dataset cannot be written' });
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+  // An answer this build cannot read is a failed preview as well.
+  const u = hostRig();
+  const unreadable = u.core.discard({ scope: 'all' }, () => { throw new Error('asked'); });
+  u.children[0].replies['discard-preview'] = { ok: 'maybe' };
+  u.children[0].emitSpawn();
+  assert.equal((await unreadable).ok, false);
+  assert.deepEqual(u.children[0].types(), ['open', 'discard-preview']);
+});
+
+test('host: monitoring that starts while the dialog is open turns the accepted discard into busy', async () => {
+  const r = hostRig();
+  const contents = new FakeContents(1);
+  const child = await connect(r, contents);
+  const done = r.core.discard({ scope: 'all' }, async () => {
+    assert.equal((await r.core.start(contents, CONFIG)).ok, true);
+    child.emitMessage({ type: 'status', status: status() });
+    return true;
+  });
+  const result = await done;
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, 'busy');
+  assert.equal(child.of('discard').length, 0);
+});
+
+test('host: a discard the utility never answers fails at an open\'s deadline, not the ordinary one', async () => {
+  const r = hostRig(64 * 1024 * 1024);
+  const done = r.core.discard({ scope: 'all' }, YES);
+  r.children[0].replies.discard = 'none';
+  r.children[0].emitSpawn();
+  await flush();
+  const deadline = openDeadlineMs(64 * 1024 * 1024);
+  assert.ok(deadline > LIMITS.requestMs);
+  type Seen = { ok: boolean; reason?: string; message?: string } | null;
+  let seen = null as Seen;
+  const outcome = (): Seen => seen;
+  void done.then((v) => { seen = v; });
+  await r.clock.advance(deadline - 1);
+  assert.equal(outcome(), null);
+  await r.clock.advance(1);
+  assert.equal(outcome()?.ok, false);
+  assert.equal(outcome()?.reason, 'failed');
+  assert.match(outcome()?.message ?? '', /did not answer/);
+});
+
+test('host: a discard that is not a scope is refused before anything is sent or forked', async () => {
+  const r = hostRig();
+  for (const bad of [{ scope: 'nope' }, undefined, null, 'all', { scope: 'before' }, { scope: 'before', beforeMs: -1 }]) {
+    const result = await r.core.discard(bad);
+    assert.equal(result.ok, false, JSON.stringify(bad));
+    assert.match((result as { message: string }).message, /not a discard/);
+  }
+  assert.equal(r.children.length, 0);
+});
+
+test('host: inspect forks if needed, sends no open, and reads the reply', async () => {
+  const r = hostRig();
+  const done = r.core.inspect('D:\\found', false);
+  await flush();
+  assert.equal(r.children.length, 1);
+  r.children[0].replies.inspect = { ok: true, kind: 'adopt', truncatedTailBytes: 12, problem: null, exporterIPv4: '192.0.2.10' };
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: true, kind: 'adopt', truncatedTailBytes: 12, problem: null, exporterIPv4: '192.0.2.10' });
+  assert.deepEqual(r.children[0].types(), ['inspect']);
+  assert.equal(r.children[0].of('inspect')[0].message.root, 'D:\\found');
+  assert.equal(r.children[0].of('inspect')[0].message.isDefaultLocation, false);
+  // Garbage comes back as a stated failure, never as a success.
+  r.children[0].replies.inspect = { ok: 'yes' };
+  const bad = await r.core.inspect('D:\\found', false);
+  assert.equal(bad.ok, false);
+});
+
+test('host: relocate with no session is ok and sends nothing; with one it asks open at the new root', async () => {
+  const idle = hostRig();
+  assert.deepEqual(await idle.core.relocate('D:\\elsewhere', false), { ok: true });
+  assert.equal(idle.children.length, 0);
+  const policy: RetentionPolicy = { keepRawDays: 3, atLimit: 'stop' };
+  const r = hostRig(64 * 1024 * 1024, null, policy);
+  const child = await connect(r, new FakeContents(1));
+  assert.deepEqual(await r.core.relocate('D:\\elsewhere', false), { ok: true });
+  const open = child.of('open')[1].message;
+  assert.equal(open.root, 'D:\\elsewhere');
+  assert.equal(open.isDefaultLocation, false);
+  assert.equal(open.limitBytes, 64 * 1024 * 1024);
+  assert.deepEqual(open.retention, policy);
+});
+
+test('host: setRetention with no session is ok; with one it asks retention', async () => {
+  const idle = hostRig();
+  assert.deepEqual(await idle.core.setRetention({ keepRawDays: 7, atLimit: 'stop' }), { ok: true });
+  assert.equal(idle.children.length, 0);
+  const r = hostRig();
+  const child = await connect(r, new FakeContents(1));
+  assert.deepEqual(await r.core.setRetention({ keepRawDays: 7, atLimit: 'expire-oldest' }), { ok: true });
+  assert.deepEqual(child.of('retention')[0].message.policy, { keepRawDays: 7, atLimit: 'expire-oldest' });
+  child.replies.retention = { ok: false, reason: 'failed', message: 'disk said no' };
+  const refused = await r.core.setRetention({ keepRawDays: 7, atLimit: 'stop' });
+  assert.deepEqual(refused, { ok: false, reason: 'failed', message: 'disk said no' });
+});
+
+test('host: after quit, inspect, relocate, discard and setRetention are refused', async () => {
+  const r = hostRig();
+  r.core.release();
+  assert.equal((await r.core.inspect('x', false)).ok, false);
+  assert.equal((await r.core.relocate('x', false)).ok, false);
+  assert.equal((await r.core.discard({ scope: 'all' })).ok, false);
+  assert.equal((await r.core.setRetention({ keepRawDays: null, atLimit: 'stop' })).ok, false);
+  assert.equal(r.children.length, 0);
 });
 
 test('host: a refused open rejects connect with the reason and posts no port', async () => {
@@ -802,8 +1032,9 @@ function tempDir(): string { return mkdtempSync(path.join(os.tmpdir(), 'inwire-m
 test('settings: a missing file reads as no source, not as a failure', () => {
   const dir = tempDir();
   try {
-    assert.deepEqual(readMonitoringSettings(dir), { ok: true, config: null });
-    assert.deepEqual(readMonitoringSettings(path.join(dir, 'never-created')), { ok: true, config: null });
+    const none = { ok: true, config: null, location: null, retention: DEFAULT_RETENTION };
+    assert.deepEqual(readMonitoringSettings(dir), none);
+    assert.deepEqual(readMonitoringSettings(path.join(dir, 'never-created')), none);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -813,7 +1044,7 @@ test('settings: a file that is not JSON, not an object or the wrong version is a
     const file = path.join(dir, SETTINGS_FILE);
     for (const [text, pattern] of [
       ['{ not json', /not valid JSON/], ['[1]', /not a JSON object/], ['null', /not a JSON object/],
-      [JSON.stringify({ version: 2, source: CONFIG }), /version 2/], [JSON.stringify({ source: CONFIG }), /version undefined/],
+      [JSON.stringify({ version: 3, source: CONFIG }), /version 3/], [JSON.stringify({ source: CONFIG }), /version undefined/],
     ] as [string, RegExp][]) {
       writeFileSync(file, text);
       const read = readMonitoringSettings(dir);
@@ -840,7 +1071,7 @@ test('settings: a save that does not validate is refused and writes nothing', ()
   const dir = tempDir();
   try {
     let writes = 0;
-    const result = saveMonitoringSettings(dir, { ...CONFIG, bindIPv4: '0.0.0.0' }, () => { writes++; });
+    const result = saveMonitoringSettings(dir, { ...CONFIG, bindIPv4: '0.0.0.0' }, {}, () => { writes++; });
     assert.equal(result.ok, false);
     assert.equal(writes, 0);
     assert.deepEqual(readdirSync(dir), []);
@@ -852,11 +1083,11 @@ test('settings: a failing write is surfaced as a failed save and leaves the prev
   try {
     assert.equal(saveMonitoringSettings(dir, CONFIG).ok, true);
     const before = readFileSync(path.join(dir, SETTINGS_FILE), 'utf8');
-    const result = saveMonitoringSettings(dir, { ...CONFIG, port: 9995 }, () => { throw new Error('disk full'); });
+    const result = saveMonitoringSettings(dir, { ...CONFIG, port: 9995 }, {}, () => { throw new Error('disk full'); });
     assert.equal(result.ok, false);
     assert.match((result as { message: string }).message, /could not be saved \(disk full\)/);
     assert.equal(readFileSync(path.join(dir, SETTINGS_FILE), 'utf8'), before);
-    assert.deepEqual(readMonitoringSettings(dir), { ok: true, config: CONFIG });
+    assert.deepEqual(readMonitoringSettings(dir), { ok: true, config: CONFIG, location: null, retention: DEFAULT_RETENTION });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -865,10 +1096,64 @@ test('settings: a saved source reads back, in a directory that did not exist, wi
   try {
     const nested = path.join(dir, 'a', 'b');
     const saved = saveMonitoringSettings(nested, { ...CONFIG, extra: 'ignored' });
-    assert.deepEqual(saved, { ok: true, config: CONFIG });
-    assert.deepEqual(readMonitoringSettings(nested), { ok: true, config: CONFIG });
+    const expected = { ok: true, config: CONFIG, location: null, retention: DEFAULT_RETENTION };
+    assert.deepEqual(saved, expected);
+    assert.deepEqual(readMonitoringSettings(nested), expected);
     assert.deepEqual(readdirSync(nested), [SETTINGS_FILE]);
-    assert.deepEqual(JSON.parse(readFileSync(path.join(nested, SETTINGS_FILE), 'utf8')), { version: 1, source: CONFIG });
+    assert.deepEqual(JSON.parse(readFileSync(path.join(nested, SETTINGS_FILE), 'utf8')), { version: 2, source: CONFIG, location: null, retention: DEFAULT_RETENTION });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('settings: a version-1 file reads as the default location and policy, and a save rewrites it as version 2', () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(path.join(dir, SETTINGS_FILE), JSON.stringify({ version: 1, source: CONFIG }));
+    assert.deepEqual(readMonitoringSettings(dir), { ok: true, config: CONFIG, location: null, retention: DEFAULT_RETENTION });
+    assert.equal(saveMonitoringSettings(dir, undefined, { location: path.join(dir, 'elsewhere') }).ok, true);
+    assert.equal(JSON.parse(readFileSync(path.join(dir, SETTINGS_FILE), 'utf8')).version, 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('settings: a patch keeps the source and the other half of the patch', () => {
+  const dir = tempDir();
+  try {
+    const place = path.join(dir, 'data');
+    const policy: RetentionPolicy = { keepRawDays: 30, atLimit: 'stop' };
+    assert.equal(saveMonitoringSettings(dir, CONFIG).ok, true);
+    assert.deepEqual(saveMonitoringSettings(dir, undefined, { location: place }), { ok: true, config: CONFIG, location: place, retention: DEFAULT_RETENTION });
+    assert.deepEqual(saveMonitoringSettings(dir, undefined, { retention: policy }), { ok: true, config: CONFIG, location: place, retention: policy });
+    assert.deepEqual(readMonitoringSettings(dir), { ok: true, config: CONFIG, location: place, retention: policy });
+    // null puts the location back to the default; a new source keeps the policy.
+    assert.equal(saveMonitoringSettings(dir, undefined, { location: null }).ok, true);
+    assert.deepEqual(saveMonitoringSettings(dir, { ...CONFIG, port: 9995 }), { ok: true, config: { ...CONFIG, port: 9995 }, location: null, retention: policy });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('settings: a patch over an unreadable file is refused and writes nothing', () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(path.join(dir, SETTINGS_FILE), '{ not json');
+    let writes = 0;
+    const refused = saveMonitoringSettings(dir, undefined, { location: path.join(dir, 'x') }, () => { writes++; });
+    assert.equal(refused.ok, false);
+    assert.match((refused as { message: string }).message, /Nothing was saved over it/);
+    assert.equal(writes, 0);
+    assert.equal(readFileSync(path.join(dir, SETTINGS_FILE), 'utf8'), '{ not json');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('settings: an invalid retention policy or location is refused and writes nothing', () => {
+  const dir = tempDir();
+  try {
+    let writes = 0;
+    const write = (): void => { writes++; };
+    for (const retention of [null, {}, { keepRawDays: 0, atLimit: 'stop' }, { keepRawDays: 1.5, atLimit: 'stop' }, { keepRawDays: null, atLimit: 'burn' }]) {
+      const result = saveMonitoringSettings(dir, undefined, { retention }, write);
+      assert.equal(result.ok, false, JSON.stringify(retention));
+      assert.match((result as { message: string }).message, /retention policy/);
+    }
+    assert.equal(saveMonitoringSettings(dir, undefined, { location: '' }, write).ok, false);
+    assert.equal(writes, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

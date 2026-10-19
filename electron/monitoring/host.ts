@@ -11,6 +11,7 @@
  */
 import { MessageChannelMain, utilityProcess, type MessagePortMain } from 'electron';
 import path from 'node:path';
+import { DEFAULT_RETENTION } from '../../src/services/monitoring/retention';
 import { MonitoringHostCore, type ChildLike } from './hostCore';
 import { readMonitoringSettings } from './settings';
 
@@ -38,9 +39,12 @@ export class MonitoringHost extends MonitoringHostCore {
       fork,
       createChannel: () => new MessageChannelMain(),
       timers: { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout) },
-      savedLimitBytes: () => {
+      // Unreadable settings open the default dataset with the default policy, the leniency the
+      // limit always had: the page is told about the file by the config read, not by a failed open.
+      settings: () => {
         const saved = readMonitoringSettings(directory);
-        return saved.ok && saved.config !== null ? saved.config.storageLimitBytes : null;
+        if (!saved.ok) return { limitBytes: null, location: null, retention: DEFAULT_RETENTION };
+        return { limitBytes: saved.config?.storageLimitBytes ?? null, location: saved.location, retention: saved.retention };
       },
     });
   }

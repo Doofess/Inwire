@@ -101,6 +101,13 @@ export interface JournalOptions {
    * no archive.
    */
   lastCutThroughEntryId?: number;
+  /**
+   * A read-only adoption (ADR 0061): the dataset is served and nothing is written. `open` keeps the torn roll,
+   * the segments an interrupted drop left and the newest segment's torn tail exactly as found, reads only up to
+   * the whole entries, and writes no `interrupted` for a session a crash left open. The journal it returns
+   * reports `refused-corrupt`, so every write path fails closed.
+   */
+  readOnly?: boolean;
 }
 
 export interface RecoveryResult {
@@ -692,6 +699,8 @@ function defaultRandom(n: number): Uint8Array {
 
 const NEWEST_POLICY = Math.max(...ACCEPTED_POLICIES);
 
+const READ_ONLY_PROBLEM = 'the journal was opened read-only; nothing is written to it';
+
 // --- the journal ----------------------------------------------------------------------------------
 
 export class MonitoringJournal {
@@ -755,6 +764,21 @@ export class MonitoringJournal {
 
     if (scan.status === 'corrupt') return { journal: refused('refused-corrupt'), recovery };
     if (scan.status === 'unknown-version') return { journal: refused('refused-version'), recovery };
+
+    if (options.readOnly === true) {
+      // Nothing to read is not a dataset to create: a read-only look never makes one.
+      if (scan.status === 'empty') return { journal: refused('refused-corrupt'), recovery };
+      // The scan already left out the torn roll, the pending unlinks and the torn tail, so this is what
+      // a repairing open would keep. `refused-corrupt` because that state refuses every write; the track
+      // is the real one, so the dataset's recorded source is still read from it.
+      return {
+        journal: new MonitoringJournal(dir, options, {
+          generation: scan.generation!, segs: scan.segs, lastId: scan.lastEntryId, state: 'refused-corrupt',
+          track: scan.track, boundaries: scan.boundaries, lastReceivedMs: scan.lastReceivedMs, lastCut, problem: READ_ONLY_PROBLEM,
+        }),
+        recovery,
+      };
+    }
 
     if (scan.status === 'empty') {
       const bytes = (options.randomBytes ?? defaultRandom)(16);
@@ -1032,6 +1056,9 @@ export class MonitoringJournal {
   private commit(
     kind: number, body: Uint8Array, receivedMs: number, boundary: BoundaryFields | null, ceiling: number,
   ): 'written' | 'over' | 'failed' {
+    // Every caller already refuses a state that is not open; this is the byte-writing choke point, so a read-only
+    // journal fails closed here too if a new caller forgets.
+    if (this.options.readOnly === true) return 'failed';
     const id = this.lastId + 1;
     const bytes = encodeEntry(JOURNAL_FRAMING, id, kind, body);
     let seg = this.segs[this.segs.length - 1];

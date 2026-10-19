@@ -25,6 +25,7 @@
 import {
   app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, protocol, session, shell,
 } from 'electron';
+import { existsSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { APP_HOST, APP_ORIGIN, APP_SCHEME, decideServe } from './appPaths';
@@ -37,6 +38,7 @@ import {
   SPEEDTEST_CANCEL_CHANNEL, SPEEDTEST_START_CHANNEL,
   MONITORING_CONFIG_GET_CHANNEL, MONITORING_CONFIG_SAVE_CHANNEL, MONITORING_PORT_REQUEST,
   MONITORING_START_CHANNEL, MONITORING_STOP_CHANNEL,
+  MONITORING_DISCARD_CHANNEL, MONITORING_LOCATION_CHOOSE_CHANNEL, MONITORING_RETENTION_SAVE_CHANNEL,
   UPDATE_STATE_REQUEST, WINDOW_STATE_CHANNEL, WINDOW_THEME_CHANNEL, WINDOW_TITLE_CHANNEL,
   QUIT_CONFIRM_CHANNEL, QUIT_CONFIRM_REPLY_CHANNEL,
 } from './channels';
@@ -52,7 +54,11 @@ import { UpdateCenter } from './updateCenter/host';
 import { SpeedTestHost } from './speedTest/host';
 import { MonitoringHost } from './monitoring/host';
 import { planQuitDrain, runQuitDrain } from './monitoring/quitDrain';
+import { discardConfirmation } from './monitoring/discardConfirm';
+import { resolveDatasetFolder } from './monitoring/location';
 import { readMonitoringSettings, saveMonitoringSettings } from './monitoring/settings';
+import { readDiscardScope, type LocationReply, type RetentionSaveReply } from '../src/services/monitoring/control';
+import { validateRetentionPolicy } from '../src/services/monitoring/retention';
 import { monitoringRoot } from './monitoring/volume';
 import { captureDirectory, CaptureStoreHost } from './store/host';
 import { developmentCsp, productionCsp } from './csp';
@@ -324,6 +330,98 @@ async function start(): Promise<void> {
   ipcMain.handle(MONITORING_CONFIG_GET_CHANNEL, () => readMonitoringSettings(monitoringDirectory));
   ipcMain.handle(MONITORING_CONFIG_SAVE_CHANNEL, (_event, config: unknown) =>
     saveMonitoringSettings(monitoringDirectory, config));
+  // Where the dataset lives, what is discarded and the retention policy (ADR 0061). Like the config
+  // save they answer any window, and each is refused while collecting. The renderer names an intent
+  // or a scope and never a path: the folder is the one main's own dialog returns.
+  const capturesRoot = path.join(app.getPath('userData'), 'captures');
+  const previousLocation = (): { root: string; isDefaultLocation: boolean } => {
+    const saved = readMonitoringSettings(monitoringDirectory);
+    const location = saved.ok ? saved.location : null;
+    return { root: location ?? monitoringDirectory, isDefaultLocation: location === null };
+  };
+  ipcMain.handle(MONITORING_LOCATION_CHOOSE_CHANNEL, async (event, intent: unknown): Promise<LocationReply> => {
+    if (intent !== 'pick' && intent !== 'default') {
+      return { ok: false, reason: 'failed', message: 'That is not a way to choose a location.' };
+    }
+    const busy: LocationReply = { ok: false, reason: 'busy', message: 'Stop monitoring first: its data and where it is kept change only while it is stopped.' };
+    if (monitoring.isRunning()) return busy;
+    let root = monitoringDirectory;
+    let isDefaultLocation = true;
+    if (intent === 'pick') {
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = {
+        title: 'Choose where to keep the monitoring data',
+        buttonLabel: 'Use this folder',
+        properties: ['openDirectory', 'createDirectory'],
+      };
+      const chosen = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+      if (chosen.canceled || chosen.filePaths.length === 0) return { ok: false, reason: 'cancelled', message: '' };
+      const resolved = resolveDatasetFolder(chosen.filePaths[0], {
+        defaultRoot: monitoringDirectory, capturesRoot,
+        caseInsensitive: process.platform === 'win32' || process.platform === 'darwin',
+        realpath: (p) => realpathSync(p), exists: (p) => existsSync(p), list: (p) => readdirSync(p),
+      });
+      if (!resolved.ok) return { ok: false, reason: 'refused', message: resolved.message };
+      ({ root, isDefaultLocation } = resolved);
+    }
+    // Where the dataset is now, read before anything moves, so a failure can put it back.
+    const previous = previousLocation();
+    const inspected = await monitoring.inspect(root, isDefaultLocation);
+    if (!inspected.ok) return inspected;
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch (e) {
+      return { ok: false, reason: 'refused', message: `That folder could not be created: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    // The old location stays in use when the new one cannot be opened or recorded.
+    const moved = await monitoring.relocate(root, isDefaultLocation);
+    if (!moved.ok) {
+      await monitoring.relocate(previous.root, previous.isDefaultLocation);
+      return { ok: false, reason: monitoring.isRunning() ? 'busy' : 'failed', message: moved.message };
+    }
+    const saved = saveMonitoringSettings(monitoringDirectory, undefined, { location: isDefaultLocation ? null : root });
+    if (!saved.ok) {
+      await monitoring.relocate(previous.root, previous.isDefaultLocation);
+      return { ok: false, reason: 'failed', message: saved.message };
+    }
+    return { ok: true, displayPath: root, isDefaultLocation, inspect: inspected };
+  });
+  // The page names a scope and nothing else. What goes, what stays and the cut are stated by this dialog,
+  // from the utility's own preview, and a declined dialog sends no discard at all (ADR 0061).
+  ipcMain.handle(MONITORING_DISCARD_CHANNEL, (event, scope: unknown) => {
+    const requested = readDiscardScope(scope);
+    return monitoring.discard(scope, async (preview) => {
+      const where = previousLocation();
+      const options = discardConfirmation(preview, {
+        folder: where.root,
+        isDefaultLocation: where.isDefaultLocation,
+        requestedBeforeMs: requested?.scope === 'before' ? requested.beforeMs : null,
+        formatTime: (ms) => new Date(ms).toLocaleString(),
+      });
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const { response } = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+      return response === 1;
+    });
+  });
+  ipcMain.handle(MONITORING_RETENTION_SAVE_CHANNEL, async (_event, policy: unknown): Promise<RetentionSaveReply> => {
+    if (monitoring.isRunning()) {
+      return { ok: false, reason: 'busy', message: 'Stop monitoring first: its data and where it is kept change only while it is stopped.' };
+    }
+    const valid = validateRetentionPolicy(policy);
+    if (valid === null) {
+      return { ok: false, reason: 'failed', message: 'That is not a valid retention policy: keep raw evidence for a whole number of days from 1, or leave it off, and choose what happens at the limit.' };
+    }
+    const before = readMonitoringSettings(monitoringDirectory);
+    const saved = saveMonitoringSettings(monitoringDirectory, undefined, { retention: valid });
+    if (!saved.ok) return { ok: false, reason: 'failed', message: saved.message };
+    const applied = await monitoring.setRetention(valid);
+    if (!applied.ok) {
+      // The utility did not take it, so the file must not hold what the dataset does not obey.
+      if (before.ok) saveMonitoringSettings(monitoringDirectory, undefined, { retention: before.retention });
+      return applied;
+    }
+    return { ok: true, retention: valid };
+  });
   // A running listener is drained before the app goes: stop intake, write the
   // final boundary, flush, then quit again. `will-quit` is the one place that
   // is late enough - every window has already passed `guardClose` - and a

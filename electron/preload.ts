@@ -29,6 +29,7 @@ import {
   MONITORING_CONFIG_GET_CHANNEL, MONITORING_CONFIG_SAVE_CHANNEL, MONITORING_EXIT_CHANNEL,
   MONITORING_PORT_CHANNEL, MONITORING_PORT_REQUEST, MONITORING_START_CHANNEL,
   MONITORING_STATUS_CHANNEL, MONITORING_STOP_CHANNEL,
+  MONITORING_DISCARD_CHANNEL, MONITORING_LOCATION_CHOOSE_CHANNEL, MONITORING_RETENTION_SAVE_CHANNEL,
   STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_INGEST_PORT_REQUEST,
   STORE_PORT_CHANNEL, STORE_PORT_REQUEST, WINDOW_CONTROL_CHANNEL,
   UNSAVED_CAPTURE_CHANNEL, UPDATE_APPLY_CHANNEL, UPDATE_CHECK_CHANNEL, UPDATE_STATE_CHANNEL,
@@ -290,6 +291,20 @@ const api = {
   },
   stopMonitoring(): Promise<unknown> {
     return ipcRenderer.invoke(MONITORING_STOP_CHANNEL);
+  },
+  /**
+   * Where the dataset lives, what is discarded and how long raw evidence is kept (ADR 0061). The page
+   * names an intent or a scope and never a path; each is refused while collecting, and each answer is
+   * read by `control.ts`.
+   */
+  chooseMonitoringLocation(intent: 'pick' | 'default'): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_LOCATION_CHOOSE_CHANNEL, intent);
+  },
+  discardMonitoring(scope: unknown): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_DISCARD_CHANNEL, scope);
+  },
+  saveMonitoringRetention(policy: unknown): Promise<unknown> {
+    return ipcRenderer.invoke(MONITORING_RETENTION_SAVE_CHANNEL, policy);
   },
   /** The utility exited; returns the unsubscribe. */
   onMonitoringRuntimeExit(listener: (exit: unknown) => void): () => void {

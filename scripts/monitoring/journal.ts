@@ -1186,6 +1186,64 @@ function journalCases(kind: 'memory' | 'disk'): void {
     const c = journal.append([dg(T0 + 3)]);
     assert.deepEqual([c.appended, c.state], [0, 'closed']);
   });
+
+  // ADR 0061: an adopted read-only dataset is served with nothing written. An ordinary open repairs
+  // all three things this case leaves; `readOnly` reports them and keeps every byte.
+  test(tag('a read-only open writes nothing: a torn tail, a crashed session and a pending unlink are left as found'), () => {
+    const rig = newJRig(kind);
+    const limitBytes = 32 * 1024 * 1024; // 1 MiB segments
+    const { journal } = open(rig.file, { limitBytes });
+    const inputs: EvidenceInput[] = [bnd('start', S1, T0)];
+    for (let i = 0; i < 24; i++) inputs.push(dg(T0 + 1 + i, new Uint8Array(60_000).fill(i + 1)));
+    assert.equal(journal.append(inputs).refused, 0);
+    const segs = journal.segments();
+    assert.ok(segs.length >= 2, 'the fill rolled to a second segment');
+    const victim = segs[0];
+    const image = readAll(rig.dir.open(victim.name));
+    // An interrupted drop: the expired boundary is on disk and the segment it names is too.
+    assert.equal(journal.dropSegments([victim.name], 'age', T0 + 100).appended, 1);
+    assert.equal(journal.append([dg(T0 + 200), dg(T0 + 201)]).refused, 0);
+    journal.close();
+    rig.reopen();
+    rig.dir.create(victim.name).write(0, image);
+    // A crash tears the end of the newest segment, and no stop was ever written.
+    const newest = rig.dir.list().at(-1)!;
+    const file = rig.dir.open(newest);
+    file.truncate(file.size() - 10);
+
+    const fingerprint = (): string => rig.dir.list().map((n) => `${n}:${sha(readAll(rig.dir.open(n)))}`).join('|');
+    const found = recoverJournal(rig.dir);
+    assert.equal(found.status, 'ok');
+    assert.deepEqual(found.pendingUnlink, [victim.name]);
+    assert.notEqual(found.tornTail, null);
+    const before = fingerprint();
+
+    const { journal: ro, recovery } = open(rig.dir, { limitBytes, readOnly: true });
+    assert.equal(fingerprint(), before, 'opening wrote');
+    assert.equal(recovery.status, 'ok');
+    assert.equal(ro.state, 'refused-corrupt', 'every state-guarded path fails closed');
+    assert.match(ro.problem ?? '', /read-only/);
+    assert.equal(ro.snapshot().throughEntryId, found.lastEntryId, 'it serves what a repairing open would keep');
+    assert.equal(ro.snapshot().firstEntryId, victim.lastEntryId + 1, 'the segment a drop was finishing is not served');
+    assert.equal(ro.readPage(ro.snapshot(), ro.snapshot().firstEntryId - 1, 5, 1 << 20).entries.length, 5);
+
+    // Nothing writes: appends, boundaries, a drop, a limit and a close.
+    for (const input of [dg(T0 + 999), bnd('stop', S1, T0 + 999), bnd('interrupted', S1, T0 + 999), bnd('start', S2, T0 + 999)]) {
+      const r = ro.append([input]);
+      assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'refused-corrupt']);
+    }
+    const second = ro.segments()[0];
+    assert.equal(ro.dropSegments([second.name], 'age', T0 + 999).appended, 0);
+    assert.equal(ro.canDropSegments([second.name]), false);
+    ro.setLimit(limitBytes * 2);
+    ro.flush();
+    ro.close();
+    assert.equal(fingerprint(), before, 'nothing wrote afterwards either');
+    // And an ordinary open of the same bytes does repair them, so the case above proves something.
+    const writing = open(rig.dir, { limitBytes }).journal;
+    assert.notEqual(fingerprint(), before, 'the repairing open is what the read-only one declined to be');
+    assert.equal(writing.state, 'open');
+  });
 }
 
 class FaultyFile implements BlockFile {
@@ -1445,6 +1503,31 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.equal(healthy.status, 'ok');
     assert.equal(healthy.store.watermark()?.throughEntryId, 10);
     assert.equal(rig.file.size(), closed, 'the unfinished tail is cut once the volume allows it');
+  });
+
+  test(tag('a read-only open writes nothing, whatever it finds, and refuses appends and resets (ADR 0061)'), () => {
+    const refusingWrites = (real: BlockFile): BlockFile => ({
+      read: (o, b) => real.read(o, b), size: () => real.size(), close: () => real.close(), flush: () => real.flush(),
+      write: () => { throw new Error('a read-only open wrote'); },
+      truncate: () => { throw new Error('a read-only open truncated'); },
+    } as BlockFile);
+    const torn = newRig(kind);
+    openStore(torn.file).store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(10), 0);
+    torn.file.write(torn.file.size(), new Uint8Array(30));
+    const cases: [string, BlockFile][] = [
+      ['an empty file', newRig(kind).file],
+      ['a header only', (() => { const r = newRig(kind); openStore(r.file); return r.reopen(); })()],
+      ['another generation', (() => { const r = newRig(kind); openStore(r.file, { ...JOURNAL_INFO, generation: 'e'.repeat(32) }); return r.reopen(); })()],
+      ['a torn tail', torn.reopen()],
+    ];
+    for (const [what, file] of cases) {
+      const opened = RollupStore.open(refusingWrites(file), JOURNAL_INFO, { nowMs: () => T0, readOnly: true });
+      assert.equal(opened.status, 'failed', what);
+      assert.match(opened.reason ?? '', /read-only/, what);
+      assert.throws(() => opened.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(20), 0), /read-only/, what);
+      assert.throws(() => opened.store.reset(), /read-only/, what);
+      assert.throws(() => opened.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20), /read-only/, `${what}: the journal answers, not a cache that may be another dataset's`);
+    }
   });
 
   test(tag('appendMinutes refuses what the aggregator never sends: a watermark past the journal, too many minutes, too many bytes, a batch over the room (M1)'), () => {

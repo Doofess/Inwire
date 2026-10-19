@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict';
 import { MemoryBlockFile, type BlockFile } from '../../src/services/capture/blockFile';
 import { SEGMENT_HEADER_BYTES, isSegmentFileName, segmentName, type SegmentDirectory } from '../../src/services/monitoring/segments';
-import { Collector, STATUS_COALESCE_MS, type CollectorVolume, type UdpSocket } from '../../electron/monitoring/collector';
+import { Collector, STATUS_COALESCE_MS, type CollectorFolder, type CollectorVolume, type UdpSocket } from '../../electron/monitoring/collector';
 import { readIntakeStatus, type IntakeStatus } from '../../src/services/monitoring/control';
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
 import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES } from '../../src/services/monitoring/rollupStore';
@@ -187,7 +187,17 @@ class FakePort implements RpcPort {
   get pushed(): Evidence[] { return this.pushes.flat(); }
 }
 
-interface TestVolume { journal: TestSegments; rollups: MemoryBlockFile; opens: number; closes: number }
+interface TestVolume {
+  journal: TestSegments; rollups: MemoryBlockFile; archive: MemoryBlockFile; opens: number; closes: number;
+  /** `dataset.json` and any other small text file, by name. */
+  texts: Map<string, string>;
+  /** Names Inwire did not write; never removed. */
+  foreign: string[];
+}
+
+function volumeNames(v: TestVolume): string[] {
+  return [...v.journal.list(), 'rollups.iwmr', 'archive.iwma', ...v.texts.keys(), ...v.foreign];
+}
 
 class Rig {
   clock = new FakeClock();
@@ -211,10 +221,35 @@ class Rig {
         const once = this.openErrors.shift();
         if (once !== undefined) throw once;
         let v = this.volumes.get(root);
-        if (v === undefined) { v = { journal: new TestSegments(), rollups: new MemoryBlockFile(), opens: 0, closes: 0 }; this.volumes.set(root, v); }
+        if (v === undefined) {
+          v = { journal: new TestSegments(), rollups: new MemoryBlockFile(), archive: new MemoryBlockFile(), opens: 0, closes: 0, texts: new Map(), foreign: [] };
+          this.volumes.set(root, v);
+        }
         v.opens++;
         const volume = v;
-        return { segments: volume.journal, rollups: volume.rollups, close: () => { volume.closes++; } };
+        return {
+          segments: volume.journal, rollups: volume.rollups, archive: volume.archive,
+          names: () => volumeNames(volume),
+          removeFile: (name) => {
+            if (isSegmentFileName(name)) volume.journal.unlink(name);
+            else if (name === 'rollups.iwmr') volume.rollups = new MemoryBlockFile();
+            else if (name === 'archive.iwma') volume.archive = new MemoryBlockFile();
+            else if (!volume.texts.delete(name)) throw new Error(`${name} does not exist`);
+          },
+          readText: (name) => volume.texts.get(name) ?? null,
+          writeText: (name, text) => { volume.texts.set(name, text); },
+          close: () => { volume.closes++; },
+        };
+      },
+      openFolder: (root): CollectorFolder => {
+        const v = this.volumes.get(root);
+        return {
+          names: v === undefined ? [] : volumeNames(v),
+          segments: v?.journal ?? new TestSegments(),
+          archive: v?.archive ?? null,
+          readText: (name) => v?.texts.get(name) ?? null,
+          close: () => {},
+        };
       },
       createSocket: () => {
         const s = new FakeSocket(this.nextBinds.shift() ?? 'ok');
@@ -1047,7 +1082,7 @@ async function main(): Promise<void> {
   /** A second process on the same files: the journal's bytes as they are now, in a fresh collector. */
   function relaunch(from: Rig): Rig {
     const rig = new Rig();
-    const v: TestVolume = { journal: TestSegments.from(from.volume.journal.snapshot()), rollups: new MemoryBlockFile(), opens: 0, closes: 0 };
+    const v: TestVolume = { journal: TestSegments.from(from.volume.journal.snapshot()), rollups: new MemoryBlockFile(), archive: new MemoryBlockFile(), opens: 0, closes: 0, texts: new Map(), foreign: [] };
     rig.volumes.set(ROOT, v);
     return rig;
   }
@@ -1172,7 +1207,7 @@ async function main(): Promise<void> {
     // Interior damage: a byte inside the first entry, with valid entries after it.
     file[SEGMENT_HEADER_BYTES + 20] ^= 0xff;
     const rig = new Rig();
-    const v: TestVolume = { journal: TestSegments.from(segs), rollups: new MemoryBlockFile(), opens: 0, closes: 0 };
+    const v: TestVolume = { journal: TestSegments.from(segs), rollups: new MemoryBlockFile(), archive: new MemoryBlockFile(), opens: 0, closes: 0, texts: new Map(), foreign: [] };
     rig.volumes.set(ROOT, v);
     const opened = await rig.collector.open(ROOT, CFG.storageLimitBytes);
     const attach = new FakePort();

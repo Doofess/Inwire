@@ -163,6 +163,7 @@ export class MonitoringWorkerHost {
   private admission = new EngineAdmission();
   private targetEntryId = 0;
   private stopRebuild = false;
+  private reopenPending = 0;
   private feedChain: Promise<void> = Promise.resolve();
 
   // What is pushed as `health`. Fed only by entries above `healthFloor`, the journal's end at
@@ -268,54 +269,10 @@ export class MonitoringWorkerHost {
     let failure = '';
     try {
       runtime = this.options.openRuntime(port);
-      // The sidecar is a cache: a fault asking about, resetting or reading it
-      // leaves the host in `failed` with nothing fed and nothing posted, and
-      // queries answer from the journal. Only the journal's own faults
-      // (`snapshot`, `openRuntime`) and a lost runtime fail the connect.
-      let sidecarFault: unknown = null;
-      let status: Awaited<ReturnType<HostRuntime['rollupStatus']>> = { status: 'failed' };
-      let mark: Awaited<ReturnType<HostRuntime['watermark']>> = null;
-      try {
-        status = await runtime.rollupStatus();
-        if (status.status === 'rebuild-required') await runtime.resetRollups();
-        mark = await runtime.watermark();
-      } catch (e) {
-        if (e instanceof RuntimeUnavailableError) throw e;
-        sidecarFault = e;
-      }
-      const snapshot = await runtime.snapshot();
-      let sources: string[] = [];
-      if (sidecarFault === null) {
-        try {
-          // The store already refuses a sidecar of another generation or policy;
-          // a disagreement here is a runtime that did not, so it is wiped, not trusted.
-          mark = await this.settleSidecar(runtime, mark, snapshot);
-          sources = mark === null ? [] : await runtime.sources();
-          // What expired is no longer in the journal to re-admit from: its engines are in the archive.
-          if (snapshot.firstEntryId > 1 && runtime.archive !== undefined) {
-            sources = [...new Set([...sources, ...await runtime.archive.sources()])].sort();
-          }
-        } catch (e) {
-          if (e instanceof RuntimeUnavailableError) throw e;
-          sidecarFault = e;
-        }
-      }
-      if (sidecarFault !== null) { mark = null; sources = []; }
-      this.generation = snapshot.generation;
-      this.healthFloor = snapshot.throughEntryId;
-      this.healthThrough = 0;
-      this.health = null;
-      this.knownSources = new Set(sources);
-      this.analyzedThrough = null;
-      this.rolledUpThrough = null;
-      this.admission = new EngineAdmission(sources);
-      this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
-      this.runtime = runtime;
+      failure = await this.adopt(runtime);
       runtime.onLive((entries) => this.onLive(entries));
-      this.phase = status.status === 'failed' || sidecarFault !== null ? 'failed' : 'rebuilding';
-      failure = sidecarFault === null
-        ? 'the rollup sidecar could not be opened; history is answered from the journal'
-        : `the rollup sidecar could not be reset or read (${sidecarFault instanceof Error ? sidecarFault.message : String(sidecarFault)}); history is answered from the journal`;
+      // Registered only now: a notice before the connect has finished is about a dataset it may not have read.
+      runtime.onReopened?.(() => this.onReopened());
       post({ type: 'connect-reply', requestId, ok: true, phase: this.phase, watermark: this.aggregator.fedThrough });
     } catch (e) {
       this.runtime = null;
@@ -336,6 +293,108 @@ export class MonitoringWorkerHost {
     // The rebuild runs behind the reply: queries are answered meanwhile, from
     // the sidecar as it stands (rule 13 makes that consistent).
     this.feedChain = this.feedChain.then(() => this.rebuild());
+  }
+
+  /**
+   * Learns the dataset `runtime` serves now: the sidecar's state, the generation, the admitted engines,
+   * the health's floor, a fresh aggregator and the phase (`failed` or `rebuilding`). Used by `connect`
+   * and, with the same runtime, after the utility reopens another dataset under it. Everything it
+   * awaits comes before anything it sets, so a throw leaves the host as it was. Returns the message a
+   * `failed` phase is announced with.
+   */
+  private async adopt(runtime: HostRuntime): Promise<string> {
+    // The sidecar is a cache: a fault asking about, resetting or reading it
+    // leaves the host in `failed` with nothing fed and nothing posted, and
+    // queries answer from the journal. Only the journal's own faults
+    // (`snapshot`, `openRuntime`) and a lost runtime fail the connect.
+    let sidecarFault: unknown = null;
+    let status: Awaited<ReturnType<HostRuntime['rollupStatus']>> = { status: 'failed' };
+    let mark: Awaited<ReturnType<HostRuntime['watermark']>> = null;
+    try {
+      status = await runtime.rollupStatus();
+      if (status.status === 'rebuild-required') await runtime.resetRollups();
+      mark = await runtime.watermark();
+    } catch (e) {
+      if (e instanceof RuntimeUnavailableError) throw e;
+      sidecarFault = e;
+    }
+    const snapshot = await runtime.snapshot();
+    let sources: string[] = [];
+    if (sidecarFault === null) {
+      try {
+        // The store already refuses a sidecar of another generation or policy;
+        // a disagreement here is a runtime that did not, so it is wiped, not trusted.
+        mark = await this.settleSidecar(runtime, mark, snapshot);
+        sources = mark === null ? [] : await runtime.sources();
+        // What expired is no longer in the journal to re-admit from: its engines are in the archive.
+        if (snapshot.firstEntryId > 1 && runtime.archive !== undefined) {
+          sources = [...new Set([...sources, ...await runtime.archive.sources()])].sort();
+        }
+      } catch (e) {
+        if (e instanceof RuntimeUnavailableError) throw e;
+        sidecarFault = e;
+      }
+    }
+    if (sidecarFault !== null) { mark = null; sources = []; }
+    this.generation = snapshot.generation;
+    this.healthFloor = snapshot.throughEntryId;
+    this.healthThrough = 0;
+    this.health = null;
+    this.knownSources = new Set(sources);
+    this.analyzedThrough = null;
+    this.rolledUpThrough = null;
+    this.targetEntryId = 0;
+    this.admission = new EngineAdmission(sources);
+    this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
+    this.runtime = runtime;
+    this.phase = status.status === 'failed' || sidecarFault !== null ? 'failed' : 'rebuilding';
+    return sidecarFault === null
+      ? 'the rollup sidecar could not be opened; history is answered from the journal'
+      : `the rollup sidecar could not be reset or read (${sidecarFault instanceof Error ? sidecarFault.message : String(sidecarFault)}); history is answered from the journal`;
+  }
+
+  /**
+   * The utility reopened a dataset under the connected runtime (a relocation, a whole discard). Not a
+   * generation comparison: a relocation to a copy keeps the generation and ends earlier or later than
+   * what this host has fed. `reopenPending` lets the last of several notices be the one that adopts.
+   */
+  private onReopened(): void {
+    if (this.shuttingDown || this.runtime === null) return;
+    this.reopenPending++;
+    // The rebuild in flight reads the dataset that is gone: it stops at its next page, and a retry waiting on it is dropped.
+    this.stopRebuild = true;
+    this.cancelRetry?.();
+    this.cancelRetry = null;
+    // After whatever the chain holds, so nothing of the old dataset is posted once this has run.
+    this.feedChain = this.feedChain.then(() => this.readopt());
+  }
+
+  private async readopt(): Promise<void> {
+    this.reopenPending--;
+    const runtime = this.runtime;
+    if (runtime === null || this.shuttingDown || this.reopenPending > 0) return;
+    this.cancelRetry?.();
+    this.cancelRetry = null;
+    this.retries = 0;
+    this.refusals = 0;
+    this.stopRebuild = false;
+    this.boundaries.clear();
+    let failure: string;
+    try {
+      failure = await this.adopt(runtime);
+    } catch (e) {
+      if (!this.shuttingDown) this.fail(e);
+      return;
+    }
+    // Another notice (or the shutdown) came in meanwhile: the state just set is about to be replaced or dropped.
+    if (this.stopRebuild || this.shuttingDown) return;
+    this.postHealth(true);
+    this.armTick();
+    if (this.phase === 'failed') {
+      this.announce(failure);
+      return;
+    }
+    await this.rebuild();
   }
 
   private announce(message?: string): void {
@@ -417,6 +476,8 @@ export class MonitoringWorkerHost {
       await slicer.checkpoint();
       const after = this.aggregator.fedThrough;
       const page = await runtime.readPage(snapshot, after, LIMITS.pageEntries, LIMITS.pageBytes);
+      // A reopen or a shutdown while the page was being read: it is the old dataset's, or nobody's.
+      if (this.stopRebuild) return;
       for (const e of page.entries) this.feed(e);
       if (page.entries.length === 0 && this.aggregator.fedThrough <= after) {
         throw new Error(`the journal returned no entries after ${after} though it holds ${snapshot.throughEntryId}`);
@@ -487,6 +548,7 @@ export class MonitoringWorkerHost {
         if (id <= this.aggregator.fedThrough) continue;
         // A push that was missed (or dropped while rebuilding) left a hole: read it before going on.
         if (id > this.aggregator.fedThrough + 1) await this.readThrough(runtime, { generation: this.generation, throughEntryId: id - 1 });
+        if (this.stopRebuild) return;
         this.feed(e);
       }
       await this.postDrained(runtime);
