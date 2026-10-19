@@ -57,7 +57,7 @@ import type { BlockFile } from '../capture/blockFile';
 import { EntryIndex } from './index';
 import {
   ENTRY_HEADER_BYTES, FILE_HEADER_BYTES, JOURNAL_FRAMING, KIND_BOUNDARY, KIND_DATAGRAM,
-  decodeDatagramBody, decodeFileHeader, encodeDatagramBody, encodeEntry, entryCrc,
+  crc32, decodeDatagramBody, decodeFileHeader, encodeDatagramBody, encodeEntry, entryCrc,
   entryReservedProblem, generationFromHex, generationToHex, isHeaderPrefix, parseEntryHeader, scanEntries,
   type ScanOutcome,
 } from './journalCodec';
@@ -380,6 +380,19 @@ const MAGIC_BYTES = Array.from('INWIREMJ', (c) => c.charCodeAt(0));
 const hasMagic = (b: Uint8Array): boolean => b.length >= 8 && MAGIC_BYTES.every((m, i) => b[i] === m);
 const u16 = (b: Uint8Array, at: number): number => b[at] | (b[at + 1] << 8);
 
+/** A segment header's bytes that are not our magic, or whose checksum does not match: never a header anything wrote whole. */
+function isUnwrittenHeader(head: Uint8Array): boolean {
+  if (!hasMagic(head)) return true;
+  return new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(124, true) !== crc32(head.subarray(0, 124));
+}
+
+/** Whether a legacy file holds a complete entry. It reads as far as the first and stops. */
+function legacyHoldsEntries(file: BlockFile): boolean {
+  let any = false;
+  scanEntries(file, JOURNAL_FRAMING, FILE_HEADER_BYTES, 0, () => { any = true; return 'seen'; });
+  return any;
+}
+
 /**
  * What `open` would find, read-only. Every change `open` makes is a decision
  * this reports (`tornTail`, `tornRoll`, `pendingUnlink`, `resetFile`) and does
@@ -432,7 +445,7 @@ function scanDataset(dir: SegmentDirectory, lastCut: number, limitBytes: number)
 
   // Headers.
   const decoded: Decoded[] = [];
-  const tornHeaders: { name: string; size: number; idFromName: number }[] = [];
+  const tornHeaders: { name: string; size: number; idFromName: number; whole?: boolean }[] = [];
   for (const p of probes) {
     const headerBytes = p.legacy ? FILE_HEADER_BYTES : SEGMENT_HEADER_BYTES;
     if (p.size < headerBytes) {
@@ -451,7 +464,16 @@ function scanDataset(dir: SegmentDirectory, lastCut: number, limitBytes: number)
       });
     } else {
       const h = decodeSegmentHeader(p.head);
-      if (!h.ok) return corrupt(`${p.name}: ${h.reason}`);
+      if (!h.ok) {
+        // A roll's header that reached disk as zeros or garbage (the size was extended, the data was not): the same
+        // torn roll as a partial header, if it is the newest and exactly a header long. Judged below with the others.
+        // Anything else wrong with a header, a correct magic and checksum included, is something that wrote it on purpose.
+        if (p.size === SEGMENT_HEADER_BYTES && isUnwrittenHeader(p.head)) {
+          tornHeaders.push({ name: p.name, size: p.size, idFromName: Number(/(\d+)/.exec(p.name)![1]), whole: true });
+          continue;
+        }
+        return corrupt(`${p.name}: ${h.reason}`);
+      }
       decoded.push({
         ...p, headerBytes, policy: h.value.policyVersion, generation: generationToHex(h.value.generation),
         createdMs: h.value.createdMs, firstId: h.value.firstEntryId,
@@ -471,10 +493,16 @@ function scanDataset(dir: SegmentDirectory, lastCut: number, limitBytes: number)
   if (tornHeaders.length > 1) return corrupt('more than one segment has an incomplete header');
   if (tornHeaders.length === 1) {
     const t = tornHeaders[0];
-    if (decoded.length === 0) {
+    // A milestone-1 file with no entry is passed over below, so it is not a segment this one could have followed.
+    const holding = decoded.filter((d) => !(d.legacy && !legacyHoldsEntries(d.file)));
+    if (holding.length === 0) {
+      // Nothing to fall back on: a partial header is a first segment's crash and starts over. A header-sized one
+      // that is not a header is the same crash only beside an empty legacy file, which is how a first open begins;
+      // alone, nothing says whether it held data, so it is refused.
+      if (t.whole === true && decoded.length === 0) return corrupt(`${t.name}: the header is not a segment header and there is no earlier segment`);
       out.resetFile = t.name;
       out.tornTail = t.size === 0 ? null : { fromOffset: 0, bytes: t.size };
-    } else if (t.idFromName > decoded[decoded.length - 1].firstId) {
+    } else if (t.idFromName > holding[holding.length - 1].firstId) {
       tornRoll = t.name;
     } else {
       return corrupt(`${t.name} has an incomplete header and is not the newest segment`);
@@ -744,6 +772,7 @@ export class MonitoringJournal {
       const segs: Seg[] = [];
       let state: JournalState = 'open';
       let problem: string | null = null;
+      let created = false;
       try {
         let file: BlockFile;
         if (scan.resetFile === name) {
@@ -752,6 +781,7 @@ export class MonitoringJournal {
         } else {
           if (scan.resetFile !== null) dir.unlink(scan.resetFile);
           file = dir.create(name);
+          created = true;
         }
         file.write(0, header);
         segs.push({
@@ -759,6 +789,8 @@ export class MonitoringJournal {
           policy: NEWEST_POLICY, bytes: SEGMENT_HEADER_BYTES, maxBytes: segmentBytesFor(options.limitBytes), index: new EntryIndex(firstId),
         });
       } catch (e) {
+        // A file without its header is something the next open has to explain; do not leave one that can go now.
+        if (created) { try { dir.unlink(name); } catch { /* the next open resets it */ } }
         state = 'failed';
         problem = `the first segment could not be created: ${(e as Error).message}`;
       }

@@ -396,6 +396,51 @@ test('legacy torn header: a lone journal.iwmj with a partial header is ignored, 
   assert.equal(j.segments()[0].name, segmentName(1));
 });
 
+const EMPTY_LEGACY = (): Uint8Array => legacyImage([]);
+
+test('legacy-empty-crash-on-first-open: an empty journal.iwmj beside a zero-byte or partly-written segment 1 reopens as a fresh dataset', () => {
+  const header = encodeSegmentHeader({
+    policyVersion: 1, generation: GEN_BYTES, createdMs: T0, firstEntryId: 1, openSession: null, source: null,
+  });
+  for (const [label, torn] of [['zero bytes', new Uint8Array(0)], ['a 40-byte partial header', header.slice(0, 40)]] as const) {
+    const legacy = EMPTY_LEGACY();
+    assert.equal(legacy.length, 64);
+    const dir = new MemorySegmentDirectory({ [LEGACY_JOURNAL_NAME]: legacy, [segmentName(1)]: torn });
+    const before = sha(bytesOf(dir, LEGACY_JOURNAL_NAME));
+    const rec = recoverJournal(dir);
+    assert.notEqual(rec.status, 'corrupt', `${label}: ${rec.problem ?? ''}`);
+    const { journal, recovery } = MonitoringJournal.open(dir, options());
+    assert.equal(journal.state, 'open', `${label}: ${recovery.problem ?? journal.problem ?? ''}`);
+    assert.equal(sha(bytesOf(dir, LEGACY_JOURNAL_NAME)), before, `${label}: journal.iwmj untouched`);
+    assert.equal(bytesOf(dir, segmentName(1)).length, SEGMENT_HEADER_BYTES, `${label}: segment 1 holds a whole header now`);
+    assert.equal(journal.append([bnd('start', S1, T0 + 1, { source: SRC })]).appended, 1, label);
+  }
+});
+
+test('legacy-empty-crash-on-first-open: a first segment whose header write throws is not left behind', () => {
+  class FailingHeaderDir implements SegmentDirectory {
+    constructor(readonly inner: MemorySegmentDirectory) {}
+    list(): string[] { return this.inner.list(); }
+    open(name: string): BlockFile { return this.inner.open(name); }
+    unlink(name: string): void { this.inner.unlink(name); }
+    create(name: string): BlockFile {
+      const real = this.inner.create(name);
+      return new Proxy(real, {
+        get(target, prop) {
+          if (prop === 'write') return () => { throw new Error('ENOSPC: no space left on device'); };
+          const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+    }
+  }
+  const base = new MemorySegmentDirectory({ [LEGACY_JOURNAL_NAME]: EMPTY_LEGACY() });
+  const { journal } = MonitoringJournal.open(new FailingHeaderDir(base), options());
+  assert.equal(journal.state, 'failed');
+  assert.match(journal.problem ?? '', /ENOSPC/);
+  assert.deepEqual(base.list(), [LEGACY_JOURNAL_NAME], 'the zero-byte segment is gone');
+});
+
 test('legacy-only drop: the expired boundary rolls first, then journal.iwmj goes in the same call', () => {
   const dir = new MemorySegmentDirectory({ [LEGACY_JOURNAL_NAME]: legacyImage(CLOSED_LEGACY()) });
   const j = open(dir);
@@ -593,6 +638,66 @@ test('torn-roll: a newest segment with a partial header is removed the same way'
   const j = open(dir);
   assert.equal(j.state, 'open', j.problem ?? '');
   assert.deepEqual(dir.list(), [segmentName(1), segmentName(4)]);
+});
+
+test('torn-roll-zero-header: a newest segment of exactly 128 zero or garbage bytes is a torn roll, removed on open', () => {
+  const garbage = Uint8Array.from({ length: SEGMENT_HEADER_BYTES }, (_, i) => (i * 37 + 11) & 255);
+  for (const [label, junk] of [['zeros', new Uint8Array(SEGMENT_HEADER_BYTES)], ['garbage', garbage]] as const) {
+    const files = twoSegments();
+    files[segmentName(6)] = junk;
+    const dir = new MemorySegmentDirectory(files);
+    const seg4 = sha(bytesOf(dir, segmentName(4)));
+    const seg1 = sha(bytesOf(dir, segmentName(1)));
+    const rec = recoverJournal(dir);
+    assert.equal(rec.status, 'ok', `${label}: ${rec.problem ?? ''}`);
+    assert.equal(rec.tornRoll, segmentName(6), label);
+    assert.ok(dir.list().includes(segmentName(6)), `${label}: recoverJournal does not unlink`);
+    const j = open(dir);
+    assert.equal(j.state, 'open', `${label}: ${j.problem ?? ''}`);
+    assert.deepEqual(dir.list(), [segmentName(1), segmentName(4)], label);
+    assert.equal(sha(bytesOf(dir, segmentName(1))), seg1, label);
+    // The session in files was closed by a stop, so nothing is appended by the open itself.
+    assert.equal(sha(bytesOf(dir, segmentName(4))), seg4, `${label}: segment 4 unchanged before any append`);
+    const r = j.append([bnd('start', S2, T0 + 60, { source: SRC })]);
+    assert.equal(r.appended, 1, label);
+    assert.equal(j.snapshot().throughEntryId, 6, label);
+    assert.equal(sha(bytesOf(dir, segmentName(1))), seg1, `${label}: segment 1 is never rewritten`);
+  }
+});
+
+test('torn-roll-zero-header: a zeroed header is still corruption off the newest file, past 128 bytes, or alone', () => {
+  const zeros = new Uint8Array(SEGMENT_HEADER_BYTES);
+  // Not the newest: segment 1 zeroed under a valid segment 4.
+  const notNewest = twoSegments();
+  notNewest[segmentName(1)] = zeros;
+  // Newest, but longer than a header: it holds entries nobody can vouch for.
+  const tooLong = twoSegments();
+  tooLong[segmentName(6)] = cat(zeros, new Uint8Array(40));
+  // The only file.
+  const alone = { [segmentName(1)]: zeros };
+  for (const [label, files] of [['not newest', notNewest], ['longer than 128', tooLong], ['only file', alone]] as const) {
+    const dir = new MemorySegmentDirectory(files);
+    const before = fingerprint(dir);
+    assert.equal(recoverJournal(dir).status, 'corrupt', label);
+    const { journal } = MonitoringJournal.open(dir, options());
+    assert.equal(journal.state, 'refused-corrupt', label);
+    assert.deepEqual(fingerprint(dir), before, `${label}: every file byte-identical`);
+  }
+});
+
+test('torn-roll-zero-header: an empty journal.iwmj beside a 128-byte zero or garbage segment 1 is I1\'s crash, and starts over', () => {
+  const garbage = Uint8Array.from({ length: SEGMENT_HEADER_BYTES }, (_, i) => (i * 37 + 11) & 255);
+  for (const [label, junk] of [['zeros', new Uint8Array(SEGMENT_HEADER_BYTES)], ['garbage', garbage]] as const) {
+    const dir = new MemorySegmentDirectory({ [LEGACY_JOURNAL_NAME]: EMPTY_LEGACY(), [segmentName(1)]: junk });
+    const before = sha(bytesOf(dir, LEGACY_JOURNAL_NAME));
+    const rec = recoverJournal(dir);
+    assert.notEqual(rec.status, 'corrupt', `${label}: ${rec.problem ?? ''}`);
+    const { journal, recovery } = MonitoringJournal.open(dir, options());
+    assert.equal(journal.state, 'open', `${label}: ${recovery.problem ?? journal.problem ?? ''}`);
+    assert.equal(sha(bytesOf(dir, LEGACY_JOURNAL_NAME)), before, `${label}: journal.iwmj untouched`);
+    assert.equal(decodeSegmentHeader(bytesOf(dir, segmentName(1))).ok, true, `${label}: segment 1 holds a whole header now`);
+    assert.equal(journal.append([bnd('start', S1, T0 + 1, { source: SRC })]).appended, 1, label);
+  }
 });
 
 test('torn-roll: a lone segment with a torn header is a new dataset, written under the name it will hold', () => {
@@ -877,11 +982,17 @@ test('drop-segments: at the storage limit a drop makes room, and setLimit says s
 test('drop-interrupted: a crash between the expired boundary and the unlinks is finished by the next open, with no second expired', () => {
   class FlakyDir implements SegmentDirectory {
     failUnlinks = 1;
+    /** The newest segment's flush count when the first unlink was attempted, and its name. */
+    atFirstUnlink: { name: string; flushes: number } | null = null;
     constructor(readonly inner: MemorySegmentDirectory) {}
     list(): string[] { return this.inner.list(); }
     open(name: string): BlockFile { return this.inner.open(name); }
     create(name: string): BlockFile { return this.inner.create(name); }
     unlink(name: string): void {
+      if (this.atFirstUnlink === null) {
+        const newest = this.inner.list().at(-1)!;
+        this.atFirstUnlink = { name: newest, flushes: this.inner.file(newest).flushes };
+      }
       if (this.failUnlinks > 0) { this.failUnlinks--; throw new Error('EBUSY: resource busy or locked'); }
       this.inner.unlink(name);
     }
@@ -892,8 +1003,14 @@ test('drop-interrupted: a crash between the expired boundary and the unlinks is 
   const flaky = new FlakyDir(base);
   const j = open(flaky);
   const victim = info[0];
+  const flushesBefore = new Map(base.list().map((n) => [n, base.file(n).flushes] as const));
   const r = j.dropSegments([victim.name], 'age', T0 + 7000);
   assert.equal(r.appended, 1, 'the boundary was written');
+  assert.ok(flaky.atFirstUnlink !== null, 'an unlink was attempted');
+  assert.ok(
+    flaky.atFirstUnlink.flushes > (flushesBefore.get(flaky.atFirstUnlink.name) ?? 0),
+    'the expired boundary was flushed before the first unlink',
+  );
   assert.equal(j.state, 'failed');
   assert.match(j.problem ?? '', /could not remove/);
   assert.ok(base.list().includes(victim.name), 'the segment is still there');
