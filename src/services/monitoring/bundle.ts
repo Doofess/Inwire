@@ -29,7 +29,7 @@ import { ExpiredRangeError, StaleGenerationError } from './journal';
 import {
   ENTRY_HEADER_BYTES, FILE_HEADER_BYTES, encodeEntry, encodeFileHeader, generationFromHex, type Framing,
 } from './journalCodec';
-import { NO_ARCHIVE, RuntimeUnavailableError, type DatasetMeta, type MonitoringRuntime } from './runtime';
+import { HistoryLostError, NO_ARCHIVE, RuntimeUnavailableError, archiveOf, type DatasetMeta, type MonitoringRuntime } from './runtime';
 import { LIMITS, type RawEntry, type SegmentSource } from './types';
 
 export const BUNDLE_FRAMING: Framing = { magic: 'INWIREMB', maxBodyBytes: 1 << 20 };
@@ -165,6 +165,7 @@ function asBundleError(e: unknown): unknown {
   if (e instanceof StaleGenerationError || e instanceof ExpiredRangeError) {
     return new BundleError('changed', 'the dataset changed while the bundle was being written (its history was expired or replaced)');
   }
+  if (e instanceof HistoryLostError) return new BundleError('history-lost', 'the archive of expired history could not be read');
   if (e instanceof RuntimeUnavailableError) return new BundleError('runtime-unavailable', e.message);
   return e;
 }
@@ -185,7 +186,6 @@ export async function* bundleStream(
     throw new BundleError('invalid-request', 'a bundle covers a range of whole milliseconds that ends after it starts');
   }
   const throughMs = range.toMs - 1;
-  const archive = runtime.archive ?? NO_ARCHIVE;
   /** Every runtime call goes through here: a cancel is seen before it, an expiry or an outage is the export's own error. */
   const ask = async <T>(call: () => Promise<T>): Promise<T> => {
     if (signal?.aborted) throw new BundleError('cancelled', 'the export was cancelled');
@@ -197,11 +197,30 @@ export async function* bundleStream(
   const meta = await ask(() => runtime.dataset());
   const snapshot = await ask(() => runtime.snapshot());
   if (snapshot.generation !== meta.generation) throw changed('the journal is not the dataset it was opened as');
-  const cutsAtOpen = await ask(() => archive.cuts());
   const frozen = { generation: snapshot.generation, throughEntryId: snapshot.throughEntryId };
   const slice = await ask(() => runtime.bundleSlice(frozen, range.fromMs, throughMs));
-  const summary = await ask(() => archive.summary(range.fromMs, range.toMs));
-  if (summary === 'history-lost') throw new BundleError('history-lost', 'the archive of expired history could not be read');
+  // A range whose first entry is past the journal's first retained one reaches no expired time, so an archive
+  // that cannot be read does not stop it. Anywhere else a refused archive is unknown, never empty.
+  const retainedOnly = slice !== null && slice.firstEntryId > snapshot.firstEntryId;
+  let archive = await ask(() => archiveOf(runtime));
+  let cutsAtOpen: ArchiveCut[];
+  // Minutes folded from entries the journal still holds are left out: an expiry that died after its cut and
+  // before dropping its segments leaves both, and the journal's entries are what the bundle writes for them.
+  let summary: { minutes: number; policies: number[] } | 'history-lost';
+  try {
+    cutsAtOpen = await ask(() => archive.cuts());
+    summary = await ask(() => archive.summary(range.fromMs, range.toMs, snapshot.firstEntryId));
+  } catch (e) {
+    if (!(retainedOnly && e instanceof BundleError && e.code === 'history-lost')) throw e;
+    summary = 'history-lost';
+    cutsAtOpen = [];
+  }
+  if (summary === 'history-lost') {
+    if (!retainedOnly) throw new BundleError('history-lost', 'the archive of expired history could not be read');
+    archive = NO_ARCHIVE;
+    cutsAtOpen = [];
+    summary = { minutes: 0, policies: [] };
+  }
 
   const manifest: BundleManifest = {
     bundleFormat: BUNDLE_FORMAT,
@@ -262,10 +281,11 @@ export async function* bundleStream(
       if (minutes === 'history-lost' || minutes === 'range-too-large') {
         throw new BundleError('history-lost', 'the archive of expired history could not be read');
       }
-      if (minutes.length > 0) {
-        archivedMinutes += minutes.length;
-        yield encodeBundleArchive(minutes, nextBundleId);
-        nextBundleId += minutes.length;
+      const expired = minutes.filter((m) => m.throughEntryId < snapshot.firstEntryId);
+      if (expired.length > 0) {
+        archivedMinutes += expired.length;
+        yield encodeBundleArchive(expired, nextBundleId);
+        nextBundleId += expired.length;
       }
       lo = hi;
     }

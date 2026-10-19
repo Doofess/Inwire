@@ -18,7 +18,7 @@
  *   same error.
  * - **Errors cross by name.** An `Error` does not survive structured clone with
  *   its class, and the query maps `StaleGenerationError`, `RangeError`,
- *   `CorruptRollupError` and `RuntimeUnavailableError` to different answers, so
+ *   `CorruptRollupError`, `HistoryLostError` and `RuntimeUnavailableError` to different answers, so
  *   the server sends `{name, message}` plus the two generation strings and the
  *   client rebuilds the class.
  * - **Live evidence is acknowledged, and a server is bounded.** The client
@@ -30,7 +30,7 @@
  */
 import { ExpiredRangeError, StaleGenerationError } from './journal';
 import {
-  CorruptRollupError, NO_ARCHIVE, RuntimeUnavailableError,
+  CorruptRollupError, HistoryLostError, RuntimeUnavailableError, archiveOf,
   type ArchiveSource, type DatasetMeta, type HostRuntime, type LiveMessage, type ReopenedMessage,
 } from './runtime';
 import type { ArchiveCut } from './archive';
@@ -94,6 +94,7 @@ function errorFrom(body: ErrorBody): Error {
   if (body.name === 'RangeError') return new RangeError(body.message);
   if (body.name === 'CorruptRollupError') return new CorruptRollupError(body.message);
   if (body.name === 'RuntimeUnavailableError') return new RuntimeUnavailableError(body.message);
+  if (body.name === 'HistoryLostError') return new HistoryLostError(body.message);
   const e = new Error(body.message);
   e.name = body.name;
   return e;
@@ -194,12 +195,13 @@ export function serveRuntime(port: RpcPort, runtime: Omit<HostRuntime, 'onLive' 
     }
     inFlight++;
     // The call is looked up in the table above, never by an arbitrary name from the port. A runtime with no
-    // archive answers the archive's calls as an archive that holds nothing.
+    // archive answers the archive's calls as one that holds nothing, unless its journal expired something (`archiveOf`).
     const onArchive = req.method.startsWith('archive.');
-    const target = (onArchive ? runtime.archive ?? NO_ARCHIVE : runtime) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-    const call = target[onArchive ? req.method.slice('archive.'.length) : req.method];
     Promise.resolve()
-      .then(() => call.apply(target, req.args))
+      .then(async () => {
+        const target = (onArchive ? await archiveOf(runtime) : runtime) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+        return target[onArchive ? req.method.slice('archive.'.length) : req.method].apply(target, req.args);
+      })
       .then(
         (value) => { inFlight--; reply({ type: 'res', id: req.id, ok: true, value }); },
         (e) => { inFlight--; reply({ type: 'res', id: req.id, ok: false, error: errorBody(e) }); },
@@ -295,7 +297,7 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
     lastCut: () => call('archive.lastCut'),
     sources: () => call('archive.sources'),
     cuts: async () => checked<ArchiveCut[]>('archive.cuts', await call('archive.cuts'), (v) => Array.isArray(v) && v.every(isCut)),
-    summary: async (from, to) => checked('archive.summary', await call('archive.summary', from, to), isSummary),
+    summary: async (from, to, firstRetained) => checked('archive.summary', await call('archive.summary', from, to, firstRetained), isSummary),
   };
 
   return {

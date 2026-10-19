@@ -299,15 +299,18 @@ export class ArchiveStore {
    * How many minutes the archive holds across every source with `minuteMs` in `[floor(fromMs / 60000) * 60000, toMs)`,
    * and the policies they were written under (ascending, distinct), from the index and without reading a byte.
    * `history-lost` where `read` would say it: a damaged archive, or a minute under a policy this build does not accept.
+   * A minute whose `throughEntryId` reaches `firstRetainedEntryId` is not counted: the journal still holds the
+   * entries it was folded from (an expiry that wrote its cut and died before dropping the segments), and a bundle
+   * writes those as entries, not twice.
    */
-  summary(fromMs: number, toMs: number): { minutes: number; policies: number[] } | 'history-lost' {
+  summary(fromMs: number, toMs: number, firstRetainedEntryId: number): { minutes: number; policies: number[] } | 'history-lost' {
     if (this.state !== 'ok') return 'history-lost';
     const from = Math.floor(fromMs / 60_000) * 60_000;
     const policies = new Set<number>();
     let minutes = 0;
     for (const list of this.minutes.values()) {
       for (const m of list) {
-        if (m.minuteMs < from || m.minuteMs >= toMs) continue;
+        if (m.minuteMs < from || m.minuteMs >= toMs || m.throughEntryId >= firstRetainedEntryId) continue;
         if (!ACCEPTED_POLICIES.includes(m.policy)) return 'history-lost';
         policies.add(m.policy);
         minutes++;

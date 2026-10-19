@@ -137,6 +137,17 @@ test('classify: a saved bundle and its partial are the app\'s, in any location, 
   }
 });
 
+test('classify: the bundle extension is matched in any case (Windows keeps the user\'s spelling), the hex stays lowercase', () => {
+  const at = (name: string) => classifyMonitoringName(name, { isDefaultLocation: false });
+  for (const n of ['Week.IWMON', 'week.Iwmon', 'Week.IWMON.partial', 'Week.IWMON.PARTIAL', 'Week.IWMON.0123456789ab.partial', 'Week.iwmon.0123456789ab.PARTIAL']) {
+    assert.equal(at(n), 'app', n);
+  }
+  for (const n of ['Week.IWMON.0123456789AB.partial', 'Week.IWMON.0123456789a.partial', '.IWMON', 'Week.IWMON.bak']) {
+    assert.equal(at(n), 'foreign', n);
+  }
+  assert.deepEqual(classifyAdoption(['Week.IWMON'], null, null, { isDefaultLocation: false }), { kind: 'new' });
+});
+
 test('discard: a bundle beside the dataset is kept, never removed, and never foreign', () => {
   const names = [SEG1, 'rollups.iwmr', BUNDLE, `${BUNDLE}.partial`, 'notes.txt'];
   const plan = planMonitoringDiscard(names, { isDefaultLocation: false });

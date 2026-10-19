@@ -17,7 +17,7 @@ import {
   BundleError, bundleFileName, encodeBundleEntries, encodeBundleHeader, exportBundle, type BundleClient,
 } from '../../src/services/monitoring/bundle';
 import { ExportCancelled } from '../../src/services/monitoring/export';
-import type { EvidenceInput } from '../../src/services/monitoring/journal';
+import type { EvidenceInput, MonitoringJournal } from '../../src/services/monitoring/journal';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan } from '../../src/services/monitoring/retention';
 import { minuteOf } from '../../src/services/monitoring/rollup';
 import type { HostRuntime } from '../../src/services/monitoring/runtime';
@@ -360,14 +360,53 @@ test('a clock that stepped back inside the range leaves no hole: the ids in betw
   rig.append([
     startWith(m(0), S1, SOURCE),
     dgram(m(2, 1000), flow(1)),
+    dgram(m(4, 1000), flow(2)),
+    dgram(m(2, 30_000), flow(3)),
+    dgram(m(5, 1000), flow(4)),
+  ]);
+  const { d } = await bundleOf(rig, { fromMs: m(2), toMs: m(3, 500) });
+  // Entry 3 is at minute 4, after the range, and between entries 2 and 4 which are in it (4's clock stepped back).
+  assert.deepEqual(d.manifest.journal, { firstEntryId: 2, throughEntryId: 4, policies: [DECODER_POLICY_VERSION] });
+  assert.deepEqual(d.journal.map((j) => j.originalId), [2, 3, 4]);
+});
+
+test('the slice ends at the last entry really in the range: a later entry whose clock stepped back before it is not pulled in', async () => {
+  const rig = new Rig();
+  rig.append([
+    startWith(m(0), S1, SOURCE),
+    dgram(m(2, 1000), flow(1)),
     dgram(m(3, 1000), flow(2)),
     dgram(m(1, 30_000), flow(3)),
     dgram(m(5, 1000), flow(4)),
   ]);
-  const { d } = await bundleOf(rig, { fromMs: m(2), toMs: m(3, 500) });
-  // Entry 3 is at minute 3, after the range, and between entries 2 and 4 which are in it.
-  assert.deepEqual(d.manifest.journal, { firstEntryId: 2, throughEntryId: 4, policies: [DECODER_POLICY_VERSION] });
-  assert.deepEqual(d.journal.map((j) => j.originalId), [2, 3, 4]);
+  const { d } = await bundleOf(rig, { fromMs: m(2), toMs: m(4) });
+  assert.deepEqual(d.manifest.journal, { firstEntryId: 2, throughEntryId: 3, policies: [DECODER_POLICY_VERSION] });
+  assert.deepEqual(d.journal.map((j) => j.originalId), [2, 3]);
+});
+
+test('the slice starts at the first entry really in the range: an earlier entry whose clock stood after it is not pulled in', async () => {
+  const rig = new Rig();
+  rig.append([
+    startWith(m(0), S1, SOURCE),
+    dgram(m(9), flow(1)),
+    dgram(m(2, 1000), flow(2)),
+    dgram(m(3, 1000), flow(3)),
+  ]);
+  const { d } = await bundleOf(rig, { fromMs: m(2), toMs: m(4) });
+  assert.deepEqual(d.manifest.journal, { firstEntryId: 3, throughEntryId: 4, policies: [DECODER_POLICY_VERSION] });
+  assert.deepEqual(d.journal.map((j) => j.originalId), [3, 4]);
+});
+
+test('a range no entry is in has no journal part even when entries before and after it are out of time order', async () => {
+  const rig = new Rig();
+  rig.append([
+    startWith(m(0), S1, SOURCE),
+    dgram(m(9), flow(1)),
+    dgram(m(1), flow(2)),
+  ]);
+  const { d } = await bundleOf(rig, { fromMs: m(3), toMs: m(4) });
+  assert.equal(d.manifest.journal, null);
+  assert.equal(d.journal.length, 0);
 });
 
 // --- the round trip --------------------------------------------------------------------------------------------
@@ -561,6 +600,28 @@ test('pages are bounded: no chunk holds more than a page of journal entries, and
   const after = await bundleOf(rig, { fromMs: m(0), toMs: hi });
   const archive = perChunk(after.sink, 3).filter((n) => n > 0);
   assert.ok(archive.length >= 2, `${after.d.archive.length} minutes came in ${archive.length} chunk(s)`);
+});
+
+/** A journal that dies as an expiry drops its segments: the archive already holds the cut, the journal still holds the entries. */
+function dyingJournal(journal: MonitoringJournal): MonitoringJournal {
+  const o = Object.create(journal) as MonitoringJournal;
+  o.dropSegments = () => { throw new Error('the process died'); };
+  return o;
+}
+
+test('an expiry interrupted between the archive and the journal is not counted twice: the archive minutes the journal still holds are left out, and the counts agree', async () => {
+  const { rig, plan, hi } = await expiryWorld();
+  assert.equal(runExpiry(dyingJournal(rig.journal), rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'failed');
+  assert.ok(rig.archive.lastCut() !== null, 'the cut is durable');
+  assert.equal(rig.journal.snapshot().firstEntryId, 1, 'and the journal still holds every entry');
+  const { d } = await bundleOf(rig, { fromMs: m(0), toMs: hi });
+  assert.equal(d.manifest.journal.firstEntryId, 1);
+  assert.ok(d.journal.length > 0);
+  // Each datagram is in the bundle once: as an entry, not also as a minute folded from it.
+  assert.equal(d.archive.length, 0);
+  assert.equal(d.manifest.archive.minutes, 0);
+  assert.deepEqual(d.manifest.archive.policies, []);
+  assert.deepEqual(d.end, { journalEntries: d.journal.length, archivedMinutes: 0 });
 });
 
 // --- what moves under an export -----------------------------------------------------------------------------------

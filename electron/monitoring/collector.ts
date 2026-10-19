@@ -54,7 +54,7 @@ import { recordedSource } from '../../src/services/monitoring/queries';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan, type RetentionPolicy } from '../../src/services/monitoring/retention';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { isSegmentFileName, type SegmentInfo } from '../../src/services/monitoring/segments';
-import { NO_ARCHIVE, RuntimeUnavailableError, type DatasetMeta, type HostRuntime } from '../../src/services/monitoring/runtime';
+import { RuntimeUnavailableError, archiveOf, type DatasetMeta, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { serveRuntime, type RpcPort, type RuntimeServer } from '../../src/services/monitoring/runtimeRpc';
 import type { ListenerState } from '../../src/services/monitoring/sourceHealth';
 import { DECODER_POLICY_VERSION, LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
@@ -400,15 +400,17 @@ export class Collector {
     ),
     bundleSlice: async (snapshot, fromMs, throughMs) => this.local().bundleSlice(snapshot, fromMs, throughMs),
     dataset: async () => this.local().dataset(),
+    // No archive served over a journal that expired something is a refused archive (corrupt, failed, another
+    // generation, read-only): unknown, never empty (`archiveOf`).
     archive: {
-      read: async (sourceKey, from, to, maxBytes) => (this.local().archive ?? NO_ARCHIVE).read(
+      read: async (sourceKey, from, to, maxBytes) => (await archiveOf(this.local())).read(
         sourceKey, from, to, clampSize(maxBytes, LIMITS.archiveReadBytes),
       ),
-      coveredThroughMs: async () => (this.local().archive ?? NO_ARCHIVE).coveredThroughMs(),
-      lastCut: async () => (this.local().archive ?? NO_ARCHIVE).lastCut(),
-      sources: async () => (this.local().archive ?? NO_ARCHIVE).sources(),
-      cuts: async () => (this.local().archive ?? NO_ARCHIVE).cuts(),
-      summary: async (fromMs, toMs) => (this.local().archive ?? NO_ARCHIVE).summary(fromMs, toMs),
+      coveredThroughMs: async () => (await archiveOf(this.local())).coveredThroughMs(),
+      lastCut: async () => (await archiveOf(this.local())).lastCut(),
+      sources: async () => (await archiveOf(this.local())).sources(),
+      cuts: async () => (await archiveOf(this.local())).cuts(),
+      summary: async (fromMs, toMs, firstRetained) => (await archiveOf(this.local())).summary(fromMs, toMs, firstRetained),
     },
   };
 

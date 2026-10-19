@@ -1818,9 +1818,11 @@ test('rpc: the bundle\'s reads cross the port as the runtime answered them: raw 
     const cuts = await p.client.archive!.cuts();
     assert.equal(cuts.length, 1);
     assert.deepEqual(cuts, rig.archive.cuts());
-    const summary = await p.client.archive!.summary(m(0), hi);
-    assert.deepEqual(summary, await rig.runtime.archive!.summary(m(0), hi));
+    const summary = await p.client.archive!.summary(m(0), hi, snap.firstEntryId);
+    assert.deepEqual(summary, await rig.runtime.archive!.summary(m(0), hi, snap.firstEntryId));
     assert.ok(typeof summary === 'object' && summary.minutes > 0);
+    // The bound crosses the port: with every entry retained, no archived minute is one the journal has not folded.
+    assert.deepEqual(await p.client.archive!.summary(m(0), hi, 1), { minutes: 0, policies: [] });
     assert.deepEqual(await p.client.archive!.sources(), rig.archive.sources());
     // An expired id crosses as the class a bundle tells apart.
     await assert.rejects(p.client.readRawPage(snap, 0, 256, 1 << 20), (e: unknown) => e instanceof ExpiredRangeError);
@@ -1837,9 +1839,40 @@ test('rpc: a runtime without an archive or a dataset answers the archive as empt
   const p = portPair(bare);
   try {
     assert.deepEqual(await p.client.archive!.cuts(), []);
-    assert.deepEqual(await p.client.archive!.summary(m(0), m(6)), { minutes: 0, policies: [] });
+    assert.deepEqual(await p.client.archive!.summary(m(0), m(6), 1), { minutes: 0, policies: [] });
     assert.deepEqual(await p.client.archive!.sources(), []);
     await assert.rejects(p.client.dataset(), (e: unknown) => e instanceof RuntimeUnavailableError && e.message === 'no dataset.json');
+  } finally {
+    p.close();
+  }
+});
+
+test('rpc: a runtime whose archive is not served, over a journal that expired, answers unknown and never empty', async () => {
+  const { rig, plan } = await expiryWorld();
+  const hi = minuteOf(plan.throughMs);
+  expire(rig, plan);
+  const key = rig.archive.sources()[0];
+  assert.ok(key !== undefined, 'the archive holds minutes of what expired');
+  // The collector sets the archive aside when it is refused (corrupt, failed, another generation): the runtime has none.
+  const refused = wrap(rig.runtime, { archive: undefined });
+  const p = portPair(refused);
+  try {
+    assert.equal(await p.client.archive!.read(key, m(6), hi, 1 << 20), 'history-lost');
+    assert.equal(await p.client.archive!.summary(m(0), hi, 1), 'history-lost');
+    await assert.rejects(p.client.archive!.cuts(), (e: unknown) => e instanceof Error && e.name === 'HistoryLostError');
+    assert.equal(await p.client.archive!.lastCut(), null);
+    assert.equal(await p.client.archive!.coveredThroughMs(), null);
+    assert.deepEqual(await p.client.archive!.sources(), []);
+    // A History query over the expired range, through that port, is an unknown and not a run of zeros.
+    await rollUp(rig).then((h) => h.host.settled());
+    const reply = await runHistoryQuery(p.client, p.client, perMinute(m(6), hi), new AbortController().signal, { inflate, nowMs: NOW, archive: p.client.archive });
+    assert.equal(reply.ok, true);
+    if (!reply.ok) return;
+    assert.ok(reply.value.buckets.length > 0);
+    for (const b of reply.value.buckets) {
+      assert.equal(b.coverage, 'history-lost');
+      assert.equal(b.reportedOctets, null);
+    }
   } finally {
     p.close();
   }

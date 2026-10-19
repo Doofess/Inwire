@@ -1340,12 +1340,12 @@ export class MonitoringJournal {
   }
 
   /**
-   * The ids an evidence bundle's range covers (ADR 0063): from the lowest id of either kind received at or after
-   * `fromMs` to the highest received at or before `throughMs`, so an entry whose clock stepped back inside the
-   * range is in it. Null where there is none, or where the last precedes the first (a range between two
-   * entries that were written out of time order). `locate` is strided on datagrams and cannot say this: the
-   * ends are found by the strides' own smallest and largest times, and only the stride that holds each end is
-   * read, so the work is a stride or two however long the range. Ids below the oldest retained one are not looked for.
+   * The ids an evidence bundle's range covers (ADR 0063): from the lowest id of either kind received in
+   * `[fromMs, throughMs]` to the highest received in it, so an entry whose clock stepped back inside the range is
+   * in it, and an entry outside it never ends the slice, however far its clock stepped. Entries between the ends
+   * go in whatever their time. Null where none is in the range. `locate` is strided on datagrams and cannot say
+   * this: the ends are found by the strides' own smallest and largest times, and only the stride that holds each
+   * end is read, so the work is a stride or two however long the range. Ids below the oldest retained one are not looked for.
    */
   bundleSlice(snapshot: { generation: string; throughEntryId: number }, fromMs: number, throughMs: number): BundleSlice | null {
     if (!Number.isSafeInteger(fromMs) || fromMs < 0) throw new RangeError(`fromMs ${fromMs} is not a non-negative safe integer`);
@@ -1358,8 +1358,8 @@ export class MonitoringJournal {
       for (let slot = 0; slot < seg.index.strides; slot++) {
         const st = seg.index.stride(slot);
         if (st.fromId > through) break scanFirst;
-        if (st.maxMs < fromMs) continue;
-        const hit = this.scanStride(seg, st.fromId, Math.min(st.toId, through), (ms) => ms >= fromMs, false);
+        if (st.maxMs < fromMs || st.minMs > throughMs) continue;
+        const hit = this.scanStride(seg, st.fromId, Math.min(st.toId, through), (ms) => ms >= fromMs && ms <= throughMs, false);
         if (hit !== null) { first = hit; break scanFirst; }
       }
     }
@@ -1370,12 +1370,12 @@ export class MonitoringJournal {
       if (seg.firstId > through) continue;
       for (let slot = seg.index.strides - 1; slot >= 0; slot--) {
         const st = seg.index.stride(slot);
-        if (st.fromId > through || st.minMs > throughMs) continue;
-        const hit = this.scanStride(seg, st.fromId, Math.min(st.toId, through), (ms) => ms <= throughMs, true);
+        if (st.fromId > through || st.minMs > throughMs || st.maxMs < fromMs) continue;
+        const hit = this.scanStride(seg, st.fromId, Math.min(st.toId, through), (ms) => ms >= fromMs && ms <= throughMs, true);
         if (hit !== null) { last = hit; break scanLast; }
       }
     }
-    if (last === null || last < first) return null;
+    if (last === null) return null;
 
     const policies = new Set<number>();
     for (const seg of this.segs) if (seg.firstId <= last && seg.lastId >= first) policies.add(seg.policy);

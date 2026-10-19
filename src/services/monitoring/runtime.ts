@@ -68,9 +68,10 @@ export interface ArchiveSource {
   cuts(): Promise<ArchiveCut[]>;
   /**
    * The minutes of every source in `[floor(fromMs / 60000) * 60000, toMs)` and the policies they were written
-   * under, counted from the index without reading a byte; `history-lost` where `read` would say it.
+   * under, counted from the index without reading a byte; `history-lost` where `read` would say it. Minutes
+   * folded from entries at or past `firstRetainedEntryId` are left out: the journal still holds those.
    */
-  summary(fromMs: number, toMs: number): Promise<{ minutes: number; policies: number[] } | 'history-lost'>;
+  summary(fromMs: number, toMs: number, firstRetainedEntryId: number): Promise<{ minutes: number; policies: number[] } | 'history-lost'>;
 }
 
 /** What a runtime without an archive answers: nothing held, nothing covered. */
@@ -82,6 +83,40 @@ export const NO_ARCHIVE: ArchiveSource = {
   cuts: async () => [],
   summary: async () => ({ minutes: 0, policies: [] }),
 };
+
+/** The archive that would answer is not there to ask, and the journal says it was needed. A bundle maps it to `history-lost`. */
+export class HistoryLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HistoryLostError';
+  }
+}
+
+/**
+ * What a runtime answers when it has no archive to serve but its journal has already expired something: the
+ * archive was refused (corrupt, failed, another generation, a read-only open), so what it held is unknown,
+ * never empty. `lastCut`, `coveredThroughMs` and `sources` answer as before the archive existed (null, null,
+ * none), which is what a runtime with `archive === undefined` always answered those with; the calls that
+ * could say "nothing here" say `history-lost` instead, and `cuts` rejects so it cannot be read as no cuts.
+ */
+export const REFUSED_ARCHIVE: ArchiveSource = {
+  read: async () => 'history-lost',
+  coveredThroughMs: async () => null,
+  lastCut: async () => null,
+  sources: async () => [],
+  cuts: async () => { throw new HistoryLostError('the sealed archive is not available, and the journal has expired entries it held'); },
+  summary: async () => 'history-lost',
+};
+
+/**
+ * The archive a runtime answers its archive calls from: its own, else `REFUSED_ARCHIVE` when the journal's
+ * first retained entry is past 1 (a cut was made, so something expired, whether or not its segments are gone
+ * yet), else `NO_ARCHIVE` for a dataset that never expired anything.
+ */
+export async function archiveOf(runtime: Pick<MonitoringRuntime, 'archive' | 'snapshot'>): Promise<ArchiveSource> {
+  if (runtime.archive !== undefined) return runtime.archive;
+  return (await runtime.snapshot()).firstEntryId > 1 ? REFUSED_ARCHIVE : NO_ARCHIVE;
+}
 
 /** What identifies the open dataset: `dataset.json`'s generation, creation time and what a discard replaced (ADR 0061). */
 export interface DatasetMeta {

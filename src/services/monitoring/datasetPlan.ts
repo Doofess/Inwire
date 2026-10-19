@@ -30,8 +30,10 @@ const PARTIAL_SUFFIX = /^(.+)\.[0-9a-f]{12}\.partial$/;
  * An evidence bundle the user saved beside the dataset (ADR 0063), or one being written: `.iwmon`, its
  * `.iwmon.partial`, or the atomic write's `.iwmon.<12 hex>.partial`. The user's file, not the dataset's:
  * adoption tolerates it and a discard keeps it, so it is classed with the app's own files and never `remove`.
+ * The extension is matched in any case, because Windows keeps the spelling the user typed (`Week.IWMON`); the
+ * atomic write's hex stays lowercase, as the app writes it.
  */
-const BUNDLE_NAME = /^[^/\\]+\.iwmon(\.([0-9a-f]{12}\.)?partial)?$/;
+const BUNDLE_NAME = /^[^/\\]+\.[iI][wW][mM][oO][nN](\.([0-9a-f]{12}\.)?[pP][aA][rR][tT][iI][aA][lL])?$/;
 const FIXED_DATASET_NAMES: ReadonlySet<string> = new Set([LEGACY_JOURNAL_NAME, ROLLUP_NAME, ARCHIVE_NAME, DATASET_FILE]);
 
 function classifyBase(name: string, isDefaultLocation: boolean): NameClass {

@@ -39,8 +39,8 @@ export class LocalArchiveSource implements ArchiveSource {
 
   async cuts(): Promise<ArchiveCut[]> { return this.store.cuts(); }
 
-  async summary(fromMs: number, toMs: number): Promise<{ minutes: number; policies: number[] } | 'history-lost'> {
-    return this.store.summary(fromMs, toMs);
+  async summary(fromMs: number, toMs: number, firstRetainedEntryId: number): Promise<{ minutes: number; policies: number[] } | 'history-lost'> {
+    return this.store.summary(fromMs, toMs, firstRetainedEntryId);
   }
 }
 
