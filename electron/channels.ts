@@ -235,3 +235,16 @@ export const MONITORING_STATUS_CHANNEL = 'inwire:monitoring-status';
 
 /** Main -> renderer: the monitoring utility exited; every pending request has already failed (`RuntimeExit`). */
 export const MONITORING_EXIT_CHANNEL = 'inwire:monitoring-runtime-exit';
+
+/**
+ * Renderer -> main (invoke): choose where the monitoring dataset lives (ADR 0061). The argument is
+ * `'pick'` (main shows the folder dialog) or `'default'`; the renderer never sends a path. Answers a
+ * `LocationReply`.
+ */
+export const MONITORING_LOCATION_CHOOSE_CHANNEL = 'inwire:monitoring-location-choose';
+
+/** Renderer -> main (invoke): discard the whole dataset or its sealed prefix, while stopped; answers a `DiscardResult`. */
+export const MONITORING_DISCARD_CHANNEL = 'inwire:monitoring-discard';
+
+/** Renderer -> main (invoke): save a retention policy, while stopped; answers a `RetentionSaveReply`. */
+export const MONITORING_RETENTION_SAVE_CHANNEL = 'inwire:monitoring-retention-save';

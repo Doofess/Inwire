@@ -18,6 +18,7 @@
  */
 import { MAX_STORAGE_BYTES, readSourceConfig } from './config';
 import type { JournalState } from './journal';
+import { validateRetentionPolicy, type RetentionPolicy } from './retention';
 import type { ListenerState, RejectedSender } from './sourceHealth';
 import { LIMITS, type JournalSnapshot, type SourceConfig } from './types';
 
@@ -88,6 +89,12 @@ export interface IntakeStatus {
    * computer slept and Start is needed - no loss count is invented for the gap.
    */
   stopReason: IntakeStopReason | null;
+  /**
+   * The exporter the open dataset itself recorded (the newest `start` boundary's source, else the
+   * newest segment header's), which is whose history it holds whatever is configured now. Null
+   * while no dataset is open or nothing was ever recorded.
+   */
+  datasetSource: string | null;
 }
 
 /** Main -> renderer when the utility process exits; every pending request has already been failed. */
@@ -107,16 +114,60 @@ export interface RuntimeExit {
  * it; `dispose` stops intake with reason `quit` and closes the dataset.
  */
 export type ToMonitoringUtility =
-  | { type: 'open'; id: number; root: string; limitBytes: number }
+  | { type: 'open'; id: number; root: string; limitBytes: number; isDefaultLocation: boolean; retention: RetentionPolicy }
+  | { type: 'inspect'; id: number; root: string; isDefaultLocation: boolean }
+  | { type: 'discard'; id: number; scope: DiscardScope }
+  | { type: 'retention'; id: number; policy: RetentionPolicy }
   | { type: 'attach' }
   | { type: 'start'; id: number; config: SourceConfig }
   | { type: 'stop'; id: number; reason: StopReason }
   | { type: 'dispose'; id: number };
 
-/** Utility -> main. A `reply` answers the request with its `id`: `open` and `start` with a `StartResult`, `stop` and `dispose` with a `StopResult`. */
+/** Utility -> main. A `reply` answers the request with its `id`: `open` and `start` with a `StartResult`, `stop` and `dispose` with a `StopResult`, `inspect` with an `InspectResult`, `discard` with a `DiscardResult`, `retention` with a `RetentionResult`. */
 export type FromMonitoringUtility =
-  | { type: 'reply'; id: number; result: StartResult | StopResult }
+  | { type: 'reply'; id: number; result: StartResult | StopResult | InspectResult | DiscardResult | RetentionResult }
   | { type: 'status'; status: IntakeStatus };
+
+// --- location and discard (ADR 0061) -----------------------------------------------------------
+
+/** What a discard removes: the whole dataset, or the sealed prefix that ends before a date. */
+export type DiscardScope = { scope: 'all' } | { scope: 'before'; beforeMs: number };
+
+/**
+ * What a folder would be if it were adopted, read without writing anything. `adopt-read-only` means
+ * Start is disabled and nothing is written; `problem` says why. `exporterIPv4` is the exporter the
+ * dataset itself recorded, the one its history is about.
+ */
+export type InspectResult =
+  | { ok: true; kind: 'new' | 'adopt' | 'adopt-read-only'; truncatedTailBytes: number | null; problem: string | null; exporterIPv4: string | null }
+  | { ok: false; reason: 'refused-version' | 'foreign-files' | 'failed'; message: string; names?: string[] };
+
+export type DiscardResult =
+  | { ok: true; removedSegments: number }
+  | { ok: false; reason: 'busy' | 'failed'; message: string };
+
+/** A retention policy is changed only while stopped, like the location and a discard. */
+export type RetentionResult = { ok: true } | { ok: false; reason: 'busy' | 'failed'; message: string };
+
+// --- main -> renderer: location and retention (ADR 0061) ---------------------------------------
+
+/**
+ * What choosing a dataset folder answers. The renderer never sends a path: main shows the dialog,
+ * decides the folder and answers with what it chose (`displayPath`) and what the folder holds.
+ */
+export type LocationReply =
+  | { ok: true; displayPath: string; isDefaultLocation: boolean; inspect: Extract<InspectResult, { ok: true }> }
+  | {
+    ok: false;
+    reason: 'cancelled' | 'busy' | 'refused' | 'refused-version' | 'foreign-files' | 'failed';
+    message: string;
+    names?: string[];
+  };
+
+/** What saving a retention policy answers: the policy now in force, or why it is not. */
+export type RetentionSaveReply =
+  | { ok: true; retention: RetentionPolicy }
+  | { ok: false; reason: 'busy' | 'failed'; message: string };
 
 // --- readers ----------------------------------------------------------------------------------
 
@@ -160,6 +211,79 @@ export function readStopResult(v: unknown): StopResult {
   return { ok: false, message: UNREADABLE, clean: false, snapshot: null };
 }
 
+export function readDiscardScope(v: unknown): DiscardScope | null {
+  if (!isObject(v)) return null;
+  if (v.scope === 'all') return { scope: 'all' };
+  if (v.scope === 'before' && isCount(v.beforeMs)) return { scope: 'before', beforeMs: v.beforeMs };
+  return null;
+}
+
+export function readDiscardResult(v: unknown): DiscardResult {
+  if (isObject(v) && v.ok === true && isCount(v.removedSegments)) return { ok: true, removedSegments: v.removedSegments };
+  if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
+    return { ok: false, reason: v.reason, message: v.message };
+  }
+  return { ok: false, reason: 'failed', message: UNREADABLE };
+}
+
+const INSPECT_KINDS: ReadonlySet<unknown> = new Set(['new', 'adopt', 'adopt-read-only']);
+const INSPECT_REFUSALS: ReadonlySet<unknown> = new Set(['refused-version', 'foreign-files', 'failed']);
+
+export function readInspectResult(v: unknown): InspectResult {
+  const bad: InspectResult = { ok: false, reason: 'failed', message: UNREADABLE };
+  if (!isObject(v)) return bad;
+  if (v.ok === true) {
+    const { kind, truncatedTailBytes, problem, exporterIPv4 } = v;
+    if (!INSPECT_KINDS.has(kind) || !(truncatedTailBytes === null || isCount(truncatedTailBytes))) return bad;
+    if (!textOrNull(problem) || !textOrNull(exporterIPv4)) return bad;
+    return { ok: true, kind: kind as 'new' | 'adopt' | 'adopt-read-only', truncatedTailBytes, problem, exporterIPv4 };
+  }
+  if (v.ok === false && INSPECT_REFUSALS.has(v.reason) && isText(v.message)) {
+    const names = Array.isArray(v.names) && v.names.every(isText) ? (v.names as string[]) : undefined;
+    return { ok: false, reason: v.reason as 'refused-version' | 'foreign-files' | 'failed', message: v.message, ...(names === undefined ? {} : { names }) };
+  }
+  return bad;
+}
+
+export function readRetentionResult(v: unknown): RetentionResult {
+  if (isObject(v) && v.ok === true) return { ok: true };
+  if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
+    return { ok: false, reason: v.reason, message: v.message };
+  }
+  return { ok: false, reason: 'failed', message: UNREADABLE };
+}
+
+const LOCATION_REFUSALS: ReadonlySet<unknown> = new Set(['cancelled', 'busy', 'refused', 'refused-version', 'foreign-files', 'failed']);
+
+export function readLocationReply(v: unknown): LocationReply {
+  const bad: LocationReply = { ok: false, reason: 'failed', message: UNREADABLE };
+  if (!isObject(v)) return bad;
+  if (v.ok === true) {
+    if (!isText(v.displayPath) || typeof v.isDefaultLocation !== 'boolean') return bad;
+    const inspect = readInspectResult(v.inspect);
+    if (!inspect.ok) return bad;
+    return { ok: true, displayPath: v.displayPath, isDefaultLocation: v.isDefaultLocation, inspect };
+  }
+  if (v.ok === false && LOCATION_REFUSALS.has(v.reason) && isText(v.message)) {
+    const names = Array.isArray(v.names) && v.names.every(isText) ? (v.names as string[]) : undefined;
+    return {
+      ok: false, reason: v.reason as Extract<LocationReply, { ok: false }>['reason'], message: v.message,
+      ...(names === undefined ? {} : { names }),
+    };
+  }
+  return bad;
+}
+
+export function readRetentionSaveReply(v: unknown): RetentionSaveReply {
+  if (isObject(v) && v.ok === true) {
+    const retention = validateRetentionPolicy(v.retention);
+    if (retention !== null) return { ok: true, retention };
+  } else if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
+    return { ok: false, reason: v.reason, message: v.message };
+  }
+  return { ok: false, reason: 'failed', message: UNREADABLE };
+}
+
 export function readStopReason(v: unknown): StopReason | null {
   return typeof v === 'string' && STOP_REASONS.has(v) ? (v as StopReason) : null;
 }
@@ -168,8 +292,9 @@ export function readIntakeStatus(v: unknown): IntakeStatus | null {
   if (!isObject(v)) return null;
   const {
     listener, listenerError, storage, storageError, source, sessionId, received,
-    rejectedSenders, rejectedOverflow, shedDatagrams, snapshot, workerAttached, stopReason,
+    rejectedSenders, rejectedOverflow, shedDatagrams, snapshot, workerAttached, stopReason, datasetSource,
   } = v;
+  if (!textOrNull(datasetSource)) return null;
   if (!isText(listener) || !LISTENER_STATES.has(listener) || !textOrNull(listenerError)) return null;
   if (!isText(storage) || !STORAGE_STATES.has(storage) || !textOrNull(storageError)) return null;
   const config = source === null ? null : readSourceConfig(source);
@@ -189,7 +314,7 @@ export function readIntakeStatus(v: unknown): IntakeStatus | null {
     listener: listener as ListenerState, listenerError,
     storage: storage as IntakeStatus['storage'], storageError,
     source: config, sessionId, received, rejectedSenders: senders, rejectedOverflow, shedDatagrams,
-    snapshot: snap, workerAttached, stopReason: stopReason as IntakeStopReason | null,
+    snapshot: snap, workerAttached, stopReason: stopReason as IntakeStopReason | null, datasetSource,
   };
 }
 
@@ -211,7 +336,22 @@ export function readToUtility(v: unknown): ToMonitoringUtility | null {
     case 'open': {
       if (!isText(v.root) || v.root === '') return null;
       if (!isCount(v.limitBytes) || v.limitBytes < LIMITS.minStorageBytes || v.limitBytes > MAX_STORAGE_BYTES) return null;
-      return { type: 'open', id, root: v.root, limitBytes: v.limitBytes };
+      if (typeof v.isDefaultLocation !== 'boolean') return null;
+      const retention = validateRetentionPolicy(v.retention);
+      if (retention === null) return null;
+      return { type: 'open', id, root: v.root, limitBytes: v.limitBytes, isDefaultLocation: v.isDefaultLocation, retention };
+    }
+    case 'inspect': {
+      if (!isText(v.root) || v.root === '' || typeof v.isDefaultLocation !== 'boolean') return null;
+      return { type: 'inspect', id, root: v.root, isDefaultLocation: v.isDefaultLocation };
+    }
+    case 'discard': {
+      const scope = readDiscardScope(v.scope);
+      return scope === null ? null : { type: 'discard', id, scope };
+    }
+    case 'retention': {
+      const policy = validateRetentionPolicy(v.policy);
+      return policy === null ? null : { type: 'retention', id, policy };
     }
     case 'start': {
       const config = readSourceConfig(v.config);

@@ -176,6 +176,10 @@ declare global {
       saveMonitoringConfig?(config: unknown): Promise<unknown>;
       startMonitoring?(config: unknown): Promise<unknown>;
       stopMonitoring?(): Promise<unknown>;
+      /** ADR 0061: the page names an intent or a scope, never a path. Read by `readLocationReply`, `readDiscardResult`, `readRetentionSaveReply`. */
+      chooseMonitoringLocation?(intent: 'pick' | 'default'): Promise<unknown>;
+      discardMonitoring?(scope: unknown): Promise<unknown>;
+      saveMonitoringRetention?(policy: unknown): Promise<unknown>;
       onMonitoringRuntimeExit?(listener: (exit: unknown) => void): () => void;
       onMonitoringStatus?(listener: (status: unknown) => void): () => void;
 

@@ -69,7 +69,14 @@ export type RollupOpenStatus = 'ok' | 'rebuild-required' | 'empty' | 'failed';
 
 export interface RollupStoreOptions {
   nowMs?: () => number;
+  /**
+   * A read-only adoption (ADR 0061): the file is neither scanned nor touched, not even a torn tail cut,
+   * and the store is `failed`, so the Worker answers history from the journal and stores nothing.
+   */
+  readOnly?: boolean;
 }
+
+const READ_ONLY = 'the dataset is read-only, so its rollups are not stored';
 
 export interface MinuteInput { sourceKey: string; minuteMs: number; bytes: Uint8Array }
 
@@ -182,6 +189,8 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
 export class RollupStore {
   /** The entry a batch must begin after while there is no watermark; set by `reset`, 0 for a file that was never reset. */
   private base = 0;
+  /** Opened for a read-only adoption: refuses `reset` as well as every read and append. */
+  private readOnly = false;
 
   private constructor(
     private readonly file: BlockFile,
@@ -200,6 +209,11 @@ export class RollupStore {
     options: RollupStoreOptions = {},
   ): { store: RollupStore; status: RollupOpenStatus; reason?: string } {
     const nowMs = options.nowMs ?? Date.now;
+    if (options.readOnly === true) {
+      const store = new RollupStore(file, journal, nowMs, file.size(), 0, null, new Map(), READ_ONLY);
+      store.readOnly = true;
+      return { store, status: 'failed', reason: READ_ONLY };
+    }
     const scan = scanSidecar(file, journal);
     if (scan.verdict === 'rebuild-required') {
       const store = new RollupStore(file, journal, nowMs, file.size(), 0, null, new Map(), scan.reason ?? 'rebuild required');
@@ -397,6 +411,7 @@ export class RollupStore {
    * the journal's first retained entry (0 while nothing has expired).
    */
   reset(baseEntryId = 0): void {
+    if (this.readOnly) throw new Error(READ_ONLY);
     if (!Number.isSafeInteger(baseEntryId) || baseEntryId < 0) throw new RangeError('a base is a non-negative entry id');
     this.writeFreshHeader();
     this.base = baseEntryId;

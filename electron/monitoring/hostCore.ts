@@ -30,9 +30,12 @@
  */
 import { readSourceConfig } from '../../src/services/monitoring/config';
 import {
-  readFromUtility, readStartResult, readStopReason, readStopResult,
-  type RuntimeExit, type StartResult, type StopReason, type StopResult, type ToMonitoringUtility,
+  readDiscardResult, readDiscardScope, readFromUtility, readInspectResult, readRetentionResult, readStartResult,
+  readStopReason, readStopResult,
+  type DiscardResult, type InspectResult, type RetentionResult, type RuntimeExit, type StartResult, type StopReason,
+  type StopResult, type ToMonitoringUtility,
 } from '../../src/services/monitoring/control';
+import type { RetentionPolicy } from '../../src/services/monitoring/retention';
 import { LIMITS } from '../../src/services/monitoring/types';
 import { MONITORING_EXIT_CHANNEL, MONITORING_PORT_CHANNEL, MONITORING_STATUS_CHANNEL } from '../channels';
 
@@ -62,13 +65,17 @@ export interface TimersLike {
 }
 
 export interface HostDeps {
-  /** The monitoring directory the utility opens its dataset under. */
+  /** The default monitoring root, where `settings.json` also lives. The dataset is here unless a location is saved. */
   directory: string;
   fork(): ChildLike;
   createChannel(): { port1: unknown; port2: unknown };
   timers: TimersLike;
-  /** The saved source's storage limit, or null when none is saved or readable. */
-  savedLimitBytes(): number | null;
+  /**
+   * What the saved settings say the utility opens with: the storage limit (null when no source is
+   * saved), the dataset folder (null for the default) and the retention policy. Unreadable settings
+   * answer `{ limitBytes: null, location: null, retention: DEFAULT_RETENTION }`.
+   */
+  settings(): { limitBytes: number | null; location: string | null; retention: RetentionPolicy };
 }
 
 // --- the core -----------------------------------------------------------------------------------------------
@@ -100,6 +107,11 @@ const failStart = (message: string): StartResult => ({ ok: false, message });
 const failStop = (message: string): StopResult => ({ ok: false, message, clean: false, snapshot: null });
 const NOTHING_TO_STOP: StopResult = { ok: true, clean: true, snapshot: null };
 const QUITTING = 'the app is quitting';
+/** The collector's own sentence (`collector.ts`), so a refusal here and one there read the same. */
+const BUSY = 'Stop monitoring first: its data and where it is kept change only while it is stopped.';
+const failInspect = (message: string): InspectResult => ({ ok: false, reason: 'failed', message });
+const failDiscard = (reason: 'busy' | 'failed', message: string): DiscardResult => ({ ok: false, reason, message });
+const failRetention = (reason: 'busy' | 'failed', message: string): RetentionResult => ({ ok: false, reason, message });
 
 /**
  * How long `open` may take: the ordinary request, plus a scan of the whole
@@ -145,15 +157,9 @@ export class MonitoringHostCore {
     if (typeof nonce !== 'number' || !Number.isSafeInteger(nonce) || nonce <= 0) {
       throw new Error('that is not a monitoring port request');
     }
-    const session = this.session ?? this.launch();
-    await session.spawn;
-    const limitBytes = this.deps.savedLimitBytes() ?? LIMITS.defaultStorageBytes;
-    const opened = await this.ask(
-      session, (id) => ({ type: 'open', id, root: this.deps.directory, limitBytes }),
-      readStartResult, failStart, openDeadlineMs(limitBytes),
-    );
+    const opened = await this.ensureOpen();
     if (!opened.ok) throw new Error(opened.message);
-    if (session.ended || this.session !== session) throw new Error('monitoring stopped while it was connecting');
+    const { session } = opened;
     if (contents.isDestroyed()) return;
     const { port1, port2 } = this.deps.createChannel();
     // The role needs no tag: `attach` is the one message that carries a port,
@@ -161,6 +167,30 @@ export class MonitoringHostCore {
     session.child.postMessage({ type: 'attach' }, [port2]);
     contents.postMessage(MONITORING_PORT_CHANNEL, { nonce }, [port1]);
     this.bind(contents);
+  }
+
+  /**
+   * Forks the utility if there is none, waits for its spawn and asks it to open the saved location
+   * with the saved limit and policy. Never throws: a spawn that fails or a dataset that will not open
+   * is a stated failure. Every caller that needs an open dataset goes through here.
+   */
+  private async ensureOpen(): Promise<{ ok: true; session: Session } | { ok: false; message: string }> {
+    const session = this.session ?? this.launch();
+    try {
+      await session.spawn;
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+    const { limitBytes, location, retention } = this.deps.settings();
+    const limit = limitBytes ?? LIMITS.defaultStorageBytes;
+    const opened = await this.ask(
+      session,
+      (id) => ({ type: 'open', id, root: location ?? this.deps.directory, limitBytes: limit, isDefaultLocation: location === null, retention }),
+      readStartResult, failStart, openDeadlineMs(limit),
+    );
+    if (!opened.ok) return opened;
+    if (session.ended || this.session !== session) return { ok: false, message: 'monitoring stopped while it was connecting' };
+    return { ok: true, session };
   }
 
   private bind(contents: ContentsLike): void {
@@ -221,6 +251,74 @@ export class MonitoringHostCore {
     );
     if (result.ok) session.running = false;
     return result;
+  }
+
+  // --- location, discard and retention (ADR 0061) -------------------------------------------------------------
+  // Settings actions, like a config save: none needs a bound window, and each is refused while collecting.
+
+  /** What a folder would be if it were adopted; writes nothing. Needs the process, not an open dataset. */
+  async inspect(root: string, isDefaultLocation: boolean): Promise<InspectResult> {
+    if (this.quitting) return failInspect(QUITTING);
+    const session = this.session ?? this.launch();
+    try {
+      await session.spawn;
+    } catch (e) {
+      return failInspect(e instanceof Error ? e.message : String(e));
+    }
+    const limit = this.deps.settings().limitBytes ?? LIMITS.defaultStorageBytes;
+    return this.ask(
+      session, (id) => ({ type: 'inspect', id, root, isDefaultLocation }),
+      readInspectResult, failInspect, openDeadlineMs(limit),
+    );
+  }
+
+  /**
+   * Moves the open dataset to `root`. With no utility there is nothing open to move: the next connect
+   * opens whatever the settings say.
+   */
+  async relocate(root: string, isDefaultLocation: boolean): Promise<StartResult> {
+    if (this.quitting) return failStart(QUITTING);
+    if (this.isRunning()) return failStart(BUSY);
+    const session = this.session;
+    if (session === null) return { ok: true };
+    try {
+      await session.spawn;
+    } catch (e) {
+      return failStart(e instanceof Error ? e.message : String(e));
+    }
+    const { limitBytes, retention } = this.deps.settings();
+    const limit = limitBytes ?? LIMITS.defaultStorageBytes;
+    return this.ask(
+      session, (id) => ({ type: 'open', id, root, limitBytes: limit, isDefaultLocation, retention }),
+      readStartResult, failStart, openDeadlineMs(limit),
+    );
+  }
+
+  /** Removes the whole dataset or its sealed prefix. The deadline is an open's: many segments outlast a request. */
+  async discard(scope: unknown): Promise<DiscardResult> {
+    if (this.quitting) return failDiscard('failed', QUITTING);
+    const parsed = readDiscardScope(scope);
+    if (parsed === null) return failDiscard('failed', 'that is not a discard');
+    if (this.isRunning()) return failDiscard('busy', BUSY);
+    const opened = await this.ensureOpen();
+    if (!opened.ok) return failDiscard('failed', opened.message);
+    const limit = this.deps.settings().limitBytes ?? LIMITS.defaultStorageBytes;
+    return this.ask(
+      opened.session, (id) => ({ type: 'discard', id, scope: parsed }),
+      readDiscardResult, (message) => failDiscard('failed', message), openDeadlineMs(limit),
+    );
+  }
+
+  /** Hands the utility a new policy. With no utility the settings carry it to the next open. */
+  async setRetention(policy: RetentionPolicy): Promise<RetentionResult> {
+    if (this.quitting) return failRetention('failed', QUITTING);
+    if (this.isRunning()) return failRetention('busy', BUSY);
+    const session = this.session;
+    if (session === null) return { ok: true };
+    return this.ask(
+      session, (id) => ({ type: 'retention', id, policy }),
+      readRetentionResult, (message) => failRetention('failed', message), LIMITS.requestMs,
+    );
   }
 
   /** Whether a listener is starting or listening in a utility that is still alive, a Start still unanswered included. */

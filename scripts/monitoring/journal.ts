@@ -1447,6 +1447,31 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.equal(rig.file.size(), closed, 'the unfinished tail is cut once the volume allows it');
   });
 
+  test(tag('a read-only open writes nothing, whatever it finds, and refuses appends and resets (ADR 0061)'), () => {
+    const refusingWrites = (real: BlockFile): BlockFile => ({
+      read: (o, b) => real.read(o, b), size: () => real.size(), close: () => real.close(), flush: () => real.flush(),
+      write: () => { throw new Error('a read-only open wrote'); },
+      truncate: () => { throw new Error('a read-only open truncated'); },
+    } as BlockFile);
+    const torn = newRig(kind);
+    openStore(torn.file).store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(10), 0);
+    torn.file.write(torn.file.size(), new Uint8Array(30));
+    const cases: [string, BlockFile][] = [
+      ['an empty file', newRig(kind).file],
+      ['a header only', (() => { const r = newRig(kind); openStore(r.file); return r.reopen(); })()],
+      ['another generation', (() => { const r = newRig(kind); openStore(r.file, { ...JOURNAL_INFO, generation: 'e'.repeat(32) }); return r.reopen(); })()],
+      ['a torn tail', torn.reopen()],
+    ];
+    for (const [what, file] of cases) {
+      const opened = RollupStore.open(refusingWrites(file), JOURNAL_INFO, { nowMs: () => T0, readOnly: true });
+      assert.equal(opened.status, 'failed', what);
+      assert.match(opened.reason ?? '', /read-only/, what);
+      assert.throws(() => opened.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(20), 0), /read-only/, what);
+      assert.throws(() => opened.store.reset(), /read-only/, what);
+      assert.throws(() => opened.store.readMinutes('a', 0, Number.MAX_SAFE_INTEGER, 1 << 20), /read-only/, `${what}: the journal answers, not a cache that may be another dataset's`);
+    }
+  });
+
   test(tag('appendMinutes refuses what the aggregator never sends: a watermark past the journal, too many minutes, too many bytes, a batch over the room (M1)'), () => {
     const rig = newRig(kind);
     const { store } = openStore(rig.file);
