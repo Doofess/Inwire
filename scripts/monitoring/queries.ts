@@ -1902,6 +1902,162 @@ test('rpc: the utility pushes appended entries and the client hands them to its 
   }
 });
 
+test('rpc: notifyReopened reaches onReopened, in order with the live pushes around it, and a closed port ignores it', async () => {
+  const rig = new Rig();
+  const p = portPair(rig.runtime);
+  try {
+    const seen: string[] = [];
+    p.client.onLive((entries) => { seen.push(`live:${entries.length}`); });
+    p.client.onReopened?.(() => { seen.push('reopened'); });
+    const a = rig.add(start(m(0)), dgram(m(1), [{}]));
+    p.server.pushLive(a);
+    p.server.notifyReopened();
+    p.server.pushLive(rig.add(stop(m(2))));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(seen, ['live:2', 'reopened', 'live:1']);
+  } finally {
+    p.close();
+  }
+  assert.doesNotThrow(() => p.server.notifyReopened(), 'a closed port has nobody to tell');
+});
+
+// --- a dataset reopened under a connected Worker (ADR 0061) ----------------------------------------------
+
+/** A runtime whose backing dataset can be swapped under the host, the way the utility's collector reopens one. */
+function switching(initial: HostRuntime) {
+  const state = { target: initial, live: [] as ((e: Evidence[]) => unknown)[], reopened: [] as (() => void)[] };
+  const rt = new Proxy({} as HostRuntime, {
+    get(_, p) {
+      if (p === 'onLive') return (h: (e: Evidence[]) => unknown) => { state.live.push(h); };
+      if (p === 'onReopened') return (h: () => void) => { state.reopened.push(h); };
+      const v = Reflect.get(state.target, p, state.target) as unknown;
+      return typeof v === 'function' ? v.bind(state.target) : v;
+    },
+  });
+  return {
+    rt,
+    switchTo(next: HostRuntime): void { state.target = next; },
+    reopened(): void { for (const h of state.reopened) h(); },
+    async push(entries: Evidence[]): Promise<void> { await Promise.all(state.live.map((h) => h(entries))); },
+  };
+}
+
+/** Datagrams of minutes `from` to `to`, two each, from `remote`. */
+function minutesOf(from: number, to: number, remote = EXPORTER, octets = 100): EvidenceInput[] {
+  const out: EvidenceInput[] = [];
+  for (let i = from; i <= to; i++) {
+    out.push(dgram(m(i, 1000), [{ src: '10.0.0.1', dst: '10.0.0.2', octets: octets + i, packets: 1 }], { sampling: 0x4064 }, remote));
+    out.push(dgram(m(i, 40_000), [{ src: '10.0.0.2', dst: '10.0.0.1', octets: 10 + octets, packets: 1 }], { sampling: 0x4064 }, remote));
+  }
+  return out;
+}
+
+async function rollupThrough(rig: Rig): Promise<number | null> {
+  return (await rig.runtime.watermark())?.throughEntryId ?? null;
+}
+
+test('reopen: a copy of the same generation that ends earlier is re-fed, so the rollups equal the raw scan', async () => {
+  const a = new Rig();
+  const b = new Rig();
+  const head = [start(m(0)), ...minutesOf(0, 2)];
+  a.add(...head);
+  b.add(...head);
+  await rollUp(b).then((h) => h.host.settled());
+  assert.equal(a.generation, b.generation, 'a copy of a dataset is the same generation');
+  const sw = switching(a.runtime);
+  const h = new HostRig(sw.rt);
+  await h.connect();
+  await sw.push(a.add(...minutesOf(3, 4)));
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'live');
+  assert.ok(a.through > b.through, 'the copy ends before where the host has fed to');
+
+  sw.switchTo(b.runtime);
+  sw.reopened();
+  await h.host.settled();
+  await sw.push(b.add(...minutesOf(3, 6, EXPORTER, 500), stop(m(7))));
+  await h.host.settled();
+
+  assert.equal(h.host.rebuildPhase, 'live');
+  assert.equal(await rollupThrough(b), b.through, 'every entry of the copy reached its sidecar');
+  const q = spec(m(0), m(7), 7);
+  const { fast, raw } = await askBoth(b, q);
+  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
+  const viaHost = await h.query('v', q);
+  assert.ok(viaHost.ok);
+  if (viaHost.ok) assert.deepEqual(withoutProvenance(viaHost.value), withoutProvenance(raw));
+});
+
+test('reopen: a whole discard (a new generation) goes live again, with the health and the sources started afresh', async () => {
+  const a = new Rig(0xa0);
+  const b = new Rig(0x33);
+  const OTHER_KEY = sourceKey(OTHER, 0, 0);
+  a.add(start(m(0)), ...minutesOf(0, 1));
+  b.add(start(m(0)), ...minutesOf(0, 1, OTHER));
+  assert.notEqual(a.generation, b.generation);
+  const sw = switching(a.runtime);
+  const h = new HostRig(sw.rt);
+  await h.connect();
+  await sw.push(a.add(...minutesOf(2, 3)));
+  await h.host.settled();
+  h.tick();
+  assert.ok(h.healthPosts().at(-1)!.health !== null, 'the first host counted live datagrams');
+  assert.deepEqual(h.healthPosts().at(-1)!.sources, [SRC]);
+
+  const before = h.posts.length;
+  sw.switchTo(b.runtime);
+  sw.reopened();
+  await h.host.settled();
+  h.tick();
+  assert.equal(h.host.rebuildPhase, 'live');
+  assert.ok(!h.posts.slice(before).some((p) => p.type === 'rebuild' && p.phase === 'failed'), 'it never failed');
+  const reset = h.healthPosts().at(-1)!;
+  assert.equal(reset.health, null, 'the old exporter is not described any more');
+  assert.deepEqual(reset.sources, [OTHER_KEY]);
+
+  await sw.push(b.add(...minutesOf(2, 3, OTHER, 700), stop(m(4))));
+  await h.host.settled();
+  h.tick();
+  assert.equal(h.healthPosts().at(-1)!.health?.exporterIPv4, OTHER, 'new entries are counted');
+  assert.equal(await rollupThrough(b), b.through);
+  const { fast, raw } = await askBoth(b, spec(m(0), m(4), 4, { sourceKey: OTHER_KEY }));
+  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
+});
+
+test('reopen: a read-only (rollup status failed) dataset reopened writable leaves failed', async () => {
+  const a = new Rig();
+  const b = new Rig();
+  const inputs = [start(m(0)), ...minutesOf(0, 2), stop(m(3))];
+  a.add(...inputs);
+  b.add(...inputs);
+  const sw = switching(wrap(a.runtime, { rollupStatus: async () => ({ status: 'failed' as const }) }));
+  const h = new HostRig(sw.rt);
+  await h.connect();
+  assert.equal(h.host.rebuildPhase, 'failed');
+
+  sw.switchTo(b.runtime);
+  sw.reopened();
+  await h.host.settled();
+  assert.equal(h.host.rebuildPhase, 'live');
+  assert.equal(await rollupThrough(b), b.through, 'the writable dataset is rolled up');
+});
+
+test('reopen: a notice with no connection, or after shutdown, is ignored', async () => {
+  const a = new Rig();
+  a.add(start(m(0)), ...minutesOf(0, 1), stop(m(2)));
+  const sw = switching(a.runtime);
+  const h = new HostRig(sw.rt);
+  sw.reopened();
+  await h.host.settled();
+  await h.connect();
+  const id = h.send({ type: 'shutdown' });
+  await h.waitFor(() => h.repliesTo(id)[0], 'the shutdown reply');
+  const posts = h.posts.length;
+  sw.reopened();
+  await h.host.settled();
+  assert.equal(h.posts.length, posts, 'nothing is posted after shutdown');
+});
+
 // --- after an expiry (ADR 0062) ---------------------------------------------------------------------------
 
 const SEG_LIMIT = 32 * 1024 * 1024; // 1 MiB segments

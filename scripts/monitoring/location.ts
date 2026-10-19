@@ -10,12 +10,14 @@
  */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Collector, type UdpSocket } from '../../electron/monitoring/collector';
 import { openMonitoringFolder, openMonitoringVolume } from '../../electron/monitoring/volume';
+import { ArchiveStore } from '../../src/services/monitoring/archive';
 import { DATASET_FILE, DATASET_SUBFOLDER, readDatasetFile } from '../../src/services/monitoring/datasetPlan';
+import { MonitoringJournal, type EvidenceInput } from '../../src/services/monitoring/journal';
 import { isSegmentFileName } from '../../src/services/monitoring/segments';
 import type { RpcPort } from '../../src/services/monitoring/runtimeRpc';
 import type { SourceConfig } from '../../src/services/monitoring/types';
@@ -60,7 +62,10 @@ class FakeSocket implements UdpSocket {
 
 class FakePort implements RpcPort {
   private h: ((m: unknown) => void) | null = null;
+  /** Every message the collector posted, in order. */
+  readonly posts: string[] = [];
   postMessage(m: unknown): void {
+    this.posts.push(String((m as { type?: string }).type));
     if ((m as { type?: string }).type === 'live') queueMicrotask(() => this.h?.({ type: 'live-ack' }));
   }
   onMessage(h: (m: unknown) => void): void { this.h = h; }
@@ -223,6 +228,100 @@ async function main(): Promise<void> {
     } finally { await disk.close(); }
   });
 
+  // ADR 0061: a dataset adopted read-only is served with nothing written. The classification has to come
+  // before any open that can write, and a last cut may only come from the archive of the journal's own generation.
+  await test('an archive of another generation adopts the folder read-only before anything is written to the journal', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const SESSION = 'a1'.repeat(16);
+    const t0 = 1_700_000_000_000;
+    {
+      const volume = openMonitoringVolume(root);
+      try {
+        // Generation A: a start and datagrams, no stop (a crash), then a torn tail on the newest segment.
+        const { journal } = MonitoringJournal.open(volume.segments, {
+          limitBytes: CFG.storageLimitBytes, randomBytes: (n) => new Uint8Array(n).fill(0xaa), nowMs: () => t0,
+        });
+        const inputs: EvidenceInput[] = [{
+          kind: 'boundary', sessionId: SESSION, receivedMs: t0, action: 'start', reason: '', droppedDatagrams: null,
+          source: { exporterIPv4: CFG.exporterIPv4, bindIPv4: CFG.bindIPv4, port: CFG.port },
+        }];
+        for (let i = 0; i < 5; i++) {
+          inputs.push({
+            kind: 'datagram', receivedMs: t0 + 1000 * (i + 1), localIPv4: CFG.bindIPv4, localPort: CFG.port,
+            remoteIPv4: CFG.exporterIPv4, remotePort: 50000, bytes: new Uint8Array(64).fill(i + 1),
+          });
+        }
+        assert.equal(journal.append(inputs).appended, 6);
+        journal.close();
+        // Generation B: an archive whose last cut is far above anything A holds.
+        const archive = ArchiveStore.open(volume.archive, { generation: new Uint8Array(16).fill(0xbb), createdMs: t0 });
+        archive.store.append([], { fromEntryId: 1, throughEntryId: 1000, fromMs: t0, throughMs: t0 + 1, fragments: 0, reason: 'age', checkpoint: new Uint8Array(0) });
+      } finally { volume.close(); }
+    }
+    const newest = segmentsIn(root).sort().at(-1)!;
+    // The last entry loses its end: a torn tail, which an ordinary open would cut off.
+    truncateSync(path.join(root, newest), statSync(path.join(root, newest)).size - 10);
+    // The cache is derived and may be absent: opening must not be what makes one.
+    unlinkSync(path.join(root, 'rollups.iwmr'));
+
+    const snapshotOf = (): Map<string, string> => new Map(readdirSync(root).sort().map((n) => [n, readFileSync(path.join(root, n)).toString('base64')]));
+    const before = snapshotOf();
+    const names = [...before.keys()];
+    assert.ok(segmentsIn(root).length >= 1 && !names.includes('rollups.iwmr') && !names.includes(DATASET_FILE));
+
+    const disk = new Disk();
+    try {
+      assert.deepEqual(await disk.collector.open(root, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      const status = disk.collector.status();
+      assert.equal(status.storage, 'refused-corrupt');
+      assert.match(status.storageError ?? '', /different dataset/);
+      const after = snapshotOf();
+      // Every way a look can write, named at once: a segment deleted or created is the worst of them.
+      const wrote: string[] = [];
+      for (const n of after.keys()) if (!before.has(n)) wrote.push(`${n} was created`);
+      for (const [n, bytes] of before) {
+        if (!after.has(n)) wrote.push(`${n} was deleted`);
+        else if (after.get(n) !== bytes) wrote.push(`${n} changed (${Buffer.from(bytes, 'base64').length} -> ${Buffer.from(after.get(n)!, 'base64').length} bytes)`);
+      }
+      assert.deepEqual(wrote, [], 'an adopted read-only dataset was written to');
+      disk.collector.attach(new FakePort());
+      const started = await disk.collector.start(CFG);
+      assert.equal(started.ok, false);
+      assert.match(!started.ok ? started.message : '', /read but not added to/);
+      const snapshot = await disk.collector.runtime.snapshot();
+      assert.equal(snapshot.throughEntryId, 5, 'the journal answers up to its last whole entry');
+      const page = await disk.collector.runtime.readPage(snapshot, 0, 100, 1 << 20);
+      assert.equal(page.entries.length, 5);
+      await settle();
+      assert.deepEqual([...snapshotOf()], [...before], 'still not a byte written after Start and a read');
+    } finally { await disk.close(); }
+  });
+
+  // The other half of the same rule: the archive of the journal's own generation does lend its last cut, so a
+  // journal whose early segments went (its first id is above 1) is adopted and written, not read-only.
+  await test('an archive of the journal\'s own generation lends its cut: a journal that starts after it adopts writable', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const t0 = 1_700_000_000_000;
+    const volume = openMonitoringVolume(root);
+    try {
+      const generation = new Uint8Array(16).fill(0xcc);
+      const { journal } = MonitoringJournal.open(volume.segments, {
+        limitBytes: CFG.storageLimitBytes, randomBytes: () => generation, nowMs: () => t0, lastCutThroughEntryId: 1000,
+      });
+      assert.equal(journal.snapshot().firstEntryId, 1001, 'the journal begins after the cut');
+      journal.close();
+      const archive = ArchiveStore.open(volume.archive, { generation, createdMs: t0 });
+      archive.store.append([], { fromEntryId: 1, throughEntryId: 1000, fromMs: t0, throughMs: t0 + 1, fragments: 0, reason: 'age', checkpoint: new Uint8Array(0) });
+    } finally { volume.close(); }
+    const disk = new Disk();
+    try {
+      assert.deepEqual(await disk.collector.inspect(root, false), { ok: true, kind: 'adopt', truncatedTailBytes: null, problem: null, exporterIPv4: null });
+      assert.deepEqual(await disk.collector.open(root, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      assert.equal(disk.collector.status().storage, 'open');
+      assert.equal(disk.collector.status().snapshot?.firstEntryId, 1001);
+    } finally { await disk.close(); }
+  });
+
   await test('relocating while stopped moves nothing; relocating while collecting is refused', async (dir) => {
     const a = path.join(dir, 'a', DATASET_SUBFOLDER);
     const b = path.join(dir, 'b', DATASET_SUBFOLDER);
@@ -240,6 +339,147 @@ async function main(): Promise<void> {
       assert.deepEqual(await disk.collector.open(a, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
       assert.ok((disk.collector.status().snapshot?.throughEntryId ?? 0) > 0, 'and choosing it again adopts it');
     } finally { await disk.close(); }
+  });
+
+  await test('a relocation and a whole discard each tell the Worker once, before the new dataset\'s live pushes; a first open tells nothing', async (dir) => {
+    const a = path.join(dir, 'a', DATASET_SUBFOLDER);
+    const b = path.join(dir, 'b', DATASET_SUBFOLDER);
+    const disk = new Disk();
+    try {
+      // The first open has no port to tell, and attaching one afterwards is not a reopen.
+      assert.deepEqual(await disk.collector.open(a, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      const port = new FakePort();
+      disk.collector.attach(port);
+      await settle();
+      assert.equal(port.posts.filter((t) => t === 'reopened').length, 0, 'a first open posts no reopened');
+
+      const recordMore = async (): Promise<void> => {
+        assert.deepEqual(await disk.collector.start(CFG), { ok: true });
+        const socket = disk.sockets[disk.sockets.length - 1];
+        for (let i = 0; i < 3; i++) { disk.t += 1000; socket.emit(new Uint8Array(64).fill(i + 1)); }
+        await settle();
+        assert.equal((await disk.collector.stop('user')).ok, true);
+      };
+      const reopenedThenLive = (why: string): void => {
+        assert.equal(port.posts.filter((t) => t === 'reopened').length, 1, `${why}: exactly one reopened`);
+        const live = port.posts.indexOf('live');
+        assert.ok(live > port.posts.indexOf('reopened'), `${why}: the notice precedes the live push (${port.posts.join(',')})`);
+      };
+
+      await recordMore();
+      port.posts.length = 0;
+      assert.deepEqual(await disk.collector.open(b, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      await recordMore();
+      reopenedThenLive('a relocation');
+
+      port.posts.length = 0;
+      const discarded = await disk.collector.discard({ scope: 'all' });
+      assert.equal(discarded.ok, true, JSON.stringify(discarded));
+      await recordMore();
+      reopenedThenLive('a whole discard');
+    } finally { await disk.close(); }
+  });
+
+  // The dialog states a cut, so the cut must be the one that runs: both ask the same selection of segments.
+  const BIG = 60_000;
+  const recordSegments = async (disk: Disk, root: string, n: number): Promise<{ t0: number }> => {
+    assert.deepEqual(await disk.collector.open(root, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+    disk.collector.attach(new FakePort());
+    assert.deepEqual(await disk.collector.start(CFG), { ok: true });
+    const t0 = disk.t;
+    const socket = disk.sockets[disk.sockets.length - 1];
+    for (let i = 0; i < n; i++) {
+      disk.t += 1000;
+      socket.emit(new Uint8Array(BIG).fill((i % 250) + 1));
+      if (i % 10 === 9) await settle();
+    }
+    await settle();
+    assert.equal((await disk.collector.stop('user')).ok, true);
+    return { t0 };
+  };
+  const stampOf = (root: string): string => readdirSync(root).sort().map((n) => `${n}:${statSync(path.join(root, n)).size}:${statSync(path.join(root, n)).mtimeMs}`).join('|');
+  const firstMs = async (disk: Disk): Promise<number> => {
+    const snapshot = await disk.collector.runtime.snapshot();
+    return (await disk.collector.runtime.readPage(snapshot, snapshot.firstEntryId - 1, 1, 1 << 20)).entries[0].receivedMs;
+  };
+
+  await test('a preview before a date states the cut the discard then makes, and writes nothing', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const disk = new Disk();
+    try {
+      const { t0 } = await recordSegments(disk, root, 60);
+      const total = segmentsIn(root).length;
+      assert.ok(total >= 3, `the run rolled segments (${total})`);
+      const first = await firstMs(disk);
+      const beforeMs = t0 + 40_000;
+      const stamp = stampOf(root);
+      const scope = { scope: 'before' as const, beforeMs };
+      const preview = await disk.collector.discardPreview(scope);
+      assert.equal(preview.ok, true, JSON.stringify(preview));
+      if (!preview.ok) return;
+      assert.equal(stampOf(root), stamp, 'a preview writes nothing: names, sizes and times are unchanged');
+      assert.equal(preview.scope, 'before');
+      assert.ok(preview.segments >= 1 && preview.segments < total, `some but not all go (${preview.segments} of ${total})`);
+      assert.equal(preview.fromMs, first, 'it starts at the first entry of the first segment that goes');
+      assert.ok(preview.cutMs !== null && preview.cutMs < beforeMs, 'the cut is before the date asked for');
+      const discarded = await disk.collector.discard(scope);
+      assert.deepEqual(discarded, { ok: true, removedSegments: preview.segments });
+      assert.equal(segmentsIn(root).length, total - preview.segments);
+      assert.ok((await firstMs(disk)) > preview.cutMs!, 'what remains starts after the cut');
+      assert.deepEqual(await disk.collector.discardPreview(scope), { ok: true, scope: 'before', segments: 0, fromMs: null, throughMs: null, cutMs: null }, 'nothing is left to go');
+    } finally { await disk.close(); }
+  });
+
+  await test('a whole preview reports the segments and the recorded range, and a whole discard removes that many', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const disk = new Disk();
+    try {
+      await recordSegments(disk, root, 30);
+      const count = segmentsIn(root).length;
+      const first = await firstMs(disk);
+      const stamp = stampOf(root);
+      const preview = await disk.collector.discardPreview({ scope: 'all' });
+      assert.equal(stampOf(root), stamp, 'a preview writes nothing');
+      assert.deepEqual(preview, { ok: true, scope: 'all', segments: count, fromMs: first, throughMs: disk.t, cutMs: null });
+      const discarded = await disk.collector.discard({ scope: 'all' });
+      assert.deepEqual(discarded, { ok: true, removedSegments: count });
+    } finally { await disk.close(); }
+  });
+
+  await test('a preview is busy while collecting, and fails for a dataset a discard would refuse', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const disk = new Disk();
+    try {
+      await disk.record(root, { keepRunning: true });
+      for (const scope of [{ scope: 'all' as const }, { scope: 'before' as const, beforeMs: disk.t + 1 }]) {
+        const preview = await disk.collector.discardPreview(scope);
+        assert.equal(preview.ok, false);
+        assert.equal(!preview.ok && preview.reason, 'busy');
+      }
+      assert.equal((await disk.collector.stop('user')).ok, true);
+    } finally { await disk.close(); }
+    // Adopted read-only: a before-discard refuses, so its preview does too, and neither writes.
+    const other = path.join(dir, 'ro', DATASET_SUBFOLDER);
+    const first = new Disk();
+    await first.record(other);
+    await first.close();
+    writeFileSync(path.join(other, DATASET_FILE), JSON.stringify({ ...datasetFile(other), generation: 'f'.repeat(32) }));
+    const stamp = stampOf(other);
+    const ro = new Disk();
+    try {
+      assert.deepEqual(await ro.collector.open(other, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      const preview = await ro.collector.discardPreview({ scope: 'before', beforeMs: ro.t + 1 });
+      assert.equal(preview.ok, false);
+      assert.equal(!preview.ok && preview.reason, 'failed');
+      assert.equal(stampOf(other), stamp);
+    } finally { await ro.close(); }
+    // Never opened: nothing to preview.
+    const unopened = new Disk();
+    try {
+      const preview = await unopened.collector.discardPreview({ scope: 'before', beforeMs: 1 });
+      assert.equal(preview.ok, false);
+      assert.equal(!preview.ok && preview.reason, 'failed');
+    } finally { await unopened.close(); }
   });
 
   await test('inspect writes nothing: a missing folder is new and is not created; a foreign file refuses by name', async (dir) => {

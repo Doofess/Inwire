@@ -41,10 +41,10 @@ import type { BlockFile } from '../../src/services/capture/blockFile';
 import type { SegmentDirectory } from '../../src/services/monitoring/segments';
 import { ArchiveStore, resumeExpiry, runExpiry, type ArchiveStatus } from '../../src/services/monitoring/archive';
 import { readSourceConfig } from '../../src/services/monitoring/config';
-import { isIntakeStopReason, type DiscardResult, type DiscardScope, type InspectResult, type IntakeStatus, type IntakeStopReason, type RetentionResult, type StartResult, type StopReason, type StopResult } from '../../src/services/monitoring/control';
+import { isIntakeStopReason, type DiscardPreviewResult, type DiscardResult, type DiscardScope, type InspectResult, type IntakeStatus, type IntakeStopReason, type RetentionResult, type StartResult, type StopReason, type StopResult } from '../../src/services/monitoring/control';
 import {
   DATASET_FILE, classifyAdoption, encodeDatasetFile, newDatasetFile, planMonitoringDiscard, readDatasetFile,
-  type DatasetFile,
+  type AdoptionResult, type DatasetFile,
 } from '../../src/services/monitoring/datasetPlan';
 import { MonitoringJournal, recoverJournal, type EvidenceInput, type JournalState } from '../../src/services/monitoring/journal';
 import { FILE_HEADER_BYTES, generationFromHex, generationToHex } from '../../src/services/monitoring/journalCodec';
@@ -53,7 +53,7 @@ import { LocalArchiveSource, LocalRuntime } from '../../src/services/monitoring/
 import { recordedSource } from '../../src/services/monitoring/queries';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan, type RetentionPolicy } from '../../src/services/monitoring/retention';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
-import { isSegmentFileName } from '../../src/services/monitoring/segments';
+import { isSegmentFileName, type SegmentInfo } from '../../src/services/monitoring/segments';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { serveRuntime, type RpcPort, type RuntimeServer } from '../../src/services/monitoring/runtimeRpc';
 import type { ListenerState } from '../../src/services/monitoring/sourceHealth';
@@ -168,6 +168,56 @@ function unwritable(file: BlockFile): BlockFile {
   };
 }
 
+/** The sidecar a read-only adoption is given: `RollupStore` opened `readOnly` only asks its size, and a write here is a bug. */
+const NO_SIDECAR: BlockFile = {
+  read: () => 0,
+  write: () => { throw new Error('a read-only dataset has no sidecar to write'); },
+  truncate: () => { throw new Error('a read-only dataset has no sidecar to write'); },
+  flush: () => {},
+  size: () => 0,
+  close: () => {},
+};
+
+/** What a folder is, and what an open may take from it, read without writing a byte. */
+interface FolderLook {
+  adoption: AdoptionResult;
+  /** `dataset.json` where it parses, else null. */
+  file: DatasetFile | null;
+  /** The newest cut of an archive that belongs to this journal; 0 for any other, which is no evidence about it. */
+  lastCut: number;
+  /** The archive file as read, with the generation its header names; null where there is none. */
+  archive: { status: ArchiveStatus; generation: string | null } | null;
+}
+
+/**
+ * ADR 0061's adoption table over a folder, the one decision `inspect` and `openNow` share. It runs before
+ * anything that can write is opened: `MonitoringJournal.open` unlinks, truncates and appends, and an archive
+ * store truncates, so a dataset that is to be served read-only must be known to be one first.
+ *
+ * The journal is scanned once with no cut to learn its generation, and only an archive of that generation
+ * lends its last cut: a cut from another dataset would move where the journal is thought to begin.
+ */
+function lookAtFolder(folder: CollectorFolder, isDefaultLocation: boolean): FolderLook {
+  const early = classifyAdoption(folder.names, null, null, { isDefaultLocation });
+  if (early.kind === 'refuse') return { adoption: early, file: null, lastCut: 0, archive: null };
+  const hasSegments = folder.names.some(isSegmentFileName);
+  const bare = hasSegments ? recoverJournal(folder.segments) : null;
+  let archive: FolderLook['archive'] = null;
+  let lastCut = 0;
+  if (folder.archive !== null && folder.archive.size() > 0) {
+    const { store, status } = ArchiveStore.open(unwritable(folder.archive), { generation: new Uint8Array(16), createdMs: 0 });
+    const gen = store.generation();
+    archive = { status, generation: gen === null ? null : generationToHex(gen) };
+    if (archive.generation !== null && archive.generation === bare?.generation && status !== 'corrupt' && status !== 'failed') {
+      lastCut = store.lastCut()?.throughEntryId ?? 0;
+    }
+  }
+  const recovery = lastCut === 0 ? bare : recoverJournal(folder.segments, { lastCutThroughEntryId: lastCut });
+  const file = readDatasetText(folder.readText(DATASET_FILE));
+  const adoption = classifyAdoption(folder.names, recovery, archive, { isDefaultLocation, datasetGeneration: file?.generation ?? null });
+  return { adoption, file, lastCut, archive };
+}
+
 /** `dataset.json` as a file to trust, or null where it is missing or does not parse: losing it loses a note and nothing else. */
 function readDatasetText(text: string | null): DatasetFile | null {
   if (text === null) return null;
@@ -192,9 +242,14 @@ function recordedExporter(journal: MonitoringJournal): string | null {
 function firstRecordedMs(d: { journal: MonitoringJournal; archive: ArchiveStore | null }): number | null {
   const cut = d.archive?.cuts()[0];
   if (cut !== undefined) return cut.fromMs;
-  const snapshot = d.journal.snapshot();
+  return firstJournalMs(d.journal);
+}
+
+/** When the oldest entry the journal still holds was received; null for a journal with none. */
+function firstJournalMs(journal: MonitoringJournal): number | null {
+  const snapshot = journal.snapshot();
   if (snapshot.throughEntryId < snapshot.firstEntryId) return null;
-  return d.journal.readPage(snapshot, snapshot.firstEntryId - 1, 1, LIMITS.pageBytes).entries[0]?.receivedMs ?? null;
+  return journal.readPage(snapshot, snapshot.firstEntryId - 1, 1, LIMITS.pageBytes).entries[0]?.receivedMs ?? null;
 }
 
 /** A caller's size, clamped to `cap`. NaN and a non-positive number are refused, not clamped: `Math.min(NaN, cap)` is NaN, and a NaN bound compares false against every total, so it would read without a limit at all. */
@@ -208,7 +263,10 @@ function clampSize(n: number, cap: number): number {
 interface Dataset {
   root: string;
   limitBytes: number;
-  volume: CollectorVolume;
+  /** Null for a read-only adoption, which opens no volume: that would create files. */
+  volume: CollectorVolume | null;
+  /** The read handles a read-only adoption holds instead of a volume; null otherwise. */
+  folder: CollectorFolder | null;
   journal: MonitoringJournal;
   rollups: RollupStore;
   /** Null only where its generation is another dataset's: then it is neither served nor written. */
@@ -385,23 +443,7 @@ export class Collector {
       }
       const folder = this.env.openFolder(root);
       try {
-        const opts = { isDefaultLocation };
-        const early = classifyAdoption(folder.names, null, null, opts);
-        if (early.kind === 'refuse') return { ok: false, reason: early.reason, message: early.message, ...(early.names === undefined ? {} : { names: early.names }) };
-        let archive: { status: ArchiveStatus; generation: string | null } | null = null;
-        let lastCut = 0;
-        if (folder.archive !== null && folder.archive.size() > 0) {
-          const { store, status } = ArchiveStore.open(unwritable(folder.archive), { generation: new Uint8Array(16), createdMs: 0 });
-          const gen = store.generation();
-          archive = { status, generation: gen === null ? null : generationToHex(gen) };
-          lastCut = store.lastCut()?.throughEntryId ?? 0;
-        }
-        const recovery = folder.names.some(isSegmentFileName) ? recoverJournal(folder.segments, { lastCutThroughEntryId: lastCut }) : null;
-        const text = folder.readText(DATASET_FILE);
-        const file = text === null ? null : readDatasetFile(text);
-        const result = classifyAdoption(folder.names, recovery, archive, {
-          isDefaultLocation, datasetGeneration: file?.ok === true ? file.file.generation : null,
-        });
+        const result = lookAtFolder(folder, isDefaultLocation).adoption;
         switch (result.kind) {
           case 'refuse':
             return { ok: false, reason: result.reason, message: result.message, ...(result.names === undefined ? {} : { names: result.names }) };
@@ -425,6 +467,15 @@ export class Collector {
   discard(scope: DiscardScope): Promise<DiscardResult> {
     return this.run(() => this.discardOp(scope))
       .catch((e): DiscardResult => ({ ok: false, reason: 'failed', message: `monitoring could not discard its data: ${message(e)}` }));
+  }
+
+  /**
+   * What `discard(scope)` would do right now, from the same selection, without writing a byte: the figures
+   * main's confirmation states (ADR 0061). On the chain, so it never reads a dataset a discard is changing.
+   */
+  discardPreview(scope: DiscardScope): Promise<DiscardPreviewResult> {
+    return this.run(() => this.discardPreviewOp(scope))
+      .catch((e): DiscardPreviewResult => ({ ok: false, reason: 'failed', message: `monitoring could not preview its discard: ${message(e)}` }));
   }
 
   /** A new retention policy, applied at once. Only while stopped, like the location and a discard. */
@@ -552,16 +603,52 @@ export class Collector {
    */
   private openNow(root: string, limitBytes: number, isDefaultLocation: boolean): StartResult {
     this.location = { root, limitBytes, isDefaultLocation };
-    let names: string[];
+    // Classified before anything that can write is opened: `MonitoringJournal.open` repairs, and a dataset
+    // that is to be served read-only must come out of this untouched.
+    let look: FolderLook;
     try {
-      const folder = this.env.openFolder(root);
-      try { names = folder.names; } finally { folder.close(); }
+      look = this.lookAt(root, isDefaultLocation);
+      const marker = look.adoption.kind === 'refuse' ? null : look.file?.discarding ?? null;
+      if (marker !== null) {
+        // A discard a crash interrupted is the one write a look leads to, and the user asked for it.
+        const volume = this.env.openVolume(root);
+        volume.close();
+        this.finishDiscard(volume, marker, isDefaultLocation);
+        look = this.lookAt(root, isDefaultLocation);
+      }
     } catch (e) {
       return this.openFailed('failed', `the monitoring folder could not be read: ${message(e)}`);
     }
-    const early = classifyAdoption(names, null, null, { isDefaultLocation });
-    if (early.kind === 'refuse') return this.openFailed('failed', early.message);
+    const adoption = look.adoption;
+    if (adoption.kind === 'refuse') return this.openFailed(adoption.reason === 'refused-version' ? 'refused-version' : 'failed', adoption.message);
 
+    const built = adoption.kind === 'adopt-read-only'
+      ? this.openReadOnly(root, limitBytes, look, adoption.problem)
+      : this.openWritable(root, limitBytes, look);
+    if ('ok' in built) return built;
+    this.dataset = built;
+    this.storageProblem = null;
+    // A Worker already attached is serving the dataset that was closed: tell it before the feed re-attaches,
+    // so on the one port the notice is ahead of every live push the new dataset makes. Writable and read-only
+    // adoptions both come through here; no port (a first open) means nothing to tell.
+    this.server?.notifyReopened();
+    this.attachFeedIfReady();
+    this.armExpiry(0);
+    this.publish();
+    this.wake();
+    return { ok: true };
+  }
+
+  private lookAt(root: string, isDefaultLocation: boolean): FolderLook {
+    const folder = this.env.openFolder(root);
+    try { return lookAtFolder(folder, isDefaultLocation); } finally { folder.close(); }
+  }
+
+  /**
+   * A new dataset or one that adopts: the volume is opened (it creates the sidecar and the archive), and
+   * the journal may repair what a crash left. Only reached once `lookAtFolder` has said it may.
+   */
+  private openWritable(root: string, limitBytes: number, look: FolderLook): Dataset | StartResult {
     let volume: CollectorVolume;
     try {
       volume = this.env.openVolume(root);
@@ -570,14 +657,6 @@ export class Collector {
     }
     const holder: { rollups: RollupStore | null; archive: ArchiveStore | null } = { rollups: null, archive: null };
     try {
-      let file = readDatasetText(volume.readText(DATASET_FILE));
-      if (file !== null && file.discarding !== null) {
-        volume.close();
-        this.finishDiscard(volume, file.discarding, isDefaultLocation);
-        volume = this.env.openVolume(root);
-        file = readDatasetText(volume.readText(DATASET_FILE));
-      }
-
       // An archive with a header is read before the journal, which needs its last cut to finish an
       // interrupted drop. One without is written after it, with the journal's generation.
       let archiveStatus: ArchiveStatus = 'ok';
@@ -592,7 +671,7 @@ export class Collector {
         otherBytes: () => (holder.rollups?.size() ?? 0) + (holder.archive?.bytes() ?? 0),
         randomBytes: this.env.randomBytes,
         nowMs: this.env.now,
-        lastCutThroughEntryId: holder.archive?.lastCut()?.throughEntryId ?? 0,
+        lastCutThroughEntryId: look.lastCut,
       });
       const snapshot = journal.snapshot();
       // A file with no readable header has no generation to serve a query
@@ -608,54 +687,90 @@ export class Collector {
       }
       const archiveGeneration = holder.archive.generation();
       const archiveHex = archiveGeneration === null ? null : generationToHex(archiveGeneration);
-      // A journal this open created is a new dataset; the dataset.json beside it is the note a discard left.
-      const created = recovery.status === 'empty';
-      const adoption = classifyAdoption(volume.names(), recovery, { status: archiveStatus, generation: archiveHex }, {
-        isDefaultLocation, datasetGeneration: created ? null : file?.generation ?? null,
-      });
-      const readOnly = adoption.kind === 'adopt-read-only' && journal.state === 'open';
       // Another dataset's archive is neither served nor written.
       const archive = archiveHex === snapshot.generation && archiveStatus !== 'corrupt' && archiveStatus !== 'failed' ? holder.archive : null;
 
       const opened = RollupStore.open(volume.rollups, {
         generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
-      }, { nowMs: this.env.now, readOnly });
+      }, { nowMs: this.env.now, readOnly: false });
       holder.rollups = opened.store;
-      const writable = !readOnly && journal.state === 'open';
+      const writable = journal.state === 'open';
       // An expiry a crash interrupted is finished before the cache answers anything.
       if (writable && archive !== null && resumeExpiry(journal, opened.store, archive, this.env.now()) === 'failed') {
         this.env.log?.('monitoring: an interrupted expiry could not be finished; the next check tries again');
       }
+      const file = look.file;
       if (writable && (file === null || file.generation !== snapshot.generation)) {
         const base = file ?? newDatasetFile(snapshot.generation, this.env.now());
         volume.writeText(DATASET_FILE, encodeDatasetFile({ ...base, generation: snapshot.generation, discarding: null }));
       }
-      // The last run's stop survives the relaunch in the journal's own boundary. A run that ended
-      // without one leaves `interrupted` or a bare `start`, and its reason has no copy, so none is invented.
-      if (this.stopReason === null && this.session === null) {
-        const last = journal.lastBoundary();
-        if (last !== null && last.action === 'stop' && isIntakeStopReason(last.reason)) this.stopReason = last.reason;
-      }
-      const local = new LocalRuntime(journal, opened.store, {
-        status: opened.status, ...(opened.reason === undefined ? {} : { reason: opened.reason }),
-      }, archive === null ? undefined : new LocalArchiveSource(archive));
-      this.dataset = {
-        root, limitBytes, volume, journal, rollups: opened.store, archive, local,
-        problem: adoption.kind === 'adopt-read-only' && readOnly ? adoption.problem
-          : journal.state === 'open' ? null : recovery.problem ?? null,
-        readOnly,
-        recordedSource: recordedExporter(journal),
-      };
+      return this.assemble({
+        root, limitBytes, volume, folder: null, journal, rollups: opened, archive,
+        problem: journal.state === 'open' ? null : recovery.problem ?? null, readOnly: false,
+      });
     } catch (e) {
       try { volume.close(); } catch { /* the first failure is the one to report */ }
       return this.openFailed('failed', `the monitoring dataset could not be opened: ${message(e)}`);
     }
-    this.storageProblem = null;
-    this.attachFeedIfReady();
-    this.armExpiry(0);
-    this.publish();
-    this.wake();
-    return { ok: true };
+  }
+
+  /**
+   * A dataset whose files disagree or whose journal is damaged (ADR 0061): served from read handles, with
+   * nothing written. There is no volume to open, so no sidecar or archive is created; the journal does not
+   * repair a torn tail, finish a drop or close a session, and the archive store sees an `unwritable` file.
+   * The sidecar is a cache and is simply not served: queries answer from the journal.
+   */
+  private openReadOnly(root: string, limitBytes: number, look: FolderLook, problem: string): Dataset | StartResult {
+    let folder: CollectorFolder;
+    try {
+      folder = this.env.openFolder(root);
+    } catch (e) {
+      return this.openFailed('failed', `the monitoring folder could not be read: ${message(e)}`);
+    }
+    try {
+      const { journal, recovery } = MonitoringJournal.open(folder.segments, {
+        limitBytes, randomBytes: this.env.randomBytes, nowMs: this.env.now, lastCutThroughEntryId: look.lastCut, readOnly: true,
+      });
+      const snapshot = journal.snapshot();
+      if (!GENERATION.test(snapshot.generation)) {
+        folder.close();
+        return this.openFailed(journal.state, recovery.problem ?? 'the monitoring journal cannot be read');
+      }
+      // Another dataset's archive, or one that cannot be read, is not served.
+      const served = look.archive !== null && look.archive.generation === snapshot.generation
+        && look.archive.status !== 'corrupt' && look.archive.status !== 'failed' && folder.archive !== null;
+      const archive = served
+        ? ArchiveStore.open(unwritable(folder.archive!), { generation: new Uint8Array(16), createdMs: this.env.now() }).store
+        : null;
+      const rollups = RollupStore.open(NO_SIDECAR, {
+        generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
+      }, { nowMs: this.env.now, readOnly: true });
+      return this.assemble({ root, limitBytes, volume: null, folder, journal, rollups, archive, problem, readOnly: true });
+    } catch (e) {
+      try { folder.close(); } catch { /* the first failure is the one to report */ }
+      return this.openFailed('failed', `the monitoring dataset could not be opened: ${message(e)}`);
+    }
+  }
+
+  /** What both opens end in: the last stop's reason, read back, and the runtime the Worker queries. */
+  private assemble(p: {
+    root: string; limitBytes: number; volume: CollectorVolume | null; folder: CollectorFolder | null;
+    journal: MonitoringJournal; rollups: ReturnType<typeof RollupStore.open>; archive: ArchiveStore | null;
+    problem: string | null; readOnly: boolean;
+  }): Dataset {
+    // The last run's stop survives the relaunch in the journal's own boundary. A run that ended
+    // without one leaves `interrupted` or a bare `start`, and its reason has no copy, so none is invented.
+    if (this.stopReason === null && this.session === null) {
+      const last = p.journal.lastBoundary();
+      if (last !== null && last.action === 'stop' && isIntakeStopReason(last.reason)) this.stopReason = last.reason;
+    }
+    const local = new LocalRuntime(p.journal, p.rollups.store, {
+      status: p.rollups.status, ...(p.rollups.reason === undefined ? {} : { reason: p.rollups.reason }),
+    }, p.archive === null ? undefined : new LocalArchiveSource(p.archive));
+    return {
+      root: p.root, limitBytes: p.limitBytes, volume: p.volume, folder: p.folder, journal: p.journal, rollups: p.rollups.store,
+      archive: p.archive, local, problem: p.problem, readOnly: p.readOnly, recordedSource: recordedExporter(p.journal),
+    };
   }
 
   private openFailed(state: JournalState, why: string): StartResult {
@@ -674,7 +789,8 @@ export class Collector {
     // The feed counted this journal's entry ids; the next one's start again.
     this.feed.detach();
     try { dataset.journal.close(); } catch { /* the volume closes regardless */ }
-    try { dataset.volume.close(); } catch { /* nothing more to do with a file that will not close */ }
+    try { dataset.volume?.close(); } catch { /* nothing more to do with a file that will not close */ }
+    try { dataset.folder?.close(); } catch { /* nor with a handle that will not close */ }
   }
 
   private relocateOp(root: string, limitBytes: number, isDefaultLocation: boolean): StartResult {
@@ -698,11 +814,8 @@ export class Collector {
    * minutes stay in the archive, and the journal records an `expired` boundary.
    */
   private discardBefore(beforeMs: number): DiscardResult {
-    const d = this.dataset;
-    if (d === null) return { ok: false, reason: 'failed', message: 'the monitoring dataset is not open' };
-    if (d.readOnly || d.archive === null) {
-      return { ok: false, reason: 'failed', message: d.problem ?? 'the monitoring dataset cannot be written' };
-    }
+    const refused = this.cannotExpire();
+    if (refused !== null) return { ok: false, reason: 'failed', message: refused };
     let removed = 0;
     for (;;) {
       const step = this.expireStep(beforeMs);
@@ -717,6 +830,54 @@ export class Collector {
     this.feed.notify();
     this.publish();
     return { ok: true, removedSegments: removed };
+  }
+
+  /** Why a discard before a date cannot run (no dataset, or one served read-only), or null where it can. */
+  private cannotExpire(): string | null {
+    const d = this.dataset;
+    if (d === null) return 'the monitoring dataset is not open';
+    if (d.readOnly || d.archive === null) return d.problem ?? 'the monitoring dataset cannot be written';
+    return null;
+  }
+
+  private discardPreviewOp(scope: DiscardScope): DiscardPreviewResult {
+    if (this.disposed) return { ok: false, reason: 'failed', message: 'monitoring has shut down' };
+    if (this.session !== null) return { ok: false, reason: 'busy', message: BUSY };
+    if (scope.scope === 'all') return this.previewAll();
+    const refused = this.cannotExpire();
+    if (refused !== null) return { ok: false, reason: 'failed', message: refused };
+    const d = this.dataset;
+    // The selection `discardBefore` loops over one segment at a time, taken whole.
+    const due = d === null ? null : this.dueSegments(d, scope.beforeMs);
+    if (d === null || due === null) return { ok: true, scope: 'before', segments: 0, fromMs: null, throughMs: null, cutMs: null };
+    return {
+      ok: true, scope: 'before', segments: due.plan.segments.length,
+      fromMs: firstJournalMs(d.journal), throughMs: null, cutMs: due.plan.throughMs,
+    };
+  }
+
+  /** The whole discard's figures: what `planMonitoringDiscard` would remove from the folder as it is, read without opening a writer. */
+  private previewAll(): DiscardPreviewResult {
+    const at = this.location;
+    if (at === null) return { ok: false, reason: 'failed', message: 'no monitoring folder has been opened' };
+    const d = this.dataset;
+    let names: string[];
+    if (d?.volume != null) names = d.volume.names();
+    else if (d?.folder != null) names = d.folder.names;
+    else {
+      const folder = this.env.openFolder(at.root);
+      try { names = [...folder.names]; } finally { folder.close(); }
+    }
+    const segments = planMonitoringDiscard(names, { isDefaultLocation: at.isDefaultLocation }).remove.filter(isSegmentFileName).length;
+    let fromMs: number | null = null;
+    let throughMs: number | null = null;
+    if (d !== null) {
+      try {
+        fromMs = firstRecordedMs(d);
+        throughMs = d.journal.segments().at(-1)?.lastReceivedMs ?? null;
+      } catch { /* a journal that cannot be read gives no range; the segments are still counted */ }
+    }
+    return { ok: true, scope: 'all', segments, fromMs, throughMs, cutMs: null };
   }
 
   /**
@@ -737,7 +898,8 @@ export class Collector {
     const marker = { generation, fromMs, throughMs: Math.max(fromMs, lastMs) };
     volume.writeText(DATASET_FILE, encodeDatasetFile({ ...(file ?? newDatasetFile(generation, fromMs)), generation, discarding: marker }));
     if (d !== null) this.closeDataset('closed');
-    else volume.close();
+    // A volume opened for this discard (none was open, or the dataset was read-only) is closed here.
+    if (d?.volume == null) volume.close();
     const removed = this.finishDiscard(volume, marker, at.isDefaultLocation);
     const reopened = this.openNow(at.root, at.limitBytes, at.isDefaultLocation);
     // The data is gone either way; a reply that only said "failed" would read as nothing discarded.
@@ -773,13 +935,10 @@ export class Collector {
    */
   private expireStep(beforeMs?: number): 'done' | 'none' | 'failed' {
     const d = this.dataset;
-    if (d === null || d.readOnly || d.archive === null) return 'none';
-    if (d.journal.state !== 'open' && d.journal.state !== 'storage-limit') return 'none';
-    const segments = d.journal.segments();
-    let used = d.rollups.size() + d.archive.bytes();
-    for (const s of segments) used += s.bytes;
-    const plan = planExpiry(segments, this.retention, this.env.now(), used, d.limitBytes, beforeMs);
-    if (plan === null) return 'none';
+    if (d === null) return 'none';
+    const due = this.dueSegments(d, beforeMs);
+    if (due === null || d.archive === null) return 'none';
+    const { plan, segments } = due;
     const first = segments[0];
     const one: ExpiryPlan = { segments: [first.name], throughEntryId: first.lastEntryId, throughMs: first.lastReceivedMs, reason: plan.reason };
     if (runExpiry(d.journal, d.rollups, d.archive, one, { nowMs: this.env.now(), deflate }) === 'failed') return 'failed';
@@ -788,6 +947,21 @@ export class Collector {
     if (d.journal.state === 'open') d.problem = null;
     d.recordedSource = recordedExporter(d.journal) ?? d.recordedSource;
     return 'done';
+  }
+
+  /**
+   * Which sealed segments are due, the one decision `expireStep` and a discard's preview share, so the cut a
+   * dialog states is the cut that runs. Null where nothing is due or the dataset cannot expire anything
+   * (read-only, or a journal that is neither open nor at its limit). `segments` is the journal's, oldest first.
+   */
+  private dueSegments(d: Dataset, beforeMs?: number): { plan: ExpiryPlan; segments: SegmentInfo[] } | null {
+    if (d.readOnly || d.archive === null) return null;
+    if (d.journal.state !== 'open' && d.journal.state !== 'storage-limit') return null;
+    const segments = d.journal.segments();
+    let used = d.rollups.size() + d.archive.bytes();
+    for (const s of segments) used += s.bytes;
+    const plan = planExpiry(segments, this.retention, this.env.now(), used, d.limitBytes, beforeMs);
+    return plan === null ? null : { plan, segments };
   }
 
   private armExpiry(ms: number = EXPIRY_CHECK_MS): void {

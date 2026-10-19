@@ -77,12 +77,23 @@ export interface MonitoringRuntime extends EvidenceReader, RollupReader, RollupW
  */
 export interface LiveSource {
   onLive(handler: (entries: Evidence[]) => unknown): void;
+  /**
+   * Called when the runtime's dataset was closed and another opened under the same port (a relocation,
+   * a whole discard), before any live push of the new one. What the Worker learned at connect (the
+   * generation, the rollup watermark, the admitted engines) is then about a dataset that is gone, and it
+   * must adopt the new one again; a generation comparison is not enough, because a relocation to a copy
+   * of the same dataset keeps the generation. Optional: an in-process runtime never reopens.
+   */
+  onReopened?(handler: () => void): void;
 }
 
 export type HostRuntime = MonitoringRuntime & LiveSource;
 
 /** The wire shape of a live push (ruling 23); the utility sends it, `runtimeRpc.ts` handles it and answers `{ type: 'live-ack' }`. */
 export interface LiveMessage { type: 'live'; entries: Evidence[] }
+
+/** The wire shape of the reopen notice: the utility sends it after a successful reopen, before the new dataset's live feed attaches. */
+export interface ReopenedMessage { type: 'reopened' }
 
 /**
  * A stored minute that fails its checksum or is shorter than the index says.

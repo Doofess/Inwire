@@ -29,7 +29,7 @@
  *   runtime is busy rather than queueing them without bound.
  */
 import { StaleGenerationError } from './journal';
-import { CorruptRollupError, RuntimeUnavailableError, type HostRuntime, type LiveMessage } from './runtime';
+import { CorruptRollupError, RuntimeUnavailableError, type HostRuntime, type LiveMessage, type ReopenedMessage } from './runtime';
 import type { Evidence } from './types';
 
 export interface RpcPort {
@@ -97,6 +97,12 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 export interface RuntimeServer {
   /** Sends entries the journal has just appended to the client, in order. */
   pushLive(entries: Evidence[]): void;
+  /**
+   * Tells the client the runtime now serves another dataset (it was relocated or discarded and reopened).
+   * Posted on the same port as `pushLive`, so it arrives before any live push the new dataset sends.
+   * A closed port is ignored.
+   */
+  notifyReopened(): void;
 }
 
 export interface ServeOptions {
@@ -108,7 +114,7 @@ export interface ServeOptions {
 
 export const DEFAULT_MAX_IN_FLIGHT = 16;
 
-export function serveRuntime(port: RpcPort, runtime: Omit<HostRuntime, 'onLive'>, options: ServeOptions = {}): RuntimeServer {
+export function serveRuntime(port: RpcPort, runtime: Omit<HostRuntime, 'onLive' | 'onReopened'>, options: ServeOptions = {}): RuntimeServer {
   const maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
   let inFlight = 0;
   port.onMessage((message) => {
@@ -148,6 +154,10 @@ export function serveRuntime(port: RpcPort, runtime: Omit<HostRuntime, 'onLive'>
       const m: LiveMessage = { type: 'live', entries };
       port.postMessage(m);
     },
+    notifyReopened() {
+      const m: ReopenedMessage = { type: 'reopened' };
+      try { port.postMessage(m); } catch { /* the client is gone */ }
+    },
   };
 }
 
@@ -164,6 +174,7 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
   let closed = false;
   const pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void; cancel(): void }>();
   const live: ((entries: Evidence[]) => unknown)[] = [];
+  const reopened: (() => void)[] = [];
 
   const failAll = (): void => {
     closed = true;
@@ -184,6 +195,11 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
       void Promise.allSettled(settled).then(() => {
         try { port.postMessage({ type: 'live-ack' }); } catch { /* the port closed under it */ }
       });
+      return;
+    }
+    if (message.type === 'reopened') {
+      // Synchronous and in port order, so a handler has run before the next live push is looked at.
+      for (const h of reopened) { try { h(); } catch { /* a handler that throws has still been told */ } }
       return;
     }
     if (message.type !== 'res' || typeof message.id !== 'number') return;
@@ -229,5 +245,6 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
     rollupStatus: () => call('rollupStatus'),
     resetRollups: () => call('resetRollups'),
     onLive: (handler) => { live.push(handler); },
+    onReopened: (handler) => { reopened.push(handler); },
   };
 }

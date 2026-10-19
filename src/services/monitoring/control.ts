@@ -117,15 +117,16 @@ export type ToMonitoringUtility =
   | { type: 'open'; id: number; root: string; limitBytes: number; isDefaultLocation: boolean; retention: RetentionPolicy }
   | { type: 'inspect'; id: number; root: string; isDefaultLocation: boolean }
   | { type: 'discard'; id: number; scope: DiscardScope }
+  | { type: 'discard-preview'; id: number; scope: DiscardScope }
   | { type: 'retention'; id: number; policy: RetentionPolicy }
   | { type: 'attach' }
   | { type: 'start'; id: number; config: SourceConfig }
   | { type: 'stop'; id: number; reason: StopReason }
   | { type: 'dispose'; id: number };
 
-/** Utility -> main. A `reply` answers the request with its `id`: `open` and `start` with a `StartResult`, `stop` and `dispose` with a `StopResult`, `inspect` with an `InspectResult`, `discard` with a `DiscardResult`, `retention` with a `RetentionResult`. */
+/** Utility -> main. A `reply` answers the request with its `id`: `open` and `start` with a `StartResult`, `stop` and `dispose` with a `StopResult`, `inspect` with an `InspectResult`, `discard` with a `DiscardResult`, `discard-preview` with a `DiscardPreviewResult`, `retention` with a `RetentionResult`. */
 export type FromMonitoringUtility =
-  | { type: 'reply'; id: number; result: StartResult | StopResult | InspectResult | DiscardResult | RetentionResult }
+  | { type: 'reply'; id: number; result: StartResult | StopResult | InspectResult | DiscardResult | DiscardPreviewResult | RetentionResult }
   | { type: 'status'; status: IntakeStatus };
 
 // --- location and discard (ADR 0061) -----------------------------------------------------------
@@ -142,8 +143,24 @@ export type InspectResult =
   | { ok: true; kind: 'new' | 'adopt' | 'adopt-read-only'; truncatedTailBytes: number | null; problem: string | null; exporterIPv4: string | null }
   | { ok: false; reason: 'refused-version' | 'foreign-files' | 'failed'; message: string; names?: string[] };
 
+/**
+ * `cancelled` is main's own: the dialog it opened was declined, and nothing was sent to the utility. The
+ * utility itself only ever answers `busy` or `failed`.
+ */
 export type DiscardResult =
   | { ok: true; removedSegments: number }
+  | { ok: false; reason: 'busy' | 'failed' | 'cancelled'; message: string };
+
+/**
+ * What a discard would do, read from the same selection the discard runs and writing nothing: the figures
+ * main's confirmation dialog states. `segments` is how many journal segments go. For `before`, `fromMs` is
+ * the first removed segment's first received time and `cutMs` the last removed segment's last: the cut
+ * that actually happens, which is at or before the date asked for because evidence goes in whole segments.
+ * For `all`, `fromMs` and `throughMs` are the dataset's recorded range, and `cutMs` is null. A time the
+ * dataset cannot give is null.
+ */
+export type DiscardPreviewResult =
+  | { ok: true; scope: 'all' | 'before'; segments: number; fromMs: number | null; throughMs: number | null; cutMs: number | null }
   | { ok: false; reason: 'busy' | 'failed'; message: string };
 
 /** A retention policy is changed only while stopped, like the location and a discard. */
@@ -220,7 +237,21 @@ export function readDiscardScope(v: unknown): DiscardScope | null {
 
 export function readDiscardResult(v: unknown): DiscardResult {
   if (isObject(v) && v.ok === true && isCount(v.removedSegments)) return { ok: true, removedSegments: v.removedSegments };
-  if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
+  if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed' || v.reason === 'cancelled') && isText(v.message)) {
+    return { ok: false, reason: v.reason, message: v.message };
+  }
+  return { ok: false, reason: 'failed', message: UNREADABLE };
+}
+
+const timeOrNull = (v: unknown): v is number | null => v === null || isCount(v);
+
+export function readDiscardPreviewResult(v: unknown): DiscardPreviewResult {
+  if (isObject(v) && v.ok === true) {
+    const { scope, segments, fromMs, throughMs, cutMs } = v;
+    if ((scope === 'all' || scope === 'before') && isCount(segments) && timeOrNull(fromMs) && timeOrNull(throughMs) && timeOrNull(cutMs)) {
+      return { ok: true, scope, segments, fromMs, throughMs, cutMs };
+    }
+  } else if (isObject(v) && v.ok === false && (v.reason === 'busy' || v.reason === 'failed') && isText(v.message)) {
     return { ok: false, reason: v.reason, message: v.message };
   }
   return { ok: false, reason: 'failed', message: UNREADABLE };
@@ -348,6 +379,10 @@ export function readToUtility(v: unknown): ToMonitoringUtility | null {
     case 'discard': {
       const scope = readDiscardScope(v.scope);
       return scope === null ? null : { type: 'discard', id, scope };
+    }
+    case 'discard-preview': {
+      const scope = readDiscardScope(v.scope);
+      return scope === null ? null : { type: 'discard-preview', id, scope };
     }
     case 'retention': {
       const policy = validateRetentionPolicy(v.policy);

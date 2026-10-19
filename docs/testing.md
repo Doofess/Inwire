@@ -147,7 +147,8 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | A rollup answer equals the raw-journal answer | `scripts/monitoring/rollup.ts` |
 | Monitoring starts only on an explicit Start; its history is independent of captures; storage limit stops with a stated reason | `scripts/electron/monitoring-drive.ts` (Start: scenarios 1-2; independence: 11; storage limit: 10; by hand, in `NOT_TESTS`) |
 | A monitoring stop reason survives quit and suspend | `scripts/monitoring/runtime-host.ts` |
-| A monitoring discard deletes only the dataset's own files, never while collecting; a read-only adoption writes nothing | `scripts/monitoring/location.ts`, `scripts/monitoring/dataset.ts` |
+| A monitoring discard deletes only the dataset's own files, never while collecting, and only after main's confirmation of the previewed cut; a read-only adoption writes nothing | `scripts/monitoring/location.ts`, `scripts/monitoring/dataset.ts`, `scripts/monitoring/runtime-host.ts` |
+| A reopened dataset reaches the live Worker as a notice ahead of its live pushes | `scripts/monitoring/queries.ts`, `scripts/monitoring/location.ts` |
 | The monitoring dataset never overlaps the captures folder | `scripts/monitoring/location-choose.ts`, `scripts/monitoring/dataset.ts` |
 
 Scripts that build their own captures exist because the fixtures hold no ICMP

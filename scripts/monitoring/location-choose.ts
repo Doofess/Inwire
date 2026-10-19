@@ -80,7 +80,7 @@ test('an existing subfolder (a junction) is followed to its real path', () => {
   assert.deepEqual(r, { ok: true, root: '/elsewhere/real', isDefaultLocation: false });
 });
 
-test('the captures folder, a folder inside it and a parent of it are refused', () => {
+test('the captures folder and a folder inside it are refused; a parent is refused only when it is the dataset', () => {
   for (const picked of [CAPTURES, `${CAPTURES}/ring`, '/data/Inwire', '/data']) {
     const r = resolveDatasetFolder(picked, fakeDeps({ [picked]: ['x'], [CAPTURES]: [] }));
     // `/data` and `/data/Inwire` resolve to a subfolder of themselves: that subfolder is a sibling

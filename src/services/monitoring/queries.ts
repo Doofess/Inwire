@@ -185,6 +185,14 @@ export class BoundaryCache {
   private chain: Promise<void> = Promise.resolve();
 
   /**
+   * Forgets everything, behind any extension in flight. The cache is keyed on the generation, and a
+   * dataset reopened at another folder as a copy keeps it while its entries past the copy point differ.
+   */
+  clear(): void {
+    this.chain = this.chain.then(() => { this.generation = null; this.list = []; this.through = 0; });
+  }
+
+  /**
    * Every boundary of the snapshot's generation up to its end that is still on disk. `firstEntryId` is
    * the journal's oldest retained entry: boundaries before it went with their segments, and a read from
    * before it is an `ExpiredRangeError`, so the cache starts from its predecessor and forgets the rest.

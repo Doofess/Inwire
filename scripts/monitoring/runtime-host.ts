@@ -91,7 +91,9 @@ class FakeChild implements ChildLike {
   /** What each request type answers; `'none'` stays silent. */
   replies: Record<string, Reply> = {
     open: { ok: true }, inspect: { ok: true, kind: 'new', truncatedTailBytes: null, problem: null, exporterIPv4: null },
-    discard: { ok: true, removedSegments: 2 }, retention: { ok: true }, start: { ok: true }, stop: { ok: true, clean: true, snapshot: null }, dispose: { ok: true, clean: true, snapshot: null },
+    discard: { ok: true, removedSegments: 2 },
+    'discard-preview': { ok: true, scope: 'before', segments: 2, fromMs: 1_000, throughMs: null, cutMs: 5_000 },
+    retention: { ok: true }, start: { ok: true }, stop: { ok: true, clean: true, snapshot: null }, dispose: { ok: true, clean: true, snapshot: null },
   };
   private messageListeners: ((m: unknown) => void)[] = [];
   private spawnListeners: (() => void)[] = [];
@@ -236,7 +238,7 @@ test('host: discard, setRetention and relocate while running are busy and send n
   const r = hostRig();
   const child = await listening(r);
   const before = child.sent.length;
-  const discard = await r.core.discard({ scope: 'all' });
+  const discard = await r.core.discard({ scope: 'all' }, () => { throw new Error('asked while collecting'); });
   assert.equal(discard.ok, false);
   assert.equal((discard as { reason: string }).reason, 'busy');
   assert.match((discard as { message: string }).message, BUSY_TEXT);
@@ -248,21 +250,105 @@ test('host: discard, setRetention and relocate while running are busy and send n
   assert.equal(child.sent.length, before);
 });
 
-test('host: discard with no session launches, opens, then asks discard with an open-sized deadline', async () => {
+const YES = (): Promise<boolean> => Promise.resolve(true);
+
+test('host: discard with no session launches, opens, previews, asks, then discards with an open-sized deadline', async () => {
   const r = hostRig(64 * 1024 * 1024);
-  const done = r.core.discard({ scope: 'before', beforeMs: 1_000 });
+  const done = r.core.discard({ scope: 'before', beforeMs: 1_000 }, YES);
   await flush();
   assert.equal(r.children.length, 1);
   assert.deepEqual(r.children[0].sent, []);
   r.children[0].emitSpawn();
   assert.deepEqual(await done, { ok: true, removedSegments: 2 });
-  assert.deepEqual(r.children[0].types(), ['open', 'discard']);
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview', 'discard']);
+  assert.deepEqual(r.children[0].of('discard-preview')[0].message.scope, { scope: 'before', beforeMs: 1_000 });
   assert.deepEqual(r.children[0].of('discard')[0].message.scope, { scope: 'before', beforeMs: 1_000 });
+});
+
+test('host: a declined confirmation answers cancelled and sends no discard', async () => {
+  const r = hostRig();
+  const asked: unknown[] = [];
+  const done = r.core.discard({ scope: 'before', beforeMs: 9_000 }, (preview) => { asked.push(preview); return Promise.resolve(false); });
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: false, reason: 'cancelled', message: '' });
+  assert.deepEqual(asked, [{ ok: true, scope: 'before', segments: 2, fromMs: 1_000, throughMs: null, cutMs: 5_000 }], 'the dialog is shown the utility\'s own preview');
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+});
+
+test('host: the confirmation comes after the preview and before the discard', async () => {
+  const r = hostRig();
+  let seenWhenAsked: string[] = [];
+  const done = r.core.discard({ scope: 'all' }, () => { seenWhenAsked = r.children[0].types(); return Promise.resolve(true); });
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: true, removedSegments: 2 });
+  assert.deepEqual(seenWhenAsked, ['open', 'discard-preview']);
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview', 'discard']);
+});
+
+test('host: a discard waits for the answer; it is not sent while the dialog is still open', async () => {
+  const r = hostRig();
+  let answer!: (v: boolean) => void;
+  const done = r.core.discard({ scope: 'all' }, () => new Promise<boolean>((resolve) => { answer = resolve; }));
+  r.children[0].emitSpawn();
+  await flush();
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+  answer(true);
+  assert.deepEqual(await done, { ok: true, removedSegments: 2 });
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview', 'discard']);
+});
+
+test('host: a preview that says nothing would go neither asks nor discards', async () => {
+  const r = hostRig();
+  const done = r.core.discard({ scope: 'before', beforeMs: 1 }, () => { throw new Error('asked about nothing'); });
+  r.children[0].replies['discard-preview'] = { ok: true, scope: 'before', segments: 0, fromMs: null, throughMs: null, cutMs: null };
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: true, removedSegments: 0 });
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+});
+
+test('host: no confirmation means no discard: refused, nothing forked or sent', async () => {
+  const r = hostRig();
+  const result = await r.core.discard({ scope: 'all' });
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, 'failed');
+  assert.match((result as { message: string }).message, /needs a confirmation/);
+  assert.equal(r.children.length, 0);
+});
+
+test('host: a preview the utility refuses is the discard\'s answer, and nothing is asked', async () => {
+  const r = hostRig();
+  const done = r.core.discard({ scope: 'before', beforeMs: 1 }, () => { throw new Error('asked about a refusal'); });
+  r.children[0].replies['discard-preview'] = { ok: false, reason: 'failed', message: 'the monitoring dataset cannot be written' };
+  r.children[0].emitSpawn();
+  assert.deepEqual(await done, { ok: false, reason: 'failed', message: 'the monitoring dataset cannot be written' });
+  assert.deepEqual(r.children[0].types(), ['open', 'discard-preview']);
+  // An answer this build cannot read is a failed preview as well.
+  const u = hostRig();
+  const unreadable = u.core.discard({ scope: 'all' }, () => { throw new Error('asked'); });
+  u.children[0].replies['discard-preview'] = { ok: 'maybe' };
+  u.children[0].emitSpawn();
+  assert.equal((await unreadable).ok, false);
+  assert.deepEqual(u.children[0].types(), ['open', 'discard-preview']);
+});
+
+test('host: monitoring that starts while the dialog is open turns the accepted discard into busy', async () => {
+  const r = hostRig();
+  const contents = new FakeContents(1);
+  const child = await connect(r, contents);
+  const done = r.core.discard({ scope: 'all' }, async () => {
+    assert.equal((await r.core.start(contents, CONFIG)).ok, true);
+    child.emitMessage({ type: 'status', status: status() });
+    return true;
+  });
+  const result = await done;
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, 'busy');
+  assert.equal(child.of('discard').length, 0);
 });
 
 test('host: a discard the utility never answers fails at an open\'s deadline, not the ordinary one', async () => {
   const r = hostRig(64 * 1024 * 1024);
-  const done = r.core.discard({ scope: 'all' });
+  const done = r.core.discard({ scope: 'all' }, YES);
   r.children[0].replies.discard = 'none';
   r.children[0].emitSpawn();
   await flush();

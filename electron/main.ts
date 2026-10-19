@@ -54,9 +54,10 @@ import { UpdateCenter } from './updateCenter/host';
 import { SpeedTestHost } from './speedTest/host';
 import { MonitoringHost } from './monitoring/host';
 import { planQuitDrain, runQuitDrain } from './monitoring/quitDrain';
+import { discardConfirmation } from './monitoring/discardConfirm';
 import { resolveDatasetFolder } from './monitoring/location';
 import { readMonitoringSettings, saveMonitoringSettings } from './monitoring/settings';
-import type { LocationReply, RetentionSaveReply } from '../src/services/monitoring/control';
+import { readDiscardScope, type LocationReply, type RetentionSaveReply } from '../src/services/monitoring/control';
 import { validateRetentionPolicy } from '../src/services/monitoring/retention';
 import { monitoringRoot } from './monitoring/volume';
 import { captureDirectory, CaptureStoreHost } from './store/host';
@@ -385,7 +386,23 @@ async function start(): Promise<void> {
     }
     return { ok: true, displayPath: root, isDefaultLocation, inspect: inspected };
   });
-  ipcMain.handle(MONITORING_DISCARD_CHANNEL, (_event, scope: unknown) => monitoring.discard(scope));
+  // The page names a scope and nothing else. What goes, what stays and the cut are stated by this dialog,
+  // from the utility's own preview, and a declined dialog sends no discard at all (ADR 0061).
+  ipcMain.handle(MONITORING_DISCARD_CHANNEL, (event, scope: unknown) => {
+    const requested = readDiscardScope(scope);
+    return monitoring.discard(scope, async (preview) => {
+      const where = previousLocation();
+      const options = discardConfirmation(preview, {
+        folder: where.root,
+        isDefaultLocation: where.isDefaultLocation,
+        requestedBeforeMs: requested?.scope === 'before' ? requested.beforeMs : null,
+        formatTime: (ms) => new Date(ms).toLocaleString(),
+      });
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const { response } = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+      return response === 1;
+    });
+  });
   ipcMain.handle(MONITORING_RETENTION_SAVE_CHANNEL, async (_event, policy: unknown): Promise<RetentionSaveReply> => {
     if (monitoring.isRunning()) {
       return { ok: false, reason: 'busy', message: 'Stop monitoring first: its data and where it is kept change only while it is stopped.' };

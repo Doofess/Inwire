@@ -30,9 +30,9 @@
  */
 import { readSourceConfig } from '../../src/services/monitoring/config';
 import {
-  readDiscardResult, readDiscardScope, readFromUtility, readInspectResult, readRetentionResult, readStartResult,
-  readStopReason, readStopResult,
-  type DiscardResult, type InspectResult, type RetentionResult, type RuntimeExit, type StartResult, type StopReason,
+  readDiscardPreviewResult, readDiscardResult, readDiscardScope, readFromUtility, readInspectResult, readRetentionResult,
+  readStartResult, readStopReason, readStopResult,
+  type DiscardPreviewResult, type DiscardResult, type InspectResult, type RetentionResult, type RuntimeExit, type StartResult, type StopReason,
   type StopResult, type ToMonitoringUtility,
 } from '../../src/services/monitoring/control';
 import type { RetentionPolicy } from '../../src/services/monitoring/retention';
@@ -110,7 +110,10 @@ const QUITTING = 'the app is quitting';
 /** The collector's own sentence (`collector.ts`), so a refusal here and one there read the same. */
 const BUSY = 'Stop monitoring first: its data and where it is kept change only while it is stopped.';
 const failInspect = (message: string): InspectResult => ({ ok: false, reason: 'failed', message });
-const failDiscard = (reason: 'busy' | 'failed', message: string): DiscardResult => ({ ok: false, reason, message });
+const failDiscard = (reason: 'busy' | 'failed' | 'cancelled', message: string): DiscardResult => ({ ok: false, reason, message });
+
+/** Main's dialog, as the core sees it: shown the preview, true to go ahead. */
+export type DiscardConfirm = (preview: Extract<DiscardPreviewResult, { ok: true }>) => Promise<boolean>;
 const failRetention = (reason: 'busy' | 'failed', message: string): RetentionResult => ({ ok: false, reason, message });
 
 /**
@@ -294,15 +297,34 @@ export class MonitoringHostCore {
     );
   }
 
-  /** Removes the whole dataset or its sealed prefix. The deadline is an open's: many segments outlast a request. */
-  async discard(scope: unknown): Promise<DiscardResult> {
+  /**
+   * Removes the whole dataset or its sealed prefix, and only after `confirm` says yes (ADR 0061: the dialog
+   * is main's, and it states what the utility says the discard would do). The order is the rule: the utility
+   * previews, `confirm` is shown that preview, and the `discard` message is sent only once it is accepted.
+   * A preview that says nothing would go answers at once with nothing asked and nothing removed. With no
+   * `confirm` there is no discard at all, so a caller that forgot the dialog cannot delete anything. The
+   * discard's deadline is an open's: many segments outlast a request.
+   */
+  async discard(scope: unknown, confirm?: DiscardConfirm): Promise<DiscardResult> {
     if (this.quitting) return failDiscard('failed', QUITTING);
     const parsed = readDiscardScope(scope);
     if (parsed === null) return failDiscard('failed', 'that is not a discard');
     if (this.isRunning()) return failDiscard('busy', BUSY);
+    if (confirm === undefined) return failDiscard('failed', 'a discard needs a confirmation');
     const opened = await this.ensureOpen();
     if (!opened.ok) return failDiscard('failed', opened.message);
     const limit = this.deps.settings().limitBytes ?? LIMITS.defaultStorageBytes;
+    const preview = await this.ask(
+      opened.session, (id) => ({ type: 'discard-preview', id, scope: parsed }),
+      readDiscardPreviewResult, (message): DiscardPreviewResult => ({ ok: false, reason: 'failed', message }), openDeadlineMs(limit),
+    );
+    if (!preview.ok) return failDiscard(preview.reason, preview.message);
+    // Nothing before the cut: there is nothing to ask about and nothing to remove.
+    if (preview.scope === 'before' && preview.segments === 0) return { ok: true, removedSegments: 0 };
+    if (!(await confirm(preview))) return failDiscard('cancelled', '');
+    // The dialog took as long as the user took: whatever it was waiting on may have changed.
+    if (this.quitting) return failDiscard('failed', QUITTING);
+    if (this.isRunning()) return failDiscard('busy', BUSY);
     return this.ask(
       opened.session, (id) => ({ type: 'discard', id, scope: parsed }),
       readDiscardResult, (message) => failDiscard('failed', message), openDeadlineMs(limit),
