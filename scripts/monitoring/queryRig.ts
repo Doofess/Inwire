@@ -155,6 +155,7 @@ export class Rig {
     this.runtime = new LocalRuntime(
       this.journal, r.store, r.reason === undefined ? { status: r.status } : { status: r.status, reason: r.reason },
       new LocalArchiveSource(this.archive),
+      { generation: snap.generation, createdMs: NOW, replaced: null },
     );
   }
 

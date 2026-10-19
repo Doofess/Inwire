@@ -150,6 +150,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | A monitoring discard deletes only the dataset's own files, never while collecting, and only after main's confirmation of the previewed cut; a read-only adoption writes nothing | `scripts/monitoring/location.ts`, `scripts/monitoring/dataset.ts`, `scripts/monitoring/runtime-host.ts` |
 | A reopened dataset reaches the live Worker as a notice ahead of its live pushes | `scripts/monitoring/queries.ts`, `scripts/monitoring/location.ts` |
 | The monitoring dataset never overlaps the captures folder | `scripts/monitoring/location-choose.ts`, `scripts/monitoring/dataset.ts` |
+| A `.iwmon` bundle carries the range's journal entries byte-for-byte and contiguous by id, the archived minutes of its expired parts, and a manifest that matches them; a change mid-export fails it and aborts the sink | `scripts/monitoring/bundle.ts` |
 
 Scripts that build their own captures exist because the fixtures hold no ICMP
 error frame, no real HTTP and no readable certificate (both negotiate TLS 1.3):

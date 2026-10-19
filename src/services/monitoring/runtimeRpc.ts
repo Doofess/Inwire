@@ -28,9 +28,13 @@
  *   Worker that fires reads faster than the journal answers them is told the
  *   runtime is busy rather than queueing them without bound.
  */
-import { StaleGenerationError } from './journal';
-import { CorruptRollupError, RuntimeUnavailableError, type HostRuntime, type LiveMessage, type ReopenedMessage } from './runtime';
-import type { Evidence } from './types';
+import { ExpiredRangeError, StaleGenerationError } from './journal';
+import {
+  CorruptRollupError, NO_ARCHIVE, RuntimeUnavailableError,
+  type ArchiveSource, type DatasetMeta, type HostRuntime, type LiveMessage, type ReopenedMessage,
+} from './runtime';
+import type { ArchiveCut } from './archive';
+import type { BundleSlice, Evidence, RawEntry, RawPage } from './types';
 
 export interface RpcPort {
   postMessage(message: unknown): void;
@@ -61,27 +65,32 @@ export function domPort(port: PortLike): RpcPort {
   };
 }
 
+type ArchiveMethod = 'archive.read' | 'archive.coveredThroughMs' | 'archive.lastCut' | 'archive.sources' | 'archive.cuts' | 'archive.summary';
+
 type Method =
-  | 'snapshot' | 'readPage' | 'readEvidence' | 'locate' | 'readBoundaries' | 'watermark' | 'readMinutes'
-  | 'sources' | 'appendMinutes' | 'rollupStatus' | 'resetRollups';
+  | 'snapshot' | 'readPage' | 'readRawPage' | 'bundleSlice' | 'readEvidence' | 'locate' | 'readBoundaries' | 'watermark' | 'readMinutes'
+  | 'sources' | 'appendMinutes' | 'rollupStatus' | 'resetRollups' | 'dataset' | ArchiveMethod;
 
 const METHODS: ReadonlySet<string> = new Set<Method>([
-  'snapshot', 'readPage', 'readEvidence', 'locate', 'readBoundaries', 'watermark', 'readMinutes',
-  'sources', 'appendMinutes', 'rollupStatus', 'resetRollups',
+  'snapshot', 'readPage', 'readRawPage', 'bundleSlice', 'readEvidence', 'locate', 'readBoundaries', 'watermark', 'readMinutes',
+  'sources', 'appendMinutes', 'rollupStatus', 'resetRollups', 'dataset',
+  'archive.read', 'archive.coveredThroughMs', 'archive.lastCut', 'archive.sources', 'archive.cuts', 'archive.summary',
 ]);
 
 interface Request { type: 'req'; id: number; method: string; args: unknown[] }
-interface ErrorBody { name: string; message: string; wanted?: string; actual?: string }
+interface ErrorBody { name: string; message: string; wanted?: string; actual?: string; firstRetained?: number }
 type Reply = { type: 'res'; id: number; ok: true; value: unknown } | { type: 'res'; id: number; ok: false; error: ErrorBody };
 
 function errorBody(e: unknown): ErrorBody {
   if (e instanceof StaleGenerationError) return { name: e.name, message: e.message, wanted: e.wanted, actual: e.actual };
+  if (e instanceof ExpiredRangeError) return { name: e.name, message: e.message, firstRetained: e.firstRetainedEntryId };
   if (e instanceof Error) return { name: e.name, message: e.message };
   return { name: 'Error', message: String(e) };
 }
 
 function errorFrom(body: ErrorBody): Error {
   if (body.name === 'StaleGenerationError') return new StaleGenerationError(body.wanted ?? '', body.actual ?? '');
+  if (body.name === 'ExpiredRangeError' && typeof body.firstRetained === 'number') return new ExpiredRangeError(body.firstRetained);
   if (body.name === 'RangeError') return new RangeError(body.message);
   if (body.name === 'CorruptRollupError') return new CorruptRollupError(body.message);
   if (body.name === 'RuntimeUnavailableError') return new RuntimeUnavailableError(body.message);
@@ -91,6 +100,50 @@ function errorFrom(body: ErrorBody): Error {
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+
+// --- what a reply must look like -----------------------------------------------------------------------------
+// A reply is data from another process: the calls that carry a body or a count are checked on arrival, and one
+// that is not what its method returns is `RuntimeUnavailableError`, never a value the bundle would write.
+
+function isRawEntry(v: unknown): v is RawEntry {
+  return isObject(v) && isCount(v.entryId) && (v.kind === 1 || v.kind === 2) && isCount(v.policy) && isCount(v.receivedMs) && v.body instanceof Uint8Array;
+}
+
+function isRawPage(v: unknown): v is RawPage {
+  return isObject(v) && Array.isArray(v.entries) && v.entries.every(isRawEntry) && isCount(v.nextAfterId) && typeof v.done === 'boolean';
+}
+
+const isSource = (v: unknown): boolean =>
+  isObject(v) && typeof v.exporterIPv4 === 'string' && typeof v.bindIPv4 === 'string' && isCount(v.port);
+
+function isBundleSlice(v: unknown): v is BundleSlice {
+  if (!isObject(v) || !isCount(v.firstEntryId) || !isCount(v.throughEntryId) || !Array.isArray(v.policies) || !v.policies.every(isCount)) return false;
+  const s = v.sessionAtStart;
+  if (s === null) return true;
+  return isObject(s) && typeof s.sessionId === 'string' && (s.source === null || isSource(s.source)) && (s.startEntryId === null || isCount(s.startEntryId));
+}
+
+function isDatasetMeta(v: unknown): v is DatasetMeta {
+  if (!isObject(v) || typeof v.generation !== 'string' || !/^[0-9a-f]{32}$/.test(v.generation) || !isCount(v.createdMs)) return false;
+  const r = v.replaced;
+  return r === null || (isObject(r) && isCount(r.discardedAtMs) && typeof r.previousGeneration === 'string'
+    && isCount(r.previousFromMs) && isCount(r.previousThroughMs));
+}
+
+function isCut(v: unknown): v is ArchiveCut {
+  return isObject(v) && isCount(v.fromEntryId) && isCount(v.throughEntryId) && isCount(v.fromMs) && isCount(v.throughMs) && isCount(v.fragments)
+    && (v.reason === 'age' || v.reason === 'limit' || v.reason === 'user-before') && v.checkpoint instanceof Uint8Array;
+}
+
+function isSummary(v: unknown): boolean {
+  return v === 'history-lost' || (isObject(v) && isCount(v.minutes) && Array.isArray(v.policies) && v.policies.every(isCount));
+}
+
+function checked<T>(method: string, value: unknown, ok: (v: unknown) => boolean): T {
+  if (!ok(value)) throw new RuntimeUnavailableError(`the monitoring runtime answered ${method} with something that is not its reply`);
+  return value as T;
+}
 
 // --- the serving half -------------------------------------------------------------------------------
 
@@ -140,10 +193,13 @@ export function serveRuntime(port: RpcPort, runtime: Omit<HostRuntime, 'onLive' 
       return;
     }
     inFlight++;
-    // The call is looked up in the table above, never by an arbitrary name from the port.
-    const call = (runtime as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[req.method];
+    // The call is looked up in the table above, never by an arbitrary name from the port. A runtime with no
+    // archive answers the archive's calls as an archive that holds nothing.
+    const onArchive = req.method.startsWith('archive.');
+    const target = (onArchive ? runtime.archive ?? NO_ARCHIVE : runtime) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    const call = target[onArchive ? req.method.slice('archive.'.length) : req.method];
     Promise.resolve()
-      .then(() => call.apply(runtime, req.args))
+      .then(() => call.apply(target, req.args))
       .then(
         (value) => { inFlight--; reply({ type: 'res', id: req.id, ok: true, value }); },
         (e) => { inFlight--; reply({ type: 'res', id: req.id, ok: false, error: errorBody(e) }); },
@@ -232,9 +288,25 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
     });
   };
 
+  // Always present on the client: a runtime without an archive answers it as one that holds nothing.
+  const archive: ArchiveSource = {
+    read: (sourceKey, from, to, maxBytes) => call('archive.read', sourceKey, from, to, maxBytes),
+    coveredThroughMs: () => call('archive.coveredThroughMs'),
+    lastCut: () => call('archive.lastCut'),
+    sources: () => call('archive.sources'),
+    cuts: async () => checked<ArchiveCut[]>('archive.cuts', await call('archive.cuts'), (v) => Array.isArray(v) && v.every(isCut)),
+    summary: async (from, to) => checked('archive.summary', await call('archive.summary', from, to), isSummary),
+  };
+
   return {
+    archive,
     snapshot: () => call('snapshot'),
     readPage: (snapshot, afterId, maxEntries, maxBytes) => call('readPage', snapshot, afterId, maxEntries, maxBytes),
+    readRawPage: async (snapshot, afterId, maxEntries, maxBytes) =>
+      checked<RawPage>('readRawPage', await call('readRawPage', snapshot, afterId, maxEntries, maxBytes), isRawPage),
+    bundleSlice: async (snapshot, fromMs, throughMs) =>
+      checked<BundleSlice | null>('bundleSlice', await call('bundleSlice', snapshot, fromMs, throughMs), (v) => v === null || isBundleSlice(v)),
+    dataset: async () => checked<DatasetMeta>('dataset', await call('dataset'), isDatasetMeta),
     readEvidence: (ref) => call('readEvidence', ref),
     locate: (snapshot, fromMs, toMs) => call('locate', snapshot, fromMs, toMs),
     readBoundaries: (snapshot, afterId, maxEntries) => call('readBoundaries', snapshot, afterId, maxEntries),

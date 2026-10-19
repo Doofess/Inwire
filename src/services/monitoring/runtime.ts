@@ -11,8 +11,9 @@
  * utility all share it.
  */
 import type {
-  BoundaryEvidence, Evidence, EvidencePage, EvidenceRef, JournalSnapshot, RollupWatermark, Snapshot,
+  BoundaryEvidence, BundleSlice, Evidence, EvidencePage, EvidenceRef, JournalSnapshot, RawPage, RollupWatermark, Snapshot,
 } from './types';
+import type { DatasetFile } from './datasetPlan';
 import type { MinuteInput, RollupOpenStatus } from './rollupStore';
 import type { ArchiveCut, ArchivedMinute } from './archive';
 
@@ -20,6 +21,10 @@ import type { ArchiveCut, ArchivedMinute } from './archive';
 export interface EvidenceReader {
   snapshot(): Promise<JournalSnapshot>;
   readPage(snapshot: Snapshot, afterId: number, maxEntries: number, maxBytes: number): Promise<EvidencePage>;
+  /** `readPage`'s entries as the file holds them (their original bodies), for the evidence bundle (ADR 0063). */
+  readRawPage(snapshot: Snapshot, afterId: number, maxEntries: number, maxBytes: number): Promise<RawPage>;
+  /** The ids a bundle over `[fromMs, throughMs]` covers, and the session open before them; null for none. */
+  bundleSlice(snapshot: Snapshot, fromMs: number, throughMs: number): Promise<BundleSlice | null>;
   readEvidence(ref: EvidenceRef): Promise<Evidence | null>;
   /** The merged id ranges whose strides might hold a datagram received in `[fromMs, toMs)`. */
   locate(snapshot: Snapshot, fromMs: number, toMs: number): Promise<{ fromId: number; toId: number }[]>;
@@ -59,12 +64,39 @@ export interface ArchiveSource {
   lastCut(): Promise<ArchiveCut | null>;
   /** Every source key the archive holds a minute for, sorted: the engines the expired entries admitted. */
   sources(): Promise<string[]>;
+  /** Every cut, oldest first; a bundle keeps those that overlap its range. */
+  cuts(): Promise<ArchiveCut[]>;
+  /**
+   * The minutes of every source in `[floor(fromMs / 60000) * 60000, toMs)` and the policies they were written
+   * under, counted from the index without reading a byte; `history-lost` where `read` would say it.
+   */
+  summary(fromMs: number, toMs: number): Promise<{ minutes: number; policies: number[] } | 'history-lost'>;
+}
+
+/** What a runtime without an archive answers: nothing held, nothing covered. */
+export const NO_ARCHIVE: ArchiveSource = {
+  read: async () => [],
+  coveredThroughMs: async () => null,
+  lastCut: async () => null,
+  sources: async () => [],
+  cuts: async () => [],
+  summary: async () => ({ minutes: 0, policies: [] }),
+};
+
+/** What identifies the open dataset: `dataset.json`'s generation, creation time and what a discard replaced (ADR 0061). */
+export interface DatasetMeta {
+  /** 32 lowercase hex digits; the journal's generation. */
+  generation: string;
+  createdMs: number;
+  replaced: DatasetFile['replaced'];
 }
 
 export interface MonitoringRuntime extends EvidenceReader, RollupReader, RollupWriter {
   /** How the sidecar opened; `rebuild-required` is answered with `resetRollups()`. */
   rollupStatus(): Promise<{ status: RollupOpenStatus; reason?: string }>;
   resetRollups(): Promise<void>;
+  /** The open dataset's identity; rejects `RuntimeUnavailableError` where the runtime has none to give. */
+  dataset(): Promise<DatasetMeta>;
   /** Absent until the runtime has an archive to serve. */
   readonly archive?: ArchiveSource;
 }

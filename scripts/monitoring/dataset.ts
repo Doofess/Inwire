@@ -122,6 +122,36 @@ test('discard: an interrupted atomic write is the dataset\'s and goes with it', 
   assert.deepEqual(plan.foreign, ['x.partial']);
 });
 
+// --- evidence bundles (ADR 0063) ------------------------------------------------------------------------------
+
+const BUNDLE = 'inwire-monitoring-20261005-0703-20261019-2359.iwmon';
+
+test('classify: a saved bundle and its partial are the app\'s, in any location, and near-misses are foreign', () => {
+  const at = (name: string, isDefaultLocation = false) => classifyMonitoringName(name, { isDefaultLocation });
+  for (const n of [BUNDLE, 'mine.iwmon', `${BUNDLE}.partial`, `${BUNDLE}.0123456789ab.partial`]) {
+    assert.equal(at(n), 'app', n);
+    assert.equal(at(n, true), 'app', n);
+  }
+  for (const n of ['.iwmon', 'x.iwmon.bak', 'x.iwmon.0123456789AB.partial', 'x.iwmon.0123456789a.partial', 'x.iwmo', 'a/b.iwmon', 'a\\b.iwmon', 'x.iwmon.x.partial']) {
+    assert.equal(at(n), 'foreign', JSON.stringify(n));
+  }
+});
+
+test('discard: a bundle beside the dataset is kept, never removed, and never foreign', () => {
+  const names = [SEG1, 'rollups.iwmr', BUNDLE, `${BUNDLE}.partial`, 'notes.txt'];
+  const plan = planMonitoringDiscard(names, { isDefaultLocation: false });
+  assert.deepEqual([...plan.keep].sort(), [BUNDLE, `${BUNDLE}.partial`].sort());
+  assert.deepEqual(plan.remove, [SEG1, 'rollups.iwmr']);
+  assert.deepEqual(plan.foreign, ['notes.txt']);
+});
+
+test('adoption: a folder with a bundle in it is not refused for it', () => {
+  const here = { isDefaultLocation: false };
+  assert.deepEqual(classifyAdoption([BUNDLE], null, null, here), { kind: 'new' });
+  const r = classifyAdoption([SEG1, BUNDLE, `${BUNDLE}.partial`], recovery(), null, here);
+  assert.equal(r.kind, 'adopt');
+});
+
 // --- dataset.json -------------------------------------------------------------------------------------------
 
 test('dataset.json: round trip, and every malformed form is a stated failure', () => {

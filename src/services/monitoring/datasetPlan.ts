@@ -26,11 +26,18 @@ export const SETTINGS_NAME = 'settings.json';
 export type NameClass = 'dataset' | 'app' | 'foreign';
 
 const PARTIAL_SUFFIX = /^(.+)\.[0-9a-f]{12}\.partial$/;
+/**
+ * An evidence bundle the user saved beside the dataset (ADR 0063), or one being written: `.iwmon`, its
+ * `.iwmon.partial`, or the atomic write's `.iwmon.<12 hex>.partial`. The user's file, not the dataset's:
+ * adoption tolerates it and a discard keeps it, so it is classed with the app's own files and never `remove`.
+ */
+const BUNDLE_NAME = /^[^/\\]+\.iwmon(\.([0-9a-f]{12}\.)?partial)?$/;
 const FIXED_DATASET_NAMES: ReadonlySet<string> = new Set([LEGACY_JOURNAL_NAME, ROLLUP_NAME, ARCHIVE_NAME, DATASET_FILE]);
 
 function classifyBase(name: string, isDefaultLocation: boolean): NameClass {
   if (FIXED_DATASET_NAMES.has(name) || SEGMENT_PATTERN.test(name)) return 'dataset';
   if (isDefaultLocation && name === SETTINGS_NAME) return 'app';
+  if (BUNDLE_NAME.test(name)) return 'app';
   return 'foreign';
 }
 

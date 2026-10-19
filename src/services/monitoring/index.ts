@@ -88,6 +88,15 @@ export class EntryIndex {
     return out;
   }
 
+  /** How many strides hold an entry. */
+  get strides(): number { return this.offsets.length; }
+
+  /** One stride's ids and the smallest and largest receipt time of its entries (the tail stride ends at the last id noted). */
+  stride(slot: number): { fromId: number; toId: number; minMs: number; maxMs: number } {
+    const fromId = slot * INDEX_STRIDE + this.firstEntryId;
+    return { fromId, toId: Math.min(fromId + INDEX_STRIDE - 1, this.lastId), minMs: this.minMs[slot], maxMs: this.maxMs[slot] };
+  }
+
   /** The nearest checkpoint at or before `entryId`, or null with nothing noted. */
   seek(entryId: number): Checkpoint | null {
     if (this.offsets.length === 0 || entryId < this.firstEntryId) return null;

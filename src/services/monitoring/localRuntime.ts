@@ -17,8 +17,11 @@
 import type { MonitoringJournal } from './journal';
 import type { MinuteInput, RollupOpenStatus, RollupStore } from './rollupStore';
 import type { ArchiveCut, ArchivedMinute, ArchiveStore } from './archive';
-import type { ArchiveSource, HostRuntime } from './runtime';
-import { LIMITS, type BoundaryEvidence, type Evidence, type EvidencePage, type EvidenceRef, type JournalSnapshot, type RollupWatermark, type Snapshot } from './types';
+import { RuntimeUnavailableError, type ArchiveSource, type DatasetMeta, type HostRuntime } from './runtime';
+import {
+  LIMITS, type BoundaryEvidence, type BundleSlice, type Evidence, type EvidencePage, type EvidenceRef, type JournalSnapshot, type RawPage,
+  type RollupWatermark, type Snapshot,
+} from './types';
 
 /** The archive behind `ArchiveSource`: answers in process, async for the same reason the rest of the runtime is. */
 export class LocalArchiveSource implements ArchiveSource {
@@ -33,6 +36,12 @@ export class LocalArchiveSource implements ArchiveSource {
   async lastCut(): Promise<ArchiveCut | null> { return this.store.lastCut(); }
 
   async sources(): Promise<string[]> { return this.store.sources(); }
+
+  async cuts(): Promise<ArchiveCut[]> { return this.store.cuts(); }
+
+  async summary(fromMs: number, toMs: number): Promise<{ minutes: number; policies: number[] } | 'history-lost'> {
+    return this.store.summary(fromMs, toMs);
+  }
 }
 
 export class LocalRuntime implements HostRuntime {
@@ -44,6 +53,7 @@ export class LocalRuntime implements HostRuntime {
     private readonly rollups: RollupStore,
     opened: { status: RollupOpenStatus; reason?: string } = { status: 'ok' },
     readonly archive?: ArchiveSource,
+    private readonly meta?: DatasetMeta,
   ) {
     this.opened = { ...opened };
   }
@@ -52,6 +62,14 @@ export class LocalRuntime implements HostRuntime {
 
   async readPage(snapshot: Snapshot, afterId: number, maxEntries: number, maxBytes: number): Promise<EvidencePage> {
     return this.journal.readPage(snapshot, afterId, maxEntries, maxBytes);
+  }
+
+  async readRawPage(snapshot: Snapshot, afterId: number, maxEntries: number, maxBytes: number): Promise<RawPage> {
+    return this.journal.readRawPage(snapshot, afterId, maxEntries, maxBytes);
+  }
+
+  async bundleSlice(snapshot: Snapshot, fromMs: number, throughMs: number): Promise<BundleSlice | null> {
+    return this.journal.bundleSlice(snapshot, fromMs, throughMs);
   }
 
   async readEvidence(ref: EvidenceRef): Promise<Evidence | null> { return this.journal.readEvidence(ref); }
@@ -89,6 +107,12 @@ export class LocalRuntime implements HostRuntime {
       journalThroughEntryId: snapshot.throughEntryId,
       maxBatchBytes: this.journal.limitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - this.rollups.size(),
     });
+  }
+
+  /** What the caller opened the runtime with: a dataset's identity is a file's, and there is nothing here to invent one from. */
+  async dataset(): Promise<DatasetMeta> {
+    if (this.meta === undefined) throw new RuntimeUnavailableError('this runtime was opened without a dataset identity');
+    return { ...this.meta };
   }
 
   async rollupStatus(): Promise<{ status: RollupOpenStatus; reason?: string }> { return this.opened; }

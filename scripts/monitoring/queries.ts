@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { MessageChannel } from 'node:worker_threads';
 import { deflateRawSync } from 'node:zlib';
 import type { EvidenceInput } from '../../src/services/monitoring/journal';
-import { StaleGenerationError } from '../../src/services/monitoring/journal';
+import { ExpiredRangeError, StaleGenerationError } from '../../src/services/monitoring/journal';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { boundedInflate } from '../../src/services/monitoring/boundedInflate';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
@@ -1795,6 +1795,67 @@ test('rpc: calls cross a MessagePort and come back as the runtime answered them'
     });
     assert.deepEqual(across, await ask(rig, q));
     assert.equal(p.timers.filter((t) => t.live).length, 0, 'every deadline is cancelled when its call is answered');
+  } finally {
+    p.close();
+  }
+});
+
+test('rpc: the bundle\'s reads cross the port as the runtime answered them: raw pages, the slice, the dataset and the archive', async () => {
+  const { rig, plan } = await expiryWorld();
+  const hi = minuteOf(plan.throughMs);
+  expire(rig, plan);
+  const p = portPair(rig.runtime);
+  try {
+    const snap = rig.journal.snapshot();
+    const after = snap.firstEntryId - 1;
+    const raw = await p.client.readRawPage(snap, after, 256, 1 << 20);
+    assert.deepEqual(raw, rig.journal.readRawPage(snap, after, 256, 1 << 20));
+    assert.equal(raw.entries.length, 256);
+    assert.ok(raw.entries[0].body instanceof Uint8Array);
+    assert.deepEqual(await p.client.bundleSlice(snap, m(35), m(40)), rig.journal.bundleSlice(snap, m(35), m(40)));
+    assert.equal(await p.client.bundleSlice(snap, m(6), hi - 1), null, 'a range that wholly expired has no slice');
+    assert.deepEqual(await p.client.dataset(), await rig.runtime.dataset());
+    const cuts = await p.client.archive!.cuts();
+    assert.equal(cuts.length, 1);
+    assert.deepEqual(cuts, rig.archive.cuts());
+    const summary = await p.client.archive!.summary(m(0), hi);
+    assert.deepEqual(summary, await rig.runtime.archive!.summary(m(0), hi));
+    assert.ok(typeof summary === 'object' && summary.minutes > 0);
+    assert.deepEqual(await p.client.archive!.sources(), rig.archive.sources());
+    // An expired id crosses as the class a bundle tells apart.
+    await assert.rejects(p.client.readRawPage(snap, 0, 256, 1 << 20), (e: unknown) => e instanceof ExpiredRangeError);
+    // A stale snapshot likewise.
+    await assert.rejects(p.client.bundleSlice({ generation: 'f'.repeat(32), throughEntryId: 1 }, m(0), m(1)), (e: unknown) => e instanceof StaleGenerationError);
+  } finally {
+    p.close();
+  }
+});
+
+test('rpc: a runtime without an archive or a dataset answers the archive as empty and the dataset as unavailable', async () => {
+  const rig = smallRig();
+  const bare = wrap(rig.runtime, { archive: undefined, dataset: async () => { throw new RuntimeUnavailableError('no dataset.json'); } });
+  const p = portPair(bare);
+  try {
+    assert.deepEqual(await p.client.archive!.cuts(), []);
+    assert.deepEqual(await p.client.archive!.summary(m(0), m(6)), { minutes: 0, policies: [] });
+    assert.deepEqual(await p.client.archive!.sources(), []);
+    await assert.rejects(p.client.dataset(), (e: unknown) => e instanceof RuntimeUnavailableError && e.message === 'no dataset.json');
+  } finally {
+    p.close();
+  }
+});
+
+test('rpc: a reply that is not the shape the method returns is unavailable, never a value a bundle would write', async () => {
+  const rig = smallRig();
+  const p = portPair(wrap(rig.runtime, {
+    readRawPage: async () => ({ entries: [{ entryId: 1, kind: 3, policy: 1, receivedMs: 0, body: new Uint8Array(1) }], nextAfterId: 1, done: true }),
+    bundleSlice: async () => ({ firstEntryId: 1 }),
+    dataset: async () => ({ generation: 'short', createdMs: 0, replaced: null }),
+  } as never));
+  try {
+    await assert.rejects(p.client.readRawPage(rig.journal.snapshot(), 0, 1, 1), (e: unknown) => e instanceof RuntimeUnavailableError);
+    await assert.rejects(p.client.bundleSlice(rig.journal.snapshot(), 0, 1), (e: unknown) => e instanceof RuntimeUnavailableError);
+    await assert.rejects(p.client.dataset(), (e: unknown) => e instanceof RuntimeUnavailableError);
   } finally {
     p.close();
   }
