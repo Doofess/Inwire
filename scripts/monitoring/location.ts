@@ -15,12 +15,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { Collector, type UdpSocket } from '../../electron/monitoring/collector';
 import { openMonitoringFolder, openMonitoringVolume } from '../../electron/monitoring/volume';
+import type { ByteSink } from '../../src/lib/saveSink';
 import { ArchiveStore } from '../../src/services/monitoring/archive';
-import { DATASET_FILE, DATASET_SUBFOLDER, readDatasetFile } from '../../src/services/monitoring/datasetPlan';
+import { BundleError, bundleStream, exportBundle, type BundleClient } from '../../src/services/monitoring/bundle';
+import { ARCHIVE_NAME, DATASET_FILE, DATASET_SUBFOLDER, readDatasetFile } from '../../src/services/monitoring/datasetPlan';
 import { MonitoringJournal, type EvidenceInput } from '../../src/services/monitoring/journal';
+import { runHistoryQuery } from '../../src/services/monitoring/queries';
 import { isSegmentFileName } from '../../src/services/monitoring/segments';
-import type { RpcPort } from '../../src/services/monitoring/runtimeRpc';
+import { createRuntimeClient, domPort, type RpcPort } from '../../src/services/monitoring/runtimeRpc';
 import type { SourceConfig } from '../../src/services/monitoring/types';
+import { MIN, inflate, spec } from './queryRig';
 
 const MiB = 1024 * 1024;
 const CFG: SourceConfig = { exporterIPv4: '10.0.0.1', bindIPv4: '192.168.1.5', port: 2055, storageLimitBytes: 16 * MiB };
@@ -511,6 +515,111 @@ async function main(): Promise<void> {
       assert.equal(seen.ok && seen.kind, 'adopt', JSON.stringify(seen));
       assert.deepEqual(readdirSync(root).sort(), names);
     } finally { await disk.close(); }
+  });
+
+  // The collector sets a refused archive aside (here a corrupt one), so its runtime has none. Over a journal that
+  // already expired something that must read as unknown, on the real collector, over the port the Worker uses.
+  await test('a corrupt archive over an expired journal is history-lost on the collector\'s port: a query says so, and an export fails and aborts its sink', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    // A real expiry on a real folder: enough datagrams to seal a segment, then the sealed one is discarded into
+    // the archive (`discard before` runs `runExpiry`, the retention path's own).
+    const first = new Disk();
+    let expired = { fromMs: 0, throughMs: 0 };
+    let lastMs = 0;
+    try {
+      await first.record(root, { n: 0, keepRunning: true });
+      const socket = first.sockets[first.sockets.length - 1];
+      for (let i = 0; i < 20_000; i++) {
+        first.t += 1000;
+        socket.emit(new Uint8Array(64).fill((i & 0xff) + 1));
+        if (i % 250 === 249) await settle();
+      }
+      await settle();
+      lastMs = first.t;
+      assert.equal((await first.collector.stop('user')).ok, true);
+      const result = await first.collector.discard({ scope: 'before', beforeMs: first.t + 1 });
+      assert.ok(result.ok && result.removedSegments >= 1, JSON.stringify(result));
+      const cut = (await first.collector.runtime.archive!.cuts())[0];
+      assert.ok(cut !== undefined && (first.collector.status().snapshot?.firstEntryId ?? 0) > 1, 'the journal expired something');
+      expired = { fromMs: cut.fromMs, throughMs: cut.throughMs };
+    } finally { await first.close(); }
+    // The archive's header is damaged: refused at the next open, nothing repaired.
+    const file = path.join(root, ARCHIVE_NAME);
+    const bytes = readFileSync(file);
+    bytes[20] ^= 0xff;
+    writeFileSync(file, bytes);
+    const from = Math.ceil(expired.fromMs / MIN) * MIN;
+    const to = from + 60 * MIN;
+    assert.ok(to <= expired.throughMs, 'the range asked for is wholly inside what expired');
+
+    const disk = new Disk();
+    const channel = new MessageChannel();
+    try {
+      assert.deepEqual(await disk.collector.open(root, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      assert.equal(disk.collector.status().storage, 'refused-corrupt');
+      assert.ok((disk.collector.status().snapshot?.firstEntryId ?? 0) > 1, 'the journal begins after what expired');
+      disk.collector.attach(domPort(channel.port1 as never));
+      const client = createRuntimeClient(domPort(channel.port2 as never), {
+        requestMs: 5000, setTimer: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); },
+      });
+      // A History query over the expired minutes is unknown, not a run of empty buckets.
+      const reply = await runHistoryQuery(client, client, spec(from, to, 60), new AbortController().signal, { inflate, nowMs: to + 24 * 60 * MIN, archive: client.archive });
+      assert.equal(reply.ok, true, JSON.stringify(reply));
+      if (!reply.ok) return;
+      assert.equal(reply.value.buckets.length, 60);
+      for (const b of reply.value.buckets) assert.equal(b.coverage, 'history-lost');
+      // An export over them fails `history-lost`, the sink is aborted, and not a byte reached it.
+      let gen: AsyncGenerator<Uint8Array, void, undefined> | null = null;
+      const bundleClient: BundleClient = {
+        async bundleOpen(range, exportedMs, inwireVersion) {
+          gen = bundleStream(client, range, { exportedMs, inwireVersion });
+          return { ok: true, exportId: 1 };
+        },
+        async bundleNext() {
+          try {
+            const r = await gen!.next();
+            return { ok: true, bytes: r.done ? new Uint8Array(0) : r.value, done: r.done === true };
+          } catch (e) {
+            if (e instanceof BundleError) return { ok: false, code: e.code, message: e.message };
+            throw e;
+          }
+        },
+        async bundleCancel() {},
+      };
+      const written: Uint8Array[] = [];
+      let aborts = 0;
+      let closes = 0;
+      const sink: ByteSink = {
+        async write(chunk) { written.push(chunk); },
+        async close() { closes++; return { saved: true, path: 'x.iwmon' }; },
+        async abort() { aborts++; },
+      };
+      await assert.rejects(
+        exportBundle(bundleClient, { fromMs: from, toMs: to }, sink, new AbortController().signal, { exportedMs: to, inwireVersion: '0.0.0-test' }),
+        (e: unknown) => e instanceof BundleError && e.code === 'history-lost',
+      );
+      assert.equal(aborts, 1);
+      assert.equal(closes, 0);
+      assert.equal(written.length, 0);
+
+      // A range that starts after the journal's first retained entry reaches no expired time: the refused
+      // archive does not stop it, and it holds no archive minutes.
+      const snap = await client.snapshot();
+      const kept = { fromMs: lastMs - 10_000, toMs: lastMs + 1 };
+      const keptSlice = await client.bundleSlice({ generation: snap.generation, throughEntryId: snap.throughEntryId }, kept.fromMs, kept.toMs - 1);
+      assert.ok(keptSlice !== null && keptSlice.firstEntryId > snap.firstEntryId, 'the range lies inside the retained journal');
+      written.length = 0;
+      await exportBundle(bundleClient, kept, sink, new AbortController().signal, { exportedMs: to, inwireVersion: '0.0.0-test' });
+      assert.equal(closes, 1);
+      assert.equal(aborts, 1);
+      const manifest = JSON.parse(new TextDecoder().decode(written[0].subarray(64 + 24))) as { archive: { minutes: number }; journal: { firstEntryId: number } };
+      assert.equal(manifest.archive.minutes, 0);
+      assert.equal(manifest.journal.firstEntryId, keptSlice.firstEntryId);
+    } finally {
+      channel.port1.close();
+      channel.port2.close();
+      await disk.close();
+    }
   });
 
   console.log(`\n${passes} passed, ${failures} failed`);

@@ -1691,6 +1691,7 @@ function stubRuntime(overrides: Partial<Omit<HostRuntime, 'onLive'>> = {}): Omit
   return {
     snapshot: nope, readPage: nope, readEvidence: nope, locate: nope, readBoundaries: nope, watermark: nope,
     readMinutes: nope, sources: nope, appendMinutes: nope, rollupStatus: nope, resetRollups: nope,
+    readRawPage: nope, bundleSlice: nope, dataset: nope,
     ...overrides,
   };
 }

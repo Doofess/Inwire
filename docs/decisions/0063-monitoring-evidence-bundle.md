@@ -25,12 +25,21 @@ can be added later without changing it.
   through the existing streamed save sink (`openSaveSink`,
   `src/lib/saveSink.ts`): a main-owned dialog, a `.partial` file, pieces
   appended, then a rename. The renderer never names a path.
-- **The journal slice is contiguous by entry id**: from the first entry
-  received at or after the range's start to the last entry received at or
-  before its end. An entry in between whose receipt clock stepped outside the
-  range is included, so the slice has no holes and its ids run one by one.
+- **The journal slice is contiguous by entry id**: from the lowest id received
+  within the range to the highest id received within it. Both ends are in
+  range, so a clock that stepped outside it, however far, never stretches the
+  slice over raw flows the user did not ask for. An entry in between whose
+  receipt clock is outside the range is included, so the slice has no holes and
+  its ids run one by one.
 - **Archived minutes** whose minute falls in the range are included, for the
   parts whose evidence expired ([0062](0062-monitoring-segments-retention-archive.md)).
+  A minute folded from an entry the journal still holds (an expiry that wrote
+  its cut and died before dropping the segments) is left out: those entries
+  are in the bundle as entries, and counting them twice would double every
+  flow. A refused archive over a journal that has expired anything fails an
+  export that reaches expired time `history-lost`, as a damaged one does; a
+  range whose first entry is past the journal's first retained one reaches no
+  expired time and is exported without it.
 - **The rebuildable cache is left out.** A reader recomputes it from the
   journal slice.
 - **Export only.** Opening a bundle is a later milestone. Nothing in 1.5 reads

@@ -37,6 +37,7 @@
  * factory, the window and the timers as parameters, so a script drives it
  * with fakes.
  */
+import type { BundleChunkResult, BundleOpenResult } from './bundle';
 import { readSourceConfig } from './config';
 import {
   readIntakeStatus, readRuntimeExit, readStartResult, readStopResult,
@@ -516,6 +517,41 @@ export class MonitoringClient {
     if (reply.type !== 'detail-reply' || !reply.ok) return null;
     if (!isObject(reply.evidence) || !isObject(reply.record)) return null;
     return { evidence: reply.evidence, record: reply.record };
+  }
+
+  // --- the evidence bundle ---------------------------------------------------------------------------------------
+
+  /** Opens an export in the Worker; the reply names it, or says why not. Satisfies `BundleClient`. */
+  async bundleOpen(range: { fromMs: number; toMs: number }, exportedMs: number, inwireVersion: string): Promise<BundleOpenResult> {
+    const worker = this.worker;
+    if (worker === null || this.snapshot.runtime !== 'connected') return { ok: false, code: 'runtime-unavailable', message: 'monitoring is not connected' };
+    const result = await this.call(worker, 'bundle-reply', (requestId) => ({ type: 'bundle-open', requestId, range, exportedMs, inwireVersion }));
+    if ('failure' in result) return { ok: false, code: 'runtime-unavailable', message: result.failure };
+    const reply = result.reply;
+    if (reply.type !== 'bundle-reply') return { ok: false, code: 'storage-failed', message: UNREADABLE };
+    if (reply.ok) return typeof reply.exportId === 'number' ? { ok: true, exportId: reply.exportId } : { ok: false, code: 'storage-failed', message: UNREADABLE };
+    return typeof reply.code === 'string' && typeof reply.message === 'string' ? { ok: false, code: reply.code, message: reply.message } : { ok: false, code: 'storage-failed', message: UNREADABLE };
+  }
+
+  /** The next chunk of whole framed entries; the last is empty with `done`. */
+  async bundleNext(exportId: number): Promise<BundleChunkResult> {
+    const worker = this.worker;
+    if (worker === null || this.snapshot.runtime !== 'connected') return { ok: false, code: 'runtime-unavailable', message: 'monitoring is not connected' };
+    const result = await this.call(worker, 'bundle-chunk', (requestId) => ({ type: 'bundle-next', requestId, exportId }));
+    if ('failure' in result) return { ok: false, code: 'runtime-unavailable', message: result.failure };
+    const reply = result.reply;
+    if (reply.type !== 'bundle-chunk') return { ok: false, code: 'storage-failed', message: UNREADABLE };
+    if (reply.ok) {
+      return reply.bytes instanceof Uint8Array && typeof reply.done === 'boolean' ? { ok: true, bytes: reply.bytes, done: reply.done } : { ok: false, code: 'storage-failed', message: UNREADABLE };
+    }
+    return typeof reply.code === 'string' && typeof reply.message === 'string' ? { ok: false, code: reply.code, message: reply.message } : { ok: false, code: 'storage-failed', message: UNREADABLE };
+  }
+
+  /** Drops an export. Never rejects: a Worker that is gone has dropped it already. */
+  async bundleCancel(exportId: number): Promise<void> {
+    const worker = this.worker;
+    if (worker === null) return;
+    await this.call(worker, 'bundle-cancel-reply', (requestId) => ({ type: 'bundle-cancel', requestId, exportId }));
   }
 
   // --- control ---------------------------------------------------------------------------------------------------

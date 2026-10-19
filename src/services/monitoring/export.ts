@@ -12,17 +12,12 @@
 import type { SaveOutcome } from '../../lib/saveFile';
 import type { ByteSink } from '../../lib/saveSink';
 import { csvCell } from '../export/writers/csv';
+import { ExportCancelled } from './exportCancelled';
 import type { HistoryResult, HistoryTable, QueryFocus } from './types';
 
 export interface ExportOptions { signal?: AbortSignal }
 
-/** Thrown when the signal aborts; the UI tells it apart from a failure. */
-export class ExportCancelled extends Error {
-  constructor() {
-    super('Export cancelled');
-    this.name = 'ExportCancelled';
-  }
-}
+export { ExportCancelled };
 
 const EOL = '\r\n';
 /** Rows per `write`; the signal is checked between writes. */

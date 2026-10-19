@@ -41,6 +41,22 @@ const REASONS: readonly ArchiveCut['reason'][] = ['age', 'limit', 'user-before']
 const utf8 = new TextEncoder();
 const utf8d = new TextDecoder('utf-8', { fatal: true });
 
+/**
+ * A fragment entry's body: `u16 keyLength, key (UTF-8), u64 minuteMs, u64 throughEntryId, rollup bytes`. One
+ * encoder for the archive's own file and for the evidence bundle (ADR 0063), whose kind-3 entries carry it whole.
+ */
+export function encodeArchiveFragmentBody(m: ArchivedMinute): Uint8Array {
+  const key = utf8.encode(m.sourceKey);
+  const body = new Uint8Array(2 + key.length + 16 + m.bytes.length);
+  const v = new DataView(body.buffer);
+  v.setUint16(0, key.length, true);
+  body.set(key, 2);
+  v.setBigUint64(2 + key.length, BigInt(m.minuteMs), true);
+  v.setBigUint64(2 + key.length + 8, BigInt(m.throughEntryId), true);
+  body.set(m.bytes, 2 + key.length + 16);
+  return body;
+}
+
 export interface ArchivedMinute {
   sourceKey: string;
   minuteMs: number;
@@ -280,6 +296,30 @@ export class ArchiveStore {
   }
 
   /**
+   * How many minutes the archive holds across every source with `minuteMs` in `[floor(fromMs / 60000) * 60000, toMs)`,
+   * and the policies they were written under (ascending, distinct), from the index and without reading a byte.
+   * `history-lost` where `read` would say it: a damaged archive, or a minute under a policy this build does not accept.
+   * A minute whose `throughEntryId` reaches `firstRetainedEntryId` is not counted: the journal still holds the
+   * entries it was folded from (an expiry that wrote its cut and died before dropping the segments), and a bundle
+   * writes those as entries, not twice.
+   */
+  summary(fromMs: number, toMs: number, firstRetainedEntryId: number): { minutes: number; policies: number[] } | 'history-lost' {
+    if (this.state !== 'ok') return 'history-lost';
+    const from = Math.floor(fromMs / 60_000) * 60_000;
+    const policies = new Set<number>();
+    let minutes = 0;
+    for (const list of this.minutes.values()) {
+      for (const m of list) {
+        if (m.minuteMs < from || m.minuteMs >= toMs || m.throughEntryId >= firstRetainedEntryId) continue;
+        if (!ACCEPTED_POLICIES.includes(m.policy)) return 'history-lost';
+        policies.add(m.policy);
+        minutes++;
+      }
+    }
+    return { minutes, policies: [...policies].sort((a, b) => a - b) };
+  }
+
+  /**
    * The fragments and then their cut, in one write and one flush. Everything is checked and encoded before
    * the file is touched, so a refusal writes nothing. A cut must start after the one before it.
    */
@@ -310,13 +350,7 @@ export class ArchiveStore {
       }
       const key = utf8.encode(m.sourceKey);
       if (key.length === 0 || key.length > 0xffff) throw new RangeError('a source key is 1 to 65,535 bytes');
-      const body = new Uint8Array(2 + key.length + 16 + m.bytes.length);
-      const v = new DataView(body.buffer);
-      v.setUint16(0, key.length, true);
-      body.set(key, 2);
-      v.setBigUint64(2 + key.length, BigInt(m.minuteMs), true);
-      v.setBigUint64(2 + key.length + 8, BigInt(m.throughEntryId), true);
-      body.set(m.bytes, 2 + key.length + 16);
+      const body = encodeArchiveFragmentBody(m);
       const entry = encodeEntry(ARCHIVE_FRAMING, ++id, KIND_MINUTE, body);
       placed.push([m.sourceKey, {
         minuteMs: m.minuteMs, throughEntryId: m.throughEntryId, offset: at + ENTRY_HEADER_BYTES + 2 + key.length + 16,

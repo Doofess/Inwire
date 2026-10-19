@@ -34,6 +34,7 @@ const DESCRIPTIONS: Record<string, string> = {
   zip: 'Zip archive',
   json: 'JSON',
   csv: 'CSV',
+  iwmon: 'Inwire monitoring bundle',
   txt: 'Text file',
   md: 'Markdown',
   html: 'HTML',

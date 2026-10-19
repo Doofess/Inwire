@@ -161,6 +161,29 @@ export interface JournalSnapshot extends Snapshot {
 
 export interface EvidencePage { entries: Evidence[]; nextAfterId: number; done: boolean }
 
+/**
+ * One journal entry as it lies in the file: the body bytes, not a decoded `Evidence`. A boundary re-encoded from
+ * its evidence is not byte-identical (the reader ignores keys it does not know), so the evidence bundle
+ * (ADR 0063) carries what the journal holds. `policy` is the decoder policy of the entry's segment.
+ */
+export interface RawEntry { entryId: number; kind: 1 | 2; policy: number; receivedMs: number; body: Uint8Array }
+
+export interface RawPage { entries: RawEntry[]; nextAfterId: number; done: boolean }
+
+/**
+ * The ids an evidence bundle's range covers (ADR 0063): every entry from the first with `receivedMs >= fromMs`
+ * through the last with `receivedMs <= throughMs`, whatever their own times, so a clock that stepped back cannot
+ * leave a hole. `sessionAtStart` is the session open before the first entry, which a datagram's session is not
+ * in its body to say; `startEntryId` is null once the journal no longer holds that session's `start`.
+ */
+export interface BundleSlice {
+  firstEntryId: number;
+  throughEntryId: number;
+  /** The distinct decoder policies of the segments the slice crosses, ascending. */
+  policies: number[];
+  sessionAtStart: { sessionId: string; source: SegmentSource | null; startEntryId: number | null } | null;
+}
+
 // --- decoding --------------------------------------------------------------------
 
 export type Sampling = { kind: 'unknown' } | { kind: 'reported'; mode: number; interval: number };

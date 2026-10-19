@@ -67,8 +67,8 @@ import {
 } from './segments';
 import {
   ACCEPTED_POLICIES, FORMAT_VERSION, LIMITS,
-  type BoundaryAction, type BoundaryEvidence, type DatagramEvidence, type Evidence,
-  type EvidencePage, type EvidenceRef, type ExpiredRange, type JournalSnapshot, type SegmentSource,
+  type BoundaryAction, type BoundaryEvidence, type BundleSlice, type DatagramEvidence, type Evidence,
+  type EvidencePage, type EvidenceRef, type ExpiredRange, type JournalSnapshot, type RawPage, type SegmentSource,
 } from './types';
 
 // --- the vocabulary ------------------------------------------------------------------------
@@ -331,6 +331,19 @@ const infoOf = (s: Seg, sealed: boolean): SegmentInfo => ({
   name: s.name, firstEntryId: s.firstId, lastEntryId: s.lastId, lastReceivedMs: s.lastMs,
   policyVersion: s.policy, sealed, bytes: s.bytes,
 });
+
+/** One entry read back: the evidence, and the same entry's body, kind and time as the file holds them. */
+interface ReadEntry {
+  evidence: Evidence;
+  entryId: number;
+  kind: 1 | 2;
+  body: Uint8Array;
+  policy: number;
+  receivedMs: number;
+  nextOffset: number;
+  sessionAfter: string | null;
+  entryBytes: number;
+}
 
 // --- scanning ----------------------------------------------------------------------------------
 
@@ -1262,6 +1275,26 @@ export class MonitoringJournal {
    * entry's predecessor throws `ExpiredRangeError`.
    */
   readPage(snapshot: { generation: string; throughEntryId: number }, afterId: number, maxEntries: number, maxBytes: number): EvidencePage {
+    const w = this.walk(snapshot, afterId, maxEntries, maxBytes);
+    return { entries: w.items.map((d) => d.evidence), nextAfterId: w.nextAfterId, done: w.done };
+  }
+
+  /**
+   * `readPage`'s entries as the file holds them: the same walk, so the same checksum and reserved-byte checks,
+   * the same generation and expiry errors and the same page bounds. A body is a copy.
+   */
+  readRawPage(snapshot: { generation: string; throughEntryId: number }, afterId: number, maxEntries: number, maxBytes: number): RawPage {
+    const w = this.walk(snapshot, afterId, maxEntries, maxBytes);
+    return {
+      entries: w.items.map((d) => ({ entryId: d.entryId, kind: d.kind, policy: d.policy, receivedMs: d.receivedMs, body: d.body })),
+      nextAfterId: w.nextAfterId,
+      done: w.done,
+    };
+  }
+
+  private walk(
+    snapshot: { generation: string; throughEntryId: number }, afterId: number, maxEntries: number, maxBytes: number,
+  ): { items: ReadEntry[]; nextAfterId: number; done: boolean } {
     // Task 5 puts this behind IPC, so the numbers are untrusted: NaN would
     // slip through every comparison below and read as "no limit".
     if (!Number.isSafeInteger(afterId) || afterId < 0) throw new RangeError(`afterId ${afterId} is not a non-negative safe integer`);
@@ -1272,22 +1305,22 @@ export class MonitoringJournal {
     const through = Math.min(snapshot.throughEntryId, this.lastId);
     const after = afterId;
     const first = after + 1;
-    if (first > through) return { entries: [], nextAfterId: Math.min(after, through), done: true };
+    if (first > through) return { items: [], nextAfterId: Math.min(after, through), done: true };
 
     const entryCap = Math.max(1, Math.min(maxEntries, LIMITS.pageEntries));
     const byteCap = Math.min(maxBytes, LIMITS.pageBytes);
     let idx = this.segIndexOf(first);
-    if (idx < 0) return { entries: [], nextAfterId: after, done: true };
+    if (idx < 0) return { items: [], nextAfterId: after, done: true };
     let seg = this.segs[idx];
     const at = this.cursorAt(seg, first);
-    if (at === null) return { entries: [], nextAfterId: after, done: true };
+    if (at === null) return { items: [], nextAfterId: after, done: true };
 
-    const entries: Evidence[] = [];
+    const items: ReadEntry[] = [];
     let bytes = 0;
     let offset = at.offset;
     let session = at.session;
     let id = first;
-    while (id <= through && entries.length < entryCap) {
+    while (id <= through && items.length < entryCap) {
       if (id > seg.lastId) {
         // The next segment begins where its header ends, with the session this one left open.
         seg = this.segs[++idx];
@@ -1295,15 +1328,110 @@ export class MonitoringJournal {
         offset = seg.headerBytes;
       }
       const decoded = this.decodeAt(seg, id, offset, session);
-      if (entries.length > 0 && bytes + decoded.entryBytes > byteCap) break;
-      entries.push(decoded.evidence);
+      if (items.length > 0 && bytes + decoded.entryBytes > byteCap) break;
+      items.push(decoded);
       bytes += decoded.entryBytes;
       offset = decoded.nextOffset;
       session = decoded.sessionAfter;
       id++;
     }
     const last = id - 1;
-    return { entries, nextAfterId: last, done: last >= through };
+    return { items, nextAfterId: last, done: last >= through };
+  }
+
+  /**
+   * The ids an evidence bundle's range covers (ADR 0063): from the lowest id of either kind received in
+   * `[fromMs, throughMs]` to the highest received in it, so an entry whose clock stepped back inside the range is
+   * in it, and an entry outside it never ends the slice, however far its clock stepped. Entries between the ends
+   * go in whatever their time. Null where none is in the range. `locate` is strided on datagrams and cannot say
+   * this: the ends are found by the strides' own smallest and largest times, and only the stride that holds each
+   * end is read, so the work is a stride or two however long the range. Ids below the oldest retained one are not looked for.
+   */
+  bundleSlice(snapshot: { generation: string; throughEntryId: number }, fromMs: number, throughMs: number): BundleSlice | null {
+    if (!Number.isSafeInteger(fromMs) || fromMs < 0) throw new RangeError(`fromMs ${fromMs} is not a non-negative safe integer`);
+    if (!Number.isSafeInteger(throughMs) || throughMs < 0) throw new RangeError(`throughMs ${throughMs} is not a non-negative safe integer`);
+    if (snapshot.generation !== this.generationHex) throw new StaleGenerationError(snapshot.generation, this.generationHex);
+    const through = Math.min(snapshot.throughEntryId, this.lastId);
+    let first: number | null = null;
+    scanFirst: for (const seg of this.segs) {
+      if (seg.firstId > through) break;
+      for (let slot = 0; slot < seg.index.strides; slot++) {
+        const st = seg.index.stride(slot);
+        if (st.fromId > through) break scanFirst;
+        if (st.maxMs < fromMs || st.minMs > throughMs) continue;
+        const hit = this.scanStride(seg, st.fromId, Math.min(st.toId, through), (ms) => ms >= fromMs && ms <= throughMs, false);
+        if (hit !== null) { first = hit; break scanFirst; }
+      }
+    }
+    if (first === null) return null;
+    let last: number | null = null;
+    scanLast: for (let s = this.segs.length - 1; s >= 0; s--) {
+      const seg = this.segs[s];
+      if (seg.firstId > through) continue;
+      for (let slot = seg.index.strides - 1; slot >= 0; slot--) {
+        const st = seg.index.stride(slot);
+        if (st.fromId > through || st.minMs > throughMs || st.maxMs < fromMs) continue;
+        const hit = this.scanStride(seg, st.fromId, Math.min(st.toId, through), (ms) => ms >= fromMs && ms <= throughMs, true);
+        if (hit !== null) { last = hit; break scanLast; }
+      }
+    }
+    if (last === null) return null;
+
+    const policies = new Set<number>();
+    for (const seg of this.segs) if (seg.firstId <= last && seg.lastId >= first) policies.add(seg.policy);
+
+    return { firstEntryId: first, throughEntryId: last, policies: [...policies].sort((a, b) => a - b), sessionAtStart: this.sessionBefore(first) };
+  }
+
+  /** The lowest (or, with `highest`, the highest) id in `[fromId, toId]` of one stride whose receipt time `wanted` accepts. */
+  private scanStride(seg: Seg, fromId: number, toId: number, wanted: (ms: number) => boolean, highest: boolean): number | null {
+    const at = this.cursorAt(seg, fromId);
+    if (at === null) return null;
+    let offset = at.offset;
+    let session = at.session;
+    let found: number | null = null;
+    for (let id = fromId; id <= toId; id++) {
+      const d = this.decodeAt(seg, id, offset, session);
+      if (wanted(d.receivedMs)) {
+        found = id;
+        if (!highest) return id;
+      }
+      offset = d.nextOffset;
+      session = d.sessionAfter;
+    }
+    return found;
+  }
+
+  /**
+   * The session open before `entryId` and what it recorded, or null: the entry's segment header (which names the
+   * session open when the segment was made, and its source), then the segment's own boundaries up to the entry.
+   * The id of that session's `start` is the newest one the retained boundaries hold, else null: it expired.
+   */
+  private sessionBefore(entryId: number): { sessionId: string; source: SegmentSource | null; startEntryId: number | null } | null {
+    const seg = this.segs[this.segIndexOf(entryId)];
+    let session: string | null = null;
+    let source: SegmentSource | null = null;
+    if (!seg.legacy) {
+      const header = decodeSegmentHeader(this.readBytes(seg, 0, SEGMENT_HEADER_BYTES));
+      if (!header.ok) throw new Error(`journal: ${seg.name}: ${header.reason}`);
+      if (header.value.openSession !== null) {
+        session = generationToHex(header.value.openSession);
+        source = header.value.source;
+      }
+    }
+    for (const b of this.boundaryList) {
+      if (b.ref.entryId >= entryId) break;
+      if (b.ref.entryId < seg.firstId) continue;
+      if (b.action === 'start') { session = b.sessionId; source = b.source ?? null; }
+      else if (b.action === 'stop' || b.action === 'interrupted') { session = null; source = null; }
+    }
+    if (session === null) return null;
+    let startEntryId: number | null = null;
+    for (const b of this.boundaryList) {
+      if (b.ref.entryId >= entryId) break;
+      if (b.action === 'start' && b.sessionId === session) startEntryId = b.ref.entryId;
+    }
+    return { sessionId: session, source: source === null ? null : { ...source }, startEntryId };
   }
 
   /**
@@ -1402,9 +1530,7 @@ export class MonitoringJournal {
     return { offset, session };
   }
 
-  private decodeAt(seg: Seg, entryId: number, offset: number, session: string | null): {
-    evidence: Evidence; nextOffset: number; sessionAfter: string | null; entryBytes: number;
-  } {
+  private decodeAt(seg: Seg, entryId: number, offset: number, session: string | null): ReadEntry {
     const headerBytes = this.readBytes(seg, offset, ENTRY_HEADER_BYTES);
     const header = parseEntryHeader(JOURNAL_FRAMING, headerBytes);
     if (!header.ok) throw new Error(`journal: ${header.reason} at ${offset} of ${seg.name}`);
@@ -1428,6 +1554,7 @@ export class MonitoringJournal {
           localIPv4: d.value.localIPv4, localPort: d.value.localPort,
           remoteIPv4: d.value.remoteIPv4, remotePort: d.value.remotePort, bytes: d.value.payload,
         },
+        entryId, kind: 1, body, policy: seg.policy, receivedMs: d.value.receivedMs,
         nextOffset, sessionAfter: session, entryBytes,
       };
     }
@@ -1435,6 +1562,7 @@ export class MonitoringJournal {
     if (header.kind !== KIND_BOUNDARY || !b.ok) throw new Error(`journal: entry ${entryId} is not a readable boundary`);
     return {
       evidence: boundaryEvidence(this.generationHex, entryId, b.value),
+      entryId, kind: 2, body, policy: seg.policy, receivedMs: b.value.receivedMs,
       nextOffset, sessionAfter: sessionAfter(session, b.value), entryBytes,
     };
   }

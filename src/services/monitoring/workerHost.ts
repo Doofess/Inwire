@@ -28,6 +28,7 @@
  *   policy version it does not decode, or a sidecar that disagrees with the
  *   journal is a reset or a failure, never a guess.
  */
+import { BundleError, bundleStream, type BundleErrorCode } from './bundle';
 import { StaleGenerationError } from './journal';
 import { BoundaryCache, runHistoryQuery } from './queries';
 import { encodeMinuteRollup, type Deflate, type Inflate } from './rollupCodec';
@@ -47,6 +48,9 @@ export type ToMonitoringWorker =
   | { type: 'query'; requestId: number; viewId: string; spec: QuerySpec }
   | { type: 'cancelQuery'; requestId: number; targetRequestId: number }
   | { type: 'detail'; requestId: number; snapshot: Snapshot; ref: EvidenceRef; recordIndex: number }
+  | { type: 'bundle-open'; requestId: number; range: { fromMs: number; toMs: number }; exportedMs: number; inwireVersion: string }
+  | { type: 'bundle-next'; requestId: number; exportId: number }
+  | { type: 'bundle-cancel'; requestId: number; exportId: number }
   | { type: 'shutdown'; requestId: number }
   /** Liveness: no request id, answered with `pong` straight from the message handler. */
   | { type: 'ping' };
@@ -62,6 +66,12 @@ export type FromMonitoringWorker =
   | { type: 'cancel-reply'; requestId: number; cancelled: boolean }
   | { type: 'detail-reply'; requestId: number; ok: true; evidence: DatagramEvidence; record: NormalizedV5 }
   | { type: 'detail-reply'; requestId: number; ok: false; code: DetailFailure; message: string }
+  | { type: 'bundle-reply'; requestId: number; ok: true; exportId: number }
+  | { type: 'bundle-reply'; requestId: number; ok: false; code: BundleErrorCode; message: string }
+  /** `bytes` is whole framed entries and is transferred; the last chunk of an export is empty with `done`. */
+  | { type: 'bundle-chunk'; requestId: number; ok: true; bytes: Uint8Array; done: boolean }
+  | { type: 'bundle-chunk'; requestId: number; ok: false; code: BundleErrorCode; message: string }
+  | { type: 'bundle-cancel-reply'; requestId: number }
   | { type: 'shutdown-reply'; requestId: number }
   | { type: 'error-reply'; requestId: number; message: string }
   /** The Worker's first message, posted when its script has loaded: the client's silence deadline starts here. */
@@ -79,7 +89,7 @@ export type FromMonitoringWorker =
   | { type: 'health'; health: SourceHealth | null; sources: string[] };
 
 export interface HostOptions {
-  post(message: FromMonitoringWorker): void;
+  post(message: FromMonitoringWorker, transfer?: Transferable[]): void;
   /** Wraps the port a `connect` carries; the Worker file passes `createRuntimeClient`. */
   openRuntime(port: unknown): HostRuntime;
   /**
@@ -132,7 +142,23 @@ interface Job {
   replied: boolean;
 }
 
+/**
+ * The one evidence-bundle export the Worker holds. `chain` serialises `bundle-next` (a generator cannot be
+ * resumed twice at once); `invalidated` is a reopen under it, which the next chunk answers as `changed`.
+ */
+interface ActiveExport {
+  exportId: number;
+  generator: AsyncGenerator<Uint8Array, void, undefined>;
+  controller: AbortController;
+  /** The first chunk, pulled at open so that a failure to set up is the open's failure; the first `bundle-next` gets it. */
+  first: Uint8Array | null;
+  invalidated: boolean;
+  ended: boolean;
+  chain: Promise<void>;
+}
+
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const isWholeMs = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
 class Slicer {
   private start: number;
@@ -165,6 +191,8 @@ export class MonitoringWorkerHost {
   private stopRebuild = false;
   private reopenPending = 0;
   private feedChain: Promise<void> = Promise.resolve();
+  private bundle: ActiveExport | null = null;
+  private nextExportId = 1;
 
   // What is pushed as `health`. Fed only by entries above `healthFloor`, the journal's end at
   // connect: replay is history, and a stale count on a fresh connect would read as a live fault.
@@ -210,6 +238,9 @@ export class MonitoringWorkerHost {
       case 'query': this.query(requestId, message.viewId, message.spec as QuerySpec); return;
       case 'cancelQuery': this.cancelQuery(requestId, message.targetRequestId); return;
       case 'detail': this.track(this.detail(requestId, message.snapshot as Snapshot, message.ref as EvidenceRef, message.recordIndex)); return;
+      case 'bundle-open': this.track(this.bundleOpen(requestId, message.range, message.exportedMs, message.inwireVersion)); return;
+      case 'bundle-next': this.track(this.bundleNext(requestId, message.exportId)); return;
+      case 'bundle-cancel': this.track(this.bundleCancel(requestId, message.exportId)); return;
       case 'shutdown': this.track(this.shutdown(requestId)); return;
       default: this.options.post({ type: 'error-reply', requestId, message: `unknown message ${message.type}` });
     }
@@ -361,6 +392,8 @@ export class MonitoringWorkerHost {
   private onReopened(): void {
     if (this.shuttingDown || this.runtime === null) return;
     this.reopenPending++;
+    // An export in flight froze the old dataset's range: its next chunk says so.
+    if (this.bundle !== null) this.bundle.invalidated = true;
     // The rebuild in flight reads the dataset that is gone: it stops at its next page, and a retry waiting on it is dropped.
     this.stopRebuild = true;
     this.cancelRetry?.();
@@ -809,6 +842,108 @@ export class MonitoringWorkerHost {
     }
   }
 
+  // --- the evidence bundle ---------------------------------------------------------------------------------
+
+  /** Ends the export that is held, if any: aborts what it is waiting on and runs the generator's cleanup. */
+  private async endExport(): Promise<void> {
+    const active = this.bundle;
+    if (active === null) return;
+    this.bundle = null;
+    active.ended = true;
+    active.controller.abort();
+    // Behind a pull that is in flight: a generator cannot be returned while it is running.
+    await active.chain.catch(() => undefined);
+    await active.generator.return(undefined).catch(() => undefined);
+  }
+
+  private async bundleOpen(requestId: number, range: unknown, exportedMs: unknown, inwireVersion: unknown): Promise<void> {
+    const post = this.options.post;
+    const fail = (code: BundleErrorCode, message: string): void => post({ type: 'bundle-reply', requestId, ok: false, code, message });
+    if (this.shuttingDown) return fail('cancelled', 'the Worker is shutting down');
+    const runtime = this.runtime;
+    if (runtime === null) return fail('runtime-unavailable', 'the Worker has no runtime yet');
+    if (!isObject(range) || !isWholeMs(range.fromMs) || !isWholeMs(range.toMs) || range.toMs <= range.fromMs
+      || !isWholeMs(exportedMs) || typeof inwireVersion !== 'string' || inwireVersion.length === 0 || inwireVersion.length > 64) {
+      return fail('invalid-request', 'a bundle names a range of whole milliseconds, the time and the version');
+    }
+    // One export at a time: a new one supersedes the one that is open, whose next chunk answers `cancelled`.
+    await this.endExport();
+    if (this.shuttingDown) return fail('cancelled', 'the Worker is shutting down');
+    const controller = new AbortController();
+    const generator = bundleStream(runtime, { fromMs: range.fromMs, toMs: range.toMs }, { exportedMs, inwireVersion }, controller.signal);
+    const active: ActiveExport = {
+      exportId: this.nextExportId++, generator, controller, first: null, invalidated: false, ended: false, chain: Promise.resolve(),
+    };
+    this.bundle = active;
+    try {
+      const first = await generator.next();
+      // Superseded or shut down while the first chunk was being read.
+      if (this.bundle !== active) return fail('cancelled', 'the export was superseded');
+      active.first = first.done ? new Uint8Array(0) : first.value;
+      if (first.done) active.ended = true;
+      post({ type: 'bundle-reply', requestId, ok: true, exportId: active.exportId });
+    } catch (e) {
+      if (this.bundle === active) this.bundle = null;
+      const [code, message] = this.bundleFailure(e);
+      fail(code, message);
+    }
+  }
+
+  private bundleFailure(e: unknown): [BundleErrorCode, string] {
+    if (e instanceof BundleError) return [e.code, e.message];
+    return ['storage-failed', e instanceof Error ? e.message : String(e)];
+  }
+
+  private bundleNext(requestId: number, exportId: unknown): Promise<void> {
+    const post = this.options.post;
+    const fail = (code: BundleErrorCode, message: string): void => post({ type: 'bundle-chunk', requestId, ok: false, code, message });
+    const active = this.bundle;
+    if (active === null || typeof exportId !== 'number' || active.exportId !== exportId) {
+      fail('cancelled', 'that export is no longer open');
+      return Promise.resolve();
+    }
+    const step = active.chain.then(async () => {
+      if (this.bundle !== active) return fail('cancelled', 'that export is no longer open');
+      if (active.invalidated) {
+        this.bundle = null;
+        active.controller.abort();
+        await active.generator.return(undefined).catch(() => undefined);
+        return fail('changed', 'the dataset was reopened while the bundle was being written');
+      }
+      if (active.first !== null) {
+        const first = active.first;
+        active.first = null;
+        return this.postChunk(requestId, first, active.ended, active);
+      }
+      if (active.ended) return this.postChunk(requestId, new Uint8Array(0), true, active);
+      try {
+        const next = await active.generator.next();
+        // Superseded while the read was in flight: whatever it read is not for the caller of this export any more.
+        if (this.bundle !== active) return fail('cancelled', 'that export is no longer open');
+        if (next.done) { active.ended = true; return this.postChunk(requestId, new Uint8Array(0), true, active); }
+        this.postChunk(requestId, next.value, false, active);
+      } catch (e) {
+        if (this.bundle === active) this.bundle = null;
+        const [code, message] = this.bundleFailure(e);
+        fail(code, message);
+      }
+    });
+    active.chain = step.catch(() => undefined);
+    return step;
+  }
+
+  private postChunk(requestId: number, bytes: Uint8Array, done: boolean, active: ActiveExport): void {
+    if (done && this.bundle === active) this.bundle = null;
+    // A view over part of a buffer cannot be transferred whole without sending its neighbours.
+    const own = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+    this.options.post({ type: 'bundle-chunk', requestId, ok: true, bytes: own, done }, [own.buffer]);
+  }
+
+  private async bundleCancel(requestId: number, exportId: unknown): Promise<void> {
+    if (this.bundle !== null && this.bundle.exportId === exportId) await this.endExport();
+    this.options.post({ type: 'bundle-cancel-reply', requestId });
+  }
+
   // --- shutdown ----------------------------------------------------------------------------------------------
 
   private async shutdown(requestId: number): Promise<void> {
@@ -820,6 +955,7 @@ export class MonitoringWorkerHost {
     this.cancelRetry?.();
     this.cancelRetry = null;
     for (const job of [...this.jobs.values()]) this.cancelJob(job);
+    if (this.bundle !== null) this.bundle.controller.abort();
     // The rebuild notices the flag at its next page, and an aborted query at its
     // next checkpoint: wait for both so that nothing is still posting to the
     // runtime after the reply. A read stuck in the runtime is not waited for
@@ -833,6 +969,7 @@ export class MonitoringWorkerHost {
       await Promise.race([settled, bound]);
       cancel();
     }
+    await this.endExport();
     this.options.post({ type: 'shutdown-reply', requestId });
   }
 }

@@ -35,7 +35,7 @@ yieldChannel.port1.onmessage = () => {
 };
 
 const host = new MonitoringWorkerHost({
-  post: (message) => self.postMessage(message),
+  post: (message, transfer) => self.postMessage(message, transfer ?? []),
   openRuntime: (port) => createRuntimeClient(domPort(port as MessagePort), {
     requestMs: LIMITS.requestMs,
     setTimer: (fn, ms) => {

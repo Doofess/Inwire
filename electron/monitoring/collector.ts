@@ -54,7 +54,7 @@ import { recordedSource } from '../../src/services/monitoring/queries';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan, type RetentionPolicy } from '../../src/services/monitoring/retention';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { isSegmentFileName, type SegmentInfo } from '../../src/services/monitoring/segments';
-import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
+import { RuntimeUnavailableError, archiveOf, type DatasetMeta, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { serveRuntime, type RpcPort, type RuntimeServer } from '../../src/services/monitoring/runtimeRpc';
 import type { ListenerState } from '../../src/services/monitoring/sourceHealth';
 import { DECODER_POLICY_VERSION, LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
@@ -393,6 +393,25 @@ export class Collector {
     appendMinutes: async (minutes, watermark, afterEntryId) => this.local().appendMinutes(minutes, watermark, afterEntryId),
     rollupStatus: async () => this.local().rollupStatus(),
     resetRollups: async () => this.local().resetRollups(),
+    // The evidence bundle (ADR 0063): raw pages are bounded like `readPage`; the slice and the dataset's identity
+    // are small; the archive's reads are bounded by `archiveReadBytes`, which refuses past it rather than clips.
+    readRawPage: async (snapshot, afterId, maxEntries, maxBytes) => this.local().readRawPage(
+      snapshot, afterId, clampSize(maxEntries, LIMITS.pageEntries), clampSize(maxBytes, LIMITS.pageBytes),
+    ),
+    bundleSlice: async (snapshot, fromMs, throughMs) => this.local().bundleSlice(snapshot, fromMs, throughMs),
+    dataset: async () => this.local().dataset(),
+    // No archive served over a journal that expired something is a refused archive (corrupt, failed, another
+    // generation, read-only): unknown, never empty (`archiveOf`).
+    archive: {
+      read: async (sourceKey, from, to, maxBytes) => (await archiveOf(this.local())).read(
+        sourceKey, from, to, clampSize(maxBytes, LIMITS.archiveReadBytes),
+      ),
+      coveredThroughMs: async () => (await archiveOf(this.local())).coveredThroughMs(),
+      lastCut: async () => (await archiveOf(this.local())).lastCut(),
+      sources: async () => (await archiveOf(this.local())).sources(),
+      cuts: async () => (await archiveOf(this.local())).cuts(),
+      summary: async (fromMs, toMs, firstRetained) => (await archiveOf(this.local())).summary(fromMs, toMs, firstRetained),
+    },
   };
 
   private local(): LocalRuntime {
@@ -700,12 +719,16 @@ export class Collector {
         this.env.log?.('monitoring: an interrupted expiry could not be finished; the next check tries again');
       }
       const file = look.file;
+      let meta: DatasetMeta | undefined = file !== null && file.generation === snapshot.generation
+        ? { generation: file.generation, createdMs: file.createdMs, replaced: file.replaced }
+        : undefined;
       if (writable && (file === null || file.generation !== snapshot.generation)) {
         const base = file ?? newDatasetFile(snapshot.generation, this.env.now());
         volume.writeText(DATASET_FILE, encodeDatasetFile({ ...base, generation: snapshot.generation, discarding: null }));
+        meta = { generation: snapshot.generation, createdMs: base.createdMs, replaced: base.replaced };
       }
       return this.assemble({
-        root, limitBytes, volume, folder: null, journal, rollups: opened, archive,
+        root, limitBytes, volume, folder: null, journal, rollups: opened, archive, meta,
         problem: journal.state === 'open' ? null : recovery.problem ?? null, readOnly: false,
       });
     } catch (e) {
@@ -745,7 +768,11 @@ export class Collector {
       const rollups = RollupStore.open(NO_SIDECAR, {
         generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
       }, { nowMs: this.env.now, readOnly: true });
-      return this.assemble({ root, limitBytes, volume: null, folder, journal, rollups, archive, problem, readOnly: true });
+      // Only a dataset.json that is this journal's names it; without one the bundle has no identity to write.
+      const meta: DatasetMeta | undefined = look.file !== null && look.file.generation === snapshot.generation
+        ? { generation: look.file.generation, createdMs: look.file.createdMs, replaced: look.file.replaced }
+        : undefined;
+      return this.assemble({ root, limitBytes, volume: null, folder, journal, rollups, archive, meta, problem, readOnly: true });
     } catch (e) {
       try { folder.close(); } catch { /* the first failure is the one to report */ }
       return this.openFailed('failed', `the monitoring dataset could not be opened: ${message(e)}`);
@@ -756,7 +783,7 @@ export class Collector {
   private assemble(p: {
     root: string; limitBytes: number; volume: CollectorVolume | null; folder: CollectorFolder | null;
     journal: MonitoringJournal; rollups: ReturnType<typeof RollupStore.open>; archive: ArchiveStore | null;
-    problem: string | null; readOnly: boolean;
+    problem: string | null; readOnly: boolean; meta?: DatasetMeta;
   }): Dataset {
     // The last run's stop survives the relaunch in the journal's own boundary. A run that ended
     // without one leaves `interrupted` or a bare `start`, and its reason has no copy, so none is invented.
@@ -766,7 +793,7 @@ export class Collector {
     }
     const local = new LocalRuntime(p.journal, p.rollups.store, {
       status: p.rollups.status, ...(p.rollups.reason === undefined ? {} : { reason: p.rollups.reason }),
-    }, p.archive === null ? undefined : new LocalArchiveSource(p.archive));
+    }, p.archive === null ? undefined : new LocalArchiveSource(p.archive), p.meta);
     return {
       root: p.root, limitBytes: p.limitBytes, volume: p.volume, folder: p.folder, journal: p.journal, rollups: p.rollups.store,
       archive: p.archive, local, problem: p.problem, readOnly: p.readOnly, recordedSource: recordedExporter(p.journal),
