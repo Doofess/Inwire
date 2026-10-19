@@ -137,11 +137,12 @@ const UNREADABLE = 'monitoring answered with something this build cannot read';
 
 export function readJournalSnapshot(v: unknown): JournalSnapshot | null {
   if (!isObject(v)) return null;
-  const { generation, throughEntryId, writtenBytes, syncedThroughEntryId } = v;
+  const { generation, throughEntryId, firstEntryId, writtenBytes, syncedThroughEntryId } = v;
   if (!isText(generation) || !GENERATION.test(generation)) return null;
   if (!isCount(throughEntryId) || !isCount(writtenBytes) || !isCount(syncedThroughEntryId)) return null;
   if (syncedThroughEntryId > throughEntryId) return null;
-  return { generation, throughEntryId, writtenBytes, syncedThroughEntryId };
+  if (!isId(firstEntryId) || firstEntryId > throughEntryId + 1) return null;
+  return { generation, throughEntryId, firstEntryId, writtenBytes, syncedThroughEntryId };
 }
 
 export function readStartResult(v: unknown): StartResult {

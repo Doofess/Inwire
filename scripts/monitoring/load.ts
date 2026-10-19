@@ -36,7 +36,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createSocket } from 'node:dgram';
-import { existsSync, mkdtempSync, rmSync, statSync, statfsSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
 import { cpus, platform, release, tmpdir, totalmem, version as osVersion } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -189,7 +189,8 @@ try {
 
 const { startStubAgent } = await import('../electron/stubAgent');
 const { launchApp } = await import('../electron/launchApp');
-const { JOURNAL_FILE, ROLLUP_FILE, monitoringRoot } = await import('../../electron/monitoring/volume');
+const { ROLLUP_FILE, monitoringRoot } = await import('../../electron/monitoring/volume');
+const { isSegmentFileName } = await import('../../src/services/monitoring/segments');
 type StubAgent = Awaited<ReturnType<typeof startStubAgent>>;
 type App = Awaited<ReturnType<typeof launchApp>>;
 type Page = Awaited<ReturnType<App['firstWindow']>>;
@@ -407,7 +408,11 @@ function collectorPid(port: number): number | null {
 }
 
 const sizeOf = (file: string): number => { try { return statSync(file).size; } catch { return 0; } };
-const journalOf = (profile: string): number => sizeOf(path.join(monitoringRoot(profile), JOURNAL_FILE));
+/** Every segment the journal holds, summed: the journal is a run of files now, not one. */
+const journalOf = (profile: string): number => {
+  const root = monitoringRoot(profile);
+  try { return readdirSync(root).filter(isSegmentFileName).reduce((n, f) => n + sizeOf(path.join(root, f)), 0); } catch { return 0; }
+};
 const sidecarOf = (profile: string): number => sizeOf(path.join(monitoringRoot(profile), ROLLUP_FILE));
 
 async function startSource(s: Session, limit?: { value: string; unit: 'MiB' | 'GiB' }): Promise<boolean> {

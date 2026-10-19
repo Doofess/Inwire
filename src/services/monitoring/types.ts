@@ -25,6 +25,14 @@ export const FORMAT_VERSION = 1;
  */
 export const DECODER_POLICY_VERSION = 1;
 
+/**
+ * The decoder policies this build reads (ADR 0062). Each segment records the
+ * policy it was written under; one outside this set is refused as
+ * `refused-version` and left untouched. A new segment is written under the
+ * newest of them.
+ */
+export const ACCEPTED_POLICIES: readonly number[] = [1];
+
 const KiB = 1024;
 const MiB = 1024 * KiB;
 const GiB = 1024 * MiB;
@@ -108,7 +116,13 @@ export interface DatagramEvidence {
   bytes: Uint8Array;
 }
 
-export type BoundaryAction = 'start' | 'stop' | 'suspend' | 'resume' | 'interrupted' | 'gap';
+/** The configuration a session was started with: where it listened and for whom (ADR 0062). */
+export interface SegmentSource { exporterIPv4: string; bindIPv4: string; port: number }
+
+/** What an `expired` boundary says left the journal: whole segments, by entry id and by receipt time. */
+export interface ExpiredRange { fromEntryId: number; throughEntryId: number; fromMs: number; throughMs: number }
+
+export type BoundaryAction = 'start' | 'stop' | 'suspend' | 'resume' | 'interrupted' | 'gap' | 'expired';
 
 export interface BoundaryEvidence {
   kind: 'boundary';
@@ -116,9 +130,14 @@ export interface BoundaryEvidence {
   sessionId: string;
   receivedMs: number;
   action: BoundaryAction;
+  /** For `expired`: `age`, `limit` or `user-before`. */
   reason: string;
   /** Shed locally before append; null where nothing was counted. Kernel drops are never known. */
   droppedDatagrams: number | null;
+  /** A `start`'s recorded source, and the newest one an `expired` boundary carries; absent where none was written. */
+  source?: SegmentSource | null;
+  /** Present on an `expired` boundary. It does not change the open session. */
+  expired?: ExpiredRange | null;
 }
 
 export type Evidence = DatagramEvidence | BoundaryEvidence;
@@ -127,6 +146,9 @@ export type Evidence = DatagramEvidence | BoundaryEvidence;
 export interface Snapshot { generation: Generation; throughEntryId: number }
 
 export interface JournalSnapshot extends Snapshot {
+  /** The oldest entry id still on disk; ids below it expired (ADR 0062). */
+  firstEntryId: number;
+  /** Every retained segment's bytes. */
   writtenBytes: number;
   /** Flushed to the OS's disk by the one-second timer or a Stop; not power-loss durable. */
   syncedThroughEntryId: number;

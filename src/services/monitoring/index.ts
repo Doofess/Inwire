@@ -13,7 +13,9 @@
  * in exchange for a scan the journal pays anyway.
  *
  * A checkpoint is kept for entry 1 and every `INDEX_STRIDE` after it, so a
- * seek walks at most `INDEX_STRIDE - 1` headers. Each checkpoint carries the
+ * seek walks at most `INDEX_STRIDE - 1` headers. A segmented journal (ADR 0062)
+ * keeps one index per segment, counting its strides from the segment's own
+ * first entry id, so a stride never spans two files. Each checkpoint carries the
  * session open *before* its entry, because a datagram's session is not in its
  * body: it is the nearest `start` before it, and a seek that lands mid-journal
  * would otherwise have no way to know it.
@@ -40,6 +42,9 @@ export interface Checkpoint {
 }
 
 export class EntryIndex {
+  /** `firstEntryId` is the id the first stride starts at: 1 for a whole journal, a segment's own first id in a segmented one. */
+  constructor(private readonly firstEntryId = 1) {}
+
   private offsets: number[] = [];
   private sessions: (string | null)[] = [];
   private minMs: number[] = [];
@@ -50,8 +55,8 @@ export class EntryIndex {
 
   /** Called for every entry, in id order, before the entry changes the session. */
   note(entryId: number, offset: number, openSession: string | null, receivedMs: number): void {
-    const slot = Math.floor((entryId - 1) / INDEX_STRIDE);
-    if ((entryId - 1) % INDEX_STRIDE === 0) {
+    const slot = Math.floor((entryId - this.firstEntryId) / INDEX_STRIDE);
+    if ((entryId - this.firstEntryId) % INDEX_STRIDE === 0) {
       this.offsets[slot] = offset;
       this.sessions[slot] = openSession;
       this.minMs[slot] = receivedMs;
@@ -72,7 +77,7 @@ export class EntryIndex {
     const out: { fromId: number; toId: number }[] = [];
     const last = Math.min(throughId, this.lastId);
     for (let slot = 0; slot < this.minMs.length; slot++) {
-      const fromId = slot * INDEX_STRIDE + 1;
+      const fromId = slot * INDEX_STRIDE + this.firstEntryId;
       if (fromId > last) break;
       if (!(this.minMs[slot] < toMs && this.maxMs[slot] >= fromMs)) continue;
       const toId = Math.min(fromId + INDEX_STRIDE - 1, last);
@@ -85,8 +90,8 @@ export class EntryIndex {
 
   /** The nearest checkpoint at or before `entryId`, or null with nothing noted. */
   seek(entryId: number): Checkpoint | null {
-    if (this.offsets.length === 0 || entryId < 1) return null;
-    const slot = Math.min(Math.floor((entryId - 1) / INDEX_STRIDE), this.offsets.length - 1);
-    return { entryId: slot * INDEX_STRIDE + 1, offset: this.offsets[slot], openSession: this.sessions[slot] };
+    if (this.offsets.length === 0 || entryId < this.firstEntryId) return null;
+    const slot = Math.min(Math.floor((entryId - this.firstEntryId) / INDEX_STRIDE), this.offsets.length - 1);
+    return { entryId: slot * INDEX_STRIDE + this.firstEntryId, offset: this.offsets[slot], openSession: this.sessions[slot] };
   }
 }

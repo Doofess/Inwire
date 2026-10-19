@@ -42,6 +42,7 @@ import { v5Payload } from '../monitoring/fixtures';
 import { formatBytes } from '../../src/lib/formatBytes';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
+import { NodeSegmentDirectory } from '../../electron/monitoring/volume';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { runHistoryQuery } from '../../src/services/monitoring/queries';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
@@ -351,10 +352,10 @@ async function oracle(profile: string): Promise<Oracle> {
   const copy = mkdtempSync(path.join(tmpdir(), 'inwire-mondrive-oracle-'));
   profiles.push(copy);
   cpSync(path.join(profile, 'monitoring'), copy, { recursive: true });
-  const jf = NodeBlockFile.open(path.join(copy, 'journal.iwmj'));
+  const segments = new NodeSegmentDirectory(copy);
   const sf = NodeBlockFile.open(path.join(copy, 'rollups.iwmr'));
   try {
-    const { journal } = MonitoringJournal.open(jf, { limitBytes: 1 << 30 });
+    const { journal } = MonitoringJournal.open(segments, { limitBytes: 1 << 30 });
     const snap = journal.snapshot();
     const entries: Evidence[] = [];
     for (let after = 0; ;) {
@@ -411,7 +412,7 @@ async function oracle(profile: string): Promise<Oracle> {
     out.rollupEqualsRaw = project(viaRollups) === project(raw);
     return out;
   } finally {
-    jf.close();
+    segments.close();
     sf.close();
   }
 }

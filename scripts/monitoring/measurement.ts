@@ -48,6 +48,8 @@ import { decodePacketBatch } from '../../src/services/agentBinary';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import { MemoryTemplateStore, normalizeFlows } from '../../src/services/flow/flowExport';
 import { MonitoringJournal, recoverJournal } from '../../src/services/monitoring/journal';
+import { segmentName } from '../../src/services/monitoring/segments';
+import { NodeSegmentDirectory } from '../../electron/monitoring/volume';
 
 const mode = process.argv[2] ?? 'help';
 const quick = process.argv.includes('--quick');
@@ -1203,10 +1205,11 @@ async function softflowdMode(): Promise<void> {
 // --- segments (milestone 1.5) ----------------------------------------------------------------
 
 /** A journal of generated v5 traffic at 7 a second, written by the product code until it holds `bytes`. */
-function writeProductJournal(path: string, bytes: number): { entries: number; seconds: number } {
-  const { journal } = MonitoringJournal.open(NodeBlockFile.open(path), { limitBytes: 64 * 1024 * MB });
+function writeProductJournal(root: string, bytes: number): { entries: number; seconds: number } {
+  const segments = new NodeSegmentDirectory(root);
+  const { journal } = MonitoringJournal.open(segments, { limitBytes: 64 * 1024 * MB });
   const t0 = 1_700_000_000;
-  journal.append([{ kind: 'boundary', sessionId: 'S1', receivedMs: t0 * 1000, action: 'start', reason: '', droppedDatagrams: null }]);
+  journal.append([{ kind: 'boundary', sessionId: 'a1'.repeat(16), receivedMs: t0 * 1000, action: 'start', reason: '', droppedDatagrams: null }]);
   const model = new TrafficModel(7, false);
   const seq = { n: 0 };
   let s = 0;
@@ -1225,16 +1228,17 @@ function writeProductJournal(path: string, bytes: number): { entries: number; se
   }
   journal.flush();
   journal.close();
+  segments.close();
   return { entries, seconds: s };
 }
 
-/** `recoverJournal` over one file: the scan an open or an adoption runs. */
-function timedRecover(path: string): { ms: number; entries: number; status: string } {
-  const f = NodeBlockFile.open(path);
+/** `recoverJournal` over one journal directory: the scan an open or an adoption runs. */
+function timedRecover(root: string): { ms: number; entries: number; status: string } {
+  const d = new NodeSegmentDirectory(root);
   try {
-    const [r, ms] = timeIt(() => recoverJournal(f));
+    const [r, ms] = timeIt(() => recoverJournal(d));
     return { ms, entries: r.completeEntries, status: r.status };
-  } finally { f.close(); }
+  } finally { d.close(); }
 }
 
 async function segmentsMode(): Promise<void> {
@@ -1245,28 +1249,29 @@ async function segmentsMode(): Promise<void> {
     const made = new Map<number, { path: string; seconds: number }>();
     console.log('Product journal (journal.ts), generated v5 at 7 datagrams a second:');
     for (const mib of sizes) {
-      const path = join(dir, `single-${mib}.iwmj`);
+      const path = join(dir, `single-${mib}`);
       const [w, wMs] = timeIt(() => writeProductJournal(path, mib * MB));
-      made.set(mib, { path, seconds: w.seconds });
+      made.set(mib, { path: join(path, segmentName(1)), seconds: w.seconds });
       const heap0 = process.memoryUsage().heapUsed;
-      const f = NodeBlockFile.open(path);
-      const [opened, openMs] = timeIt(() => MonitoringJournal.open(f, { limitBytes: 64 * 1024 * MB }));
+      const segs = new NodeSegmentDirectory(path);
+      const [opened, openMs] = timeIt(() => MonitoringJournal.open(segs, { limitBytes: 64 * 1024 * MB }));
       const heap = process.memoryUsage().heapUsed - heap0;
       opened.journal.close();
+      segs.close();
       const scan = timedRecover(path);
       console.log(`  ${mib} MiB segment: ${w.entries.toLocaleString()} entries, ${fmt(w.seconds / 3600, 2)} h of traffic, written in ${fmt(wMs / 1000)} s; `
         + `open ${fmt(openMs, 0)} ms (${fmt(mib / (openMs / 1000), 0)} MiB/s, heap after open +${fmt(heap / MB)} MiB), recover-only ${fmt(scan.ms, 0)} ms, ${scan.status}`);
     }
 
     // Per-file cost apart from bytes: open, read the 64-byte header, close, over many tiny segments.
-    const header = new Uint8Array(64);
+    const header = new Uint8Array(128);
     for (const n of [1, 32, 64, 256]) {
       const paths: string[] = [];
-      for (let i = 0; i < n; i++) { const p = join(dir, `tiny-${n}-${i}.iwmj`); writeProductJournal(p, 1); paths.push(p); }
-      const [, ms] = timeIt(() => { for (const p of paths) { const fd = openSync(p, 'r'); readSync(fd, header, 0, 64, 0); closeSync(fd); } });
+      for (let i = 0; i < n; i++) { const p = join(dir, `tiny-${n}-${i}`); writeProductJournal(p, 1); paths.push(p); }
+      const [, ms] = timeIt(() => { for (const p of paths) { const fd = openSync(join(p, segmentName(1)), 'r'); readSync(fd, header, 0, 128, 0); closeSync(fd); } });
       const [, recMs] = timeIt(() => { for (const p of paths) timedRecover(p); });
       console.log(`  ${n} segment files: header reads ${fmt(ms, 2)} ms (${fmt((ms * 1000) / n, 0)} µs a file), full recover ${fmt(recMs)} ms`);
-      for (const p of paths) unlinkSync(p);
+      for (const p of paths) rmSync(p, { recursive: true, force: true });
     }
 
     // A roll: create the next segment, write its header, flush. Twenty, averaged.
@@ -1308,7 +1313,12 @@ async function segmentsMode(): Promise<void> {
     // Adopting 8 GiB: 32 segments of 256 MiB (copies of one, which costs a scan the same), scanned in turn.
     const count = quick ? 4 : 32;
     const copies: string[] = [];
-    for (let i = 0; i < count; i++) { const p = join(dir, `adopt-${i}.iwmj`); copyFileSync(seg, p); copies.push(p); }
+    for (let i = 0; i < count; i++) {
+      const p = join(dir, `adopt-${i}`);
+      mkdirSync(p, { recursive: true });
+      copyFileSync(seg, join(p, segmentName(1)));
+      copies.push(p);
+    }
     let entries = 0;
     const [, adoptMs] = timeIt(() => { for (const p of copies) entries += timedRecover(p).entries; });
     const total = count * 256;

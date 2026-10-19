@@ -37,7 +37,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createSocket } from 'node:dgram';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from '../electron/stubAgent';
@@ -49,7 +49,8 @@ import { runHistoryQuery } from '../../src/services/monitoring/queries';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { decodeV5 } from '../../src/services/monitoring/v5';
 import { DECODER_POLICY_VERSION, type DatagramEvidence, type HistoryResult } from '../../src/services/monitoring/types';
-import { JOURNAL_FILE, ROLLUP_FILE, monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
+import { ROLLUP_FILE, monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
+import { isSegmentFileName } from '../../src/services/monitoring/segments';
 import { HostRig, deflate, inflate } from './queryRig';
 
 const argv = process.argv.slice(2);
@@ -65,6 +66,12 @@ function check(name: string, ok: boolean, detail = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${!ok && detail ? `\n        ${detail}` : ''}`);
 }
 const note = (line: string): void => console.log(`NOTE  ${line}`);
+/** The dataset of a closed app: every segment the journal holds, and the sidecar, onto a copy that may be opened freely. */
+function copyMonitoring(from: string, to: string): void {
+  for (const f of readdirSync(from)) {
+    if (isSegmentFileName(f) || f === ROLLUP_FILE) copyFileSync(path.join(from, f), path.join(to, f));
+  }
+}
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // --- the synthetic capture ---------------------------------------------------------------------------
@@ -643,10 +650,10 @@ try {
     app = null;
     const copy1 = path.join(work, 'copy1');
     mkdirSync(copy1, { recursive: true });
-    for (const f of [JOURNAL_FILE, ROLLUP_FILE]) copyFileSync(path.join(monitoringRoot(profile!), f), path.join(copy1, f));
+    copyMonitoring(monitoringRoot(profile!), copy1);
     const vol1 = openMonitoringVolume(copy1);
     try {
-      const { journal } = MonitoringJournal.open(vol1.journal, { limitBytes: 1 << 30 });
+      const { journal } = MonitoringJournal.open(vol1.segments, { limitBytes: 1 << 30 });
       const snap = journal.snapshot();
       const opened = RollupStore.open(vol1.rollups,
         { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION }, { nowMs: () => Date.now() });
@@ -713,10 +720,10 @@ try {
   // 4. the journal and the sidecar, read with the repo's own code, exactly.
   const copy = path.join(work, 'copy');
   mkdirSync(copy, { recursive: true });
-  for (const f of [JOURNAL_FILE, ROLLUP_FILE]) copyFileSync(path.join(monitoringRoot(profile), f), path.join(copy, f));
+  copyMonitoring(monitoringRoot(profile), copy);
   const volume = openMonitoringVolume(copy);
   try {
-    const { journal } = MonitoringJournal.open(volume.journal, { limitBytes: 1 << 30 });
+    const { journal } = MonitoringJournal.open(volume.segments, { limitBytes: 1 << 30 });
     const snap = journal.snapshot();
     const opened = RollupStore.open(volume.rollups,
       { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION }, { nowMs: () => Date.now() });

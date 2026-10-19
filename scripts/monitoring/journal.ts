@@ -23,6 +23,9 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { MemoryBlockFile, type BlockFile } from '../../src/services/capture/blockFile';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import {
+  LEGACY_JOURNAL_NAME, MemorySegmentDirectory, SEGMENT_HEADER_BYTES, encodeSegmentHeader, segmentName, type SegmentDirectory,
+} from '../../src/services/monitoring/segments';
+import {
   DECODER_POLICY_VERSION, FORMAT_VERSION, LIMITS,
   type BoundaryEvidence, type DatagramEvidence, type Evidence, type MinuteRollup,
 } from '../../src/services/monitoring/types';
@@ -38,7 +41,7 @@ import {
 import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES, RollupStore } from '../../src/services/monitoring/rollupStore';
 import { MAX_ROLLUP_INFLATED_BYTES, decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { EntryIndex, INDEX_STRIDE } from '../../src/services/monitoring/index';
-import { monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
+import { NodeSegmentDirectory, monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
 
 let failures = 0;
 function test(name: string, fn: () => void): void {
@@ -65,11 +68,11 @@ function readAll(file: BlockFile): Uint8Array {
   return out;
 }
 
-/** Where each entry of a valid journal or sidecar image starts, in id order. */
-function entryStarts(image: Uint8Array): number[] {
+/** Where each entry of a valid segment image starts, in id order. A legacy image passes its 64-byte header. */
+function entryStarts(image: Uint8Array, headerBytes = SEGMENT_HEADER_BYTES): number[] {
   const out: number[] = [];
   const v = new DataView(image.buffer, image.byteOffset, image.byteLength);
-  let off = FILE_HEADER_BYTES;
+  let off = headerBytes;
   while (off + 24 <= image.length) {
     out.push(off);
     off += 24 + v.getUint32(off + 4, true);
@@ -176,6 +179,12 @@ const GEN_BYTES = Uint8Array.from({ length: 16 }, (_, i) => 0xa0 + i);
 const GEN = hex(GEN_BYTES).replace(/ /g, '');
 const T0 = 1_700_000_000_000;
 const rnd = (n: number): Uint8Array => GEN_BYTES.slice(0, n);
+/** A session id is 16 random bytes in the header of a segment that opens inside it, so these are 32 hex digits. */
+const sid = (n: number): string => n.toString(16).padStart(2, '0').repeat(16);
+const S1 = sid(1);
+const S2 = sid(2);
+const S9 = sid(9);
+const ZZ = sid(0xee);
 
 function options(over: Partial<JournalOptions> = {}): JournalOptions {
   return { limitBytes: 1 << 30, randomBytes: rnd, nowMs: () => T0, ...over };
@@ -190,7 +199,66 @@ function bnd(action: BoundaryEvidence['action'], sessionId: string, receivedMs: 
   return { kind: 'boundary', sessionId, receivedMs, action, reason, droppedDatagrams };
 }
 
-/** A file backend that can be reopened, loaded with bytes and measured. */
+/**
+ * One named file of a rig's directory, as the single file the journal tests
+ * read, cut and damage. It looks the directory up on every call, so it stays
+ * valid across a `reopen`, and it owns no handle: the directory does.
+ */
+class SegFile implements BlockFile {
+  constructor(private readonly rig: JRig, readonly name: string = segmentName(1)) {}
+  get dir(): SegmentDirectory { return this.rig.dir; }
+  private exists(): boolean { return this.dir.list().includes(this.name); }
+  read(offset: number, into: Uint8Array): number { return this.dir.open(this.name).read(offset, into); }
+  write(offset: number, from: Uint8Array): void {
+    (this.exists() ? this.dir.open(this.name) : this.dir.create(this.name)).write(offset, from);
+  }
+  truncate(length: number): void { this.dir.open(this.name).truncate(length); }
+  flush(): void { this.dir.open(this.name).flush(); }
+  size(): number { return this.exists() ? this.dir.open(this.name).size() : 0; }
+  close(): void { /* the directory owns the handle */ }
+}
+
+/** A directory of segments, over memory or a real folder, with the first segment as `file`. */
+class JRig {
+  dir: SegmentDirectory;
+  readonly file = new SegFile(this);
+  constructor(readonly kind: 'memory' | 'disk', private readonly root: string | null) {
+    this.dir = this.fresh();
+  }
+  private fresh(seed?: Record<string, Uint8Array>): SegmentDirectory {
+    if (this.kind === 'memory') return new MemorySegmentDirectory(seed);
+    const dir = new NodeSegmentDirectory(this.root!);
+    for (const [name, bytes] of Object.entries(seed ?? {})) dir.create(name).write(0, bytes);
+    return dir;
+  }
+  private closeDir(): void {
+    if (this.dir instanceof NodeSegmentDirectory) this.dir.close();
+  }
+  reopen(): SegFile {
+    if (this.kind === 'disk') {
+      this.closeDir();
+      this.dir = this.fresh();
+    }
+    return this.file;
+  }
+  /** Replaces everything with one segment image, named for entry 1. */
+  load(bytes: Uint8Array): SegFile {
+    return this.seed({ [segmentName(1)]: bytes }, this.file);
+  }
+  /** Replaces everything with a milestone-1 `journal.iwmj`; the file it returns reads and damages that one. */
+  loadLegacy(bytes: Uint8Array): SegFile {
+    return this.seed({ [LEGACY_JOURNAL_NAME]: bytes }, new SegFile(this, LEGACY_JOURNAL_NAME));
+  }
+  private seed(files: Record<string, Uint8Array>, file: SegFile): SegFile {
+    for (const name of this.dir.list()) this.dir.unlink(name);
+    this.closeDir();
+    this.dir = this.fresh(files);
+    return file;
+  }
+  close(): void { this.closeDir(); }
+}
+
+/** A file backend that can be reopened, loaded with bytes and measured. Holds the sidecar. */
 class Rig {
   file: BlockFile;
   constructor(readonly kind: 'memory' | 'disk', private readonly filePath: string | null) {
@@ -208,24 +276,35 @@ class Rig {
     this.file.write(0, bytes);
     return this.reopen();
   }
+  close(): void { this.file.close(); }
 }
 
 const tmpRoot = mkdtempSync(path.join(tmpdir(), 'inwire-journal-'));
 let rigCount = 0;
-const openRigs: Rig[] = [];
+const openRigs: { close(): void }[] = [];
 function newRig(kind: 'memory' | 'disk'): Rig {
   const rig = new Rig(kind, kind === 'disk' ? path.join(tmpRoot, `f${rigCount++}`, 'file.bin') : null);
   openRigs.push(rig);
   return rig;
 }
+function newJRig(kind: 'memory' | 'disk'): JRig {
+  const rig = new JRig(kind, kind === 'disk' ? path.join(tmpRoot, `j${rigCount++}`) : null);
+  openRigs.push(rig);
+  return rig;
+}
 
-function open(file: BlockFile, over: Partial<JournalOptions> = {}) {
-  return MonitoringJournal.open(file, options(over));
+type Target = SegFile | SegmentDirectory;
+const dirOf = (t: Target): SegmentDirectory => (t instanceof SegFile ? t.dir : t);
+function open(target: Target, over: Partial<JournalOptions> = {}) {
+  return MonitoringJournal.open(dirOf(target), options(over));
+}
+function recover(target: Target) {
+  return recoverJournal(dirOf(target));
 }
 
 /** start, datagrams carrying payloads of the given sizes; no stop. */
-function build(file: BlockFile, payloadSizes: number[], session = 'S1'): MonitoringJournal {
-  const { journal } = open(file);
+function build(target: Target, payloadSizes: number[], session = S1): MonitoringJournal {
+  const { journal } = open(target);
   const inputs: EvidenceInput[] = [bnd('start', session, T0 + 1)];
   payloadSizes.forEach((n, i) => inputs.push(dg(T0 + 10 + i, Uint8Array.from({ length: n }, (_, k) => (k + i) & 0xff))));
   const r = journal.append(inputs);
@@ -239,12 +318,12 @@ function journalCases(kind: 'memory' | 'disk'): void {
   const tag = (s: string) => `[${kind}] ${s}`;
 
   test(tag('an empty file gets a header; the generation comes from randomBytes and is fixed'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal, recovery } = open(rig.file);
     assert.equal(recovery.status, 'empty');
-    assert.equal(rig.file.size(), FILE_HEADER_BYTES);
+    assert.equal(rig.file.size(), SEGMENT_HEADER_BYTES);
     assert.equal(journal.snapshot().generation, GEN);
-    assert.deepEqual(journal.snapshot(), { generation: GEN, throughEntryId: 0, writtenBytes: 64, syncedThroughEntryId: 0 });
+    assert.deepEqual(journal.snapshot(), { generation: GEN, throughEntryId: 0, firstEntryId: 1, writtenBytes: SEGMENT_HEADER_BYTES, syncedThroughEntryId: 0 });
     assert.equal(journal.state, 'open');
     // A non-empty file's generation is read, never replaced.
     const again = open(rig.reopen(), { randomBytes: () => new Uint8Array(16).fill(7) });
@@ -254,12 +333,12 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('zero inputs: an empty append, a zero-length payload'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
     const before = journal.snapshot();
     const empty = journal.append([]);
     assert.deepEqual(empty, { snapshot: before, appended: 0, refused: 0, state: 'open' });
-    assert.equal(journal.append([bnd('start', 'S1', T0)]).appended, 1);
+    assert.equal(journal.append([bnd('start', S1, T0)]).appended, 1);
     const r = journal.append([dg(T0 + 1, [])]);
     assert.equal(r.appended, 1);
     const got = journal.readEvidence({ generation: GEN, entryId: 2 }) as DatagramEvidence;
@@ -267,31 +346,31 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('exact round trip through close and reopen, bytes included'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
     const payload = Uint8Array.from({ length: 300 }, (_, i) => (i * 7) & 0xff);
     const r = journal.append([
-      bnd('start', 'S1', T0 + 5, 'user'),
+      bnd('start', S1, T0 + 5, 'user'),
       dg(T0 + 6, payload, 40001),
-      bnd('gap', 'S1', T0 + 7, 'inbox full', 12),
+      bnd('gap', S1, T0 + 7, 'inbox full', 12),
       dg(T0 + 8, [9], 40002),
-      bnd('stop', 'S1', T0 + 9, 'user', 3),
+      bnd('stop', S1, T0 + 9, 'user', 3),
     ]);
     assert.equal(r.appended, 5);
     assert.equal(r.snapshot.throughEntryId, 5);
     const expected: Evidence[] = [
-      { kind: 'boundary', ref: { generation: GEN, entryId: 1 }, sessionId: 'S1', receivedMs: T0 + 5, action: 'start', reason: 'user', droppedDatagrams: null },
-      { kind: 'datagram', ref: { generation: GEN, entryId: 2 }, sessionId: 'S1', receivedMs: T0 + 6, receiveOrdinal: 2, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40001, bytes: payload },
-      { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: 'S1', receivedMs: T0 + 7, action: 'gap', reason: 'inbox full', droppedDatagrams: 12 },
-      { kind: 'datagram', ref: { generation: GEN, entryId: 4 }, sessionId: 'S1', receivedMs: T0 + 8, receiveOrdinal: 4, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40002, bytes: Uint8Array.from([9]) },
-      { kind: 'boundary', ref: { generation: GEN, entryId: 5 }, sessionId: 'S1', receivedMs: T0 + 9, action: 'stop', reason: 'user', droppedDatagrams: 3 },
+      { kind: 'boundary', ref: { generation: GEN, entryId: 1 }, sessionId: S1, receivedMs: T0 + 5, action: 'start', reason: 'user', droppedDatagrams: null },
+      { kind: 'datagram', ref: { generation: GEN, entryId: 2 }, sessionId: S1, receivedMs: T0 + 6, receiveOrdinal: 2, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40001, bytes: payload },
+      { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: S1, receivedMs: T0 + 7, action: 'gap', reason: 'inbox full', droppedDatagrams: 12 },
+      { kind: 'datagram', ref: { generation: GEN, entryId: 4 }, sessionId: S1, receivedMs: T0 + 8, receiveOrdinal: 4, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40002, bytes: Uint8Array.from([9]) },
+      { kind: 'boundary', ref: { generation: GEN, entryId: 5 }, sessionId: S1, receivedMs: T0 + 9, action: 'stop', reason: 'user', droppedDatagrams: 3 },
     ];
     const reopened = open(rig.reopen()).journal;
     expected.forEach((e) => assert.deepEqual(reopened.readEvidence(e.ref), e));
     assert.equal(reopened.snapshot().throughEntryId, 5);
     assert.deepEqual(reopened.readPage(reopened.snapshot(), 0, 100, 1 << 20).entries, expected);
     // The recovery view agrees with the open.
-    const rec = recoverJournal(rig.file);
+    const rec = recover(rig.file);
     assert.equal(rec.status, 'ok');
     assert.equal(rec.completeEntries, 5);
     assert.equal(rec.lastEntryId, 5);
@@ -300,25 +379,25 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('a datagram with no open session is refused; a closed session closes it again'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
     assert.deepEqual([journal.append([dg(T0)]).appended, journal.state], [0, 'open']);
-    journal.append([bnd('start', 'S1', T0)]);
+    journal.append([bnd('start', S1, T0)]);
     assert.equal(journal.append([dg(T0 + 1)]).appended, 1);
-    journal.append([bnd('stop', 'S1', T0 + 2)]);
+    journal.append([bnd('stop', S1, T0 + 2)]);
     const r = journal.append([dg(T0 + 3)]);
     assert.equal(r.appended, 0);
     assert.equal(r.refused, 1);
     // A later session labels its own datagrams.
-    journal.append([bnd('start', 'S2', T0 + 4), dg(T0 + 5)]);
-    assert.equal((journal.readEvidence({ generation: GEN, entryId: 5 }) as DatagramEvidence).sessionId, 'S2');
-    assert.equal((journal.readEvidence({ generation: GEN, entryId: 2 }) as DatagramEvidence).sessionId, 'S1');
+    journal.append([bnd('start', S2, T0 + 4), dg(T0 + 5)]);
+    assert.equal((journal.readEvidence({ generation: GEN, entryId: 5 }) as DatagramEvidence).sessionId, S2);
+    assert.equal((journal.readEvidence({ generation: GEN, entryId: 2 }) as DatagramEvidence).sessionId, S1);
   });
 
   test(tag('maximum payload accepted, one byte more refused; refusal is per entry'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
-    journal.append([bnd('start', 'S1', T0)]);
+    journal.append([bnd('start', S1, T0)]);
     const max = new Uint8Array(LIMITS.maxPayloadBytes).fill(0xab);
     const over = new Uint8Array(LIMITS.maxPayloadBytes + 1);
     const r = journal.append([dg(T0 + 1, max), dg(T0 + 2, over), dg(T0 + 3, [1])]);
@@ -333,7 +412,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('every torn-tail offset inside the last entry keeps exactly the complete prefix'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const journal = build(rig.file, [10, 0, 100]);
     assert.equal(journal.snapshot().throughEntryId, 4);
     const full = readAll(rig.file);
@@ -350,7 +429,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       const snap = j.snapshot();
       assert.equal(snap.throughEntryId, 4, `cut ${cut}`);
       const marker = j.readEvidence({ generation: GEN, entryId: 4 }) as BoundaryEvidence;
-      assert.deepEqual([marker.action, marker.sessionId, marker.droppedDatagrams], ['interrupted', 'S1', null]);
+      assert.deepEqual([marker.action, marker.sessionId, marker.droppedDatagrams], ['interrupted', S1, null]);
       assert.equal(marker.receivedMs, T0 + 11, 'the last surviving entry\'s own receipt time');
       const bytesAfterFirst = sha(readAll(file));
       const second = open(rig.reopen());
@@ -365,20 +444,20 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('every torn offset inside the file header leaves an empty journal, then a stable one'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     open(rig.file);
     const header = readAll(rig.file);
-    assert.equal(header.length, 64);
-    for (let cut = 0; cut < 64; cut++) {
+    assert.equal(header.length, SEGMENT_HEADER_BYTES);
+    for (let cut = 0; cut < SEGMENT_HEADER_BYTES; cut++) {
       const file = rig.load(header.subarray(0, cut));
-      const rec = recoverJournal(file);
+      const rec = recover(file);
       assert.equal(rec.status, 'empty', `cut ${cut}`);
       assert.equal(rec.generation, null);
       assert.deepEqual(rec.tornTail, cut === 0 ? null : { fromOffset: 0, bytes: cut }, `cut ${cut}`);
       assert.equal(file.size(), cut, 'recoverJournal never truncates');
       const first = open(file, { randomBytes: () => new Uint8Array(16).fill(cut & 0xff) });
       assert.equal(first.journal.state, 'open');
-      assert.equal(file.size(), 64, `cut ${cut}`);
+      assert.equal(file.size(), SEGMENT_HEADER_BYTES, `cut ${cut}`);
       const gen = first.journal.snapshot().generation;
       const second = open(rig.reopen(), { randomBytes: () => new Uint8Array(16).fill(0xee) });
       assert.equal(second.journal.snapshot().generation, gen, `generation is fixed once written (cut ${cut})`);
@@ -392,7 +471,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('a bad torn-extent entry with a failing CRC at the very end is a torn tail'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     build(rig.file, [10, 20]);
     const full = readAll(rig.file);
     full[full.length - 1] ^= 0xff;
@@ -406,11 +485,11 @@ function journalCases(kind: 'memory' | 'disk'): void {
 
   test(tag('interior corruption: bad frame magic and bad interior CRC preserve the file and refuse append'), () => {
     for (const how of ['magic', 'crc', 'length'] as const) {
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       build(rig.file, [10, 20, 30, 40]);
       const full = readAll(rig.file);
       // Entry 4 (the second datagram), with entry 5 behind it.
-      let off = 64;
+      let off = SEGMENT_HEADER_BYTES;
       for (let id = 1; id < 4; id++) {
         const h = parseEntryHeader(JOURNAL_FRAMING, full.subarray(off, off + 24));
         assert.ok(h.ok);
@@ -432,7 +511,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       const snap = journal.snapshot();
       assert.equal(snap.throughEntryId, 3, how);
       assert.equal(journal.readPage(snap, 0, 100, 1 << 20).entries.length, 3, `${how}: history before the bad entry stays readable`);
-      const r = journal.append([bnd('start', 'S9', T0)]);
+      const r = journal.append([bnd('start', S9, T0)]);
       assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'refused-corrupt'], how);
       assert.equal(sha(readAll(file)), before, `${how}: a refused append wrote nothing`);
     }
@@ -441,7 +520,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   test(tag('a corrupted interior length is corruption, never a torn tail (extent past EOF, mid-file, inside a bad-CRC extent)'), () => {
     const cases = ['past EOF, in cap', 'lands mid-file on non-entry bytes', 'bad CRC whose extent holds a valid entry'] as const;
     for (const how of cases) {
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       build(rig.file, [10, 20, 30, 40]);
       let full = readAll(rig.file);
       const starts = entryStarts(full);
@@ -453,7 +532,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
         new DataView(full.buffer).setUint32(off2 + 4, 40, true);
       } else {
         // A last entry whose own checksum is wrong and whose body is a complete, valid entry.
-        const inner = encodeEntry(JOURNAL_FRAMING, 6, KIND_BOUNDARY, new TextEncoder().encode(JSON.stringify({ action: 'gap', sessionId: 'S1', receivedMs: T0 })));
+        const inner = encodeEntry(JOURNAL_FRAMING, 6, KIND_BOUNDARY, new TextEncoder().encode(JSON.stringify({ action: 'gap', sessionId: S1, receivedMs: T0 })));
         const outer = encodeEntry(JOURNAL_FRAMING, 6, KIND_DATAGRAM, inner);
         new DataView(outer.buffer).setUint32(20, 0x12345678, true);
         const joined = new Uint8Array(full.length + outer.length);
@@ -475,7 +554,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
         assert.equal(recovery.validBytes, off2);
         assert.equal(journal.readPage(journal.snapshot(), 0, 100, 1 << 20).entries.length, 1, 'history before the bad entry stays readable');
       }
-      const r = journal.append([bnd('start', 'S9', T0)]);
+      const r = journal.append([bnd('start', S9, T0)]);
       assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'refused-corrupt'], how);
       assert.equal(sha(readAll(file)), before, `${how}: a refused append wrote nothing`);
     }
@@ -484,12 +563,12 @@ function journalCases(kind: 'memory' | 'disk'): void {
   test(tag('an all-zero tail is torn and truncated; a zero run with a non-zero byte after it is corruption'), () => {
     for (const zeros of [1, 23, 24, 25, 4096]) {
       for (const sessionOpen of [true, false]) {
-        const rig = newRig(kind);
+        const rig = newJRig(kind);
         const journal = build(rig.file, [10, 20]);
-        if (!sessionOpen) journal.append([bnd('stop', 'S1', T0 + 99)]);
+        if (!sessionOpen) journal.append([bnd('stop', S1, T0 + 99)]);
         const valid = readAll(rig.file);
         const file = rig.load(Uint8Array.from([...valid, ...new Uint8Array(zeros)]));
-        const rec = recoverJournal(file);
+        const rec = recover(file);
         assert.equal(rec.status, 'ok', `${zeros} zeros`);
         assert.deepEqual(rec.tornTail, { fromOffset: valid.length, bytes: zeros }, `${zeros} zeros`);
         const reopened = open(file);
@@ -504,7 +583,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       }
     }
     // Zeros, then one non-zero byte: the zeros are not the whole story.
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     build(rig.file, [10, 20]);
     const valid = readAll(rig.file);
     const tail = new Uint8Array(4096);
@@ -529,7 +608,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
     for (const [name, rel] of fields) {
       // Entry 2 has entries behind it; entry 5 is the last in the file.
       for (const id of [2, 5]) {
-        const rig = newRig(kind);
+        const rig = newJRig(kind);
         build(rig.file, [10, 20, 30, 40]);
         const full = readAll(rig.file);
         const off = entryStarts(full)[id - 1];
@@ -546,11 +625,11 @@ function journalCases(kind: 'memory' | 'disk'): void {
       }
     }
     // The control: the same edit with a zero byte is the original file, and reads fine.
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     build(rig.file, [10, 20]);
     const full = readAll(rig.file);
     reseal(full, entryStarts(full)[1]);
-    assert.equal(recoverJournal(rig.load(full)).status, 'ok');
+    assert.equal(recover(rig.load(full)).status, 'ok');
   });
 
   test(tag('every boundary is held to the limit; a forced one that does not fit is not written and the session stays open'), () => {
@@ -561,9 +640,9 @@ function journalCases(kind: 'memory' | 'disk'): void {
       const other = 500;
       const limit = reserve + 4_000;
       const ceiling = limit - reserve - other; // what the file itself may reach for anything but a close
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
-      journal.append([bnd('start', 'S1', T0)]);
+      journal.append([bnd('start', S1, T0)]);
       let datagrams = 0;
       while (rig.file.size() + 130 <= ceiling && datagrams < 1_000) {
         datagrams += journal.append([dg(T0 + 1, new Uint8Array(40))]).appended;
@@ -573,7 +652,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       let refused = false;
       for (let i = 0; i < 2_000 && !refused; i++) {
         const before = rig.file.size();
-        const r = journal.append([bnd('gap', 'S1', T0 + 2, 'x'.repeat(200), 5)]);
+        const r = journal.append([bnd('gap', S1, T0 + 2, 'x'.repeat(200), 5)]);
         if (r.appended === 1) {
           gaps++;
           assert.ok(rig.file.size() + other <= limit - reserve, 'an accepted gap never enters the reserve');
@@ -586,7 +665,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       assert.ok(refused, 'gaps are refused once they would enter the reserve');
       assert.ok(gaps < 100, 'a gap does not run on to the limit');
       const last = journal.readEvidence({ generation: GEN, entryId: journal.snapshot().throughEntryId }) as BoundaryEvidence;
-      assert.deepEqual([last.action, last.reason, last.sessionId], ['stop', 'storage-limit', 'S1'], 'the session is closed on disk');
+      assert.deepEqual([last.action, last.reason, last.sessionId], ['stop', 'storage-limit', S1], 'the session is closed on disk');
       assert.ok(rig.file.size() + other <= limit, 'the dataset never exceeds the limit');
       const r = journal.append([dg(T0 + 3, new Uint8Array(40))]);
       assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'storage-limit']);
@@ -597,13 +676,13 @@ function journalCases(kind: 'memory' | 'disk'): void {
     for (const action of ['suspend', 'resume'] as const) {
       const reserve = LIMITS.closingReserveBytes;
       const limit = reserve + 2_000;
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       const { journal } = open(rig.file, { limitBytes: limit });
-      journal.append([bnd('start', 'S1', T0)]);
-      if (action === 'resume') journal.append([bnd('suspend', 'S1', T0 + 1)]);
+      journal.append([bnd('start', S1, T0)]);
+      if (action === 'resume') journal.append([bnd('suspend', S1, T0 + 1)]);
       while (rig.file.size() + 130 <= limit - reserve) journal.append([dg(T0 + 2, new Uint8Array(40))]);
       while (journal.state === 'open' && journal.snapshot().throughEntryId < 10_000) {
-        journal.append([bnd(action, 'S1', T0 + 3), bnd(action === 'suspend' ? 'resume' : 'suspend', 'S1', T0 + 4)]);
+        journal.append([bnd(action, S1, T0 + 3), bnd(action === 'suspend' ? 'resume' : 'suspend', S1, T0 + 4)]);
       }
       assert.equal(journal.state, 'storage-limit', action);
       const last = journal.readEvidence({ generation: GEN, entryId: journal.snapshot().throughEntryId }) as BoundaryEvidence;
@@ -616,26 +695,26 @@ function journalCases(kind: 'memory' | 'disk'): void {
       const reserve = LIMITS.closingReserveBytes;
       const limit = reserve + 4_000;
       let other = 0;
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
-      journal.append([bnd('start', 'S1', T0)]);
+      journal.append([bnd('start', S1, T0)]);
       while (rig.file.size() + 130 <= limit - reserve) journal.append([dg(T0 + 1, new Uint8Array(40))]);
       other = limit - reserve - rig.file.size() + 100; // the journal is now 100 bytes inside the reserve
-      const r = journal.append([bnd('stop', 'S1', T0 + 2)]);
+      const r = journal.append([bnd('stop', S1, T0 + 2)]);
       assert.deepEqual([r.appended, r.refused, r.state], [1, 0, 'open'], 'the user stop is written from the reserve');
       const last = journal.readEvidence({ generation: GEN, entryId: r.snapshot.throughEntryId }) as BoundaryEvidence;
       assert.deepEqual([last.action, last.reason], ['stop', '']);
       assert.ok(rig.file.size() + other <= limit, 'never past the limit');
-      assert.equal(journal.append([bnd('start', 'S2', T0 + 3)]).appended, 0, 'a new session does not fit inside the reserve');
+      assert.equal(journal.append([bnd('start', S2, T0 + 3)]).appended, 0, 'a new session does not fit inside the reserve');
     }
 
     // 2. otherBytes grows mid-run past what the reserve can cover.
     {
       const limit = LIMITS.closingReserveBytes + 2_000;
       let other = 0;
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
-      journal.append([bnd('start', 'S1', T0)]);
+      journal.append([bnd('start', S1, T0)]);
       assert.equal(journal.append([dg(T0 + 1, new Uint8Array(100))]).appended, 1);
       const sizeBefore = rig.file.size();
       other = limit - sizeBefore - 5; // 5 bytes of room: not enough for any boundary
@@ -643,7 +722,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'storage-limit']);
       assert.equal(rig.file.size(), sizeBefore, 'the stop did not fit, so it was not written');
       assert.ok(rig.file.size() + other <= limit, 'the dataset never exceeds the limit');
-      assert.equal(journal.append([bnd('stop', 'S1', T0 + 3)]).appended, 0, 'nothing more is accepted');
+      assert.equal(journal.append([bnd('stop', S1, T0 + 3)]).appended, 0, 'nothing more is accepted');
       // The session is open on disk. With no room the next open writes nothing and says storage-limit...
       const cramped = open(rig.reopen(), { limitBytes: limit, otherBytes: () => other });
       assert.equal(cramped.journal.state, 'storage-limit');
@@ -653,7 +732,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       const roomy = open(rig.reopen(), { limitBytes: limit, otherBytes: () => other });
       assert.equal(roomy.journal.state, 'open');
       const marker = roomy.journal.readEvidence({ generation: GEN, entryId: roomy.journal.snapshot().throughEntryId }) as BoundaryEvidence;
-      assert.deepEqual([marker.action, marker.sessionId], ['interrupted', 'S1']);
+      assert.deepEqual([marker.action, marker.sessionId], ['interrupted', S1]);
     }
   });
 
@@ -661,7 +740,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   // zeros to EOF. Built from a real entry so the leading bytes are really a header's.
   test(tag('a torn header (some header bytes, then zeros to EOF) is a torn tail and recovers'), () => {
     for (const kept of [1, 2, 4]) {
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       build(rig.file, [10, 20, 30]);
       const full = readAll(rig.file);
       const last = entryStarts(full).at(-1)!;
@@ -669,7 +748,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
       const image = Uint8Array.from([...full.subarray(0, last + kept), ...new Uint8Array(zeros)]);
       assert.equal(parseEntryHeader(JOURNAL_FRAMING, image.subarray(last, last + 24)).ok, false, 'the header is one that fails to parse');
       const file = rig.load(image);
-      const rec = recoverJournal(file);
+      const rec = recover(file);
       assert.equal(rec.status, 'ok', `${kept} header bytes`);
       assert.equal(rec.completeEntries, 3, `${kept} header bytes`);
       assert.deepEqual(rec.tornTail, { fromOffset: last, bytes: kept + zeros }, `${kept} header bytes`);
@@ -681,7 +760,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('a header that fails to parse with garbage after it stays refused-corrupt, and nothing is written'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     build(rig.file, [10, 20, 30]);
     const full = readAll(rig.file);
     const last = entryStarts(full).at(-1)!;
@@ -699,7 +778,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('a header that fails to parse, zeros, and then a valid entry stays refused-corrupt'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     build(rig.file, [10, 20, 30]);
     const full = readAll(rig.file);
     const last = entryStarts(full).at(-1)!;
@@ -718,9 +797,9 @@ function journalCases(kind: 'memory' | 'disk'): void {
     const reserve = LIMITS.closingReserveBytes;
     const other = 500;
     const limit = reserve + 4_000;
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
-    journal.append([bnd('start', 'S1', T0)]);
+    journal.append([bnd('start', S1, T0)]);
     for (let i = 0; i < 1_000 && journal.state === 'open'; i++) journal.append([dg(T0 + 1, new Uint8Array(40))]);
     assert.equal(journal.state, 'storage-limit');
     assert.equal(journal.limitBytes, limit);
@@ -735,7 +814,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
     assert.equal(journal.state, 'open');
     assert.equal(journal.limitBytes, limit * 4);
     assert.equal(rig.file.size(), sizeAtLimit, 'raising the ceiling wrote nothing: the session was closed by a stop');
-    assert.equal(journal.append([bnd('start', 'S2', T0 + 5)]).appended, 1);
+    assert.equal(journal.append([bnd('start', S2, T0 + 5)]).appended, 1);
     assert.equal(journal.append([dg(T0 + 6, [1])]).appended, 1);
     // Lowering it below what is held closes the door again at the next write.
     journal.setLimit(sizeAtLimit);
@@ -749,9 +828,9 @@ function journalCases(kind: 'memory' | 'disk'): void {
   test(tag('setLimit on a session the limit could not close writes the interrupted marker a crash would have'), () => {
     const limit = LIMITS.closingReserveBytes + 2_000;
     let other = 0;
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
-    journal.append([bnd('start', 'S1', T0)]);
+    journal.append([bnd('start', S1, T0)]);
     journal.append([dg(T0 + 1, new Uint8Array(100))]);
     other = limit - rig.file.size() - 5;
     assert.equal(journal.append([dg(T0 + 2, new Uint8Array(100))]).refused, 1);
@@ -760,12 +839,12 @@ function journalCases(kind: 'memory' | 'disk'): void {
     journal.setLimit(limit * 2);
     assert.equal(journal.state, 'open');
     const marker = journal.readEvidence({ generation: GEN, entryId: journal.snapshot().throughEntryId }) as BoundaryEvidence;
-    assert.deepEqual([marker.action, marker.sessionId], ['interrupted', 'S1']);
-    assert.equal(journal.append([bnd('start', 'S2', T0 + 9)]).appended, 1, 'the new session is accepted behind the marker');
+    assert.deepEqual([marker.action, marker.sessionId], ['interrupted', S1]);
+    assert.equal(journal.append([bnd('start', S2, T0 + 9)]).appended, 1, 'the new session is accepted behind the marker');
   });
 
   test(tag('readPage refuses arguments that are not integers in range (they will arrive over IPC)'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const journal = build(rig.file, [1, 2, 3]);
     const snap = journal.snapshot();
     for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
@@ -779,7 +858,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('session consistency at append: refused without a write, counted, and the read side still accepts what a file holds'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
     const attempt = (inputs: EvidenceInput[], name: string) => {
       const before = sha(readAll(rig.file));
@@ -790,38 +869,46 @@ function journalCases(kind: 'memory' | 'disk'): void {
       assert.equal(sha(readAll(rig.file)), before, `${name}: nothing written`);
     };
     // No session open.
-    for (const action of ['stop', 'suspend', 'resume', 'interrupted'] as const) attempt([bnd(action, 'S1', T0)], `${action} with no session`);
-    assert.equal(journal.append([bnd('start', 'S1', T0)]).appended, 1);
+    for (const action of ['stop', 'suspend', 'resume', 'interrupted'] as const) attempt([bnd(action, S1, T0)], `${action} with no session`);
+    assert.equal(journal.append([bnd('start', S1, T0)]).appended, 1);
     // A session is open.
-    attempt([bnd('start', 'S2', T0 + 1)], 'start while a session is open');
-    attempt([bnd('start', 'S1', T0 + 1)], 'a second start of the same session');
-    for (const action of ['stop', 'suspend', 'resume', 'interrupted'] as const) attempt([bnd(action, 'S2', T0 + 1)], `${action} naming another session`);
+    attempt([bnd('start', S2, T0 + 1)], 'start while a session is open');
+    attempt([bnd('start', S1, T0 + 1)], 'a second start of the same session');
+    for (const action of ['stop', 'suspend', 'resume', 'interrupted'] as const) attempt([bnd(action, S2, T0 + 1)], `${action} naming another session`);
     // The legitimate sequence still works, in order.
-    const ok = journal.append([bnd('suspend', 'S1', T0 + 2), bnd('resume', 'S1', T0 + 3), dg(T0 + 4), bnd('stop', 'S1', T0 + 5)]);
+    const ok = journal.append([bnd('suspend', S1, T0 + 2), bnd('resume', S1, T0 + 3), dg(T0 + 4), bnd('stop', S1, T0 + 5)]);
     assert.deepEqual([ok.appended, ok.refused], [4, 0]);
-    attempt([bnd('stop', 'S1', T0 + 6)], 'a second stop');
-    assert.equal(journal.append([bnd('start', 'S2', T0 + 7)]).appended, 1, 'a new session after a stop');
+    attempt([bnd('stop', S1, T0 + 6)], 'a second stop');
+    assert.equal(journal.append([bnd('start', S2, T0 + 7)]).appended, 1, 'a new session after a stop');
     // The read side accepts what files contain: a double start, a stop naming nobody, a stop with nothing open.
     const json = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
     const b = (action: string, sessionId: string) => json({ action, sessionId, receivedMs: T0, reason: '', droppedDatagrams: null });
     const entries = [
-      encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, b('start', 'S1')),
-      encodeEntry(JOURNAL_FRAMING, 2, KIND_BOUNDARY, b('start', 'S2')),
-      encodeEntry(JOURNAL_FRAMING, 3, KIND_BOUNDARY, b('stop', 'ZZ')),
-      encodeEntry(JOURNAL_FRAMING, 4, KIND_BOUNDARY, b('resume', 'S9')),
+      encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, b('start', S1)),
+      encodeEntry(JOURNAL_FRAMING, 2, KIND_BOUNDARY, b('start', S2)),
+      encodeEntry(JOURNAL_FRAMING, 3, KIND_BOUNDARY, b('stop', ZZ)),
+      encodeEntry(JOURNAL_FRAMING, 4, KIND_BOUNDARY, b('resume', S9)),
     ];
-    const image = new Uint8Array(64 + entries.reduce((n, e) => n + e.length, 0));
+    const image = new Uint8Array(FILE_HEADER_BYTES + entries.reduce((n, e) => n + e.length, 0));
     image.set(encodeFileHeader(JOURNAL_FRAMING, { generation: GEN_BYTES, createdMs: T0 }), 0);
-    let at = 64;
+    let at = FILE_HEADER_BYTES;
     for (const e of entries) { image.set(e, at); at += e.length; }
-    const rec = recoverJournal(newRig(kind).load(image));
+    const rec = recover(newJRig(kind).loadLegacy(image));
     assert.equal(rec.status, 'ok', 'an existing file is never made corrupt by the writer\'s rules');
     assert.equal(rec.completeEntries, 4);
+    // The same entries behind a segment header read the same way.
+    const segImage = new Uint8Array(SEGMENT_HEADER_BYTES + entries.reduce((n, e) => n + e.length, 0));
+    segImage.set(encodeSegmentHeader({ policyVersion: 1, generation: GEN_BYTES, createdMs: T0, firstEntryId: 1, openSession: null, source: null }), 0);
+    at = SEGMENT_HEADER_BYTES;
+    for (const e of entries) { segImage.set(e, at); at += e.length; }
+    const segRec = recover(newJRig(kind).load(segImage));
+    assert.equal(segRec.status, 'ok', 'a segment is read by the same rules');
+    assert.equal(segRec.completeEntries, 4);
   });
 
   test(tag('a randomBytes of the wrong length is a RangeError before any write'), () => {
     for (const n of [0, 15, 17, 32]) {
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       assert.throws(() => open(rig.file, { randomBytes: () => new Uint8Array(n) }), RangeError, `length ${n}`);
       assert.equal(rig.file.size(), 0, `length ${n}: the file was not touched`);
     }
@@ -830,38 +917,45 @@ function journalCases(kind: 'memory' | 'disk'): void {
   test(tag('corruption of meaning: skipped id, orphan datagram, bad boundary JSON are all preserved'), () => {
     const bodyOf = (n: number) => encodeDatagramBody({ receivedMs: T0, localIPv4: '1.1.1.1', localPort: 1, remoteIPv4: '2.2.2.2', remotePort: 2, payload: Uint8Array.from([n]) });
     const json = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
-    const header = encodeFileHeader(JOURNAL_FRAMING, { generation: GEN_BYTES, createdMs: T0 });
-    const start = json({ action: 'start', sessionId: 'S1', receivedMs: T0, reason: '', droppedDatagrams: null });
+    // The same entries are read the same way behind either header: the milestone-1 one and a segment's.
+    const headers = {
+      legacy: encodeFileHeader(JOURNAL_FRAMING, { generation: GEN_BYTES, createdMs: T0 }),
+      segment: encodeSegmentHeader({ policyVersion: 1, generation: GEN_BYTES, createdMs: T0, firstEntryId: 1, openSession: null, source: null }),
+    } as const;
+    const start = json({ action: 'start', sessionId: S1, receivedMs: T0, reason: '', droppedDatagrams: null });
     const cases: [string, Uint8Array[]][] = [
       ['skipped id', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, start), encodeEntry(JOURNAL_FRAMING, 3, KIND_DATAGRAM, bodyOf(1))]],
       ['repeated id', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, start), encodeEntry(JOURNAL_FRAMING, 1, KIND_DATAGRAM, bodyOf(1))]],
       ['datagram before any start', [encodeEntry(JOURNAL_FRAMING, 1, KIND_DATAGRAM, bodyOf(1))]],
-      ['unknown action', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, json({ action: 'explode', sessionId: 'S1', receivedMs: T0 }))]],
+      ['unknown action', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, json({ action: 'explode', sessionId: S1, receivedMs: T0 }))]],
       ['unparsable JSON', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, new TextEncoder().encode('{"action":'))]],
       ['wrong-typed sessionId', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, json({ action: 'start', sessionId: 7, receivedMs: T0 }))]],
       ['the ADR vector\'s sessionless start', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, new TextEncoder().encode('{"action":"start"}'))]],
       ['unknown kind', [encodeEntry(JOURNAL_FRAMING, 1, 9, start)]],
       ['datagram body shorter than its metadata', [encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, start), encodeEntry(JOURNAL_FRAMING, 2, KIND_DATAGRAM, new Uint8Array(10))]],
     ];
-    for (const [name, entries] of cases) {
-      const bytes = new Uint8Array(64 + entries.reduce((n, e) => n + e.length, 0));
-      bytes.set(header, 0);
-      let at = 64;
-      for (const e of entries) { bytes.set(e, at); at += e.length; }
-      const rig = newRig(kind);
-      const file = rig.load(bytes);
-      const before = sha(bytes);
-      const { journal, recovery } = open(file);
-      assert.equal(recovery.status, 'corrupt', name);
-      assert.equal(journal.state, 'refused-corrupt', name);
-      assert.equal(sha(readAll(file)), before, name);
+    for (const format of ['legacy', 'segment'] as const) {
+      const header = headers[format];
+      for (const [name, entries] of cases) {
+        const bytes = new Uint8Array(header.length + entries.reduce((n, e) => n + e.length, 0));
+        bytes.set(header, 0);
+        let at = header.length;
+        for (const e of entries) { bytes.set(e, at); at += e.length; }
+        const rig = newJRig(kind);
+        const file = format === 'legacy' ? rig.loadLegacy(bytes) : rig.load(bytes);
+        const before = sha(bytes);
+        const { journal, recovery } = open(file);
+        assert.equal(recovery.status, 'corrupt', `${format}: ${name}`);
+        assert.equal(journal.state, 'refused-corrupt', `${format}: ${name}`);
+        assert.equal(sha(readAll(file)), before, `${format}: ${name}`);
+      }
     }
     // Missing optional fields default rather than corrupt.
-    const rig = newRig(kind);
-    const sparse = encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, json({ action: 'start', sessionId: 'S1', receivedMs: T0, extra: 'ignored' }));
-    const bytes = new Uint8Array(64 + sparse.length);
-    bytes.set(header, 0);
-    bytes.set(sparse, 64);
+    const rig = newJRig(kind);
+    const sparse = encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, json({ action: 'start', sessionId: S1, receivedMs: T0, extra: 'ignored' }));
+    const bytes = new Uint8Array(SEGMENT_HEADER_BYTES + sparse.length);
+    bytes.set(headers.segment, 0);
+    bytes.set(sparse, SEGMENT_HEADER_BYTES);
     const { journal, recovery } = open(rig.load(bytes));
     assert.equal(recovery.status, 'ok');
     const b = journal.readEvidence({ generation: GEN, entryId: 1 }) as BoundaryEvidence;
@@ -870,22 +964,22 @@ function journalCases(kind: 'memory' | 'disk'): void {
 
   test(tag('unknown format version and unknown decoder-policy version: preserved and refused'), () => {
     for (const [name, over] of [['format', { formatVersion: FORMAT_VERSION + 1 }], ['policy', { policyVersion: DECODER_POLICY_VERSION + 1 }]] as const) {
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       const header = encodeFileHeader(JOURNAL_FRAMING, { generation: GEN_BYTES, createdMs: T0, ...over });
       const tail = encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, new TextEncoder().encode('whatever a future decoder wrote'));
-      const bytes = new Uint8Array(64 + tail.length);
+      const bytes = new Uint8Array(FILE_HEADER_BYTES + tail.length);
       bytes.set(header, 0);
-      bytes.set(tail, 64);
-      const file = rig.load(bytes);
+      bytes.set(tail, FILE_HEADER_BYTES);
+      const file = rig.loadLegacy(bytes);
       const before = sha(bytes);
-      const rec = recoverJournal(file);
+      const rec = recover(file);
       assert.equal(rec.status, 'unknown-version', name);
       assert.ok(rec.problem, name);
       const { journal, recovery } = open(file);
       assert.equal(recovery.status, 'unknown-version', name);
       assert.equal(journal.state, 'refused-version', name);
       assert.equal(sha(readAll(file)), before, name);
-      const r = journal.append([bnd('start', 'S1', T0)]);
+      const r = journal.append([bnd('start', S1, T0)]);
       assert.deepEqual([r.appended, r.refused, r.state], [0, 1, 'refused-version'], name);
       assert.equal(sha(readAll(file)), before, name);
       assert.equal(journal.readEvidence({ generation: GEN, entryId: 1 }), null, 'never reinterpreted under another policy');
@@ -894,10 +988,10 @@ function journalCases(kind: 'memory' | 'disk'): void {
 
   test(tag('a write error mid-append: truncate back, fail, snapshot as before the failing entry'), () => {
     for (const partial of [false, true]) {
-      const rig = newRig(kind);
-      const faulty = new FaultyFile(rig.file);
+      const rig = newJRig(kind);
+      const faulty = new FaultyDir(rig.dir);
       const { journal } = open(faulty);
-      journal.append([bnd('start', 'S1', T0)]);
+      journal.append([bnd('start', S1, T0)]);
       const before = journal.snapshot();
       const sizeBefore = faulty.size();
       faulty.failAtWrite = faulty.writes + 2;
@@ -919,10 +1013,10 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('a flush error: failed, written and synced watermarks unchanged'), () => {
-    const rig = newRig(kind);
-    const faulty = new FaultyFile(rig.file);
+    const rig = newJRig(kind);
+    const faulty = new FaultyDir(rig.dir);
     const { journal } = open(faulty);
-    journal.append([bnd('start', 'S1', T0), dg(T0 + 1)]);
+    journal.append([bnd('start', S1, T0), dg(T0 + 1)]);
     assert.equal(journal.snapshot().syncedThroughEntryId, 0, 'an append is never called durable');
     const ok = journal.flush();
     assert.equal(ok.syncedThroughEntryId, 2);
@@ -939,9 +1033,9 @@ function journalCases(kind: 'memory' | 'disk'): void {
   test(tag('storage limit counts the sidecar; datagrams stop at limit - reserve; a stop boundary closes the session'), () => {
     const limit = LIMITS.closingReserveBytes + 6_000;
     const run = (other: number) => {
-      const rig = newRig(kind);
+      const rig = newJRig(kind);
       const { journal } = open(rig.file, { limitBytes: limit, otherBytes: () => other });
-      journal.append([bnd('start', 'S1', T0)]);
+      journal.append([bnd('start', S1, T0)]);
       let admitted = 0;
       let last = journal.snapshot();
       for (let i = 0; i < 20; i++) {
@@ -959,13 +1053,13 @@ function journalCases(kind: 'memory' | 'disk'): void {
       assert.equal(r.journal.state, 'storage-limit');
       assert.ok(r.rig.file.size() + other <= limit, 'never past the limit');
       const stop = r.journal.readEvidence({ generation: GEN, entryId: r.last.throughEntryId }) as BoundaryEvidence;
-      assert.deepEqual([stop.kind, stop.action, stop.reason, stop.sessionId], ['boundary', 'stop', 'storage-limit', 'S1']);
+      assert.deepEqual([stop.kind, stop.action, stop.reason, stop.sessionId], ['boundary', 'stop', 'storage-limit', S1]);
       // Evidence committed before the limit is intact and readable.
       const page = r.journal.readPage(r.last, 0, 1000, 1 << 24);
       assert.equal(page.entries.length, r.last.throughEntryId);
       assert.equal(page.entries.filter((e) => e.kind === 'datagram').length, r.admitted);
       const sizeBefore = r.rig.file.size();
-      const later = r.journal.append([dg(T0 + 100), bnd('start', 'S2', T0 + 101)]);
+      const later = r.journal.append([dg(T0 + 100), bnd('start', S2, T0 + 101)]);
       assert.deepEqual([later.appended, later.refused, later.state], [0, 2, 'storage-limit']);
       assert.equal(r.rig.file.size(), sizeBefore);
       // The exact edge: one more datagram would have crossed limit - reserve.
@@ -979,24 +1073,24 @@ function journalCases(kind: 'memory' | 'disk'): void {
   test(tag('storage limit edge: admitted while total + entry <= limit - reserve, refused one byte over'), () => {
     const entryBytes = 24 + 24 + 100;
     // Measure the start boundary, then build a limit that admits exactly two datagrams after it.
-    const probe = open(newRig(kind).file).journal;
-    const startBytes = probe.append([bnd('start', 'S1', T0)]).snapshot.writtenBytes - 64;
-    const rig2 = newRig(kind);
-    const exact = 64 + startBytes + 2 * entryBytes + LIMITS.closingReserveBytes;
+    const probe = open(newJRig(kind).file).journal;
+    const startBytes = probe.append([bnd('start', S1, T0)]).snapshot.writtenBytes - SEGMENT_HEADER_BYTES;
+    const rig2 = newJRig(kind);
+    const exact = SEGMENT_HEADER_BYTES + startBytes + 2 * entryBytes + LIMITS.closingReserveBytes;
     const j2 = open(rig2.file, { limitBytes: exact }).journal;
-    j2.append([bnd('start', 'S1', T0)]);
+    j2.append([bnd('start', S1, T0)]);
     const r = j2.append([dg(T0 + 1, new Uint8Array(100)), dg(T0 + 2, new Uint8Array(100)), dg(T0 + 3, new Uint8Array(100))]);
     assert.equal(r.appended, 2);
     assert.equal(r.state, 'storage-limit');
-    const rig3 = newRig(kind);
+    const rig3 = newJRig(kind);
     const j3 = open(rig3.file, { limitBytes: exact - 1 }).journal;
-    j3.append([bnd('start', 'S1', T0)]);
+    j3.append([bnd('start', S1, T0)]);
     const r3 = j3.append([dg(T0 + 1, new Uint8Array(100)), dg(T0 + 2, new Uint8Array(100))]);
     assert.equal(r3.appended, 1, 'one byte under the edge admits one fewer');
   });
 
   test(tag('generation: readEvidence answers null, readPage throws StaleGenerationError'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const journal = build(rig.file, [1, 2, 3]);
     const snap = journal.snapshot();
     assert.equal(journal.readEvidence({ generation: 'f'.repeat(32), entryId: 2 }), null);
@@ -1007,9 +1101,9 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('pages: caps over the caller, a snapshot bounds the answer, an oversized entry goes alone'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
-    journal.append([bnd('start', 'S1', T0)]);
+    journal.append([bnd('start', S1, T0)]);
     const inputs: EvidenceInput[] = [];
     for (let i = 0; i < 600; i++) inputs.push(dg(T0 + 1 + i, [i & 0xff]));
     journal.append(inputs);
@@ -1040,15 +1134,15 @@ function journalCases(kind: 'memory' | 'disk'): void {
       assert.equal(journal.readEvidence({ generation: GEN, entryId: id })?.ref.entryId, id);
     }
     const mid = journal.readEvidence({ generation: GEN, entryId: 300 }) as DatagramEvidence;
-    assert.equal(mid.sessionId, 'S1');
+    assert.equal(mid.sessionId, S1);
     assert.equal(mid.bytes[0], 298 & 0xff);
   });
 
   test(tag('a clock stepping back keeps ids rising and every record readable in id order'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
     const times = [T0 + 5000, T0 + 4000, T0 + 6000, T0 + 100, T0 + 100, T0 + 7000];
-    const r = journal.append([bnd('start', 'S1', T0 + 4000), ...times.map((t, i) => dg(t, [i]))]);
+    const r = journal.append([bnd('start', S1, T0 + 4000), ...times.map((t, i) => dg(t, [i]))]);
     assert.equal(r.appended, 7);
     const page = open(rig.reopen()).journal.readPage(r.snapshot, 0, 100, 1 << 20);
     assert.deepEqual(page.entries.map((e) => e.ref.entryId), [1, 2, 3, 4, 5, 6, 7]);
@@ -1057,7 +1151,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('an interrupted marker is appended on reopen, once, and never invents a count'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const journal = build(rig.file, [5, 5]);
     const last = journal.snapshot().throughEntryId;
     const first = open(rig.reopen());
@@ -1065,22 +1159,22 @@ function journalCases(kind: 'memory' | 'disk'): void {
     const marker = first.journal.readEvidence({ generation: GEN, entryId: last + 1 }) as BoundaryEvidence;
     assert.deepEqual(
       [marker.action, marker.sessionId, marker.receivedMs, marker.droppedDatagrams],
-      ['interrupted', 'S1', T0 + 11, null],
+      ['interrupted', S1, T0 + 11, null],
     );
     assert.equal(first.journal.append([dg(T0 + 50)]).appended, 0, 'interrupted closed the session');
     const second = open(rig.reopen());
     assert.equal(second.journal.snapshot().throughEntryId, last + 1, 'reopening again appends nothing');
     // A cleanly stopped session gets none.
-    const clean = newRig(kind);
+    const clean = newJRig(kind);
     const j = open(clean.file).journal;
-    j.append([bnd('start', 'S1', T0), bnd('stop', 'S1', T0 + 1)]);
+    j.append([bnd('start', S1, T0), bnd('stop', S1, T0 + 1)]);
     assert.equal(open(clean.reopen()).journal.snapshot().throughEntryId, 2);
   });
 
   test(tag('watermarks: appended moves with the append, synced only with a successful flush'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
-    const a = journal.append([bnd('start', 'S1', T0), dg(T0 + 1)]);
+    const a = journal.append([bnd('start', S1, T0), dg(T0 + 1)]);
     assert.deepEqual([a.snapshot.throughEntryId, a.snapshot.syncedThroughEntryId], [2, 0]);
     assert.equal(a.snapshot.writtenBytes, rig.file.size());
     const f = journal.flush();
@@ -1113,6 +1207,39 @@ class FaultyFile implements BlockFile {
   flush(): void { if (this.failFlush) throw new Error('simulated flush error'); this.inner.flush(); }
   size(): number { return this.inner.size(); }
   close(): void { this.inner.close(); }
+}
+
+/** A directory whose files fail on the write or flush it is told to, counted across all of them. */
+class FaultyDir implements SegmentDirectory {
+  writes = 0;
+  failAtWrite = Infinity;
+  partial = false;
+  failFlush = false;
+  constructor(readonly inner: SegmentDirectory) {}
+  list(): string[] { return this.inner.list(); }
+  open(name: string): BlockFile { return this.wrap(this.inner.open(name)); }
+  create(name: string): BlockFile { return this.wrap(this.inner.create(name)); }
+  unlink(name: string): void { this.inner.unlink(name); }
+  /** The first segment's size, as the single-file tests measure it. */
+  size(): number { return this.inner.open(segmentName(1)).size(); }
+  private wrap(inner: BlockFile): BlockFile {
+    const dir = this;
+    return {
+      read: (offset, into) => inner.read(offset, into),
+      write(offset, from) {
+        dir.writes++;
+        if (dir.writes === dir.failAtWrite) {
+          if (dir.partial) inner.write(offset, from.subarray(0, Math.floor(from.length / 2)));
+          throw new Error('simulated disk error');
+        }
+        inner.write(offset, from);
+      },
+      truncate: (length) => inner.truncate(length),
+      flush() { if (dir.failFlush) throw new Error('simulated flush error'); inner.flush(); },
+      size: () => inner.size(),
+      close: () => inner.close(),
+    };
+  }
 }
 
 // --- the sparse index -------------------------------------------------------------------
@@ -1511,19 +1638,21 @@ test('volume: opens both files under a temp root, creates the directory, plain t
   const volume = openMonitoringVolume(root);
   try {
     assert.equal(statSync(root).isDirectory(), true);
-    assert.equal(existsSync(path.join(root, 'journal.iwmj')), true);
     assert.equal(existsSync(path.join(root, 'rollups.iwmr')), true);
-    const { journal } = MonitoringJournal.open(volume.journal, options());
-    journal.append([bnd('start', 'S1', T0), dg(T0 + 1, [4, 5, 6])]);
+    assert.deepEqual(volume.segments.list(), [], 'opening the volume writes no journal file; the journal names its own segments');
+    const { journal } = MonitoringJournal.open(volume.segments, options());
+    journal.append([bnd('start', S1, T0), dg(T0 + 1, [4, 5, 6])]);
+    assert.deepEqual(volume.segments.list(), [segmentName(1)]);
+    assert.equal(existsSync(path.join(root, 'journal.iwmj')), false, 'the milestone-1 name is only ever read');
     const store = RollupStore.open(volume.rollups, { generation: GEN, throughEntryId: 2, policyVersion: DECODER_POLICY_VERSION });
     store.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(2));
-    assert.ok(statSync(path.join(root, 'journal.iwmj')).size > 64);
+    assert.ok(statSync(path.join(root, segmentName(1))).size > SEGMENT_HEADER_BYTES);
   } finally {
     volume.close();
   }
   const again = openMonitoringVolume(root);
   try {
-    const { journal, recovery } = MonitoringJournal.open(again.journal, options());
+    const { journal, recovery } = MonitoringJournal.open(again.segments, options());
     assert.equal(recovery.status, 'ok');
     assert.equal(recovery.completeEntries, 2);
     assert.equal(journal.state, 'open');
@@ -1558,9 +1687,9 @@ function timeIndexCases(kind: 'memory' | 'disk'): void {
   const tag = (s: string) => `[${kind}] ${s}`;
 
   test(tag('locate: merged ranges clipped to the snapshot, and a stepped-back clock is found by overlap'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
-    const inputs: EvidenceInput[] = [bnd('start', 'S1', T0)];
+    const inputs: EvidenceInput[] = [bnd('start', S1, T0)];
     // 600 datagrams: stride 0 and 1 ascend from T0 + 1000; stride 2 starts at a clock far behind.
     for (let i = 0; i < 600; i++) inputs.push(dg(i < 511 ? T0 + 1000 + i : T0 - 50_000 + i));
     journal.append(inputs);
@@ -1587,18 +1716,18 @@ function timeIndexCases(kind: 'memory' | 'disk'): void {
     assert.equal(reopened.snapshot().throughEntryId, 602);
     assert.deepEqual(reopened.locate(reopened.snapshot(), T0 - 51_000, T0 - 40_000), [{ fromId: 513, toId: 602 }]);
     // Boundaries count: a lone early boundary pulls its stride's min down.
-    const rig2 = newRig(kind);
+    const rig2 = newJRig(kind);
     const j2 = open(rig2.file).journal;
-    j2.append([bnd('start', 'S1', T0 + 500), dg(T0 + 600), bnd('gap', 'S1', T0 + 100, 'shed', 2)]);
+    j2.append([bnd('start', S1, T0 + 500), dg(T0 + 600), bnd('gap', S1, T0 + 100, 'shed', 2)]);
     assert.deepEqual(j2.locate(j2.snapshot(), T0 + 100, T0 + 101), [{ fromId: 1, toId: 3 }]);
   });
 
   test(tag('readBoundaries: from the open scan and from appends, paged, by cursor'), () => {
-    const rig = newRig(kind);
+    const rig = newJRig(kind);
     const { journal } = open(rig.file);
     journal.append([
-      bnd('start', 'S1', T0), dg(T0 + 1), bnd('gap', 'S1', T0 + 2, 'inbox full', 5), dg(T0 + 3),
-      bnd('suspend', 'S1', T0 + 4, 'sleep'), bnd('resume', 'S1', T0 + 5, 'wake'), dg(T0 + 6),
+      bnd('start', S1, T0), dg(T0 + 1), bnd('gap', S1, T0 + 2, 'inbox full', 5), dg(T0 + 3),
+      bnd('suspend', S1, T0 + 4, 'sleep'), bnd('resume', S1, T0 + 5, 'wake'), dg(T0 + 6),
     ]);
     const snap = journal.snapshot();
     const ids = (r: { entries: BoundaryEvidence[] }) => r.entries.map((e) => e.ref.entryId);
@@ -1606,7 +1735,7 @@ function timeIndexCases(kind: 'memory' | 'disk'): void {
     assert.deepEqual(ids(all), [1, 3, 5, 6]);
     assert.equal(all.done, true);
     assert.equal(all.nextAfterId, 7, 'complete through the snapshot, whatever the ids in between held');
-    assert.deepEqual(all.entries[1], { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: 'S1', receivedMs: T0 + 2, action: 'gap', reason: 'inbox full', droppedDatagrams: 5 });
+    assert.deepEqual(all.entries[1], { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: S1, receivedMs: T0 + 2, action: 'gap', reason: 'inbox full', droppedDatagrams: 5 });
     // Paging by two.
     const p1 = journal.readBoundaries(snap, 0, 2);
     assert.deepEqual([ids(p1), p1.done, p1.nextAfterId], [[1, 3], false, 3]);
@@ -1614,13 +1743,13 @@ function timeIndexCases(kind: 'memory' | 'disk'): void {
     assert.deepEqual([ids(p2), p2.done, p2.nextAfterId], [[5, 6], true, 7]);
     assert.deepEqual(ids(journal.readBoundaries(snap, 7, 2)), []);
     // The snapshot clips: a later boundary is not in an older answer.
-    journal.append([bnd('stop', 'S1', T0 + 8, 'user')]);
+    journal.append([bnd('stop', S1, T0 + 8, 'user')]);
     assert.deepEqual(ids(journal.readBoundaries(snap, 0, 100)), [1, 3, 5, 6]);
     assert.deepEqual(ids(journal.readBoundaries(journal.snapshot(), 0, 100)), [1, 3, 5, 6, 8]);
     // After a reopen the open scan supplies the list, plus the `interrupted` a crash earns.
-    const rig2 = newRig(kind);
+    const rig2 = newJRig(kind);
     const j2 = open(rig2.file).journal;
-    j2.append([bnd('start', 'S9', T0), dg(T0 + 1), bnd('gap', 'S9', T0 + 2, 'x', 1), dg(T0 + 3)]);
+    j2.append([bnd('start', S9, T0), dg(T0 + 1), bnd('gap', S9, T0 + 2, 'x', 1), dg(T0 + 3)]);
     const again = open(rig2.reopen()).journal;
     const after = again.readBoundaries(again.snapshot(), 0, 100);
     assert.deepEqual(after.entries.map((e) => [e.ref.entryId, e.action]), [[1, 'start'], [3, 'gap'], [5, 'interrupted']]);
@@ -1666,7 +1795,7 @@ try {
   }
 } finally {
   for (const rig of openRigs) {
-    try { rig.file.close(); } catch { /* already closed */ }
+    try { rig.close(); } catch { /* already closed */ }
   }
   // Removes only the directory this run created.
   rmSync(tmpRoot, { recursive: true, force: true });

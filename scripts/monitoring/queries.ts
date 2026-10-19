@@ -25,11 +25,11 @@ import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monit
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, domPort, serveRuntime } from '../../src/services/monitoring/runtimeRpc';
-import { DECODER_POLICY_VERSION, LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type Snapshot } from '../../src/services/monitoring/types';
+import { DECODER_POLICY_VERSION, LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type JournalSnapshot, type Snapshot } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import type { FromMonitoringWorker } from '../../src/services/monitoring/workerHost';
 import {
-  BASE, HostRig, MIN, NOW, Rig, SRC, SRC1, ask, askBoth, askOk, deflate, dgram, inflate, junk, rollUp, runAll, spec, start, stop,
+  BASE, HostRig, MIN, NOW, Rig, S1, S2, SRC, SRC1, ask, askBoth, askOk, deflate, dgram, inflate, junk, rollUp, runAll, spec, start, stop,
   test, v9, waitTick, withoutProvenance, boundary,
 } from './queryRig';
 import { EXPORTER } from './fixtures';
@@ -349,7 +349,7 @@ test('coverage: a stop is a gap that says stopped, and what was recorded before 
 
 test('coverage: a suspend and a resume leave a gap that says suspended', async () => {
   const rig = new Rig();
-  rig.append([start(m(0)), boundary('suspend', 's1', m(2)), boundary('resume', 's1', m(4)), stop(m(6))]);
+  rig.append([start(m(0)), boundary('suspend', S1, m(2)), boundary('resume', S1, m(4)), stop(m(6))]);
   const r = await check(rig, spec(m(0), m(8), 8));
   assert.deepEqual(r.gaps, [{ fromMs: m(2), toMs: m(4), reason: 'suspended' }, { fromMs: m(6), toMs: m(8), reason: 'stopped' }]);
   assert.deepEqual(coverageOf(r), ['no-records', 'no-records', 'collection-gap', 'collection-gap', 'no-records', 'no-records', 'collection-gap', 'collection-gap']);
@@ -357,7 +357,7 @@ test('coverage: a suspend and a resume leave a gap that says suspended', async (
 
 test('coverage: a stop for the storage limit says so', async () => {
   const rig = new Rig();
-  rig.append([start(m(0)), dgram(m(1), [{}]), boundary('stop', 's1', m(2), 'storage-limit')]);
+  rig.append([start(m(0)), dgram(m(1), [{}]), boundary('stop', S1, m(2), 'storage-limit')]);
   const r = await check(rig, spec(m(0), m(4), 4));
   assert.deepEqual(r.gaps, [{ fromMs: m(2), toMs: m(4), reason: 'storage-limit' }]);
 });
@@ -401,11 +401,11 @@ test('coverage: shed datagrams are a point gap with the count they could be sure
   rig.append([
     start(m(0)),
     dgram(m(1, 1000), [{ octets: 5 }]),
-    boundary('gap', 's1', m(1, 5000), 'shed', 5),
-    boundary('gap', 's1', m(1, 10_000), 'shed', null),
-    boundary('gap', 's1', m(3, 1000), 'shed', null),
-    boundary('gap', 's1', m(5, 1000), 'shed', 7),
-    boundary('gap', 's1', m(5, 2000), 'shed', 3),
+    boundary('gap', S1, m(1, 5000), 'shed', 5),
+    boundary('gap', S1, m(1, 10_000), 'shed', null),
+    boundary('gap', S1, m(3, 1000), 'shed', null),
+    boundary('gap', S1, m(5, 1000), 'shed', 7),
+    boundary('gap', S1, m(5, 2000), 'shed', 3),
   ]);
   const r = await check(rig, spec(m(0), m(6), 6));
   assert.deepEqual(r.gaps, [
@@ -1045,7 +1045,7 @@ test('degraded: a host whose rollups have failed does not use the rollups it alr
   const rig = smallRig();
   await rollUp(rig).then((h) => h.host.settled());
   // More evidence the sidecar has not seen, so the next host has something to post - and fails to.
-  rig.append([start(m(7), 's2'), dgram(m(7, 1000), [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 5, packets: 1 }]), dgram(m(8, 1000), [{ octets: 1 }])]);
+  rig.append([start(m(7), S2), dgram(m(7, 1000), [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 5, packets: 1 }]), dgram(m(8, 1000), [{ octets: 1 }])]);
   const q = spec(m(0), m(7), 7);
   const oracle = await askOk(rig, q, { forceRaw: true });
 
@@ -1666,7 +1666,7 @@ test('host: a live append during a query is not in its answer, and is in the nex
   }
   // And the rollups followed the journal: an unfocused minute-aligned query agrees with the raw answer.
   rig.append([stop(m(2))]);
-  rig.runtime.publishLive(rig.add(boundary('start', 's2', m(2, 1)))); // the push may also carry a boundary
+  rig.runtime.publishLive(rig.add(boundary('start', S2, m(2, 1)))); // the push may also carry a boundary
   await h.host.settled();
   const fast = await h.query('w', spec(m(0), m(2), 2));
   const raw = await askOk(rig, spec(m(0), m(2), 2), { forceRaw: true });
@@ -1840,7 +1840,7 @@ test('rpc: only the whitelisted calls are served', async () => {
 test('rpc: a call has a deadline, and an answer that comes after it is dropped', async () => {
   const rig = smallRig();
   let release: (v: Snapshot) => void = () => undefined;
-  const slow = new Promise<Snapshot & { writtenBytes: number; syncedThroughEntryId: number }>((resolve) => { release = resolve as never; });
+  const slow = new Promise<JournalSnapshot>((resolve) => { release = resolve as never; });
   const p = portPair(wrap(rig.runtime, { snapshot: () => slow }), 1234);
   try {
     const pending = p.client.snapshot();

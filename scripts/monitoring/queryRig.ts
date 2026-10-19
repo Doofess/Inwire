@@ -11,6 +11,7 @@
  */
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
+import { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
 import { MonitoringJournal, type AppendResult, type EvidenceInput } from '../../src/services/monitoring/journal';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { runHistoryQuery, type QueryOptions } from '../../src/services/monitoring/queries';
@@ -75,20 +76,25 @@ export function v9(receivedMs: number, remoteIPv4 = EXPORTER): EvidenceInput {
   return { kind: 'datagram', receivedMs, localIPv4: COLLECTOR, localPort: 2055, remoteIPv4, remotePort: 40_000, bytes };
 }
 
+/** Session ids are 16 bytes in a segment header, so they are 32 hex digits. */
+export const S1 = '01'.repeat(16);
+export const S2 = '02'.repeat(16);
+export const S3 = '03'.repeat(16);
+
 export function boundary(
   action: BoundaryAction, sessionId: string, receivedMs: number, reason = '', droppedDatagrams: number | null = null,
 ): EvidenceInput {
   return { kind: 'boundary', sessionId, receivedMs, action, reason, droppedDatagrams };
 }
 
-export const start = (receivedMs: number, sessionId = 's1'): EvidenceInput => boundary('start', sessionId, receivedMs);
-export const stop = (receivedMs: number, sessionId = 's1', reason = ''): EvidenceInput =>
+export const start = (receivedMs: number, sessionId = S1): EvidenceInput => boundary('start', sessionId, receivedMs);
+export const stop = (receivedMs: number, sessionId = S1, reason = ''): EvidenceInput =>
   boundary('stop', sessionId, receivedMs, reason);
 
 // --- the journal, the sidecar and the runtime ---------------------------------------------------------
 
 export class Rig {
-  jfile = new MemoryBlockFile();
+  jdir = new MemorySegmentDirectory();
   sfile = new MemoryBlockFile();
   journal!: MonitoringJournal;
   store!: RollupStore;
@@ -104,7 +110,7 @@ export class Rig {
   private rnd = (n: number): Uint8Array => Uint8Array.from({ length: n }, (_, i) => (this.seed + i) & 0xff);
 
   openJournal(): void {
-    this.journal = MonitoringJournal.open(this.jfile, { limitBytes: 1 << 30, randomBytes: this.rnd, nowMs: () => NOW }).journal;
+    this.journal = MonitoringJournal.open(this.jdir, { limitBytes: 1 << 30, randomBytes: this.rnd, nowMs: () => NOW }).journal;
   }
 
   /** Opens the sidecar file as it stands against the journal as it stands, and wraps both in a runtime. */
