@@ -1754,10 +1754,10 @@ test('client: start and stop read what main answered, and an unreadable answer i
 
 test('client: the saved source is read and saved through main and validated on the way back', async () => {
   const r = clientRig();
-  assert.deepEqual(await r.client.getConfig(), { ok: true, config: CONFIG });
+  assert.deepEqual(await r.client.getConfig(), { ok: true, config: CONFIG, location: null, retention: DEFAULT_RETENTION });
   assert.deepEqual(await r.client.saveConfig(CONFIG), { ok: true, config: CONFIG });
   const empty = clientRig({ getMonitoringConfig: async () => ({ ok: true, config: null }) });
-  assert.deepEqual(await empty.client.getConfig(), { ok: true, config: null });
+  assert.deepEqual(await empty.client.getConfig(), { ok: true, config: null, location: null, retention: DEFAULT_RETENTION });
   const refused = clientRig({ saveMonitoringConfig: async () => ({ ok: false, message: 'disk full' }) });
   assert.deepEqual(await refused.client.saveConfig(CONFIG), { ok: false, message: 'disk full' });
   const junk = clientRig({
@@ -1766,6 +1766,45 @@ test('client: the saved source is read and saved through main and validated on t
   });
   assert.equal((await junk.client.getConfig()).ok, false);
   assert.equal((await junk.client.saveConfig(CONFIG)).ok, false);
+});
+
+test('client: the config reply carries the location and the retention, read strictly', async () => {
+  const policy: RetentionPolicy = { keepRawDays: 30, atLimit: 'stop' };
+  const full = clientRig({ getMonitoringConfig: async () => ({ ok: true, config: CONFIG, location: 'D:\\Inwire Monitoring', retention: policy }) });
+  assert.deepEqual(await full.client.getConfig(), { ok: true, config: CONFIG, location: 'D:\\Inwire Monitoring', retention: policy });
+  const nulled = clientRig({ getMonitoringConfig: async () => ({ ok: true, config: CONFIG, location: null }) });
+  assert.deepEqual(await nulled.client.getConfig(), { ok: true, config: CONFIG, location: null, retention: DEFAULT_RETENTION });
+  const copy = (await clientRig({ getMonitoringConfig: async () => ({ ok: true, config: null }) }).client.getConfig()) as { retention: RetentionPolicy };
+  assert.notEqual(copy.retention, DEFAULT_RETENTION, 'a copy, never the shared default');
+  for (const bad of [{ location: 5 }, { location: {} }, { retention: { keepRawDays: 0, atLimit: 'stop' } }, { retention: 'x' }, { retention: null }]) {
+    const r = clientRig({ getMonitoringConfig: async () => ({ ok: true, config: CONFIG, ...bad }) });
+    assert.equal((await r.client.getConfig()).ok, false, JSON.stringify(bad));
+  }
+});
+
+test('client: location, discard and retention go through main unchanged and read what it answers', async () => {
+  const seen: unknown[] = [];
+  const inspect = { ok: true, kind: 'new', truncatedTailBytes: null, problem: null, exporterIPv4: null };
+  const policy: RetentionPolicy = { keepRawDays: 7, atLimit: 'expire-oldest' };
+  const r = clientRig({
+    chooseMonitoringLocation: async (i) => { seen.push(i); return { ok: true, displayPath: 'D:\\x', isDefaultLocation: false, inspect }; },
+    discardMonitoring: async (s) => { seen.push(s); return { ok: true, removedSegments: 3 }; },
+    saveMonitoringRetention: async (p) => { seen.push(p); return { ok: true, retention: policy }; },
+  });
+  assert.deepEqual(await r.client.chooseLocation('pick'), { ok: true, displayPath: 'D:\\x', isDefaultLocation: false, inspect });
+  assert.deepEqual(await r.client.discard({ scope: 'before', beforeMs: 9 }), { ok: true, removedSegments: 3 });
+  assert.deepEqual(await r.client.saveRetention(policy), { ok: true, retention: policy });
+  assert.deepEqual(seen, ['pick', { scope: 'before', beforeMs: 9 }, policy]);
+  const none = clientRig();
+  const unavailable = 'monitoring is not available in this build';
+  assert.deepEqual(await none.client.chooseLocation('default'), { ok: false, reason: 'failed', message: unavailable });
+  assert.deepEqual(await none.client.discard({ scope: 'all' }), { ok: false, reason: 'failed', message: unavailable });
+  assert.deepEqual(await none.client.saveRetention(policy), { ok: false, reason: 'failed', message: unavailable });
+  const boom = async (): Promise<never> => { throw new Error('ipc closed'); };
+  const thrown = clientRig({ chooseMonitoringLocation: boom, discardMonitoring: boom, saveMonitoringRetention: boom });
+  assert.deepEqual(await thrown.client.chooseLocation('pick'), { ok: false, reason: 'failed', message: 'The location could not be changed (ipc closed)' });
+  assert.deepEqual(await thrown.client.discard({ scope: 'all' }), { ok: false, reason: 'failed', message: 'The data could not be discarded (ipc closed)' });
+  assert.deepEqual(await thrown.client.saveRetention(policy), { ok: false, reason: 'failed', message: 'The retention policy could not be saved (ipc closed)' });
 });
 
 test('client: dispose unsubscribes from main, fails what is pending and ends the Worker', async () => {

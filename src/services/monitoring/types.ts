@@ -281,7 +281,15 @@ export type HistoryTable<Row> =
   | { status: 'ok'; rows: Row[] }
   | { status: 'range-too-large'; message: string }
   /** The minute's raw datagrams expired and its tables were never archived whole; totals are still exact. */
-  | { status: 'evidence-expired'; expiredMs: number };
+  | { status: 'evidence-expired'; expiredMs: number; expiry: ExpiryCause | null; incomplete: boolean };
+
+/** Why a range's raw evidence is gone, and when: read from the `expired` boundary of the cut. */
+export interface ExpiryCause {
+  /** `retention` for an `age` or `limit` expiry; `discard` for the user's "discard before". */
+  kind: 'retention' | 'discard';
+  /** `retention`: when the expiry ran (the boundary's receipt time). `discard`: the first instant still kept, the cut's `throughMs + 1`. */
+  atMs: number;
+}
 
 export interface HistoryResult {
   snapshot: Snapshot;
@@ -311,6 +319,8 @@ export type HistoryReply =
     message: string;
     /** For `evidence-expired`: the receipt time up to which raw evidence is gone. */
     expiredMs?: number;
+    /** Only with `evidence-expired`: why and when, where the cut's boundary says. */
+    expiry?: ExpiryCause;
   };
 
 /**

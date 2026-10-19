@@ -3,8 +3,13 @@ import { Play, ShieldAlert, Square } from 'lucide-react';
 import type { MonitoringClient } from '../../services/monitoring/client';
 import type { MonitoringState } from '../../services/monitoring/state';
 import type { SourceConfig } from '../../services/monitoring/types';
-import { draftFromConfig, readDraft, sameConfig, type FieldErrors, type SourceDraft } from './monitoringCopy';
-import { BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT, INPUT_SURFACE, Note } from './parts';
+import { DEFAULT_RETENTION, type RetentionPolicy } from '../../services/monitoring/retention';
+import {
+  draftFromConfig, readDraft, readRetentionDraft, retentionDraftFrom, sameConfig, sameRetention,
+  type FieldErrors, type RetentionDraft, type SourceDraft,
+} from './monitoringCopy';
+import { BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT, Note } from './parts';
+import { DiscardControl, StorageBlock } from './StorageBlock';
 
 type Busy = 'load' | 'save' | 'start' | 'stop' | null;
 
@@ -36,6 +41,10 @@ export function SourceForm({ client, state, onConfig }: {
   const id = useId();
   const [saved, setSaved] = useState<SourceConfig | null>(null);
   const [draft, setDraft] = useState<SourceDraft>(() => draftFromConfig(null));
+  const [savedRetention, setSavedRetention] = useState<RetentionPolicy>(DEFAULT_RETENTION);
+  const [retentionDraft, setRetentionDraft] = useState<RetentionDraft>(() => retentionDraftFrom(DEFAULT_RETENTION));
+  const [location, setLocation] = useState<string | null>(null);
+  const [folderReadOnly, setFolderReadOnly] = useState(false);
   const [busy, setBusy] = useState<Busy>('load');
   const [shown, setShown] = useState<Set<keyof FieldErrors>>(new Set());
   const [message, setMessage] = useState<{ tone: 'neutral' | 'bad'; text: string } | null>(null);
@@ -48,6 +57,9 @@ export function SourceForm({ client, state, onConfig }: {
       if (!reply.ok) { setMessage({ tone: 'bad', text: reply.message }); return; }
       setSaved(reply.config);
       setDraft(draftFromConfig(reply.config));
+      setSavedRetention(reply.retention);
+      setRetentionDraft(retentionDraftFrom(reply.retention));
+      setLocation(reply.location);
       onConfig(reply.config);
     });
     return () => { live = false; };
@@ -58,35 +70,46 @@ export function SourceForm({ client, state, onConfig }: {
   const listener = state.intake?.listener ?? 'stopped';
   const running = listener === 'listening' || listener === 'starting';
   const { config, errors } = readDraft(draft);
-  const dirty = config === null || !sameConfig(config, saved);
+  const retention = readRetentionDraft(retentionDraft);
+  const retentionDirty = retention.policy === null || !sameRetention(retention.policy, savedRetention);
+  const dirty = config === null || !sameConfig(config, saved) || retentionDirty;
+  const readOnly = folderReadOnly || state.intake?.storage === 'refused-corrupt';
   const fieldError = (name: keyof FieldErrors): string | undefined => (shown.has(name) ? errors[name] : undefined);
   const show = (name: keyof FieldErrors) => setShown((s) => (s.has(name) ? s : new Set(s).add(name)));
   const showAll = () => setShown(new Set(['exporterIPv4', 'bindIPv4', 'port', 'limit']));
   const edit = (patch: Partial<SourceDraft>) => { setDraft((d) => ({ ...d, ...patch })); setMessage(null); };
+  const editRetention = (patch: Partial<RetentionDraft>) => { setRetentionDraft((d) => ({ ...d, ...patch })); setMessage(null); };
 
-  const persist = async (next: SourceConfig): Promise<boolean> => {
-    const reply = await client.saveConfig(next);
-    if (!reply.ok) { setMessage({ tone: 'bad', text: `Not saved: ${reply.message}` }); return false; }
-    setSaved(reply.config);
-    onConfig(reply.config);
+  const persist = async (next: SourceConfig, policy: RetentionPolicy): Promise<boolean> => {
+    if (!sameConfig(next, saved)) {
+      const reply = await client.saveConfig(next);
+      if (!reply.ok) { setMessage({ tone: 'bad', text: `Not saved: ${reply.message}` }); return false; }
+      setSaved(reply.config);
+      onConfig(reply.config);
+    }
+    if (!sameRetention(policy, savedRetention)) {
+      const reply = await client.saveRetention(policy);
+      if (!reply.ok) { setMessage({ tone: 'bad', text: `Not saved: ${reply.message}` }); return false; }
+      setSavedRetention(reply.retention);
+    }
     return true;
   };
 
   const save = async () => {
     showAll();
-    if (config === null) return;
+    if (config === null || retention.policy === null) return;
     setBusy('save');
-    if (await persist(config)) setMessage({ tone: 'neutral', text: 'Saved.' });
+    if (await persist(config, retention.policy)) setMessage({ tone: 'neutral', text: 'Saved.' });
     setBusy(null);
   };
 
   const start = async () => {
     showAll();
-    if (config === null) return;
+    if (config === null || retention.policy === null || readOnly) return;
     setBusy('start');
     setMessage(null);
     try {
-      if (dirty && !(await persist(config))) return;
+      if (dirty && !(await persist(config, retention.policy))) return;
       const connected = await client.ensureConnected();
       if (!connected.ok) { setMessage({ tone: 'bad', text: connected.message }); return; }
       const result = await client.start(config);
@@ -141,27 +164,21 @@ export function SourceForm({ client, state, onConfig }: {
           aria-describedby={`${id}-bind-hint ${id}-bind-err`}
           onChange={(e) => edit({ bindIPv4: e.target.value })} onBlur={() => show('bindIPv4')} />
       </Field>
-      <div className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3">
+      <div className="w-24">
         <Field id={`${id}-port`} label="Port" error={fieldError('port')}>
           <input id={`${id}-port`} className={INPUT} value={draft.port} inputMode="numeric" autoComplete="off" disabled={locked}
             aria-invalid={fieldError('port') !== undefined} aria-describedby={`${id}-port-err`}
             onChange={(e) => edit({ port: e.target.value })} onBlur={() => show('port')} />
         </Field>
-        <Field id={`${id}-limit`} label="Keep up to" error={fieldError('limit')}>
-          <div className="flex min-w-0 gap-1.5">
-            <input id={`${id}-limit`} className={`${INPUT} min-w-0 flex-1`} value={draft.limit} inputMode="decimal" autoComplete="off" disabled={locked}
-              aria-invalid={fieldError('limit') !== undefined} aria-describedby={`${id}-limit-err`}
-              onChange={(e) => edit({ limit: e.target.value })} onBlur={() => show('limit')} />
-            <select aria-label="Storage unit" className={`${INPUT_SURFACE} w-[4.5rem] shrink-0 font-sans`} value={draft.unit} disabled={locked}
-              onChange={(e) => edit({ unit: e.target.value as SourceDraft['unit'] })}>
-              <option value="GiB">GiB</option>
-              <option value="MiB">MiB</option>
-            </select>
-          </div>
-        </Field>
       </div>
 
-      {firstStart && busy !== 'load' && (
+      <StorageBlock client={client} locked={locked} location={location} onFolderChanged={setFolderReadOnly}
+        limit={{
+          draft, error: fieldError('limit'), edit, show: () => show('limit'),
+        }}
+        retention={{ draft: retentionDraft, error: retention.error, edit: editRetention }} />
+
+      {firstStart && busy !== 'load' && !readOnly && (
         <Note tone="warn" icon={<ShieldAlert className="h-4 w-4" />}>
           <p>
             Windows will ask whether Inwire may receive on the network. Choose <strong>Allow</strong>. If you choose
@@ -178,7 +195,7 @@ export function SourceForm({ client, state, onConfig }: {
             {busy === 'stop' ? 'Stopping…' : 'Stop'}
           </button>
         ) : (
-          <button type="submit" className={BUTTON_PRIMARY} disabled={busy !== null}>
+          <button type="submit" className={BUTTON_PRIMARY} disabled={busy !== null || readOnly}>
             <Play className="h-3.5 w-3.5" aria-hidden />
             {busy === 'start' ? 'Starting…' : 'Start'}
           </button>
@@ -199,6 +216,8 @@ export function SourceForm({ client, state, onConfig }: {
           {message.text}
         </p>
       )}
+
+      <DiscardControl client={client} locked={locked} />
     </form>
   );
 }

@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Download, Loader2 } from 'lucide-react';
+import { Download, Loader2, Package } from 'lucide-react';
 import type { MonitoringClient } from '../../services/monitoring/client';
 import type { MonitoringState } from '../../services/monitoring/state';
 import { LIMITS, type HistoryResult, type HistoryTable, type QueryFocus, type QuerySpec, type SourceConfig } from '../../services/monitoring/types';
 import { ExportCancelled, exportHistory, historyCsvName } from '../../services/monitoring/export';
+import type { BundleError } from '../../services/monitoring/bundle';
 import { historySpec } from '../../services/monitoring/historyRange';
 import { createQueryRefresher } from '../../services/monitoring/queryRefresher';
 import { isByteSink, openSaveSink } from '../../lib/saveSink';
 import { formatBytes } from '../../lib/formatBytes';
 import { useElementSize } from '../../lib/useElementSize';
-import { count, engineLabel, localRange } from './monitoringCopy';
+import { INCOMPLETE_EXPIRED_MINUTE, count, engineLabel, evidenceExpiredText, localRange } from './monitoringCopy';
 import { HistoryChart, type Measure } from './HistoryChart';
 import { Focus } from './Focus';
 import { BUTTON_SECONDARY, Note } from './parts';
@@ -25,7 +26,7 @@ const PRESETS = [
 /** How often the history is asked again while the sheet is on screen. */
 const REFRESH_MS = 5000;
 
-type Saving = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved'; path: string } | { kind: 'cancelled' }
+type Saving = { kind: 'idle' } | { kind: 'saving'; what?: 'bundle' } | { kind: 'saved'; path: string } | { kind: 'cancelled' }
   | { kind: 'failed'; message: string };
 
 /**
@@ -131,6 +132,31 @@ export function History({ client, state, config, onFilterCapture }: {
     }
   };
 
+  const saveBundle = async () => {
+    if (!result) return;
+    const { fromMs, toMs } = result.query;
+    setSaving({ kind: 'saving', what: 'bundle' });
+    // Fetched on the click: the bundle codec is not in the sheet's first paint.
+    const { BundleError, bundleFileName, exportBundle } = await import('../../services/monitoring/bundle');
+    const sink = await openSaveSink(bundleFileName(fromMs, toMs));
+    if (!isByteSink(sink)) {
+      setSaving('canceled' in sink ? { kind: 'cancelled' } : { kind: 'failed', message: sink.error });
+      return;
+    }
+    const controller = new AbortController();
+    abort.current = controller;
+    try {
+      const { outcome } = await exportBundle(client, { fromMs, toMs }, sink, controller.signal);
+      if (outcome.saved) setSaving({ kind: 'saved', path: outcome.path });
+      else setSaving(outcome.canceled ? { kind: 'cancelled' } : { kind: 'failed', message: outcome.error });
+    } catch (e) {
+      setSaving(e instanceof ExportCancelled || (e instanceof BundleError && e.code === 'cancelled')
+        ? { kind: 'cancelled' } : { kind: 'failed', message: bundleFailure(e instanceof BundleError ? e : null, e) });
+    } finally {
+      abort.current = null;
+    }
+  };
+
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2">
       {sources.length > 1 && (
@@ -164,7 +190,12 @@ export function History({ client, state, config, onFilterCapture }: {
               <button type="button" className={BUTTON_SECONDARY} disabled={!result || saving.kind === 'saving'}
                 onClick={() => void save()}>
                 <Download className="h-3.5 w-3.5" aria-hidden />
-                {saving.kind === 'saving' ? 'Exporting…' : 'Export CSV'}
+                {saving.kind === 'saving' && saving.what !== 'bundle' ? 'Exporting…' : 'Export CSV'}
+              </button>
+              <button type="button" className={BUTTON_SECONDARY} disabled={!result || saving.kind === 'saving'}
+                onClick={() => void saveBundle()}>
+                <Package className="h-3.5 w-3.5" aria-hidden />
+                {saving.kind === 'saving' && saving.what === 'bundle' ? 'Exporting…' : 'Export evidence bundle'}
               </button>
             </div>
           </div>
@@ -241,6 +272,14 @@ function Segmented<T extends string | number>({ label, value, options, onChange 
   );
 }
 
+/** Why a bundle did not export, in words; a failure the Worker reported already says it. */
+function bundleFailure(bundle: BundleError | null, e: unknown): string {
+  if (bundle) {
+    return bundle.code === 'changed' ? 'the history changed while it was being exported, so nothing was saved. Try again.' : bundle.message;
+  }
+  return String(e);
+}
+
 function SaveLine({ saving }: { saving: Saving }) {
   if (saving.kind === 'idle' || saving.kind === 'saving') return null;
   const text = saving.kind === 'saved' ? `Saved to ${saving.path}`
@@ -299,7 +338,9 @@ function TopTable<Row>({ title, table, head, rows, leftColumns }: {
       {table.status === 'range-too-large' ? (
         <p className="px-3 py-3 text-xs text-muted-foreground">{table.message} Choose a shorter range to see this table.</p>
       ) : table.status === 'evidence-expired' ? (
-        <p className="px-3 py-3 text-xs text-muted-foreground">The records for this range have expired, so this table is not available. The totals are kept.</p>
+        <p className="px-3 py-3 text-xs leading-relaxed text-muted-foreground">
+          {table.incomplete ? INCOMPLETE_EXPIRED_MINUTE : evidenceExpiredText(table.expiry, table.expiredMs)}
+        </p>
       ) : table.rows.length === 0 ? (
         <p className="px-3 py-3 text-xs text-muted-foreground">No records in this range.</p>
       ) : (

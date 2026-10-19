@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import type { HistoryBucket } from '../../services/monitoring/types';
 import { formatBytes } from '../../lib/formatBytes';
-import { count, localRange, localTime } from './monitoringCopy';
+import { EVIDENCE_EXPIRED_LEGEND, count, localRange, localTime } from './monitoringCopy';
 
 export type Measure = 'octets' | 'packets';
 
@@ -18,6 +18,10 @@ const PLOT = HEIGHT - AXIS;
  *   is a real zero;
  * - collection was not running: a hatched band over the full height, which is
  *   not a zero at all - nobody was listening.
+ *
+ * - totals only, the detailed evidence having expired (`aggregate-only`): the
+ *   observed bar with a pale fill and a dashed outline, so it reads as "counted,
+ *   but the records behind it are gone" by its shape and not by its colour.
  *
  * A gap is never a zero-height bar. Drawn as SVG at the measured width, with a
  * `<title>` per bucket so the hover says the exact numbers.
@@ -37,6 +41,7 @@ export function HistoryChart({ buckets, measure, width }: {
   const fmt = (v: bigint): string => (measure === 'octets' ? formatBytes(Number(v)) : `${count(v)} packets`);
   const label = measure === 'octets' ? 'Reported bytes' : 'Reported packets';
   const observed = buckets.filter((b) => b.coverage === 'observed-records' || b.coverage === 'aggregate-only').length;
+  const expiredBuckets = buckets.some((b) => b.coverage === 'aggregate-only');
   const gaps = buckets.filter((b) => b.coverage === 'collection-gap' || b.coverage === 'history-lost').length;
   const ticks = tickIndices(buckets.length, width);
 
@@ -80,9 +85,22 @@ export function HistoryChart({ buckets, measure, width }: {
             );
           }
           const h = Math.max(b.records > 0 ? 1.5 : 0, scale(v));
+          if (b.coverage === 'aggregate-only') {
+            return (
+              <g key={i}>
+                <rect data-coverage="aggregate-only" x={x + 0.75} y={PLOT - h + 0.75} width={Math.max(0.5, barW - 1.5)}
+                  height={Math.max(0.5, h - 0.75)} rx={barW >= 4 ? 1 : 0} fill="var(--color-primary)" fillOpacity="0.28" stroke="var(--color-primary)"
+                  strokeWidth="1.5" strokeDasharray="3 2" />
+                <rect x={i * slot} y={0} width={slot} height={PLOT} fill="transparent">
+                  <title>{`${span}: ${fmt(v)}; ${EVIDENCE_EXPIRED_LEGEND.toLowerCase()}, totals only`}</title>
+                </rect>
+              </g>
+            );
+          }
           return (
             <g key={i}>
-              <rect x={x} y={PLOT - h} width={barW} height={h} rx={barW >= 4 ? 1 : 0} fill="var(--color-primary)" />
+              <rect data-coverage="observed-records" x={x} y={PLOT - h} width={barW} height={h} rx={barW >= 4 ? 1 : 0}
+                fill="var(--color-primary)" />
               <rect x={i * slot} y={0} width={slot} height={PLOT} fill="transparent">
                 <title>{`${span}: ${fmt(v)} in ${count(b.records)} ${b.records === 1 ? 'record' : 'records'}`}</title>
               </rect>
@@ -100,6 +118,12 @@ export function HistoryChart({ buckets, measure, width }: {
         <span className="inline-flex items-center gap-1.5">
           <span aria-hidden className="h-2.5 w-2.5 rounded-[2px] bg-primary" />Reported by the exporter
         </span>
+        {expiredBuckets && (
+          <span className="inline-flex items-center gap-1.5">
+            <span aria-hidden className="h-2.5 w-2.5 rounded-[2px] border-[1.5px] border-dashed border-primary bg-primary/30" />
+            {EVIDENCE_EXPIRED_LEGEND}
+          </span>
+        )}
         <span className="inline-flex items-center gap-1.5">
           <span aria-hidden className="h-0 w-3 border-t-2 border-dashed border-muted-foreground/70" />Listening, nothing reported
         </span>

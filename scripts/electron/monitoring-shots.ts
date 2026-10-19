@@ -3,7 +3,7 @@
  * asserting.
  *
  *   npx tsx scripts/electron/monitoring-shots.ts <out-dir> [--widths 1024,1600]
- *     [--themes light,dark,dim,contrast]
+ *     [--themes light,dark,dim,contrast] [--only 02,storage,history-]
  *
  * Launches the built app against the stub agent and sends it v5 datagrams over
  * loopback (`scripts/monitoring/fixtures.ts`'s `v5Payload`), so every number in
@@ -30,6 +30,7 @@ import type { Page } from 'playwright';
 import { startStubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
 import { v5Payload, type FlowSpec } from '../monitoring/fixtures';
+import { FOREIGN_NAME, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
 
 const OUT = process.argv[2];
 if (!OUT) { console.log('usage: monitoring-shots.ts <out-dir> [--widths 1024,1600] [--themes light,dark,dim,contrast]'); process.exit(2); }
@@ -39,6 +40,12 @@ const arg = (name: string, fallback: string) => {
 };
 const WIDTHS = arg('widths', '1024,1600').split(',').map(Number);
 const THEMES = arg('themes', 'light,dark,dim,contrast').split(',');
+/** `--only 02,storage,history-`: the states whose names start with one of these; the default is every state. */
+const ONLY = arg('only', '') === '' ? null : arg('only', '').split(',');
+const wanted = (name: string) => ONLY === null || ONLY.some((prefix) => name.startsWith(prefix));
+/** The numbered states are one long run (two waits of a minute and a rebuild); skip it when only the newer ones are asked for. */
+const legacy = ONLY === null || ONLY.some((prefix) => /^\d/.test(prefix));
+const fresh = ONLY === null || ONLY.some((prefix) => !/^\d/.test(prefix));
 mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -142,6 +149,7 @@ for (const width of WIDTHS) {
   const text = (t: string | RegExp) => p.getByText(t).first().isVisible().catch(() => false);
   /** One state, every theme. */
   const shot = async (name: string) => {
+    if (!wanted(name)) return;
     for (const theme of THEMES) {
       await p.evaluate((t) => {
         localStorage.setItem('theme', t);
@@ -174,126 +182,225 @@ for (const width of WIDTHS) {
     }).catch(() => {});
   const field = (name: string) => p.getByRole('textbox', { name, exact: true });
 
-  await p.getByRole('button', { name: 'Network', exact: true }).click();
-  await until(() => text('Open monitoring'), 10_000);
-  await sleep(400);
-  await shot('01-panel-not-started');
+  if (legacy) {
+    await p.getByRole('button', { name: 'Network', exact: true }).click();
+    await until(() => text('Open monitoring'), 10_000);
+    await sleep(400);
+    await shot('01-panel-not-started');
 
-  await openSheet();
-  await until(() => text(/No history yet/), 60_000);
-  await sleep(400);
-  await shot('02-sheet-empty');
+    await openSheet();
+    await until(() => text(/No history yet/), 60_000);
+    await sleep(400);
+    await shot('02-sheet-empty');
 
-  await field('Exporter').fill('127.0.0.1');
-  await field('Listen on').fill('127.0.0.1');
-  await field('Port').fill(String(port));
-  await p.locator(SHEET).click({ position: { x: 4, y: 80 } }).catch(() => {});
-  await sleep(200);
-  await shot('03-first-start');
+    await field('Exporter').fill('127.0.0.1');
+    await field('Listen on').fill('127.0.0.1');
+    await field('Port').fill(String(port));
+    await p.locator(SHEET).click({ position: { x: 4, y: 80 } }).catch(() => {});
+    await sleep(200);
+    await shot('03-first-start');
 
-  await p.getByRole('button', { name: 'Start', exact: true }).click();
-  await until(() => text(/Listening, nothing received yet/), 15_000);
-  await sleep(400);
-  await shot('04-listening');
+    await p.getByRole('button', { name: 'Start', exact: true }).click();
+    await until(() => text(/Listening, nothing received yet/), 15_000);
+    await sleep(400);
+    await shot('04-listening');
 
-  console.log('    waiting a minute for "nothing arriving"');
-  await until(() => text('Nothing has arrived for a minute'), 75_000);
-  await sleep(300);
-  await shot('05-nothing-arriving');
+    console.log('    waiting a minute for "nothing arriving"');
+    await until(() => text('Nothing has arrived for a minute'), 75_000);
+    await sleep(300);
+    await shot('05-nothing-arriving');
 
-  const stranger = await socketFrom('127.0.0.2');
-  const other = new Exporter(stranger, port);
-  for (let i = 0; i < 3; i++) await other.datagram(i);
-  await until(() => text(/were refused/), 10_000);
-  await sleep(400);
-  await shot('06-rejected-senders');
-  stranger.close();
+    const stranger = await socketFrom('127.0.0.2');
+    const other = new Exporter(stranger, port);
+    for (let i = 0; i < 3; i++) await other.datagram(i);
+    await until(() => text(/were refused/), 10_000);
+    await sleep(400);
+    await shot('06-rejected-senders');
+    stranger.close();
 
-  // Live: one engine busy, a second quieter one with a sequence jump.
-  const sock = await socketFrom('127.0.0.1');
-  const exporter = new Exporter(sock, port);
-  for (let i = 0; i < 300; i++) {
-    await exporter.datagram(i);
-    if (i % 25 === 0) await exporter.datagram(i, [1, 1], 4);
-    if (i === 150) exporter.skip([1, 1], 40);
-    if (i % 20 === 0) await sleep(20);
+    // Live: one engine busy, a second quieter one with a sequence jump.
+    const sock = await socketFrom('127.0.0.1');
+    const exporter = new Exporter(sock, port);
+    for (let i = 0; i < 300; i++) {
+      await exporter.datagram(i);
+      if (i % 25 === 0) await exporter.datagram(i, [1, 1], 4);
+      if (i === 150) exporter.skip([1, 1], 40);
+      if (i % 20 === 0) await sleep(20);
+    }
+    await until(() => text('Receiving'), 15_000);
+    await until(() => p.locator(`${SHEET} svg[role="img"]`).count().then((n) => n > 0), 20_000);
+    await sleep(5_500); // one refresh past the last datagram
+    await shot('07-live-top');
+    await scrollTo(`${SHEET} [aria-labelledby="monitoring-history"]`);
+    await sleep(300);
+    await shot('08-live-history');
+
+    await p.getByRole('button', { name: HOSTS[0], exact: true }).first().click();
+    await until(() => text(/Supporting references: \d+ of \d+/), 10_000);
+    await sleep(300);
+    await scrollTo(`${SHEET} [aria-label="Selection"]`);
+    await sleep(300);
+    await shot('09-selection');
+    await p.locator('[aria-label="Supporting references"] button').first().click();
+    await until(() => p.locator('[aria-label="Datagram detail"]').count().then((n) => n > 0), 10_000);
+    await sleep(300);
+    await scrollTo(`${SHEET} [aria-label="Datagram detail"]`);
+    await sleep(300);
+    await shot('10-datagram-detail');
+
+    await toPanel();
+    await shot('11-panel-receiving');
+
+    console.log('    waiting a minute for "stale"');
+    await openSheet();
+    await p.locator(`${SHEET} .overflow-y-auto`).first().evaluate((el) => el.scrollTo(0, 0)).catch(() => {});
+    await until(() => text(/No recent export/), 80_000);
+    await sleep(300);
+    await shot('12-stale');
+    await toPanel();
+    await shot('13-panel-stale');
+    await openSheet();
+
+    await p.getByRole('button', { name: 'Stop', exact: true }).click();
+    await until(() => text('Stopped.'), 10_000);
+    await sleep(300);
+    await shot('14-stopped');
+
+    await field('Listen on').fill('192.0.2.1');
+    await p.getByRole('button', { name: 'Start', exact: true }).click();
+    await until(() => text(/socket failed/), 15_000);
+    await sleep(400);
+    await shot('15-bind-failed');
+    await field('Listen on').fill('0.0.0.0');
+    await p.locator(SHEET).click({ position: { x: 4, y: 80 } }).catch(() => {});
+    await sleep(300);
+    await shot('16-any-address-refused');
+    await field('Listen on').fill('127.0.0.1');
+
+    // A journal large enough that rebuilding its summaries takes a moment.
+    await p.getByRole('button', { name: 'Start', exact: true }).click();
+    await until(() => text(/Listening|Receiving/), 15_000);
+    console.log('    filling the journal for the rebuild');
+    for (let i = 0; i < 40_000; i++) {
+      await exporter.datagram(i, [0, 0], 30);
+      if (i % 200 === 0) await sleep(30);
+    }
+    await sleep(3_000);
+    await p.getByRole('button', { name: 'Stop', exact: true }).click();
+    await until(() => text('Stopped.'), 10_000);
+    sock.close();
+    await close(app, p);
+
+    const rollups = path.join(profile, 'monitoring', 'rollups.iwmr');
+    if (existsSync(rollups)) rmSync(rollups);
+    ({ app, p } = await launch(profile, width));
+    await p.getByRole('button', { name: 'Network', exact: true }).click();
+    await until(() => text('Open monitoring'), 10_000);
+    await p.getByRole('button', { name: 'Open monitoring' }).click();
+    const seen = await until(() => text(/Rebuilding summaries/), 60_000);
+    if (seen) await shot('17-rebuilding');
+    else console.log('    the rebuild finished before it could be photographed');
+    await until(() => text(/Received traffic records/), 5_000);
+    await sleep(6_000);
+    await shot('18-after-relaunch');
   }
-  await until(() => text('Receiving'), 15_000);
-  await until(() => p.locator(`${SHEET} svg[role="img"]`).count().then((n) => n > 0), 20_000);
-  await sleep(5_500); // one refresh past the last datagram
-  await shot('07-live-top');
-  await scrollTo(`${SHEET} [aria-labelledby="monitoring-history"]`);
-  await sleep(300);
-  await shot('08-live-history');
 
-  await p.getByRole('button', { name: HOSTS[0], exact: true }).first().click();
-  await until(() => text(/Supporting references: \d+ of \d+/), 10_000);
-  await sleep(300);
-  await scrollTo(`${SHEET} [aria-label="Selection"]`);
-  await sleep(300);
-  await shot('09-selection');
-  await p.locator('[aria-label="Supporting references"] button').first().click();
-  await until(() => p.locator('[aria-label="Datagram detail"]').count().then((n) => n > 0), 10_000);
-  await sleep(300);
-  await scrollTo(`${SHEET} [aria-label="Datagram detail"]`);
-  await sleep(300);
-  await shot('10-datagram-detail');
+  if (fresh) {
+    // Storage, retention, discard and expired evidence (ADRs 0061-0063) on real seeded folders. Main's dialogs
+    // are stubbed, so "Change..." lands on the folder this script names. Nothing here is saved: the retention
+    // draft stays a draft, so no policy ever runs over a seed.
+    const seeds = mkdtempSync(path.join(tmpdir(), 'inwire-monseed-'));
+    const nowMs = Date.now();
+    const empty = await seedEmpty(seeds);
+    const foreign = await seedForeign(seeds, { nowMs });
+    const readOnly = await seedReadOnly(seeds, { nowMs });
+    const expired = await seedExpired(seeds, { nowMs });
+    const incomplete = await seedIncomplete(seeds, { nowMs });
+    const { pick, saveTo } = await stubDialogs(app);
+    const sheet = p.locator(SHEET);
+    const change = async (folder: string) => {
+      await pick(folder);
+      await sheet.getByRole('button', { name: 'Change…' }).click();
+    };
+    const toStorage = async () => { await scrollTo(`${SHEET} h3:text-is("Storage")`); await sleep(300); };
+    const sixHours = () => sheet.getByRole('button', { name: '6 h', exact: true }).click();
+    const bars = (kind: string) => sheet.locator(`svg[role="img"] rect[data-coverage="${kind}"]`).count();
 
-  await toPanel();
-  await shot('11-panel-receiving');
+    console.log('    storage, expiry and the bundle');
+    await openSheet();
+    await until(() => text(/No history yet|No received traffic records yet|Received traffic records/), 60_000);
+    await field('Exporter').fill('127.0.0.1');
+    await field('Listen on').fill('127.0.0.1');
+    await field('Port').fill(String(port));
+    await p.locator(SHEET).click({ position: { x: 4, y: 80 } }).catch(() => {});
+    await sleep(300);
 
-  console.log('    waiting a minute for "stale"');
-  await openSheet();
-  await p.locator(`${SHEET} .overflow-y-auto`).first().evaluate((el) => el.scrollTo(0, 0)).catch(() => {});
-  await until(() => text(/No recent export/), 80_000);
-  await sleep(300);
-  await shot('12-stale');
-  await toPanel();
-  await shot('13-panel-stale');
-  await openSheet();
+    await toStorage();
+    await shot('storage-default');
 
-  await p.getByRole('button', { name: 'Stop', exact: true }).click();
-  await until(() => text('Stopped.'), 10_000);
-  await sleep(300);
-  await shot('14-stopped');
+    await change(empty.folder);
+    await until(() => text('New monitoring data will be kept here.'), 10_000);
+    await toStorage();
+    await shot('storage-custom');
 
-  await field('Listen on').fill('192.0.2.1');
-  await p.getByRole('button', { name: 'Start', exact: true }).click();
-  await until(() => text(/socket failed/), 15_000);
-  await sleep(400);
-  await shot('15-bind-failed');
-  await field('Listen on').fill('0.0.0.0');
-  await p.locator(SHEET).click({ position: { x: 4, y: 80 } }).catch(() => {});
-  await sleep(300);
-  await shot('16-any-address-refused');
-  await field('Listen on').fill('127.0.0.1');
+    await change(foreign.folder);
+    await until(() => sheet.locator('[role="alert"]').filter({ hasText: FOREIGN_NAME }).count().then((n) => n > 0), 10_000);
+    await toStorage();
+    await shot('storage-refused');
 
-  // A journal large enough that rebuilding its summaries takes a moment.
-  await p.getByRole('button', { name: 'Start', exact: true }).click();
-  await until(() => text(/Listening|Receiving/), 15_000);
-  console.log('    filling the journal for the rebuild');
-  for (let i = 0; i < 40_000; i++) {
-    await exporter.datagram(i, [0, 0], 30);
-    if (i % 200 === 0) await sleep(30);
+    await change(readOnly.folder);
+    await until(() => text(/open read-only/), 10_000);
+    await toStorage();
+    await shot('storage-read-only');
+
+    // A discard before a date, filled in and not pressed.
+    await change(expired.folder);
+    await until(() => text('The monitoring data already in this folder is in use.'), 10_000);
+    const day = new Date(Date.now() - 86_400_000);
+    const two = (n: number) => String(n).padStart(2, '0');
+    await sheet.getByLabel('Discard', { exact: true }).selectOption('before');
+    await sheet.getByLabel('Discard evidence before').fill(
+      `${day.getFullYear()}-${two(day.getMonth() + 1)}-${two(day.getDate())}T${two(day.getHours())}:${two(day.getMinutes())}`);
+    await toStorage();
+    await shot('storage-discard');
+
+    await sheet.getByRole('checkbox', { name: 'Keep raw evidence for' }).check();
+    await sheet.getByLabel('Days of raw evidence').fill('30');
+    await sheet.getByRole('radio', { name: 'Expire the oldest raw evidence' }).check();
+    await toStorage();
+    await shot('storage-retention-on');
+
+    await sixHours();
+    await until(async () => (await bars('aggregate-only')) > 0 && await sheet.locator('figcaption').getByText('Evidence expired', { exact: true }).isVisible(), 30_000);
+    await sleep(400);
+    await scrollTo(`${SHEET} [aria-labelledby="monitoring-history"]`);
+    await sleep(300);
+    await shot('history-expired');
+
+    await sheet.getByRole('button', { name: expired.host, exact: true }).first().click();
+    await until(() => sheet.locator('section[aria-label="Selection"] [role="status"]').filter({ hasText: /under the retention policy/ }).count().then((n) => n > 0), 20_000);
+    await scrollTo(`${SHEET} [aria-label="Selection"]`);
+    await sleep(300);
+    await shot('focus-expired');
+    await sheet.getByRole('button', { name: 'Clear the selection' }).click();
+
+    await change(incomplete.folder);
+    await until(() => text('Not available: this minute exceeded the key budget, and its evidence has expired.'), 30_000);
+    await sleep(400);
+    await scrollTo(`${SHEET} >> text=Not available: this minute`);
+    await sleep(300);
+    await shot('history-incomplete');
+
+    // The bundle saved through the sheet: the line under the buttons says where.
+    const bundleFile = path.join(seeds, 'incomplete.iwmon');
+    await saveTo(bundleFile);
+    await sheet.getByRole('button', { name: 'Export evidence bundle' }).click();
+    await until(() => text(`Saved to ${bundleFile}`), 30_000);
+    await scrollTo(`${SHEET} >> button:has-text("Export evidence bundle")`);
+    await sleep(300);
+    await shot('bundle-export');
+    rmSync(seeds, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
-  await sleep(3_000);
-  await p.getByRole('button', { name: 'Stop', exact: true }).click();
-  await until(() => text('Stopped.'), 10_000);
-  sock.close();
-  await close(app, p);
-
-  const rollups = path.join(profile, 'monitoring', 'rollups.iwmr');
-  if (existsSync(rollups)) rmSync(rollups);
-  ({ app, p } = await launch(profile, width));
-  await p.getByRole('button', { name: 'Network', exact: true }).click();
-  await until(() => text('Open monitoring'), 10_000);
-  await p.getByRole('button', { name: 'Open monitoring' }).click();
-  const seen = await until(() => text(/Rebuilding summaries/), 60_000);
-  if (seen) await shot('17-rebuilding');
-  else console.log('    the rebuild finished before it could be photographed');
-  await until(() => text(/Received traffic records/), 5_000);
-  await sleep(6_000);
-  await shot('18-after-relaunch');
 
   await close(app, p);
   rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

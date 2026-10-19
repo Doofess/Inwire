@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Filter, Loader2, RefreshCw, X } from 'lucide-react';
 import type { DetailResult, MonitoringClient } from '../../services/monitoring/client';
 import type { HistoryResult, QueryFocus, QuerySpec } from '../../services/monitoring/types';
-import { count, localTime } from './monitoringCopy';
+import { count, evidenceExpiredText, localTime } from './monitoringCopy';
 import { DatagramDetail } from './DatagramDetail';
 import { BUTTON_SECONDARY } from './parts';
 
@@ -33,6 +33,7 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
 }) {
   const [result, setResult] = useState<HistoryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expired, setExpired] = useState<string | null>(null);
   const [again, setAgain] = useState(0);
   const [reading, setReading] = useState(false);
   const [detail, setDetail] = useState<DetailResult | null>(null);
@@ -43,6 +44,7 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
   useEffect(() => {
     let live = true;
     setError(null);
+    setExpired(null);
     setReading(true);
     void client.query('monitoring-focus', { ...spec, focus }).then((reply) => {
       if (!live) return;
@@ -51,6 +53,8 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
       // The journal moved between asking and answering: ask again, as the
       // detail path does. Neither is something to show as an error.
       if (reply.code === 'stale-generation') { setAgain((n) => n + 1); return; }
+      // Expired evidence is a fact about the range, not a failure: said in the sheet's own words.
+      if (reply.code === 'evidence-expired') { setExpired(evidenceExpiredText(reply.expiry ?? null, reply.expiredMs ?? 0)); return; }
       if (reply.code !== 'cancelled') setError(reply.message);
     });
     return () => { live = false; };
@@ -111,7 +115,10 @@ export function Focus({ client, spec, focus, asOfMs, onRefresh, onClear, onFilte
         </p>
       )}
       {error && <p role="alert" className="text-xs text-danger">{error}</p>}
-      {!error && !result && (
+      {expired && !error && (
+        <p role="status" className="text-xs leading-relaxed text-muted-foreground">{expired}</p>
+      )}
+      {!error && !expired && !result && (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden />Reading the supporting records…
         </p>

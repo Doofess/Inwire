@@ -52,4 +52,55 @@ test('limit: a storage limit too large is told apart from one too small', () => 
   assert.match(err('abc') ?? '', /at least 16 MiB/);
 });
 
+const COPY_CONSTANTS = [
+  'Evidence expired',
+  'Not available: this minute exceeded the key budget, and its evidence has expired.',
+  'Nothing expires unless you turn this on',
+  'Totals come from retained minute rollups.',
+  'under the retention policy',
+  'was discarded before',
+];
+
+test('Task 6: the storage block carries its fields and adds no confirm of its own', () => {
+  const src = read('StorageBlock.tsx');
+  for (const label of ['Kept in', 'Change…', 'Keep up to', 'Keep raw evidence for', 'At the storage limit', 'Discard…']) {
+    assert.ok(src.includes(label), `StorageBlock says "${label}"`);
+  }
+  const form = read('SourceForm.tsx');
+  assert.ok(!form.includes('Keep up to'), 'the limit field moved out of SourceForm');
+  // Discard acts at once: it renders after Start and Save, not among the drafts they save.
+  assert.ok(form.indexOf('<DiscardControl') > form.indexOf("'Start'"), 'Discard renders below Start');
+  assert.match(form, /firstStart && busy !== 'load' && !readOnly/, 'no firewall note while Start is off for a read-only folder');
+  assert.doesNotMatch(src, /uppercase/, 'section titles are sentence case');
+  assert.doesNotMatch(src, /confirm\(/);
+  assert.doesNotMatch(src, /role="dialog"/);
+  assert.doesNotMatch(src, /alertdialog/);
+});
+
+test('Task 6: the expiry copy is held verbatim in monitoringCopy', () => {
+  const src = read('monitoringCopy.ts');
+  for (const text of COPY_CONSTANTS) assert.ok(src.includes(text), `monitoringCopy holds "${text}"`);
+});
+
+test('Task 6: Export evidence bundle sits in the same button row as Export CSV', () => {
+  const src = read('History.tsx');
+  const csv = src.indexOf('Export CSV');
+  const bundle = src.indexOf('Export evidence bundle');
+  assert.ok(csv > 0 && bundle > 0);
+  assert.ok(Math.abs(bundle - csv) < 900, 'the two buttons are neighbours');
+  assert.ok(!src.slice(Math.min(csv, bundle), Math.max(csv, bundle)).includes('</div>'), 'no row closes between them');
+});
+
+test('Task 6: the chart marks aggregate-only apart from observed-records and has the legend entry', () => {
+  const src = read('HistoryChart.tsx');
+  assert.match(src, /EVIDENCE_EXPIRED_LEGEND/);
+  assert.match(src, /b\.coverage === 'aggregate-only'/);
+});
+
+test('Task 6: Focus words an expired range from the copy function, not the reply message', () => {
+  const src = read('Focus.tsx');
+  assert.match(src, /'evidence-expired'/);
+  assert.match(src, /evidenceExpiredText\(/);
+});
+
 process.exit((await runAll()) === 0 ? 0 : 1);

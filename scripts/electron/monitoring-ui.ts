@@ -11,12 +11,14 @@
  * Skips like `speed-test-ui.ts` without a build or Playwright.
  */
 import { createSocket } from 'node:dgram';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
 import { v5Payload } from '../monitoring/fixtures';
+import { BUNDLE_FRAMING } from '../../src/services/monitoring/bundle';
+import { FOREIGN_NAME, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
 
 let failures = 0;
 function checkTrue(name: string, ok: boolean, detail = ''): void {
@@ -51,6 +53,7 @@ const PIPE = String.raw`\\.\pipe\inwire-monui-` + process.pid;
 const SHEET = '[data-testid="monitoring-sheet"]';
 let agent: StubAgent | null = null;
 let profile: string | null = null;
+let seeds: string | null = null;
 let app: Awaited<ReturnType<typeof launchApp>> | null = null;
 const sender = createSocket('udp4');
 
@@ -194,6 +197,133 @@ try {
   await until(sheetOpen, 5_000);
   await p.getByRole('button', { name: 'Stop', exact: true }).click();
   checkTrue('Stop stops the listener', await until(() => visible(/Stopped/), 10_000));
+
+  // --- Storage, retention, discard and expired evidence (ADRs 0061-0063), on seeded folders ---------------
+  // Main's dialogs are replaced from main: the open dialog answers with the folder the script names, and the
+  // message box records its options, answers "Discard" (button 1) and counts. Neither stub knows about windows:
+  // main calls each with or without one.
+  const sheet = p.locator(SHEET);
+  const nowMs = Date.now();
+  seeds = mkdtempSync(path.join(tmpdir(), 'inwire-monseed-'));
+  const empty = await seedEmpty(seeds);
+  const foreign = await seedForeign(seeds, { nowMs });
+  const readOnly = await seedReadOnly(seeds, { nowMs });
+  const expired = await seedExpired(seeds, { nowMs });
+  const incomplete = await seedIncomplete(seeds, { nowMs });
+  checkTrue('the seeds classify as intended (new, refused, read-only, adopt, adopt)',
+    empty.inspect.ok && empty.inspect.kind === 'new' && !foreign.inspect.ok && foreign.inspect.reason === 'foreign-files'
+    && readOnly.inspect.ok && readOnly.inspect.kind === 'adopt-read-only'
+    && expired.inspect.ok && expired.inspect.kind === 'adopt' && incomplete.inspect.ok && incomplete.inspect.kind === 'adopt');
+  const { pick, boxes, saveTo } = await stubDialogs(app);
+  const change = async (folder: string) => {
+    await pick(folder);
+    await sheet.getByRole('button', { name: 'Change…' }).click();
+  };
+  const scopeRange = (label: string) => sheet.getByRole('button', { name: label, exact: true }).click();
+
+  checkTrue('Storage: "Kept in" the default folder, marked (default)',
+    await visible('Kept in') && await sheet.getByText('(default)').first().isVisible().catch(() => false));
+  checkTrue('Storage: with retention off it says nothing expires unless turned on',
+    await visible('Nothing expires unless you turn this on.'));
+
+  // Retention: check it, 30 days, Save; it survives closing and reopening the sheet.
+  await sheet.getByRole('checkbox', { name: 'Keep raw evidence for' }).check();
+  await sheet.getByLabel('Days of raw evidence').fill('30');
+  await sheet.getByRole('button', { name: 'Save', exact: true }).click();
+  checkTrue('Retention: Save says Saved.', await until(() => visible('Saved.'), 10_000));
+  await p.keyboard.press('Escape');
+  await until(sheetClosed, 5_000);
+  await p.getByRole('button', { name: 'Open monitoring' }).click();
+  await until(sheetOpen, 5_000);
+  checkTrue('Retention: the policy persists on reopening (box checked, 30 days)',
+    await until(async () => await sheet.getByRole('checkbox', { name: 'Keep raw evidence for' }).isChecked().catch(() => false)
+      && await sheet.getByLabel('Days of raw evidence').inputValue().catch(() => '') === '30', 10_000));
+
+  // Change... onto an empty folder, then a refused one, then a read-only one.
+  await change(empty.folder);
+  checkTrue('Change... onto an empty folder says new monitoring data will be kept there',
+    await until(() => visible('New monitoring data will be kept here.'), 10_000));
+  checkTrue('...and offers "Use the default folder"',
+    await sheet.getByRole('button', { name: 'Use the default folder' }).isVisible().catch(() => false));
+  await change(foreign.folder);
+  checkTrue('Change... onto a folder with a foreign file shows an alert naming it',
+    await until(async () => (await sheet.locator('[role="alert"]').allTextContents()).some((t) => t.includes(FOREIGN_NAME)), 10_000));
+  await change(readOnly.folder);
+  checkTrue('Change... onto a damaged dataset shows the read-only note',
+    await until(() => visible(/open read-only: history up to the damage is shown, Start is off/), 10_000));
+  checkTrue('...and Start is disabled',
+    await sheet.getByRole('button', { name: 'Start', exact: true }).isDisabled().catch(() => false));
+  checkTrue('...and the firewall note, which is about a Start, is not shown',
+    !(await visible(/Windows will ask whether Inwire may receive/)));
+
+  // The sheet's History over the seeded datasets (6 h reaches all of them).
+  await change(expired.folder);
+  checkTrue('Change... onto a dataset in use says so',
+    await until(() => visible('The monitoring data already in this folder is in use.'), 10_000));
+  checkTrue('...and Start is enabled again',
+    await until(() => sheet.getByRole('button', { name: 'Start', exact: true }).isEnabled().catch(() => false), 10_000));
+  await scopeRange('6 h');
+  const aggregateBars = () => sheet.locator('svg[role="img"] rect[data-coverage="aggregate-only"]').count().catch(() => 0);
+  const rawBars = () => sheet.locator('svg[role="img"] rect[data-coverage="observed-records"]').count().catch(() => 0);
+  checkTrue('an expired range: the chart has aggregate-only buckets, marked apart from the raw ones',
+    await until(async () => (await aggregateBars()) > 0 && (await rawBars()) > 0, 30_000),
+    `aggregate ${await aggregateBars()}, raw ${await rawBars()}`);
+  // `visible()` takes the first match, and the first is a bucket's <title> (it says "evidence expired, totals only").
+  checkTrue('...the legend reads "Evidence expired"',
+    await sheet.locator('figcaption').getByText('Evidence expired', { exact: true }).isVisible().catch(() => false));
+  checkTrue('...and the host over the expired part is in the tables',
+    await until(() => sheet.getByRole('button', { name: expired.host, exact: true }).count().then((n) => n > 0), 20_000));
+  await sheet.getByRole('button', { name: expired.host, exact: true }).first().click();
+  const selection = sheet.locator('section[aria-label="Selection"]');
+  checkTrue('Focus over expired evidence says so under the retention policy, as a status',
+    await until(() => selection.locator('[role="status"]').filter({ hasText: /under the retention policy/ }).count().then((n) => n > 0), 20_000));
+  checkTrue('...and not as an alert', await selection.locator('[role="alert"]').count() === 0);
+  await selection.getByRole('button', { name: 'Clear the selection' }).click();
+
+  // Export buttons share a row.
+  const csv = await sheet.getByRole('button', { name: 'Export CSV' }).boundingBox();
+  const bundle = await sheet.getByRole('button', { name: 'Export evidence bundle' }).boundingBox();
+  checkTrue('"Export evidence bundle" is in the same row as "Export CSV"',
+    csv !== null && bundle !== null && Math.abs(csv.y - bundle.y) < 4 && bundle.x > csv.x, JSON.stringify({ csv, bundle }));
+
+  // The bundle through the sheet, into the file main's save dialog answers with.
+  const bundleFile = path.join(seeds, 'expired.iwmon');
+  await saveTo(bundleFile);
+  await sheet.getByRole('button', { name: 'Export evidence bundle' }).click();
+  checkTrue('Export evidence bundle saves to the chosen file and says where',
+    await until(() => visible(`Saved to ${bundleFile}`), 30_000));
+  checkTrue('...and the file is a bundle (it starts with the bundle magic)',
+    existsSync(bundleFile) && readFileSync(bundleFile).subarray(0, 8).toString('latin1') === BUNDLE_FRAMING.magic);
+
+  // Discard acts at once, so it sits below Start and Save rather than among the drafts they save.
+  const startBox = await sheet.getByRole('button', { name: 'Start', exact: true }).boundingBox();
+  const discardBox = await sheet.getByRole('button', { name: 'Discard…' }).boundingBox();
+  checkTrue('Discard sits below Start and Save',
+    startBox !== null && discardBox !== null && discardBox.y > startBox.y + startBox.height, JSON.stringify({ startBox, discardBox }));
+
+  await change(incomplete.folder);
+  checkTrue('an incomplete expired minute: the tables say why it is not available',
+    await until(() => visible('Not available: this minute exceeded the key budget, and its evidence has expired.'), 30_000));
+
+  // Discard "All monitoring data" in the default folder, which holds the datagrams sent above.
+  await sheet.getByRole('button', { name: 'Use the default folder' }).click();
+  await until(() => visible(/The monitoring data already in this folder is in use\./), 10_000);
+  const before = (await boxes()).n;
+  await sheet.getByRole('button', { name: 'Discard…' }).click();
+  checkTrue('Discard: the segment count is reported ("Discarded N segment(s).")',
+    await until(() => visible(/Discarded \d+ segments?\./), 20_000));
+  const after = await boxes();
+  const box = after.last ?? {};
+  checkTrue('Discard: main\'s confirmation is shown exactly once', after.n - before === 1, `calls ${after.n - before}`);
+  const detail = String(box.detail ?? '');
+  checkTrue('...it names what goes and what stays, in discardConfirmation\'s words',
+    box.title === 'Discard all monitoring data' && box.message === 'Discard the whole monitoring dataset?'
+    && detail.includes('What goes:') && detail.includes('What stays:') && detail.includes('The app\'s settings.')
+    && detail.includes('this cannot be undone'), JSON.stringify(box).slice(0, 400));
+  checkTrue('...Cancel is the default and the cancel button',
+    JSON.stringify(box.buttons) === JSON.stringify(['Cancel', 'Discard']) && box.defaultId === 0 && box.cancelId === 0);
+  checkTrue('...and the sheet adds no dialog of its own',
+    await sheet.locator('[role="dialog"], [role="alertdialog"]').count() === 0);
   await p.evaluate(() => (window as unknown as { inwire?: { setUnsavedCapture?: (v: boolean) => void } })
     .inwire?.setUnsavedCapture?.(false));
 } finally {
@@ -203,6 +333,7 @@ try {
   await agent?.close();
   try {
     if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    if (seeds) rmSync(seeds, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   } catch {
     console.log(`      note: could not remove the temporary profile at ${profile}`);
   }
