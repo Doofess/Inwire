@@ -101,7 +101,11 @@ function* sectionChunks<Row>(
 }
 
 function tableRows<Row>(table: HistoryTable<Row>): { rows: readonly Row[]; unavailable?: string } {
-  return table.status === 'ok' ? { rows: table.rows } : { rows: [], unavailable: table.message };
+  if (table.status === 'ok') return { rows: table.rows };
+  if (table.status === 'evidence-expired') {
+    return { rows: [], unavailable: `the evidence for this range expired through ${iso(table.expiredMs)}; totals are kept, the tables are not` };
+  }
+  return { rows: [], unavailable: table.message };
 }
 
 export async function exportHistory(

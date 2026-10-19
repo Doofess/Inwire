@@ -129,6 +129,27 @@ async function main(): Promise<void> {
     ok('preamble value cannot start a new line', !/^# injected/m.test(text));
     ok('not-available message is one record', !text.includes('\nreally') && text.includes('too'));
   }
+  // Expired evidence (ADR 0062): the coverage column carries the new values, expired tables say so
+  {
+    const sink = new TestSink();
+    await exportHistory(result({
+      buckets: [
+        { fromMs: T0, toMs: T0 + 1_800_000, reportedOctets: 10n, reportedPackets: 2n, records: 0, coverage: 'aggregate-only' },
+        { fromMs: T0 + 1_800_000, toMs: T0 + 3_600_000, reportedOctets: null, reportedPackets: null, records: 0, coverage: 'history-lost' },
+      ],
+      endpoints: { status: 'evidence-expired', expiredMs: T0 + 900_000 },
+      conversations: { status: 'evidence-expired', expiredMs: T0 + 900_000 },
+    }), sink);
+    const rows = parseCsv(sink.text());
+    const b = section(rows, 'buckets');
+    ok('expired: aggregate-only keeps its counters', b[1][2] === 'aggregate-only' && b[1][4] === '10' && b[1][5] === '2');
+    ok('expired: history-lost has empty counters', b[2][2] === 'history-lost' && b[2][4] === '' && b[2][5] === '');
+    for (const name of ['endpoints', 'conversations']) {
+      const s = section(rows, name);
+      ok(`expired: ${name} is one not-available line`, s.length === 1 && s[0][0].startsWith('# not available: ')
+        && s[0][0].includes('2026-10-17T10:15:00.000Z'), String(s[0]));
+    }
+  }
   // Empty
   {
     const sink = new TestSink();

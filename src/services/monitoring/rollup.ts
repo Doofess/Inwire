@@ -26,8 +26,10 @@
  * Live and rebuild feed the same class in the same order, so a replay of the
  * same journal produces the same fragments to the byte (`sortedRollup`).
  */
-import { LIMITS, type ConversationTotals, type EndpointTotals, type MinuteRollup, type NormalizedV5 } from './types';
-import { exporterKey, exporterOf, isEngineSourceKey } from './v5';
+import {
+  LIMITS, type ConversationTotals, type DecodeResult, type EndpointTotals, type Evidence, type MinuteRollup, type NormalizedV5,
+} from './types';
+import { decodeV5, exporterKey, exporterOf, isEngineSourceKey, sourceKey } from './v5';
 
 export const MINUTE_MS = 60_000;
 
@@ -297,4 +299,40 @@ export class MinuteAggregator {
     this.held = this.held.filter((f) => !posted.has(f));
     return { fragments: post, watermark };
   }
+}
+
+/**
+ * One journal entry into the aggregator, in strict id order; an id already fed is ignored and
+ * returns null, as does a boundary. The live feed, the rebuild and the expiry's replay all go
+ * through this, so the archive's minutes are made by the same code as the cache's (ADR 0062).
+ * A datagram returns what it decoded to and whether its engine was admitted, which the live
+ * feed's health and source list need and a replay does not.
+ */
+export function feedEntry(
+  agg: MinuteAggregator, admission: EngineAdmission, e: Evidence,
+): { decoded: DecodeResult; admitted: boolean } | null {
+  const id = e.ref.entryId;
+  if (id <= agg.fedThrough) return null;
+  if (e.kind === 'boundary') {
+    agg.fed(id);
+    // A stop, a suspend and a reopen after a crash all end the collector's
+    // run: the minutes it was building are done, whatever the clock says.
+    if (e.action === 'stop' || e.action === 'suspend' || e.action === 'interrupted') agg.seal(Infinity);
+    return null;
+  }
+  const decoded = decodeV5(e, e.remoteIPv4);
+  const admitted = decoded.kind === 'valid' && admission.admit(sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId));
+  if (decoded.kind === 'valid') {
+    if (!admitted) agg.fed(id);
+    else if (decoded.flows.length === 0) agg.touch(sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId), e.receivedMs, id);
+    else for (const flow of decoded.flows) agg.add(flow);
+  } else if (decoded.kind === 'malformed') {
+    agg.addMalformed(e.remoteIPv4, e.receivedMs, id);
+  } else {
+    agg.addUnsupported(e.remoteIPv4, e.receivedMs, id);
+  }
+  // Receipt time has passed every earlier minute; the watermark, not the
+  // wall clock, is what makes it safe to post them.
+  agg.seal(minuteOf(e.receivedMs));
+  return { decoded, admitted };
 }

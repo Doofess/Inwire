@@ -20,12 +20,18 @@ import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { boundedInflate } from '../../src/services/monitoring/boundedInflate';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { historySpec } from '../../src/services/monitoring/historyRange';
-import { bucketBounds, runHistoryQuery, validateQuery, type QueryOptions } from '../../src/services/monitoring/queries';
+import { bucketBounds, recordedSource, runHistoryQuery, validateQuery, type QueryOptions } from '../../src/services/monitoring/queries';
+import { runExpiry } from '../../src/services/monitoring/archive';
+import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan } from '../../src/services/monitoring/retention';
+import { minuteOf } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, domPort, serveRuntime } from '../../src/services/monitoring/runtimeRpc';
-import { DECODER_POLICY_VERSION, LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type JournalSnapshot, type Snapshot } from '../../src/services/monitoring/types';
+import {
+  DECODER_POLICY_VERSION, LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type JournalSnapshot, type Snapshot, type SegmentSource,
+  type HistoryResult,
+} from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import type { FromMonitoringWorker } from '../../src/services/monitoring/workerHost';
 import {
@@ -1893,6 +1899,189 @@ test('rpc: the utility pushes appended entries and the client hands them to its 
   } finally {
     p.close();
   }
+});
+
+// --- after an expiry (ADR 0062) ---------------------------------------------------------------------------
+
+const SEG_LIMIT = 32 * 1024 * 1024; // 1 MiB segments
+const EXP_SOURCE: SegmentSource = { exporterIPv4: EXPORTER, bindIPv4: '192.0.2.50', port: 2055 };
+const WIDE_MINUTE = 2;
+
+/** An hour of one datagram a second, and one minute (the third) with more keys than a minute's budget. */
+function expiryInputs(): EvidenceInput[] {
+  const timed: EvidenceInput[] = [];
+  for (let i = 0; i < 3600; i++) {
+    const flows = Array.from({ length: 20 }, (_, j) => ({
+      src: `10.${i % 5}.${j}.1`, dst: `172.16.${j % 4}.${(i % 9) + 1}`, octets: 100 + j + (i % 13) * 10, packets: 1 + (j % 3),
+      srcPort: 1000 + j, dstPort: 443,
+    }));
+    timed.push(dgram(BASE + 1000 + i * 1000, flows, { engineId: i % 3 === 0 ? 1 : 0, sequence: i }));
+  }
+  for (let k = 0; k < 600; k++) {
+    const flows = Array.from({ length: 30 }, (_, j) => ({
+      src: `11.${k >> 8}.${k & 255}.${j}`, dst: '172.31.0.1', octets: 7 + j, packets: 1, srcPort: 2000 + j, dstPort: 80,
+    }));
+    timed.push(dgram(m(WIDE_MINUTE, 100 + k * 50), flows, { engineId: 0 }));
+  }
+  timed.sort((a, b) => a.receivedMs - b.receivedMs);
+  return [{ ...start(BASE), source: EXP_SOURCE } as never, ...timed];
+}
+
+/** A rig whose Worker has rolled up the whole journal, and the plan that expires its first two sealed segments. */
+async function expiryWorld(): Promise<{ rig: Rig; plan: ExpiryPlan }> {
+  const rig = new Rig(0xa0, SEG_LIMIT);
+  const inputs = expiryInputs();
+  for (let at = 0; at < inputs.length; at += 100) rig.append(inputs.slice(at, at + 100));
+  await rollUp(rig).then((h) => h.host.settled());
+  const segs = rig.journal.segments();
+  const plan = planExpiry(segs, DEFAULT_RETENTION, NOW, 0, SEG_LIMIT, segs[1].lastReceivedMs + 1);
+  assert.ok(plan !== null, 'the fixture seals at least two segments');
+  assert.equal(plan.segments.length, 2);
+  return { rig, plan };
+}
+
+function expire(rig: Rig, plan: ExpiryPlan): void {
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'done');
+  rig.reopen();
+}
+
+/** The numbers an expiry must not change. */
+function totals(r: HistoryResult) {
+  return {
+    buckets: r.buckets.map((b) => `${(b.fromMs - BASE) / MIN}: ${b.records} records, ${b.reportedOctets} octets, ${b.reportedPackets} packets`),
+    matchingRecords: r.matchingRecords, malformed: r.malformed, unsupported: r.unsupported, samplingKnown: r.samplingKnown,
+  };
+}
+
+const perMinute = (from: number, to: number): QuerySpec => spec(from, to, (to - from) / MIN);
+
+test('an expired range answers aggregate-only: the totals it had, the tables from the archive', async () => {
+  const { rig, plan } = await expiryWorld();
+  const cutThrough = plan.throughMs;
+  const hi = minuteOf(cutThrough);
+  assert.ok(hi > m(12), `the cut (${hi - BASE} ms in) leaves room for a range of expired minutes`);
+  const q = perMinute(m(6), hi);
+  const before = await askOk(rig, q);
+  assert.ok(before.buckets.every((b) => b.coverage === 'observed-records'));
+  assert.equal(before.endpoints.status, 'ok');
+  const wideBefore = await askOk(rig, perMinute(m(6), m(40)));
+  expire(rig, plan);
+  await rollUp(rig).then((h) => h.host.settled());
+  const after = await askOk(rig, q);
+  assert.deepEqual(totals(after), totals(before));
+  assert.ok(after.buckets.every((b) => b.coverage === 'aggregate-only'), after.buckets.map((b) => b.coverage).join());
+  assert.equal(after.endpoints.status, 'ok');
+  assert.equal(after.conversations.status, 'ok');
+  assert.deepEqual(after.endpoints, before.endpoints);
+  assert.deepEqual(after.conversations, before.conversations);
+  assert.deepEqual(after.gaps, [], 'an expired range is not a gap');
+  assert.deepEqual(after.evidence, []);
+  // Across the cut, into what the journal still holds: the totals are still the ones it had...
+  const wide = perMinute(m(6), m(40));
+  const across = await askOk(rig, wide);
+  assert.deepEqual(totals(across), totals(wideBefore));
+  assert.ok(across.buckets.every((b) => b.coverage === 'aggregate-only' || b.coverage === 'observed-records'));
+  assert.ok(across.buckets[0].coverage === 'aggregate-only' && across.buckets[across.buckets.length - 1].coverage === 'observed-records');
+  // ...and on what it still holds, rollups and raw agree.
+  const { fast, raw } = await askBoth(rig, perMinute(hi + MIN, m(40)));
+  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
+});
+
+test('an incomplete expired minute keeps exact totals and loses its tables', async () => {
+  const { rig, plan } = await expiryWorld();
+  const q = perMinute(m(WIDE_MINUTE), m(WIDE_MINUTE + 1));
+  const before = await askOk(rig, q);
+  assert.ok(before.matchingRecords >= 600 * 30, 'the wide minute holds its 18,000 records');
+  expire(rig, plan);
+  await rollUp(rig).then((h) => h.host.settled());
+  const after = await askOk(rig, q);
+  assert.deepEqual(totals(after), totals(before));
+  assert.equal(after.buckets[0].coverage, 'aggregate-only');
+  assert.equal(after.endpoints.status, 'evidence-expired');
+  assert.equal(after.conversations.status, 'evidence-expired');
+  assert.ok(after.endpoints.status === 'evidence-expired' && after.endpoints.expiredMs === plan.throughMs);
+});
+
+test('a corrupt archive minute is history-lost, never zero', async () => {
+  const { rig, plan } = await expiryWorld();
+  const hi = minuteOf(plan.throughMs);
+  const q = perMinute(m(6), hi);
+  expire(rig, plan);
+  // Damage the middle of the sealed archive, then open it again: it is preserved, and every read of it is refused.
+  const bytes = new Uint8Array(rig.afile.size());
+  rig.afile.read(0, bytes);
+  const at = bytes.length >> 1;
+  rig.afile.write(at, Uint8Array.of(bytes[at] ^ 0xff));
+  rig.openArchive();
+  rig.openSidecar();
+  await rollUp(rig).then((h) => h.host.settled());
+  const after = await askOk(rig, q);
+  assert.ok(after.buckets.length > 0);
+  for (const b of after.buckets) {
+    assert.equal(b.coverage, 'history-lost');
+    assert.equal(b.reportedOctets, null);
+    assert.equal(b.reportedPackets, null);
+    assert.equal(b.records, 0);
+  }
+  assert.equal(after.endpoints.status, 'evidence-expired');
+  // What the journal still holds is unaffected by it.
+  const retained = await askOk(rig, perMinute(hi + MIN, m(40)));
+  assert.ok(retained.buckets.every((b) => b.coverage === 'observed-records' && b.reportedOctets !== null));
+});
+
+test('a focused query over an expired range says the evidence expired, and through when', async () => {
+  const { rig, plan } = await expiryWorld();
+  const hi = minuteOf(plan.throughMs);
+  expire(rig, plan);
+  await rollUp(rig).then((h) => h.host.settled());
+  assert.equal((await ask(rig, perMinute(m(6), hi))).ok, true, 'unfocused, the same range answers');
+  const focused = await ask(rig, { ...perMinute(m(6), hi), focus: { kind: 'endpoint', address: '10.1.0.1' } });
+  assert.equal(focused.ok, false);
+  if (focused.ok) return;
+  assert.equal(focused.code, 'evidence-expired');
+  assert.equal(focused.expiredMs, plan.throughMs);
+  // A focused query over what is retained is untouched.
+  const kept = await ask(rig, { ...perMinute(hi + MIN, hi + 3 * MIN), focus: { kind: 'endpoint', address: '10.1.0.1' } });
+  assert.equal(kept.ok, true);
+});
+
+test('a query planned before an expiry restarts or says evidence-expired; it never throws or mixes pages', async () => {
+  for (const focused of [false, true]) {
+    const { rig, plan } = await expiryWorld();
+    const hi = minuteOf(plan.throughMs);
+    // Ragged edges, so that the plan reads the journal's pages (the leading partial minute) as well as the rollups.
+    const q: QuerySpec = { ...spec(m(6, 1000), hi + 1000, 1), ...(focused ? { focus: { kind: 'endpoint' as const, address: '10.1.0.1' } } : {}) };
+    const gate = new Gate();
+    gate.held = true;
+    const gated = gatedRuntime(rig.runtime, 'readPage', gate);
+    const pending = runHistoryQuery(gated, gated, q, new AbortController().signal, { inflate, nowMs: NOW, archive: rig.runtime.archive });
+    await ticks();
+    assert.ok(gate.entered > 0, 'the query is reading pages');
+    assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'done');
+    gate.release();
+    const reply = await pending;
+    const fresh = await ask(rig, q);
+    if (focused) {
+      assert.equal(reply.ok, false);
+      if (!reply.ok) { assert.equal(reply.code, 'evidence-expired'); assert.equal(reply.expiredMs, plan.throughMs); }
+    } else {
+      // Answered again from the start against the journal as it now is: exactly what a new question gets.
+      assert.equal(reply.ok, true, JSON.stringify(reply));
+      assert.deepEqual(reply, fresh);
+    }
+  }
+});
+
+test('the recorded exporter survives the expiry of the only start boundary', async () => {
+  const { rig, plan } = await expiryWorld();
+  const snap0 = rig.journal.snapshot();
+  assert.deepEqual(recordedSource((await rig.runtime.readBoundaries(snap0, 0, 100)).entries), EXP_SOURCE);
+  expire(rig, plan);
+  const snap = rig.journal.snapshot();
+  assert.ok(snap.firstEntryId > 1);
+  const kept = await rig.runtime.readBoundaries(snap, snap.firstEntryId - 1, 100);
+  assert.ok(!kept.entries.some((b) => b.action === 'start'), 'the start went with the first segment');
+  assert.deepEqual(recordedSource(kept.entries), EXP_SOURCE);
 });
 
 process.exit((await runAll()) === 0 ? 0 : 1);

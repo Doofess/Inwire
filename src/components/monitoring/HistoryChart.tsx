@@ -36,8 +36,8 @@ export function HistoryChart({ buckets, measure, width }: {
   const scale = (v: bigint): number => (max === 0n ? 0 : Number((v * 10_000n) / max) / 10_000 * (PLOT - 6));
   const fmt = (v: bigint): string => (measure === 'octets' ? formatBytes(Number(v)) : `${count(v)} packets`);
   const label = measure === 'octets' ? 'Reported bytes' : 'Reported packets';
-  const observed = buckets.filter((b) => b.coverage === 'observed-records').length;
-  const gaps = buckets.filter((b) => b.coverage === 'collection-gap').length;
+  const observed = buckets.filter((b) => b.coverage === 'observed-records' || b.coverage === 'aggregate-only').length;
+  const gaps = buckets.filter((b) => b.coverage === 'collection-gap' || b.coverage === 'history-lost').length;
   const ticks = tickIndices(buckets.length, width);
 
   return (
@@ -60,10 +60,10 @@ export function HistoryChart({ buckets, measure, width }: {
         {buckets.map((b, i) => {
           const x = i * slot + gap / 2;
           const span = localRange(b.fromMs, b.toMs);
-          if (b.coverage === 'collection-gap') {
+          if (b.coverage === 'collection-gap' || b.coverage === 'history-lost') {
             return (
               <rect key={i} x={i * slot} y={0} width={slot} height={PLOT} fill={`url(#${hatch})`}>
-                <title>{`${span}: not collecting`}</title>
+                <title>{b.coverage === 'history-lost' ? `${span}: history lost` : `${span}: not collecting`}</title>
               </rect>
             );
           }

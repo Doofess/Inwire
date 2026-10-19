@@ -28,7 +28,7 @@
  * last field are an error, not slack.
  */
 import { ipv4FromBytes, ipv4ToBytes } from './journalCodec';
-import { DECODER_POLICY_VERSION, LIMITS, type ConversationTotals, type EndpointTotals, type MinuteRollup } from './types';
+import { ACCEPTED_POLICIES, LIMITS, WRITE_POLICY_VERSION, type ConversationTotals, type EndpointTotals, type MinuteRollup } from './types';
 
 export type Deflate = (bytes: Uint8Array) => Uint8Array;
 /**
@@ -111,7 +111,7 @@ export function encodeMinuteRollup(rollup: MinuteRollup, deflate: Deflate): Uint
   }
   const packed = deflate(raw);
   const out = new Uint8Array(2 + packed.length);
-  new DataView(out.buffer).setUint16(0, DECODER_POLICY_VERSION, true);
+  new DataView(out.buffer).setUint16(0, WRITE_POLICY_VERSION, true);
   out.set(packed, 2);
   return out;
 }
@@ -120,8 +120,8 @@ export function decodeMinuteRollup(bytes: Uint8Array, inflate: Inflate): MinuteR
   if (bytes.length < 2) throw new Error('a stored rollup is shorter than its version');
   const version = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(0, true);
   // Before inflating: bytes of another policy are not ours to interpret.
-  if (version !== DECODER_POLICY_VERSION) {
-    throw new Error(`a stored rollup is decoder policy version ${version}; this build reads ${DECODER_POLICY_VERSION}`);
+  if (!ACCEPTED_POLICIES.includes(version)) {
+    throw new Error(`a stored rollup is decoder policy version ${version}; this build reads ${ACCEPTED_POLICIES.join(", ")}`);
   }
   const raw = inflate(bytes.subarray(2), MAX_ROLLUP_INFLATED_BYTES);
   if (raw.length > MAX_ROLLUP_INFLATED_BYTES) throw new Error('a stored rollup inflates past the most a rollup can hold');

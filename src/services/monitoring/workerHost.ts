@@ -31,7 +31,7 @@
 import { StaleGenerationError } from './journal';
 import { BoundaryCache, runHistoryQuery } from './queries';
 import { encodeMinuteRollup, type Deflate, type Inflate } from './rollupCodec';
-import { EngineAdmission, MinuteAggregator, minuteOf } from './rollup';
+import { EngineAdmission, MinuteAggregator, feedEntry } from './rollup';
 import { RuntimeUnavailableError, type HostRuntime } from './runtime';
 import { initialSourceHealth, reduceSourceHealth, type HealthEvent, type SourceHealth } from './sourceHealth';
 import {
@@ -258,6 +258,10 @@ export class MonitoringWorkerHost {
             mark = await runtime.watermark();
           }
           sources = mark === null ? [] : await runtime.sources();
+          // What expired is no longer in the journal to re-admit from: its engines are in the archive.
+          if (snapshot.firstEntryId > 1 && runtime.archive !== undefined) {
+            sources = [...new Set([...sources, ...await runtime.archive.sources()])].sort();
+          }
         } catch (e) {
           if (e instanceof RuntimeUnavailableError) throw e;
           sidecarFault = e;
@@ -272,7 +276,7 @@ export class MonitoringWorkerHost {
       this.analyzedThrough = null;
       this.rolledUpThrough = null;
       this.admission = new EngineAdmission(sources);
-      this.aggregator = new MinuteAggregator(mark === null ? 0 : mark.throughEntryId);
+      this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
       this.runtime = runtime;
       runtime.onLive((entries) => this.onLive(entries));
       this.phase = status.status === 'failed' || sidecarFault !== null ? 'failed' : 'rebuilding';
@@ -368,7 +372,8 @@ export class MonitoringWorkerHost {
         await runtime.resetRollups();
         mark = await runtime.watermark();
       }
-      this.aggregator = new MinuteAggregator(mark === null ? 0 : mark.throughEntryId);
+      const snapshot = await runtime.snapshot();
+      this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
     } catch (e) {
       this.rollupFault(e);
       return;
@@ -517,31 +522,14 @@ export class MonitoringWorkerHost {
 
   /** One entry into the aggregator, in strict id order; an id already fed is ignored. */
   private feed(e: Evidence): void {
-    const id = e.ref.entryId;
-    const agg = this.aggregator;
-    if (id <= agg.fedThrough) return;
-    if (e.kind === 'boundary') {
-      agg.fed(id);
-      // A stop, a suspend and a reopen after a crash all end the collector's
-      // run: the minutes it was building are done, whatever the clock says.
-      if (e.action === 'stop' || e.action === 'suspend' || e.action === 'interrupted') agg.seal(Infinity);
-      return;
+    // The aggregator's own steps are `feedEntry`'s, shared with the expiry's replay; the health and
+    // the source list are this host's.
+    const fed = feedEntry(this.aggregator, this.admission, e);
+    if (fed === null || e.kind !== 'datagram') return;
+    if (fed.decoded.kind === 'valid' && fed.admitted) {
+      this.knownSources.add(sourceKey(e.remoteIPv4, fed.decoded.engineType, fed.decoded.engineId));
     }
-    const decoded = decodeV5(e, e.remoteIPv4);
-    const admitted = this.admit(e, decoded);
-    if (decoded.kind === 'valid') {
-      if (!admitted) agg.fed(id);
-      else if (decoded.flows.length === 0) agg.touch(sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId), e.receivedMs, id);
-      else for (const flow of decoded.flows) agg.add(flow);
-    } else if (decoded.kind === 'malformed') {
-      agg.addMalformed(e.remoteIPv4, e.receivedMs, id);
-    } else {
-      agg.addUnsupported(e.remoteIPv4, e.receivedMs, id);
-    }
-    this.watch(e, decoded, admitted);
-    // Receipt time has passed every earlier minute; the watermark, not the
-    // wall clock, is what makes it safe to post them.
-    agg.seal(minuteOf(e.receivedMs));
+    this.watch(e, fed.decoded, fed.admitted);
   }
 
   /** Engine admission and the source list: the Worker's own facts, replay included, and independent of the aggregator. */
@@ -673,6 +661,7 @@ export class MonitoringWorkerHost {
         inflate: this.options.inflate,
         nowMs: this.options.wallNow,
         boundaries: this.boundaries,
+        ...(runtime.archive !== undefined ? { archive: runtime.archive } : {}),
         checkpoint: () => slicer.checkpoint(),
         rebuildNote: () => this.rebuildNote(),
         // A failed rebuild leaves the sidecar behind the journal for good, and

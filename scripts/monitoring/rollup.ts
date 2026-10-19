@@ -21,7 +21,9 @@ import assert from 'node:assert/strict';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
 import { EngineAdmission, MinuteAccumulator, MinuteAggregator, minuteOf } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
-import { LIMITS, type DatagramEvidence, type HistoryResult, type MinuteRollup, type NormalizedV5 } from '../../src/services/monitoring/types';
+import { runExpiry } from '../../src/services/monitoring/archive';
+import { DEFAULT_RETENTION, planExpiry } from '../../src/services/monitoring/retention';
+import { ACCEPTED_POLICIES, LIMITS, WRITE_POLICY_VERSION,type DatagramEvidence, type HistoryResult, type MinuteRollup, type NormalizedV5 } from '../../src/services/monitoring/types';
 import { decodeV5, exporterKey, sourceKey } from '../../src/services/monitoring/v5';
 import type { EvidenceInput } from '../../src/services/monitoring/journal';
 import { EXPORTER, GENERATION, evidence, v5Payload, type FlowSpec, type HeaderSpec } from './fixtures';
@@ -800,6 +802,77 @@ test('replay: a restart reopens the same journal and the sidecar, and the answer
   void minuteOf;
   void ask;
   void NOW;
+});
+
+// --- accepted policies and expiry (ADR 0062) -----------------------------------------------------------------
+
+test('codec: a rollup is written under the newest accepted policy, and every accepted policy decodes', () => {
+  const acc = new MinuteAccumulator(SRC, m(0));
+  for (const f of flowsOf([{ src: '10.1.1.1', dst: '10.1.1.2', octets: 5, packets: 2 }], m(0, 5), 1)) acc.addFlow(f);
+  const rollup = acc.toRollup();
+  const bytes = encodeMinuteRollup(rollup, deflate);
+  assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint16(0, true), WRITE_POLICY_VERSION);
+  assert.equal(WRITE_POLICY_VERSION, Math.max(...ACCEPTED_POLICIES));
+  for (const v of ACCEPTED_POLICIES) {
+    const copy = bytes.slice();
+    new DataView(copy.buffer).setUint16(0, v, true);
+    assert.deepEqual(decodeMinuteRollup(copy, inflate), rollup, `policy ${v}`);
+  }
+});
+
+test('codec: a policy this build does not accept is refused before anything is inflated', () => {
+  const bytes = encodeMinuteRollup(new MinuteAccumulator(SRC, m(0)).toRollup(), deflate);
+  const refused = [0, Math.max(...ACCEPTED_POLICIES) + 1, 0xffff].filter((v) => !ACCEPTED_POLICIES.includes(v));
+  for (const v of refused) {
+    const copy = bytes.slice();
+    new DataView(copy.buffer).setUint16(0, v, true);
+    // The body after the version is garbage on purpose: a reader that inflated first would fail differently.
+    copy.fill(0xee, 2);
+    assert.throws(() => decodeMinuteRollup(copy, inflate), /decoder policy version/, `policy ${v}`);
+  }
+});
+
+test('equality after an expiry: the retained journal is answered the same from rollups and from raw', async () => {
+  const LIMIT = 32 * 1024 * 1024; // 1 MiB segments
+  const S4 = '04'.repeat(16);
+  const world = buildWorld();
+  const rig = new Rig(0xa0, LIMIT);
+  // Two sealed segments of an earlier session, then the awkward world of the tests above.
+  const filler: EvidenceInput[] = [start(m(-61), S4)];
+  for (let i = 0; i < 2600; i++) {
+    const flows = Array.from({ length: 20 }, (_, j) => ({ src: `10.${i % 5}.${j}.1`, dst: `172.16.${j % 4}.1`, octets: 50 + j, packets: 1 }));
+    filler.push(dgram(m(-60, i * 1000), flows, { engineId: i % 3 === 0 ? 1 : 0, sampling: 0x4064 }));
+  }
+  filler.push(stop(m(-16), S4));
+  for (let at = 0; at < filler.length; at += 100) rig.append(filler.slice(at, at + 100));
+  rig.append(world.phase1);
+  const first = await rollUp(rig);
+  first.host.handle({ type: 'shutdown', requestId: 9000 });
+  await first.host.settled();
+  const segs = rig.journal.segments();
+  const plan = planExpiry(segs, DEFAULT_RETENTION, NOW, 0, LIMIT, segs[1].lastReceivedMs + 1);
+  assert.ok(plan !== null && plan.segments.length === 2 && plan.throughMs < m(-16), 'only the earlier session expires');
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'done');
+  rig.reopen();
+  assert.ok(rig.journal.snapshot().firstEntryId > 1);
+  const second = await rollUp(rig);
+  second.host.handle({ type: 'shutdown', requestId: 9001 });
+  await second.host.settled();
+  rig.append(world.phase2);
+  let rollupMinutes = 0;
+  let asked = 0;
+  for (const [label, from, to, counts] of RANGES) {
+    for (const n of counts) {
+      for (const source of SOURCES) {
+        const { fast, raw } = await askBoth(rig, spec(from, to, n, { sourceKey: source }));
+        assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw), `${label}, ${n} buckets, ${source}`);
+        assert.ok(fast.buckets.every((b) => b.coverage !== 'history-lost' && b.coverage !== 'aggregate-only'), label);
+        rollupMinutes += fast.answeredFrom.rollupMinutes;
+        asked++;
+      }
+    }
+  }
+  assert.ok(asked > 100 && rollupMinutes > 0, 'the property was asked of rollups, not only of raw reads');
 });
 
 process.exit((await runAll()) === 0 ? 0 : 1);
