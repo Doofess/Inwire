@@ -85,6 +85,22 @@ export const LIMITS = {
   drainMs: 5_000,
   staleMs: 60_000,
   flushMs: 1_000,
+  /** Template state for NetFlow v9 and IPFIX (ADRs 0064, 0065). */
+  templatesPerScope: 256,
+  templates: 4_096,
+  /** Field-specifier bytes over every stored template: a template has no fixed size. */
+  templateFieldBytes: 768 * KiB,
+  samplersPerSource: 16,
+  /** 1 MiB less the archive cut's 44 bytes of framing. */
+  checkpointBytes: 1_048_532,
+  templateLifetimeMinMs: 30 * 60_000,
+  templateLifetimeMinMessages: 48,
+  /** A v9 sysUptime or an IPFIX systemInitTime moving by more than this is a restart; less is a reordered datagram. */
+  restartToleranceMs: 10_000,
+  /** A header export time further than this from receipt flags the source's clock. */
+  clockFlagMs: 10_000,
+  /** Discriminating message pairs a source needs before its sequence convention is settled. */
+  sequenceLearningPairs: 8,
 } as const;
 
 // --- configuration --------------------------------------------------------------

@@ -120,3 +120,86 @@ export function truncatedEvidence(): DatagramEvidence {
   const full = v5Payload({}, [{}, {}]);
   return evidence(full.slice(0, 24 + 48 + 24));
 }
+
+// --- NetFlow v9 and IPFIX (ADRs 0064, 0065) ------------------------------------------------------------
+//
+// Authored from RFC 3954 and RFC 7011: a message is a header and sets; a set is
+// a four-byte header (id, length) and a body. Every length here is computed
+// from what is written, except where a case asks for a lie (`count`, `length`).
+
+export interface WireField { type: number; length: number; pen?: number }
+
+export const be = {
+  u8: (n: number): number[] => [n & 0xff],
+  u16: (n: number): number[] => [(n >>> 8) & 0xff, n & 0xff],
+  u32: (n: number): number[] => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff],
+  /** A value of `bytes` bytes, big-endian: how a reduced-size or 64-bit counter lies on the wire. */
+  uint: (value: bigint | number, bytes: number): number[] => {
+    let v = BigInt(value);
+    const out: number[] = [];
+    for (let i = 0; i < bytes; i++) { out.unshift(Number(v & 0xffn)); v >>= 8n; }
+    return out;
+  },
+  ipv4: (a: string): number[] => a.split('.').map(Number),
+  ipv6: (a: string): number[] => {
+    const [head, tail = ''] = a.split('::');
+    const groups = (s: string) => (s === '' ? [] : s.split(':'));
+    const left = groups(head);
+    const right = a.includes('::') ? groups(tail) : [];
+    const all = a.includes('::') ? [...left, ...Array<string>(8 - left.length - right.length).fill('0'), ...right] : left;
+    return all.flatMap((g) => [(parseInt(g, 16) >> 8) & 0xff, parseInt(g, 16) & 0xff]);
+  },
+  concat: (...parts: ArrayLike<number>[]): number[] => parts.flatMap((p) => Array.from(p)),
+};
+
+/** A field specifier as the wire carries it: 4 bytes, 8 with an enterprise number (IPFIX only). */
+export function fieldSpecifier(version: 9 | 10, f: WireField): number[] {
+  if (f.pen !== undefined && version === 10) return [...be.u16(f.type | 0x8000), ...be.u16(f.length), ...be.u32(f.pen)];
+  return [...be.u16(f.type), ...be.u16(f.length)];
+}
+
+/** A template record: id, field count, fields. */
+export function templateRecord(version: 9 | 10, id: number, fields: WireField[]): number[] {
+  return [...be.u16(id), ...be.u16(fields.length), ...fields.flatMap((f) => fieldSpecifier(version, f))];
+}
+
+/** An options template record. v9 counts its scope and option fields in bytes; IPFIX counts all fields, then the scope's. */
+export function optionsTemplateRecord(version: 9 | 10, id: number, scope: WireField[], options: WireField[]): number[] {
+  const specs = [...scope, ...options].flatMap((f) => fieldSpecifier(version, f));
+  if (version === 9) return [...be.u16(id), ...be.u16(scope.length * 4), ...be.u16(options.length * 4), ...specs];
+  return [...be.u16(id), ...be.u16(scope.length + options.length), ...be.u16(scope.length), ...specs];
+}
+
+/** A set: its header, the body, and `pad` zero bytes. The length covers all of it unless `length` lies. */
+export function setOf(id: number, body: ArrayLike<number>, pad = 0, length?: number): number[] {
+  const total = 4 + body.length + pad;
+  return [...be.u16(id), ...be.u16(length ?? total), ...Array.from(body), ...Array<number>(pad).fill(0)];
+}
+
+export function templateSet(version: 9 | 10, records: number[][], pad = 0): number[] {
+  return setOf(version === 9 ? 0 : 2, records.flat(), pad);
+}
+
+export function optionsTemplateSet(version: 9 | 10, records: number[][], pad = 0): number[] {
+  return setOf(version === 9 ? 1 : 3, records.flat(), pad);
+}
+
+export function dataSet(id: number, records: number[][], pad = 0): number[] {
+  return setOf(id, records.flat(), pad);
+}
+
+export interface V9Header { uptime: number; secs: number; sequence: number; sourceId: number; count?: number }
+
+/** A v9 datagram. `count` is written as given: the decoder does not check it. */
+export function v9Message(h: V9Header, sets: number[][]): Uint8Array {
+  const body = sets.flat();
+  return Uint8Array.from([...be.u16(9), ...be.u16(h.count ?? sets.length), ...be.u32(h.uptime), ...be.u32(h.secs), ...be.u32(h.sequence), ...be.u32(h.sourceId), ...body]);
+}
+
+export interface IpfixHeader { secs: number; sequence: number; domain: number; length?: number }
+
+/** An IPFIX message. `length` is the header's own and is written as given when a case wants it wrong. */
+export function ipfixMessage(h: IpfixHeader, sets: number[][]): Uint8Array {
+  const body = sets.flat();
+  return Uint8Array.from([...be.u16(10), ...be.u16(h.length ?? 16 + body.length), ...be.u32(h.secs), ...be.u32(h.sequence), ...be.u32(h.domain), ...body]);
+}
