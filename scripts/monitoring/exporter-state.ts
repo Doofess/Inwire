@@ -319,6 +319,38 @@ test('options: a selector rate past 2^32 - 1 is unsupported, and the state still
   assert.notEqual(decodeCheckpoint(encodeCheckpoint(new CollectorTemplateStore(), top.s, 1, 1)), null);
 });
 
+// The field-width bound (`templates.ts`: IE 34, 50, 305 and 306 are interpreted at 1 to 4 bytes) is what keeps these
+// values inside the checkpoint's 32-bit fields; only IE 302 may be 8 bytes, and the test above holds that.
+test('options and data: an 8-byte sampling interval or sampler is not interpreted, and the state checkpoints as it is', () => {
+  const roundTrips = (s: ExporterState) => {
+    const bytes = encodeCheckpoint(new CollectorTemplateStore(), s, 1, 1);
+    const restored = decodeCheckpoint(bytes);
+    assert.notEqual(restored, null, 'the checkpoint decodes');
+    assert.equal(Buffer.from(encodeCheckpoint(restored!.store, restored!.state, 1, 1)).toString('hex'), Buffer.from(bytes).toString('hex'), 'and re-encodes to the same bytes');
+  };
+  {
+    // v9 options IE 34 as 8 bytes.
+    const { s, send, v9 } = sampling();
+    send(v9([optionsTemplateSet(9, [optionsTemplateRecord(9, 300, [F(1, 4)], [F(34, 8)])]), dataSet(300, [be.concat(be.u32(0), be.uint(2 ** 33, 8))])]));
+    assert.notEqual(s.sampling(KEY9).kind, 'known', 'an options interval of 2^33 is not stated');
+    roundTrips(s);
+  }
+  {
+    // A data record's own IE 34 as 8 bytes.
+    const { s, send, v9 } = sampling();
+    send(v9([templateSet(9, [templateRecord(9, 256, [F(8, 4), F(12, 4), F(1, 4), F(34, 8)])]), dataSet(256, [be.concat(be.ipv4('10.0.0.1'), be.ipv4('10.0.0.2'), be.u32(5), be.uint(2 ** 33, 8))])]));
+    assert.notEqual(s.sampling(KEY9).kind, 'known', 'a record interval of 2^33 is not stated');
+    roundTrips(s);
+  }
+  {
+    // An IPFIX selector whose interval and space are 8 bytes past 2^32: the live rate would not survive the checkpoint's u32s.
+    const { s, send, ipfix } = sampling();
+    send(ipfix([optionsTemplateSet(10, [optionsTemplateRecord(10, 300, [F(302, 4)], [F(305, 8), F(306, 8), F(304, 2)])]), dataSet(300, [be.concat(be.u32(7), be.uint(2 ** 40, 8), be.uint(2 ** 41, 8), be.u16(1))])]));
+    assert.equal(s.samplerRate(KEY, 7), null, 'the sampler is not filed');
+    roundTrips(s);
+  }
+});
+
 test('options: a selector id past 2^32 - 1 is not filed, and the state still checkpoints and restores', () => {
   // IE 302 may be 8 bytes; the checkpoint holds a 32-bit id, so 2^32 + 1 would be written as 1 and sort before 5.
   const rec = (id: number) => be.concat(be.uint(id, 8), be.u32(1), be.u32(9), be.u16(1));
