@@ -17,7 +17,8 @@
  *   away (`onCaptureStoreExit`) must answer every pending digest request with
  *   its fallback, or the hook's poll hangs for the life of the window.
  */
-import { digestConversation, outcomeText } from '../../src/services/conversation/digestRows';
+import { readFileSync } from 'node:fs';
+import { conversationRows, digestConversation, outcomeText, tcpScopeNote } from '../../src/services/conversation/digestRows';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
 import type { ToCapture, FromCapture } from '../../src/services/capture/captureProtocol';
 
@@ -97,6 +98,38 @@ check('a clean close', outcomeText({ outcome: 'closed cleanly', joinedMidStream:
 check('a joined stream that was reset', outcomeText({ outcome: 'reset by server', joinedMidStream: true }),
   'reset by server · joined mid-stream');
 check('the row itself is enough', outcomeText(digestConversation(summary())), 'closed cleanly');
+
+console.log('\n--- the conversation table, TCP from the digest ---\n');
+
+{
+  const digest = new Map([[3, summary()], [4, summary({ streamId: 4 })]]);
+  check('TCP reads the digest, one row per stream', conversationRows('tcp', digest)?.map((r) => r.streamId), [3, 4]);
+  check('...and an empty digest leaves TCP to the buffer', conversationRows('tcp', new Map()), null);
+  check('UDP has no digest and reads the buffer', conversationRows('udp', digest), null);
+  check('so do the address levels', [conversationRows('ipv4', digest), conversationRows('eth', digest)], [null, null]);
+
+  // The ADR: the pane says which scope it is showing.
+  check('a digest answers for the whole capture', tcpScopeNote(digest, null), 'Whole capture');
+  check('a rebuild says how far it has got', tcpScopeNote(digest, { done: 3, total: 12 }),
+    'Rebuilding the stream digest: 3 of 12 chunks');
+  check('...even before its first summary', tcpScopeNote(new Map(), { done: 0, total: 12 }),
+    'Rebuilding the stream digest: 0 of 12 chunks');
+  check('no digest, no claim: the buffer\'s own note stands', tcpScopeNote(new Map(), null), null);
+}
+
+// Following a conversation lands on the stream. The pane's
+// `onReturnToPackets` is `setView('packets')`, and called after
+// `onFollowStream` it wins the batch: the follow items went to Packets.
+{
+  const pane = readFileSync('src/components/statistics/StatisticsPane.tsx', 'utf8');
+  // Each call, up to the end of the handler it sits in.
+  const follows: string[] = [];
+  for (let at = pane.indexOf('onFollowStream?.('); at >= 0; at = pane.indexOf('onFollowStream?.(', at + 1)) {
+    follows.push(pane.slice(at, pane.indexOf('}', pane.indexOf(';', at))));
+  }
+  check('the pane follows streams from the row and the menu', follows.length >= 3, true);
+  check('...and no follow then returns to Packets', follows.filter((f) => f.includes('onReturnToPackets')).length, 0);
+}
 
 console.log('\n--- the client, with no store at all ---\n');
 

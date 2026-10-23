@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ChartColumn, ChevronDown, ChevronRight } from 'lucide-react';
+import { ChartColumn, ChevronDown, ChevronRight, Filter } from 'lucide-react';
 
 import { Packet } from '../../types/packet';
 import {
@@ -11,6 +11,8 @@ import {
 import { flowAnnotations } from '../../services/flowAnnotations';
 import { resolveMacVendor } from '../../services/macVendors';
 import type { StreamTarget } from '../../services/followStream';
+import { conversationRows, outcomeText, tcpScopeNote, type DigestConversation } from '../../services/conversation/digestRows';
+import type { StreamSummary } from '../../services/conversation/streamDigest';
 import { NameLookup, SOURCE_LABELS } from '../../services/nameResolution';
 import {
   CATEGORY_HINTS, CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TEXT,
@@ -32,12 +34,20 @@ import {
  * itself is in `services/statistics.ts` and `services/nameResolution.ts` so it
  * can be asserted; this file is the presentation and nothing else.
  *
- * Every row is a filter waiting to happen - clicking one applies the display
- * filter that selects exactly its frames, which is the shortest path there is
- * from "this pair moved 7 MB" to looking at the frames that did it. The
- * filters come from the statistics module rather than being spelled out here,
- * so the row and the filter can never disagree about what the row meant.
+ * Every row leads to its frames - clicking one applies the display filter that
+ * selects exactly them, which is the shortest path there is from "this pair
+ * moved 7 MB" to looking at the frames that did it. The filters come from the
+ * statistics module rather than being spelled out here, so the row and the
+ * filter can never disagree about what the row meant.
+ *
+ * A TCP or UDP conversation row is one stream, so its click opens that stream
+ * on the ladder instead, and the filter moves to a button on the row. The TCP
+ * level is the one table that does not count the buffer: it reads the store's
+ * stream digest, the whole capture with each stream's outcome (ADR 0055).
  */
+
+/** The empty digest, one identity, so a pane without one memoizes. */
+const NO_SUMMARIES: ReadonlyMap<number, StreamSummary> = new Map();
 
 type Tab = 'hierarchy' | 'conversations' | 'endpoints' | 'devices' | 'processes'
   | 'graphs' | 'expert' | 'names';
@@ -61,6 +71,15 @@ interface StatisticsPaneProps {
   onApplyFilter: (expression: string) => void;
   /** Opens the stream follower on a TCP or UDP conversation. */
   onFollowStream?: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
+  /**
+   * The store's stream digest (ADR 0055), which answers the TCP level for the
+   * whole capture where the buffer can only count what it still holds - and
+   * knows how each stream ended, which a pair count cannot.
+   */
+  tcpDigest?: {
+    summaries: ReadonlyMap<number, StreamSummary>;
+    rebuilding: { done: number; total: number } | null;
+  };
   /** Everything the dissectors and the anomaly detector found. */
   expert: ExpertLookup;
   /** Selects a frame in the main window. */
@@ -108,6 +127,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   expert,
   onApplyFilter,
   onFollowStream,
+  tcpDigest,
   onSelectFrame,
   droppedBuffer = 0,
   onReturnToPackets,
@@ -124,7 +144,23 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   } | null>(null);
 
   const hierarchy = useMemo(() => protocolHierarchy(packets), [packets]);
-  const convRows = useMemo(() => conversations(packets, kind), [packets, kind]);
+  const digestSummaries = tcpDigest?.summaries ?? NO_SUMMARIES;
+  // The digest's rows where it answers the level, the buffer's count elsewhere.
+  const digestRows = useMemo(() => conversationRows(kind, digestSummaries), [kind, digestSummaries]);
+  const bufferRows = useMemo(
+    () => (digestRows === null ? conversations(packets, kind) : []),
+    [packets, kind, digestRows],
+  );
+  const convRows: Conversation[] = digestRows ?? bufferRows;
+  const scopeNote = tab === 'conversations' && kind === 'tcp'
+    ? tcpScopeNote(digestSummaries, tcpDigest?.rebuilding ?? null)
+    : null;
+  const transport = kind === 'tcp' || kind === 'udp';
+  /** A transport row is one stream; an address row is many, with no single one to open. */
+  const streamOf = (r: Conversation): StreamTarget | undefined =>
+    transport && r.portA !== undefined && r.portB !== undefined
+      ? { kind: kind as 'tcp' | 'udp', addressA: r.addressA, portA: r.portA, addressB: r.addressB, portB: r.portB, streamId: r.streamId }
+      : undefined;
   const endpointRows = useMemo(() => endpoints(packets, kind), [packets, kind]);
   const nameRows = useMemo(
     () => names.entries().sort((a, b) => a.name.localeCompare(b.name)),
@@ -180,6 +216,19 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
       ? [{ key: 'pb', label: 'Port B', align: 'right' as const, render: (r: Conversation) => port(r.portB), sortValue: (r: Conversation) => r.portB ?? 0 }]
       : []),
     { key: 'proto', label: 'Protocol', render: (r) => r.protocol, sortValue: (r) => r.protocol },
+    // How the stream ended, which only the digest knows. A stream still open
+    // is the ordinary case and is set back, so the endings that need
+    // explaining - a reset, a half close - are what the eye lands on.
+    ...(digestRows !== null
+      ? [{
+        key: 'outcome', label: 'Outcome',
+        render: (r: Conversation) => {
+          const d = r as DigestConversation;
+          return <span className={d.outcome === 'open' ? 'text-muted-foreground' : undefined}>{outcomeText(d)}</span>;
+        },
+        sortValue: (r: Conversation) => (r as DigestConversation).outcome,
+      }]
+      : []),
     { key: 'packets', label: 'Packets', align: 'right', render: (r) => count(r.packets), sortValue: (r) => r.packets },
     { key: 'bytes', label: 'Bytes', align: 'right', render: (r) => bytes(r.bytes), sortValue: (r) => r.bytes },
     { key: 'ab', label: 'A → B', align: 'right', render: (r) => count(r.packetsAtoB), sortValue: (r) => r.packetsAtoB },
@@ -199,6 +248,25 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     { key: 'start', label: 'Start', align: 'right', render: (r) => `${r.startRel.toFixed(3)} s`, sortValue: (r) => r.startRel },
     { key: 'dur', label: 'Duration', align: 'right', render: (r) => seconds(r.duration), sortValue: (r) => r.duration },
     { key: 'rate', label: 'Bits/s', align: 'right', render: (r) => bitrate(r.bytes, r.duration), sortValue: (r) => (r.duration > 0 ? r.bytes / r.duration : 0) },
+    // A transport row's click opens its stream, so filtering - what the click
+    // did before, and still does on the address levels - keeps a control of
+    // its own on the row rather than living only in the context menu.
+    ...(transport
+      ? [{
+        key: 'filter', label: '',
+        render: (r: Conversation) => (
+          <button
+            type="button"
+            aria-label="Filter to this conversation"
+            title="Filter to this conversation"
+            onClick={(event) => { event.stopPropagation(); apply(conversationFilter(r, kind)); }}
+            className="p-1 -my-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
+          >
+            <Filter className="w-3 h-3" />
+          </button>
+        ),
+      }]
+      : []),
   ];
 
   const endpointColumns: StatColumn<Endpoint>[] = [
@@ -246,14 +314,19 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
             <div>
               <div className="font-bold text-base">Capture Statistics</div>
               <p className="text-xs text-muted-foreground">
-                {count(packets.length)} frames · {bytes(hierarchy.bytes)} · every row is a filter
+                {count(packets.length)} frames · {bytes(hierarchy.bytes)} · click a row to see its frames
               </p>
               {/* Named as a range rather than a count, because "counted
                   1,900,000 of 2,000,000" still invites the reader to treat the
                   tables as the capture. Frame numbers are what the rest of the
                   app addresses frames by, so they are what says which part of
                   it this is. */}
-              {droppedBuffer > 0 && packets.length > 0 && (
+              {/* The TCP level answers from the digest, so the buffer's
+                  limits are not its limits: it says its own scope instead. */}
+              {scopeNote !== null && (
+                <p className="mt-0.5 text-[11px] text-muted-foreground font-mono">{scopeNote}</p>
+              )}
+              {scopeNote === null && droppedBuffer > 0 && packets.length > 0 && (
                 <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400 font-mono">
                   Frames {packets[0].id.toLocaleString()}–
                   {packets[packets.length - 1].id.toLocaleString()} only:{' '}
@@ -487,16 +560,21 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
                       columns={conversationColumns}
                       rowKey={(r) => r.key}
                       initialSort="bytes"
-                      onRowClick={(r) => apply(conversationFilter(r, kind))}
+                      // A transport row opens its stream on the ladder, the
+                      // way "Show conversation" does; an address row is many
+                      // streams and filters, as every row once did.
+                      onRowClick={(r) => {
+                        const stream = streamOf(r);
+                        if (stream !== undefined && onFollowStream) { onFollowStream?.(stream, 'ladder'); return; }
+                        apply(conversationFilter(r, kind));
+                      }}
                       onRowContextMenu={(r) => setMenuRow({
                         filter: conversationFilter(r, kind),
                         title: `${r.addressA} ↔ ${r.addressB}`,
                         // Only the transport tabs describe a stream: an IP-tab
                         // row collapses every port pair between two hosts, so
                         // there is no single conversation to follow.
-                        stream: (kind === 'tcp' || kind === 'udp') && r.portA !== undefined && r.portB !== undefined
-                          ? { kind, addressA: r.addressA, portA: r.portA, addressB: r.addressB, portB: r.portB, streamId: r.streamId }
-                          : undefined,
+                        stream: streamOf(r),
                         frame: r.firstFrame,
                       })}
                       empty={`No ${CONVERSATION_TABS.find((t) => t.id === kind)?.label} conversations in this capture.`}
@@ -529,7 +607,6 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
                     onSelect={() => {
                       if (menuRow.stream === undefined) return;
                       onFollowStream?.(menuRow.stream);
-                      onReturnToPackets();
                     }}
                   >
                     Follow Stream
@@ -542,7 +619,6 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
                     onSelect={() => {
                       if (menuRow.stream === undefined) return;
                       onFollowStream?.(menuRow.stream, 'ladder');
-                      onReturnToPackets();
                     }}
                   >
                     Show conversation

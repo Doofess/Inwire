@@ -7,7 +7,7 @@
  * draws, so a digest row needs no second table; the three fields past it are
  * what the digest knows and a pair count does not.
  */
-import type { Conversation } from '../statistics';
+import type { Conversation, ConversationKind } from '../statistics';
 import type { StreamSummary } from './streamDigest';
 import type { TcpOutcome } from './tcpStates';
 
@@ -33,6 +33,31 @@ export function digestConversation(s: StreamSummary): DigestConversation {
     streamId: s.streamId, protocol: s.protocol, firstFrame: s.firstId,
     outcome: s.outcome, joinedMidStream: s.joinedMidStream, summary: s,
   };
+}
+
+/**
+ * The conversation table's rows for a level, when the digest answers it: TCP
+ * only, and only once the store has summarised a stream. Null leaves the level
+ * to the buffer's own count, which is every other level and a TCP level with
+ * no digest yet.
+ */
+export function conversationRows(
+  kind: ConversationKind, summaries: ReadonlyMap<number, StreamSummary>,
+): DigestConversation[] | null {
+  if (kind !== 'tcp' || summaries.size === 0) return null;
+  return [...summaries.values()].map(digestConversation);
+}
+
+/**
+ * Which part of the capture the TCP level answers for (ADR 0055: the pane says
+ * which scope it is showing). Null when the digest has nothing to say, so the
+ * buffer's own "Frames X-Y only" note is the one that stands.
+ */
+export function tcpScopeNote(
+  summaries: ReadonlyMap<number, StreamSummary>, rebuilding: { done: number; total: number } | null,
+): string | null {
+  if (rebuilding !== null) return `Rebuilding the stream digest: ${rebuilding.done} of ${rebuilding.total} chunks`;
+  return summaries.size > 0 ? 'Whole capture' : null;
 }
 
 /** The outcome in the ADR's words, with its one modifier. */
