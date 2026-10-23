@@ -253,7 +253,10 @@ Electron drive; where they differ, both are given.
   have about 10,000 distinct address pairs a minute, near the key bound,
   where 0059's workload had fewer. A profile puts 4.6 to 5.6 s in
   `ipv4Number`, called from `byAddress` on every sort comparison when a minute
-  is sealed.
+  is sealed. The final review fixed that by computing each row's key once
+  before sorting. The quick run's v5 decode plus rollup went from 5.39 s to
+  2.67 s, while v9 stayed at 2.0 s. The full-day figures above are from
+  before the fix.
 
 **A day rebuilt through the runtime.** A day of v9 was written under policy
 2 through `MonitoringJournal`, then read by the real `MonitoringWorkerHost`
