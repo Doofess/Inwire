@@ -119,6 +119,9 @@ const NOT_TESTS: Record<string, string> = {
     'driver; replays softflowd\'s own v5 exports into the built app and compares with tshark - needs WSL, Ubuntu, softflowd '
     + 'and tshark, and says NOT RUN without them, which is never a pass',
   'monitoring/load.ts': 'measurement; stepped NetFlow load against the built app for up to ten minutes, with no pass mark',
+  'monitoring/exporter-lab.ts':
+    'measurement; records what softflowd and pmacct send as v9 and IPFIX and cross-checks tshark and nfdump - needs WSL, Ubuntu, '
+    + 'softflowd, pmacct, nfdump and tshark, and says NOT RUN without them, which is never a pass',
   'electron/monitoringSeed.ts': 'helper, not a test; builds real monitoring datasets on disk (expired, incomplete, read-only, foreign, empty) for monitoring-ui.ts and monitoring-shots.ts, each proved by the collector’s own inspect',
   'monitoring/fixtures.ts': 'helper, not a test; builds the generated NetFlow v5 payloads and evidence the monitoring scripts assert against',
   'monitoring/queryRig.ts': 'helper, not a test; the in-memory journal, sidecar, runtime and Worker host that rollup.ts and queries.ts drive',

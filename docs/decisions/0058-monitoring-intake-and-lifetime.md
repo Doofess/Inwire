@@ -1,5 +1,10 @@
 # 0058 — Monitoring receives NetFlow v5 in its own utilityProcess, only while the app is open and only after Start
 
+> **Superseded in part by [0064](0064-monitoring-v9-ipfix-collection.md).**
+> v9 and IPFIX are no longer later: the same intake takes v5, v9 and UDP IPFIX
+> from the one configured exporter, chosen by the version field. Everything
+> else here stands, including the other items under "Later, not built".
+
 **Status:** accepted 2026-10-17. Measured in
 [`docs/monitoring-v5-measurements.md`](../monitoring-v5-measurements.md).
 Implementation landed 2026-10-18 (merge 41b4a43).

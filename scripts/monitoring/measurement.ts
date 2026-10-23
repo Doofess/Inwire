@@ -36,7 +36,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { connect } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -46,7 +46,12 @@ import { crc32 as zlibCrc32, deflateSync, constants as zlibConstants } from 'nod
 import { FRAME_JSON, FrameReader, encodeFrame } from '../../src/services/agentFraming';
 import { decodePacketBatch } from '../../src/services/agentBinary';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
-import { MemoryTemplateStore, normalizeFlows } from '../../src/services/flow/flowExport';
+import {
+  MemoryTemplateStore, normalizeFlows, readDataRecords, readFlowHeader, readFlowSets, readTemplateSet, readUint, setKind, type FlowTemplate,
+} from '../../src/services/flow/flowExport';
+import { formatIpv4Address, formatIpv6Address } from '../../src/services/addressFormat';
+import { decodeV5 } from '../../src/services/monitoring/v5';
+import type { DatagramEvidence } from '../../src/services/monitoring/types';
 import { MonitoringJournal, recoverJournal } from '../../src/services/monitoring/journal';
 import { segmentName } from '../../src/services/monitoring/segments';
 import { NodeSegmentDirectory } from '../../electron/monitoring/volume';
@@ -1329,8 +1334,212 @@ async function segmentsMode(): Promise<void> {
   }
 }
 
+// --- v9 and IPFIX decode, before the decoder exists (milestone 2, ADR 0064) -------------------------
+
+interface VectorPass { name: string; datagrams: { atMs: number; port: number; hex: string }[] }
+function exporterVectors(): VectorPass[] {
+  const file = join(dirname(fileURLToPath(import.meta.url)), 'exporter-vectors.json');
+  if (!existsSync(file)) throw new Error('exporter-vectors.json is missing: run exporter-lab.ts --write-vectors first');
+  return (JSON.parse(readFileSync(file, 'utf8')) as { passes: VectorPass[] }).passes;
+}
+
+/**
+ * The work Task 8's decoder will do per datagram, built from the tree decoder's
+ * readers: header, sets, templates into a map keyed by scope, then every data
+ * record's addresses, ports, protocol and its counters as bigint. It is a
+ * stand-in for timing only - no lifetimes, options or health.
+ */
+function readerDecode(b: Uint8Array, port: number, templates: Map<string, FlowTemplate>): number {
+  const h = readFlowHeader(b, 0, b.length);
+  if (h === null || h.version === 5) return 0;
+  const scope = `${h.version}/${h.version === 10 ? port : 0}/${h.domain}`;
+  let records = 0;
+  let octets = 0n;
+  let keyParts = 0;
+  for (const set of readFlowSets(b, h, b.length)) {
+    const kind = setKind(h.version, set.id);
+    if (kind === 'template' || kind === 'options') {
+      for (const t of readTemplateSet(b, h.version, set).templates) templates.set(`${scope}/${t.id}`, t);
+      continue;
+    }
+    if (kind !== 'data') continue;
+    const t = templates.get(`${scope}/${set.id}`);
+    if (t === undefined || t.scopeCount > 0) continue;
+    for (const r of readDataRecords(b, set, t).records) {
+      let src = '', dst = '';
+      for (const v of r) {
+        if (v.field.pen !== undefined) { if (v.field.type <= 2) octets += readUint(b, v.start, v.length); continue; }
+        switch (v.field.type) {
+          case 8: src = formatIpv4Address(b, v.start); break;
+          case 12: dst = formatIpv4Address(b, v.start); break;
+          case 27: src = formatIpv6Address(b, v.start); break;
+          case 28: dst = formatIpv6Address(b, v.start); break;
+          case 1: case 2: case 85: case 86: octets += readUint(b, v.start, v.length); break;
+          case 4: case 7: case 11: keyParts += Number(readUint(b, v.start, v.length)); break;
+        }
+      }
+      if (src.length + dst.length > 0) records++;
+    }
+  }
+  // Returned through a condition that is always true, so the reads cannot be dropped as unused.
+  return octets >= 0n && keyParts >= 0 ? records : 0;
+}
+
+/** A day at the planning rate (7 a second, ADR 0059's measurement): v5 through `decodeV5`, then each recorded v9/IPFIX pass through the readers. */
+function v9DecodeMode(): void {
+  const DAY = quick ? 62_257 : 622_570;
+  const evidenceOf = (bytes: Uint8Array, i: number) => ({ kind: 'datagram', bytes, receivedMs: 0, receiveOrdinal: i } as unknown as DatagramEvidence);
+  const recs: FlowRec[] = Array.from({ length: 30 }, (_, i) => ({ src: 0x0a000001 + i, dst: 0x0a010001, sport: 40_000 + i, dport: 443, proto: 6, octets: 1_200 * (i + 1), packets: i + 1, firstMs: BOOT_MS + 1000, lastMs: BOOT_MS + 2000 }));
+  const v5 = v5Datagrams(recs, BOOT_MS + 5000, { n: 0 })[0];
+  let v5Records = 0;
+  const [, v5Ms] = timeIt(() => {
+    for (let i = 0; i < DAY; i++) { const r = decodeV5(evidenceOf(v5, i), '192.0.2.1'); if (r.kind === 'valid') v5Records += r.flows.length; }
+  });
+  console.log(`v5, decodeV5: ${DAY.toLocaleString()} datagrams of ${v5.length} B (30 records) in ${fmt(v5Ms / 1000, 2)} s: `
+    + `${fmt(DAY / (v5Ms / 1000), 0)} datagrams/s, ${fmt(v5Records / (v5Ms / 1000), 0)} records/s, ${fmt(DAY * v5.length / MB / (v5Ms / 1000), 1)} MiB/s`);
+  for (const pass of exporterVectors()) {
+    if (!/^(softflowd-v9|softflowd-v10|softflowd-v10-b|pmacct-v9|pmacct-v10)$/.test(pass.name)) continue;
+    const datagrams = pass.datagrams.map((d) => ({ port: d.port, bytes: Uint8Array.from(Buffer.from(d.hex, 'hex')) }));
+    // The first datagram carries the templates; the day is it once, then the rest in rotation,
+    // which re-reads a template set only where the exporter put one.
+    const templates = new Map<string, FlowTemplate>();
+    readerDecode(datagrams[0].bytes, datagrams[0].port, templates);
+    const rest = datagrams.length > 1 ? datagrams.slice(1) : datagrams;
+    let records = 0, bytes = 0;
+    const [, ms] = timeIt(() => {
+      for (let i = 0; i < DAY; i++) { const d = rest[i % rest.length]; records += readerDecode(d.bytes, d.port, templates); bytes += d.bytes.length; }
+    });
+    console.log(`${pass.name}, readers: ${DAY.toLocaleString()} datagrams averaging ${fmt(bytes / DAY, 0)} B in ${fmt(ms / 1000, 2)} s: `
+      + `${fmt(DAY / (ms / 1000), 0)} datagrams/s, ${fmt(records / (ms / 1000), 0)} records/s, ${fmt(bytes / MB / (ms / 1000), 1)} MiB/s; `
+      + `a 256 MiB segment (the largest, ADR 0062) replays in ${fmt(256 / (bytes / MB / (ms / 1000)), 1)} s`);
+  }
+  console.log('These are the readers, not Task 8\'s decoder: a pre-implementation estimate, re-measured in Task 11.');
+}
+
+// --- the template checkpoint (ADR 0064) --------------------------------------------------------------
+
+/**
+ * The checkpoint encoding ADR 0064 pins, as a prototype: product code is
+ * written against the ADR under its own tests, and this produces its vector
+ * and its sizes. Little-endian like the rest of the monitoring formats, except
+ * field specifiers, which are copied from the wire as they arrived.
+ */
+interface CkTemplate { id: number; options: boolean; v9Options: boolean; scopeCount: number; fieldSpecs: Uint8Array; fieldCount: number; definedEntryId: number; lastSeenMs: number; lastSeenMessage: number; intervalMs: number; intervalMessages: number }
+interface CkScope { protocol: 9 | 10; exporter: string; port: number; domain: number; uptimeMs: number | null; systemInitMs: number | null; messages: number; templates: CkTemplate[] }
+interface CkSampler { id: number; algorithm: number; interval: number; space: number }
+interface CkSource { key: string; sampling: 'absent' | 'known' | 'unsupported'; samplingInterval: number; samplingSinceEntryId: number; sequence: CkSequence; samplers: CkSampler[] }
+/** Sequence learning (ADR 0064): the convention is learned from the first eight message pairs that carry data records. */
+interface CkSequence { mode: 'learning' | 'rfc' | 'own-records' | 'unrecognized'; last: number | null; lastRecords: number; pairs: number; fitRfc: number; fitOwn: number }
+interface Checkpoint { throughEntryId: number; atMs: number; scopes: CkScope[]; sources: CkSource[] }
+
+function encodeCheckpoint(c: Checkpoint): Uint8Array {
+  const parts: number[] = [];
+  const u8 = (n: number) => parts.push(n & 0xff);
+  const u16 = (n: number) => { u8(n); u8(n >>> 8); };
+  const u32 = (n: number) => { u16(n & 0xffff); u16(n >>> 16); };
+  const u64 = (n: number) => { u32(n % 2 ** 32); u32(Math.floor(n / 2 ** 32)); };
+  const bytes = (b: Uint8Array) => { for (const x of b) parts.push(x); };
+  // Deterministic: scopes by protocol, then Source ID or domain, then port; templates by id; sources by key bytes.
+  const scopes = [...c.scopes].sort((a, b) => a.protocol - b.protocol || a.domain - b.domain || a.port - b.port);
+  const sources = [...c.sources].sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
+  bytes(new TextEncoder().encode('INWIREMT'));
+  u16(1); u16(2); u16(scopes.length); u16(sources.length);
+  u64(c.throughEntryId); u64(c.atMs);
+  for (const s of scopes) {
+    u8(s.protocol);
+    u8((s.uptimeMs !== null ? 1 : 0) | (s.systemInitMs !== null ? 2 : 0));
+    u16(s.port);
+    bytes(Uint8Array.from(s.exporter.split('.').map(Number)));
+    u32(s.domain); u32(s.uptimeMs ?? 0); u64(s.systemInitMs ?? 0); u64(s.messages); u16(s.templates.length); u16(0);
+    for (const t of [...s.templates].sort((a, b) => a.id - b.id)) {
+      u16(t.id); u8((t.options ? 1 : 0) | (t.v9Options ? 2 : 0)); u8(0);
+      u16(t.scopeCount); u16(t.fieldCount); u32(t.intervalMs); u32(t.intervalMessages); u64(t.definedEntryId); u64(t.lastSeenMs); u64(t.lastSeenMessage);
+      u32(t.fieldSpecs.length); bytes(t.fieldSpecs);
+    }
+  }
+  for (const s of sources) {
+    const key = new TextEncoder().encode(s.key);
+    u8(key.length); bytes(key);
+    const q = s.sequence;
+    u8({ absent: 0, known: 1, unsupported: 2 }[s.sampling]); u8(q.last !== null ? 1 : 0); u16(s.samplers.length);
+    u32(s.samplingInterval); u64(s.samplingSinceEntryId);
+    u8({ learning: 0, rfc: 1, 'own-records': 2, unrecognized: 3 }[q.mode]); u8(q.pairs); u8(q.fitRfc); u8(q.fitOwn); u32(q.last ?? 0); u32(q.lastRecords);
+    for (const m of s.samplers) { u32(m.id); u16(m.algorithm); u16(0); u32(m.interval); u32(m.space); }
+  }
+  const body = Uint8Array.from(parts);
+  const out = new Uint8Array(body.length + 4);
+  out.set(body);
+  new DataView(out.buffer).setUint32(body.length, crc32(body), true);
+  return out;
+}
+
+function checkpointMode(): void {
+  const hex = (b: Uint8Array) => Buffer.from(b).toString('hex').replace(/(.{2})/g, '$1 ').trim();
+  // Field specifiers as the wire carries them: 4 bytes, or 8 with an enterprise number (IPFIX only).
+  const specs = (fields: [number, number, number?][]): Uint8Array => {
+    const out: number[] = [];
+    for (const [type, length, pen] of fields) {
+      const t = pen === undefined ? type : type | 0x8000;
+      out.push(t >>> 8, t & 0xff, length >>> 8, length & 0xff);
+      if (pen !== undefined) out.push(pen >>> 24, (pen >>> 16) & 0xff, (pen >>> 8) & 0xff, pen & 0xff);
+    }
+    return Uint8Array.from(out);
+  };
+  // softflowd's IPv4 data template (1024) and its -b biflow form, as exporter-lab.ts recorded them.
+  const plain: [number, number, number?][] = [[8, 4], [12, 4], [22, 4], [21, 4], [1, 4], [2, 4], [10, 4], [14, 4], [61, 1], [136, 1], [7, 2], [11, 2], [4, 1], [6, 1], [60, 1], [5, 1]];
+  const biflow: [number, number, number?][] = [...plain, [1, 4, 29305], [2, 4, 29305], [5, 1, 29305], [6, 1, 29305]];
+  const template = (id: number, fields: [number, number, number?][], definedEntryId: number): CkTemplate =>
+    ({ id, options: false, v9Options: false, scopeCount: 0, fieldSpecs: specs(fields), fieldCount: fields.length, definedEntryId, lastSeenMs: 1_700_000_000_000, lastSeenMessage: 0, intervalMs: 0, intervalMessages: 0 });
+
+  // The vector: one IPFIX scope with one data template and one options template, one source.
+  const vector: Checkpoint = {
+    throughEntryId: 4096, atMs: 1_700_000_600_000,
+    scopes: [{
+      protocol: 10, exporter: '192.0.2.1', port: 50_000, domain: 0, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 4_090,
+      templates: [
+        { ...template(1024, plain.slice(0, 6), 17), lastSeenMessage: 4_080, intervalMs: 30_000, intervalMessages: 16 },
+        { id: 256, options: true, v9Options: false, scopeCount: 1, fieldSpecs: specs([[143, 4], [305, 4], [306, 4], [304, 2]]), fieldCount: 4, definedEntryId: 17, lastSeenMs: 1_700_000_590_000, lastSeenMessage: 4_080, intervalMs: 30_000, intervalMessages: 16 },
+      ],
+    }],
+    sources: [{ key: 'ipfix:192.0.2.1/0', sampling: 'known', samplingInterval: 10, samplingSinceEntryId: 17,
+      sequence: { mode: 'rfc', last: 123_456, lastRecords: 30, pairs: 8, fitRfc: 8, fitOwn: 0 }, samplers: [] }],
+  };
+  const v = encodeCheckpoint(vector);
+  console.log(`checkpoint vector (${v.length} bytes): through entry 4096 at 1700000600000 ms; IPFIX scope 192.0.2.1 port 50000 domain 0, `
+    + 'systemInitTimeMilliseconds 1699990000000, 4090 messages; template 1024 [8:4 12:4 22:4 21:4 1:4 2:4] defined at entry 17, last seen 1700000000000 at message 4080, '
+    + 'interval 30000 ms / 16 messages; options template 256 (1 scope) [143:4 305:4 306:4 304:2] defined at 17, last seen 1700000590000 at message 4080, interval 30000 ms / 16 messages; '
+    + `source ipfix:192.0.2.1/0 sampling known 1-in-10 since entry 17, sequence rfc (8 pairs, 8 fit rfc, 0 fit own-records), last 123456 with 30 records:\n  ${hex(v)}`);
+
+  // Sizes at the bound: 4,096 templates over 16 scopes.
+  const sized = (label: string, perTemplate: (i: number) => [number, number, number?][]) => {
+    const scopes: CkScope[] = Array.from({ length: 16 }, (_, s) => ({
+      protocol: 10, exporter: '192.0.2.1', port: 50_000 + s, domain: s, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 1 << 30,
+      templates: Array.from({ length: 256 }, (_, i) => template(256 + i, perTemplate(s * 256 + i), 1)),
+    }));
+    const sources: CkSource[] = Array.from({ length: 16 }, (_, s) => ({
+      key: `ipfix:192.0.2.1/${s}`, sampling: 'known', samplingInterval: 10, samplingSinceEntryId: 1,
+      sequence: { mode: 'learning', last: 0, lastRecords: 0, pairs: 0, fitRfc: 0, fitOwn: 0 },
+      samplers: Array.from({ length: 16 }, (_, k) => ({ id: k, algorithm: 1, interval: 1, space: 9 })),
+    }));
+    const c: Checkpoint = { throughEntryId: 1 << 30, atMs: 1_700_000_000_000, scopes, sources };
+    const [bytes, encMs] = timeIt(() => encodeCheckpoint(c));
+    const fieldBytes = scopes.reduce((a, s) => a + s.templates.reduce((b, t) => b + t.fieldSpecs.length, 0), 0);
+    const [deflated, defMs] = timeIt(() => deflateSync(bytes, { level: 6 }));
+    console.log(`${label}: ${bytes.length.toLocaleString()} B (${fmt(bytes.length / 1024, 1)} KiB; field specifiers ${fmt(fieldBytes / 1024, 1)} KiB), `
+      + `encoded in ${fmt(encMs, 1)} ms; deflated ${deflated.length.toLocaleString()} B in ${fmt(defMs, 1)} ms`);
+  };
+  sized('4,096 templates like softflowd\'s 1024 (16 fields)', () => plain);
+  sized('4,096 templates like softflowd -b (20 fields, 4 enterprise)', () => biflow);
+  sized('4,096 templates of 48 fields', () => Array.from({ length: 48 }, (_, k) => [k + 1, 4] as [number, number]));
+  // The worst a field budget allows: 768 KiB of specifiers spread over 4,096 templates (48 enterprise fields each).
+  sized('worst case at a 768 KiB specifier budget (4,096 x 24 enterprise fields)', () => Array.from({ length: 24 }, (_, k) => [k + 1, 4, 29305] as [number, number, number?]));
+  console.log(`the sidecar's and the archive's framing take a body of at most ${(1 << 20).toLocaleString()} B; an archive cut spends 44 of them before its checkpoint (ADR 0062).`);
+}
+
 switch (mode) {
   case 'softflowd': await softflowdMode(); break;
+  case 'v9decode': v9DecodeMode(); break;
+  case 'checkpoint': checkpointMode(); break;
   case 'bindpair': await bindPairMode(); break;
   case 'socket': await socketMode(); break;
   case 'journal': await journalMode(); break;
@@ -1339,6 +1548,6 @@ switch (mode) {
   case 'firewall': await firewallMode(); break;
   case 'segments': await segmentsMode(); break;
   default:
-    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick]');
+    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick] | v9decode [--quick] | checkpoint');
     process.exitCode = 2;
 }
