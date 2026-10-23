@@ -1,11 +1,47 @@
-// PreToolUse hook for the Bash and PowerShell tools. It denies two slips:
+// PreToolUse hook for the Bash and PowerShell tools. It denies three slips:
 //   - Windows-side Python (the Microsoft Store stub hangs the shell);
-//   - `npm run check` / `npx tsx scripts/check.ts` held in the foreground.
+//   - `npm run check` / `npx tsx scripts/check.ts` held in the foreground;
+//   - npm that writes node_modules where node_modules is a link. ensure-modules
+//     junctions main's copy into worktrees, and npm ci there would empty it.
 // Only the command word of each real segment is read, so text that merely
-// mentions either (a commit message, a heredoc, a grep pattern) goes through.
+// mentions any of them (a commit message, a heredoc, a grep pattern) goes
+// through. A `cd` or `Set-Location` segment moves where npm is taken to run.
 // It fails open: any error, bad input or unbalanced quote lets the call run.
 // Allow = exit 0 with no output; deny = exit 0 with one JSON object on stdout.
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+
+const LINK_REASON =
+  "node_modules here is a junction to main's copy, so this npm command would rewrite main's packages. " +
+  'Delete the junction first, (Get-Item -Force node_modules).Delete() in PowerShell, then run it.';
+
+/** npm subcommands and aliases that write node_modules. */
+const NPM_WRITES = new Set(['ci', 'install', 'i', 'in', 'add', 'isntall', 'uninstall', 'remove', 'rm', 'r', 'un',
+  'unlink', 'update', 'up', 'upgrade', 'udpate', 'dedupe', 'ddp', 'prune', 'link', 'ln', 'rebuild', 'rb']);
+const CD = new Set(['cd', 'pushd', 'chdir', 'set-location', 'sl', 'push-location']);
+
+/** A shell path as Node reads it: Git Bash's /c/... is C:/... on Windows. */
+function nativePath(p) {
+  return process.platform === 'win32' ? p.replace(/^\/([A-Za-z])(?=\/|$)/, '$1:') : p;
+}
+
+function isLink(p) {
+  try { return lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
+
+/** The directory an npm segment that writes node_modules acts on; null for any other segment. */
+function npmTarget(w, dir) {
+  if (!/^npm(\.cmd)?$/i.test(w[0])) return null;
+  let target = dir;
+  let sub = null;
+  for (let k = 1; k < w.length; k++) {
+    const prefix = /^--prefix=(.+)$/.exec(w[k]);
+    if (prefix) target = path.resolve(dir, nativePath(prefix[1]));
+    else if ((w[k] === '--prefix' || w[k] === '-C') && w[k + 1]) target = path.resolve(dir, nativePath(w[++k]));
+    else if (sub === null && !w[k].startsWith('-')) sub = w[k].toLowerCase();
+  }
+  return NPM_WRITES.has(sub) ? target : null;
+}
 
 const PYTHON_REASON =
   'Windows-side Python is blocked in Inwire (the Microsoft Store stub hangs the shell). ' +
@@ -129,11 +165,15 @@ function decide(input) {
   if (typeof ti.command !== 'string') return null;
   const exempt = ti.run_in_background === true || Number(ti.timeout) >= 600000;
   const text = stripHereStrings(stripHeredocs(ti.command.replace(/\r\n/g, '\n')));
+  let dir = input.cwd || process.cwd();
   for (const seg of segments(text)) {
     const w = leading(seg);
     if (!w.length) continue;
     const last = w[0].split(/[\\/]/).pop().toLowerCase();
     if (/^(python[\d.]*w?|py)(\.exe)?$/.test(last)) return PYTHON_REASON;
+    if (CD.has(w[0].toLowerCase()) && w[1] && !w[1].startsWith('-')) dir = path.resolve(dir, nativePath(w[1]));
+    const target = npmTarget(w, dir);
+    if (target && isLink(path.join(target, 'node_modules'))) return LINK_REASON;
     if (exempt) continue;
     const npmCheck = w[0] === 'npm' && w[1] === 'run' && /^check(?:[<>&]|$)/.test(w[2] ?? '');
     const tsxCheck = w[0] === 'npx' && w[1] === 'tsx' && /scripts[\\/]check\.ts$/.test(w[2] ?? '');

@@ -150,9 +150,14 @@ for (const hook of hookFiles) {
   check(`${hook} parses`, result.status === 0, result.stderr.split('\n')[0]);
 }
 
-/** A personal path or an email address in a public file. */
-const PERSONAL = /[A-Z]:[\\/](Users|dev)[\\/]|Home Office|claude-setup|[\w.+-]+@[\w-]+\.[\w.]+/i;
-const committed = ['.mcp.json', '.claude/settings.json', '.claude/README.md', ...agentFiles, ...skillFiles, ...hookFiles];
+/**
+ * A personal path or an email address in a public file. Generic on purpose:
+ * naming the owner's profile folder here would publish the very thing it
+ * guards. `example.invalid` is the reserved address the hook tests commit as.
+ */
+const PERSONAL = /[A-Z]:[\\/](Users|dev)[\\/]|\/[a-z]\/Users\/|[\w.+-]+@(?!example\.invalid\b)[\w-]+\.[\w.]+/i;
+const committed = ['.mcp.json', '.claude/settings.json', '.claude/README.md', ...agentFiles, ...skillFiles, ...hookFiles,
+  'scripts/claude/setup.ts', 'scripts/claude/hooks.ts'];
 for (const file of committed.filter((f) => existsSync(f))) {
   const hit = readFileSync(file, 'utf8').match(PERSONAL);
   check(`${file} carries nothing personal`, hit === null, hit?.[0]);

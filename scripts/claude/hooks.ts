@@ -172,16 +172,50 @@ for (const [name, input] of FAIL_OPEN) {
     const again = run('ensure-modules.mjs', { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'git worktree add .claude/worktrees/wt' }, cwd: main });
     check('ensure-modules run twice changes nothing and says nothing', again.code === 0 && again.stdout === '' && linked(inside('wt')), again.stdout);
 
-    git(main, 'worktree', 'add', '-q', '-b', 'wt2', inside('wt2'));
-    worktrees.push(inside('wt2'));
-    writeFileSync(path.join(inside('wt2'), 'package-lock.json'), '{"changed":true}\n');
+    for (const name of ['wt2', 'wt3']) {
+      git(main, 'worktree', 'add', '-q', '-b', name, inside(name));
+      worktrees.push(inside(name));
+    }
+    // npm ci empties node_modules' entries, and through a junction those are main's.
+    writeFileSync(path.join(inside('wt3'), 'package-lock.json'), '{"changed":true}\n');
     const ls = run('ensure-modules.mjs', { hook_event_name: 'PostToolUse', tool_name: 'PowerShell', tool_input: { command: 'ls' }, cwd: main });
     check('ensure-modules ignores a shell command that adds no worktree', ls.code === 0 && ls.stdout === '' && !existsSync(path.join(inside('wt2'), 'node_modules')), ls.stdout);
 
     const subagent = run('ensure-modules.mjs', { hook_event_name: 'SubagentStart', cwd: main });
     check('ensure-modules links at SubagentStart, for isolation: worktree agents', subagent.code === 0 && linked(inside('wt2')), subagent.stdout || `exit ${subagent.code}`);
-    check('ensure-modules warns when a worktree\'s lockfile differs from main\'s', subagent.stdout.includes('package-lock.json differs'), subagent.stdout);
+    check('ensure-modules never links a worktree whose lockfile differs from main\'s', !existsSync(path.join(inside('wt3'), 'node_modules')));
+    check('ensure-modules says why it left that worktree alone', subagent.stdout.includes('not linked') && subagent.stdout.includes('package-lock.json differs'), subagent.stdout);
+    check('ensure-modules tells Claude never to run npm through the junction', subagent.stdout.includes('rewrite main\'s packages'), subagent.stdout);
     check('ensure-modules still never links the outside worktree', !existsSync(path.join(outside, 'node_modules')));
+
+    // guard-shell: npm that rewrites packages, aimed at a linked node_modules.
+    const msys = (p: string) => p.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d: string) => `/${d.toLowerCase()}`);
+    const NPM_DENY: Array<[string, Shell, string]> = [
+      ['npm ci', 'Bash', inside('wt')],
+      ['npm install', 'PowerShell', inside('wt')],
+      ['npm i -D tsx', 'Bash', inside('wt')],
+      ['npm uninstall tsx', 'Bash', inside('wt')],
+      ['npm --prefix .claude/worktrees/wt ci', 'Bash', main],
+      [`npm install --prefix="${inside('wt').replace(/\\/g, '/')}"`, 'Bash', main],
+      ['cd .claude/worktrees/wt && npm ci', 'Bash', main],
+      [`cd "${msys(inside('wt'))}" && npm install`, 'Bash', main],
+      ['Set-Location .claude/worktrees/wt; npm ci', 'PowerShell', main],
+    ];
+    for (const [command, shell, cwd] of NPM_DENY) {
+      const r = run('guard-shell.mjs', { ...shellCall({ command, shell }), cwd });
+      check(`guard-shell denies ${shell} ${JSON.stringify(command)} through a node_modules link`, r.decision === 'deny' && r.reason.includes('rewrite main'), r.stdout || `exit ${r.code}`);
+    }
+    const NPM_ALLOW: Array<[string, string]> = [
+      ['npm ci', main],
+      ['npm run build', inside('wt')],
+      ['npx tsx scripts/x.ts', inside('wt')],
+      ['cd .claude/worktrees/wt3 && npm ci', main],
+      ['cd .claude/worktrees/wt && cd ../../.. && npm ci', main],
+    ];
+    for (const [command, cwd] of NPM_ALLOW) {
+      const r = run('guard-shell.mjs', { ...shellCall({ command }), cwd });
+      check(`guard-shell allows ${JSON.stringify(command)} where node_modules is not a link`, r.code === 0 && r.decision === null, r.stdout || `exit ${r.code}`);
+    }
 
     git(main, 'worktree', 'remove', '--force', inside('wt'));
     worktrees.splice(worktrees.indexOf(inside('wt')), 1);

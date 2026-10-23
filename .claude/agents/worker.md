@@ -21,6 +21,7 @@ This copy replaces the user-level worker for this repo only. The rules below are
 - Change files with Edit or Write, never `sed -i`, a heredoc or `cat >`. Put scratch scripts in a file, not a heredoc.
 - In a worktree, every path you read, edit or run is inside that worktree, not the main checkout.
 - Never run `python`, `python3` or `py` on the Windows side: the Store stub hangs the shell. Use WSL (`wsl -e python3 …`). A hook blocks it anyway.
+- A worktree's `node_modules` may be a junction to main's. Never run `npm ci`, `install` or `uninstall` through it: npm would empty and rewrite main's packages. Delete the junction first. A hook blocks it anyway.
 
 **Verifying.** The main thread runs the full gate, so for a worker this overrides the root CLAUDE.md's "run `npm run check` before handing off":
 - Run the assertion for what you changed: `npx tsx scripts/<path>.ts`, and `npm run lint` when you touched TypeScript.
