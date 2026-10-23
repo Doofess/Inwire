@@ -196,6 +196,20 @@ test('live checkpoint: the stop an hour after the base writes one, and it equals
   assert.deepEqual(inflate(stored, LIMITS.checkpointBytes), replayed.checkpoint());
 });
 
+test('reopen at the end: nothing after the watermark, and a live v9 datagram still decodes by the template before it', async () => {
+  const rig = new Rig();
+  rig.append([start(m(0)), template(m(1)), data(m(2), TWO), template(m(65)), stop(m(70))]);
+  await rollUp(rig);
+  rig.reopen();
+  const h = await rollUp(rig);
+  rig.runtime.publishLive(rig.add(start(m(71), S2), data(m(72), TWO), stop(m(73), S2)));
+  await h.host.settled();
+  const minute = minutesOf(rig, V9).find((r) => r.minuteMs === m(72));
+  assert.ok(minute !== undefined, 'the live minute is rolled up under its v9 source');
+  assert.equal(minute.records, 2);
+  assert.equal(minute.awaitingSets, 0, 'the state was prepared though there was nothing to catch up');
+});
+
 function readAll(rig: Rig): Evidence[] {
   const snap = rig.journal.snapshot();
   const out: Evidence[] = [];
