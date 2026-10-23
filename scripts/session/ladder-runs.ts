@@ -38,7 +38,7 @@ import {
 } from '../../src/services/conversation/streamFrames';
 import { summaryIsTarget, type StreamTarget } from '../../src/services/followStream';
 import { foldRuns, itemTime, type LadderItem } from '../../src/components/ladder/ladderRuns';
-import { layoutLadder, type LadderLayout } from '../../src/components/ladder/ladderLayout';
+import { layoutLadder, MIN_ROW_GAP, revealScroll, rowMeta, type LadderLayout } from '../../src/components/ladder/ladderLayout';
 import {
   lanePills, markLadder, MARK_ROW, ROW_ABOVE, ROW_BELOW,
 } from '../../src/components/ladder/ladderMarks';
@@ -453,20 +453,48 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   check('...and nothing moved, because the gap had the room', ys(marked), [0, 240, 480]);
 }
 
+// Revealing a row in the ladder's own scroller. Nudging a burst apart can push
+// rows below the viewport, so a frame inside the time window is not
+// necessarily on screen: a state picked on the map at a 700px window landed
+// on the bottom edge with its chips and number cut off.
+{
+  // A 400px viewport scrolled to 100 shows 100..500.
+  check('a row already in view leaves the scroll alone', revealScroll(100, 400, 200, 240), 100);
+  check('a row below scrolls just far enough to show it whole', revealScroll(100, 400, 480, 520), 120);
+  check('a row above scrolls up to its top', revealScroll(100, 400, 60, 100), 60);
+  check('a row taller than the viewport shows its top', revealScroll(0, 20, 50, 90), 50);
+}
+
+// The line under an arrow keeps to the lanes. At the 1024 minimum with the side
+// bar and the map open the lanes are under 200px apart, and the crowded note
+// ran over both of them and into the next row's.
+{
+  // 6px a character at 10px, so 5.4 at the line's 9px.
+  check('a wide ladder says a crowded row is not to scale',
+    rowMeta('#442-#443', 1506, true, 600, 6), '#442-#443 · 1506 B · ordered, not to scale');
+  check('a narrow one drops the note rather than overrun the lanes',
+    rowMeta('#442-#443', 1506, true, 190, 6), '#442-#443 · 1506 B');
+  check('a row that is to scale never carries it', rowMeta('#415', 66, false, 600, 6), '#415 · 66 B');
+}
+
 // A lost segment in a burst, where the rows are already at the minimum gap.
 {
+  // A row reaches ROW_ABOVE over its line and ROW_BELOW under it; two rows
+  // closer than that overprint one's number on the next's chip.
+  checkTrue('the minimum row gap clears a row\'s own extent', MIN_ROW_GAP >= ROW_ABOVE + ROW_BELOW);
+  const G = MIN_ROW_GAP;
   nextId = 1;
   const frames = Array.from({ length: 5 }, (_, i) => row(i % 2 === 0, 'A', { len: 10 }));
   frames[2].analysisFlags = ['lost_segment'];
   const layout = laidOut(frames, 60);
-  check('the layout under test is nudged to the minimum gap', layout.arrows.map((a) => a.y), [0, 26, 52, 78, 104]);
+  check('the layout under test is nudged to the minimum gap', layout.arrows.map((a) => a.y), [0, G, 2 * G, 3 * G, 4 * G]);
   const marked = markLadder(layout, frames, summaryWith(frames), true);
-  const least = 26 + ROW_BELOW + MARK_ROW + ROW_ABOVE;
+  const least = G + ROW_BELOW + MARK_ROW + ROW_ABOVE;
   check('the flagged row moves down to clear a marker row under the one above', ys(marked)[2], least);
-  check('...and every row below it moves by the same amount', ys(marked), [0, 26, least, least + 26, least + 52]);
-  check('...the rows above it do not', ys(marked).slice(0, 2), [0, 26]);
+  check('...and every row below it moves by the same amount', ys(marked), [0, G, least, least + G, least + 2 * G]);
+  check('...the rows above it do not', ys(marked).slice(0, 2), [0, G]);
   check('...the mark sits in the row opened', marked.marks[0].y, least - ROW_ABOVE - MARK_ROW / 2);
-  check('...and the drawing grows to hold the last row', marked.contentHeight, least + 52);
+  check('...and the drawing grows to hold the last row', marked.contentHeight, least + 2 * G);
   checkTrue('...with the moved arrows copied and the rest by reference',
     marked.arrows[0] === layout.arrows[0] && marked.arrows[2] !== layout.arrows[2]);
 }
@@ -611,6 +639,17 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the chip is painted by getPacketStyle', view.includes('colorEngine.getPacketStyle(packet, packetTheme)'));
   checkTrue('the fold is keyed by getMatchedRuleName', view.includes('colorEngine.getMatchedRuleName(p)'));
   checkTrue('and the one highlight is --primary', view.includes("'var(--primary)'"));
+
+  // The state map beside it keeps the same discipline: its text is the
+  // theme's currentColor through a text-* class, its path is --primary, and
+  // no fill or stroke is a literal - so Day and Night are one drawing.
+  checkTrue('the state map\'s source is under test', files.includes(`${dir}/TcpStateMap.tsx`));
+  const map = readFileSync(join(root, `${dir}/TcpStateMap.tsx`), 'utf8');
+  check('the state map paints no fill or stroke literal', map.match(/(?:fill|stroke)=["']#[0-9a-fA-F]/)?.[0] ?? null, null);
+  checkTrue('...its text is currentColor', !/<text[^>]*fill=(?!"currentColor")/.test(map.replace(/\n\s*/g, ' ')));
+  checkTrue('...its taken path is --primary', map.includes("'var(--primary)'"));
+  checkTrue('...its current state is the rail\'s active fill, the accent at 20%', /fillOpacity=\{current \? 0\.2 : 1\}/.test(map));
+  checkTrue('...and its caption is the ADR\'s', map.includes('States are inferred from one vantage point. Dashed: implied, not seen.'));
 }
 
 // --- Whether a page of progress reaches the views ------------------------------------------------
@@ -675,8 +714,12 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
 
   // A band closed over the selected frame stays closed until the selection
   // moves; a selected row that a later fold puts into a band opens it.
+  // Keyed per source: the selection and the highlight by their id, the state
+  // map by its request, so a second click on one state reopens a band the
+  // user closed between.
   checkTrue('the ladder opens a band for an id once, not once per fold',
-    view.includes('const autoOpened = useRef') && view.includes('if (id === autoOpened.current[source]) return;'));
+    view.includes('const autoOpened = useRef') && view.includes('if (key === autoOpened.current[source]) return;')
+    && view.includes('[scrollToFrameId, scrollTo]'));
   checkTrue('...remembering only an id it opened a band for',
     view.includes("if (holder === 'row') { autoOpened.current[source] = undefined; return; }"));
   // The ladder draws nothing by direction, so the direction legend is the dialogue's alone.

@@ -71,6 +71,9 @@ const NOT_TESTS: Record<string, string> = {
   'electron/gpu-restore-drive.ts':
     'loses and restores a real WebGL context in the running app; needs dist/ and a GPU, run by hand',
   'electron/serveStub.ts': 'tool; serves the stub agent until Ctrl+C, for driving the app by hand',
+  'electron/stream-states-shots.ts':
+    'photographs the ladder and the state map over real streams in both themes, for looking at '
+    + 'rather than asserting; needs dist/, the fixtures and a few minutes, run by hand',
   'tls/replay-stored-capture.ts':
     'tool; replays a person\'s own stored capture against their key log (ADR 0045), run by hand',
   'parity/cluster-diff.ts':

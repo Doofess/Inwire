@@ -13,11 +13,11 @@ import type { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
 import {
   arrowsThatFit, initialWindow, ladderExtent, layoutLadder, panWindow,
-  windowAround, zoomWindow,
+  revealScroll, rowMeta, windowAround, zoomWindow,
   type LadderArrow, type LadderWindow,
 } from './ladderLayout';
 import { foldRuns, itemPacket, type LadderItem } from './ladderRuns';
-import { lanePills, markLadder, ROW_ABOVE, type LadderMark, type LanePill } from './ladderMarks';
+import { lanePills, markLadder, ROW_ABOVE, ROW_BELOW, type LadderMark, type LanePill } from './ladderMarks';
 
 /**
  * One conversation as a ladder: two lanes, time running down, an arrow per
@@ -107,6 +107,9 @@ function monoCharWidth(family: string): number {
   return width;
 }
 
+/** One request to bring a frame in. Compared by identity, so asking twice for one frame is two requests. */
+export interface ScrollRequest { readonly frameId: number }
+
 interface LadderViewProps {
   /**
    * The stream's frames in capture order: the whole capture's, read through
@@ -130,7 +133,7 @@ interface LadderViewProps {
   /** The arrow under the pointer, for the state map; null when none is. */
   onHoverFrame?: (id: number | null) => void;
   /** A frame to bring into the window, exactly as the selection is brought. */
-  scrollToFrameId?: number | null;
+  scrollTo?: ScrollRequest | null;
   /**
    * Bands opened by their first frame's id. The pane holds the set rather
    * than this view, so a band stays open across the tabs and across a reload
@@ -145,9 +148,10 @@ interface LadderViewProps {
 
 export const LadderView: React.FC<LadderViewProps> = ({
   frames, loading, client, server, summary, colorEngine, packetTheme,
-  selectedId, onSelectFrame, highlightFrameId, onHoverFrame, scrollToFrameId,
+  selectedId, onSelectFrame, highlightFrameId, onHoverFrame, scrollTo,
   expanded, onToggleBand, onOpenBand,
 }) => {
+  const scrollToFrameId = scrollTo?.frameId ?? null;
   // A band breaks where the matched rule changes, so its chip takes one rule's
   // colour and never an average. `getMatchedRuleName` caches on the packet, so
   // the fold asks the chain once per frame and the chips not at all.
@@ -255,17 +259,32 @@ export const LadderView: React.FC<LadderViewProps> = ({
     });
     return true;
   }, [frames, extent]);
+  // The frame just brought into the window, still to be scrolled to. The
+  // window decides which frames are drawn, not where: rows nudged apart can run
+  // past the box's height, and a frame placed below its fold is in the window
+  // and still off screen. Answered once the layout has placed it.
+  const revealRef = useRef<number | null>(null);
   useEffect(() => {
     if (selectedId === undefined || selectedId === followedRef.current) return;
     // Recorded only once found: a frame still on its way from disk is followed
     // by the page that brings it.
-    if (bringIntoView(selectedId)) followedRef.current = selectedId;
+    if (bringIntoView(selectedId)) {
+      followedRef.current = selectedId;
+      revealRef.current = selectedId;
+    }
   }, [selectedId, bringIntoView]);
-  const scrolledRef = useRef<number | null>(null);
+  // The request answered, by identity: a re-run for a change of
+  // `bringIntoView` (every flush) does not pull the window back, and a second
+  // click on one state is a new object and so a new request. A request whose
+  // frame is not here yet stays pending, and the page that brings it answers it.
+  const scrolledRef = useRef<ScrollRequest | null>(null);
   useEffect(() => {
-    if (scrollToFrameId === undefined || scrollToFrameId === null || scrollToFrameId === scrolledRef.current) return;
-    if (bringIntoView(scrollToFrameId)) scrolledRef.current = scrollToFrameId;
-  }, [scrollToFrameId, bringIntoView]);
+    if (scrollTo === undefined || scrollTo === null || scrollTo === scrolledRef.current) return;
+    if (bringIntoView(scrollTo.frameId)) {
+      scrolledRef.current = scrollTo;
+      revealRef.current = scrollTo.frameId;
+    }
+  }, [scrollTo, bringIntoView]);
 
   // A frame named from outside that a closed band is hiding opens the band:
   // the selection must be drawn selected, and a frame the state map points at
@@ -280,23 +299,29 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // opened once, closed, and selected again after a row was selected between
   // opens again. An id whose frame is not here yet leaves the slot alone, so
   // the page that brings it opens its band.
-  const autoOpened = useRef<(number | undefined)[]>([undefined, undefined, undefined]);
+  // The state map's slot is keyed on the request rather than its id, so a
+  // second click on the same state reopens a band the user closed between.
+  const autoOpened = useRef<unknown[]>([undefined, undefined, undefined]);
   useEffect(() => {
-    [selectedId, highlightFrameId, scrollToFrameId].forEach((id, source) => {
-      if (id === autoOpened.current[source]) return;
-      if (id === undefined || id === null) { autoOpened.current[source] = undefined; return; }
-      const holder = holding(items, id);
-      if (holder === null) return;
-      if (holder === 'row') { autoOpened.current[source] = undefined; return; }
-      autoOpened.current[source] = id;
-      onOpenBand(holder.first.id);
-    });
-  }, [items, selectedId, highlightFrameId, scrollToFrameId, onOpenBand]);
+    ([[selectedId, selectedId], [highlightFrameId, highlightFrameId], [scrollToFrameId, scrollTo]] as const)
+      .forEach(([id, key], source) => {
+        if (key === autoOpened.current[source]) return;
+        if (id === undefined || id === null) { autoOpened.current[source] = undefined; return; }
+        const holder = holding(items, id);
+        if (holder === null) return;
+        if (holder === 'row') { autoOpened.current[source] = undefined; return; }
+        autoOpened.current[source] = key;
+        onOpenBand(holder.first.id);
+      });
+  }, [items, selectedId, highlightFrameId, scrollToFrameId, scrollTo, onOpenBand]);
 
   const onWheel = useCallback((event: React.WheelEvent) => {
     const box = boxRef.current;
     if (box === null) return;
     event.preventDefault();
+    // The user has taken the window: a frame never placed is not scrolled to
+    // later by a zoom that happens to place it.
+    revealRef.current = null;
     const bounds = box.getBoundingClientRect();
     const anchor = Math.min(Math.max(
       (event.clientY - bounds.top - TOP_PAD) / plotHeight, 0), 1);
@@ -313,6 +338,17 @@ export const LadderView: React.FC<LadderViewProps> = ({
   );
 
   const plotTop = TOP_PAD + marked.topRoom;
+  useLayoutEffect(() => {
+    const id = revealRef.current;
+    const box = boxRef.current;
+    if (id === null || box === null) return;
+    const arrow = marked.arrows.find((a) => a.item.kind === 'frame' && a.item.packet.id === id);
+    // Not placed yet: the window set above lands on a later render.
+    if (arrow === undefined) return;
+    revealRef.current = null;
+    const y = plotTop + arrow.y;
+    box.scrollTop = revealScroll(box.scrollTop, box.clientHeight, y - ROW_ABOVE, y + ROW_BELOW);
+  }, [marked, plotTop]);
   const svgHeight = Math.max(size.height, marked.contentHeight + plotTop + BOTTOM_PAD);
   const clientX = LANE_INSET;
   const serverX = Math.max(size.width - LANE_INSET, LANE_INSET + 120);
@@ -324,14 +360,17 @@ export const LadderView: React.FC<LadderViewProps> = ({
 
   if (!hasFrames) {
     return (
-      <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+      <div className="flex-1 min-w-0 flex items-center justify-center text-xs text-muted-foreground">
         {loading !== null ? readingText(loading) : 'No frames on this stream.'}
       </div>
     );
   }
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col">
+    // `min-w-0`: this sits in a row beside the state map, and a flex item's
+    // default minimum is its content - which here is an SVG as wide as the
+    // box it measured, so without it the ladder could never get narrower.
+    <div className="flex-1 min-w-0 min-h-0 flex flex-col">
       {/* Lane headers, outside the scrolling area so they stay put. The role
           in the foreground and the address beneath it: the roles are what the
           lanes mean, and when the client is a guess the header says so, because
@@ -374,14 +413,27 @@ export const LadderView: React.FC<LadderViewProps> = ({
         className="flex-1 min-h-0 relative overflow-y-auto overflow-x-hidden
           cursor-crosshair custom-scrollbar">
         <svg ref={svgRef} width={size.width} height={svgHeight} className="block font-mono">
+          {/* Every head is the line's own colour inside a faint outline in the
+              text colour, as the lines are: a pale Day rule's head on a white
+              ground was otherwise the part of the arrow that vanished. A
+              band's head is sized in pixels rather than in stroke widths,
+              because its line is 1px and a head six times that is 6px. */}
           <defs>
             <marker id="ladder-head-r" viewBox="0 0 8 8" refX="7" refY="4"
               markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" />
+              <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" stroke="currentColor" strokeOpacity={0.4} strokeWidth={0.8} />
             </marker>
             <marker id="ladder-head-l" viewBox="0 0 8 8" refX="7" refY="4"
               markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" />
+              <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" stroke="currentColor" strokeOpacity={0.4} strokeWidth={0.8} />
+            </marker>
+            <marker id="ladder-band-head-r" viewBox="0 0 8 8" refX="7" refY="4"
+              markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" stroke="currentColor" strokeOpacity={0.5} strokeWidth={0.8} />
+            </marker>
+            <marker id="ladder-band-head-l" viewBox="0 0 8 8" refX="7" refY="4"
+              markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke" stroke="currentColor" strokeOpacity={0.5} strokeWidth={0.8} />
             </marker>
           </defs>
 
@@ -395,10 +447,13 @@ export const LadderView: React.FC<LadderViewProps> = ({
             {/* A time tick every so often, so the vertical axis means
                 something. Five is enough to read a gap without becoming a
                 grid that competes with the arrows. */}
+            {/* The label hangs under its tick rather than sitting on it: the
+                first tick is the plot's top edge, and a label above it sat
+                in the row a marker above the plot takes. */}
             {timeScale.ticks(5).map((t) => (
               <g key={t} transform={`translate(0, ${timeScale(t)})`}>
                 <line x1={0} x2={size.width} stroke="currentColor" strokeOpacity={0.07} />
-                <text x={4} y={-3} fontSize={9} fill="currentColor" fillOpacity={0.45}>
+                <text x={4} y={10} fontSize={9} fill="currentColor" fillOpacity={0.45}>
                   {t.toFixed(3)}s
                 </text>
               </g>
@@ -539,6 +594,8 @@ const Arrow: React.FC<{
       onMouseLeave={hover === undefined ? undefined : () => hover(null)}
       className={onClick ? 'cursor-pointer' : undefined}
       opacity={lit ? 1 : 0.92}
+      data-frame={isBand ? undefined : packet.id}
+      data-band={isBand ? item.first.id : undefined}
     >
       {/* An invisible fat line under the visible one: a 1px arrow is almost
           impossible to hit with a mouse, and widening the drawn line to make
@@ -559,7 +616,7 @@ const Arrow: React.FC<{
             fill={colour} fillOpacity={0.55} />
           <line x1={x1} y1={arrow.y} x2={x2} y2={arrow.y}
             stroke={colour} strokeWidth={1}
-            markerEnd={`url(#${toServer ? 'ladder-head-r' : 'ladder-head-l'})`} />
+            markerEnd={`url(#${toServer ? 'ladder-band-head-r' : 'ladder-band-head-l'})`} />
         </>
       ) : (
         <>
@@ -595,8 +652,7 @@ const Arrow: React.FC<{
         x={mid} y={arrow.y + 11} textAnchor="middle" fontSize={9}
         fill="currentColor" fillOpacity={0.4}
       >
-        {number} · {Math.round(arrow.length)} B
-        {arrow.crowded ? ' · ordered, not to scale' : ''}
+        {rowMeta(number, arrow.length, arrow.crowded, span, charWidth)}
       </text>
       <title>
         {isBand
