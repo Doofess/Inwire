@@ -4,15 +4,16 @@ The on-disk capture format and the store protocol; loaded when you work under `s
 
 ## Layout
 
-- A capture is a directory named `cap-YYYYMMDD-HHMMSS-xxxx` (`CAPTURE_ID_PATTERN`, `captureDirectory.ts`) holding five files: `index.iwidx`, `prefix.iwpfx`, `summary.iwsum`, `frames.iwbyt`, `records.iwrec`.
+- A capture is a directory named `cap-YYYYMMDD-HHMMSS-xxxx` (`CAPTURE_ID_PATTERN`, `captureDirectory.ts`) holding six files: `index.iwidx`, `prefix.iwpfx`, `summary.iwsum`, `frames.iwbyt`, `records.iwrec` and `streams.iwdig`.
 - `records.iwrec` is one deflated block of frame records per chunk (ADR 0049), written before the chunk's index record so recovery covers it unchanged.
 - The index is version 3 (`INDEX_VERSION` in `captureIndex.ts`): an 80-byte stride carrying the records' extent and each chunk's segment. Versions 2 and 1 still open and are continued as themselves; a version 1 capture's trees fall back to the replay. Never migrate an old capture in place.
 - A chunk is version 2 and records each frame's `linkType`. Version 1 still decodes; `RowBlock.linkTypesStored` says whether an absent link type means Ethernet (v2) or not recorded (v1). Imports need it stored: every frame of one carries one adapter label whatever its link type (ADR 0046).
+- `streams.iwdig` is the stream digest's snapshot (ADR 0055, `digestCodec.ts`): every row folded into a summary per stream, its TCP states, totals and outcome. **It is a cache, never a source.** The store writes it at `finish` and at close (`trySnapshot` in `captureHost.ts`), and an open trusts it only when it was folded through the capture's newest id; missing, torn, another format or another id, it is folded again from the rows, sliced through the queue like a scan. The file is emptied before that fold starts and never written while one runs or after one dropped rows (`DIGEST_DEFERRED_MAX`), because a partial digest written as whole is a wrong answer the next open would trust. One per capture, beside the index, not per segment. `scripts/capture/stream-digest-store.ts`.
 - Writing is `captureWriter.ts` through `chunkCodec.ts`; reading is `captureReader.ts`; addressing `captureIndex.ts`; search `captureScan.ts` and `matchSet.ts`.
 
 ## Ring segments (ADR 0052)
 
-- A capture following the agent's ring keeps data in segments: segment 0 is the four files beside the index, segment *n* a `seg-NNNNNN` directory. Segments are filed by the agent's `capture_boundary` messages (`src/services/pipeline/ringFiling.ts`).
+- A capture following the agent's ring keeps data in segments: segment 0 is the four data files beside the index, segment *n* a `seg-NNNNNN` directory. Segments are filed by the agent's `capture_boundary` messages (`src/services/pipeline/ringFiling.ts`).
 - `segments.ts` is the only place a capture's frames are deleted without the user pressing anything. A segment goes only if it is not segment 0, not the one being written, every frame in it was filed under the capture the agent deleted from, and its newest frame is at or below the deleted file's last sequence number. Oldest first, no gaps.
 - Delete by sequence number, never by file: a shed `capture_boundary` would file a whole ring file under the one before it.
 - Floor first: the header records the first chunk still held, every lookup below it answers as a hole, ordinals never move. The list, a filter's bitmap and an export start at the floor, they do not renumber.

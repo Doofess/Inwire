@@ -1,7 +1,8 @@
 # 0055 — A stream is told as its states, from a digest the store keeps
 
-**Status:** accepted 2026-10-09; nothing landed yet. Stage 1 (TCP) is planned in
-`docs/superpowers/plans/2026-10-09-stream-states-stage1.md`. The owner asked for
+**Status:** accepted 2026-10-09; Stage 1 (TCP) landed 2026-10-24: the store's
+digest and `streams.iwdig`, the ladder, the docked state map and the
+conversation list's TCP level. UDP and the other protocols are not started. The owner asked for
 a Conversations pane that shows "the networking that's going on" in a stream,
 pointing at the RFC 793 state diagram, and the same idea for UDP and for any
 other protocol that has a stream.

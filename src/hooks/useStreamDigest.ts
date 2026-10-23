@@ -3,7 +3,7 @@
  *
  * Polled rather than pushed: the store answers `changedSince(version)`, so a
  * quiet capture costs one empty message a second, and nothing is sent while
- * the Conversations tab is not showing the TCP level.
+ * neither view that reads it - Statistics, Follow Stream - is showing.
  *
  * The answer's `captureId` is the capture the version belongs to. A version
  * means nothing across captures, so when it changes everything held here is
