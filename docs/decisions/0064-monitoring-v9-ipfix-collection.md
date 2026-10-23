@@ -3,7 +3,12 @@
 > **Amended by [0065](0065-monitoring-checkpoint-gap-state.md).** The
 > checkpoint's scope and template flags gain bit 2 for collection-gap state,
 > a gap ends at `start`, `resume` or `gap`, and a template applies to the data
-> sets after it in its own datagram. Everything else here stands.
+> sets after it in its own datagram.
+>
+> **Amended by [0066](0066-monitoring-policy-2-stores.md).** The kind-3 body
+> carries the checkpoint's through entry id and receipt time outside the
+> deflate, at offsets 8 and 16, so the store can index it. Everything else
+> here stands.
 
 **Status:** accepted 2026-10-23 by the owner, who ruled on four of its
 departures from the spec: UDP withdrawals ignored and counted, lifetime by

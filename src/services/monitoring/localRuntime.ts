@@ -19,8 +19,8 @@ import type { MinuteInput, RollupOpenStatus, RollupStore } from './rollupStore';
 import type { ArchiveCut, ArchivedMinute, ArchiveStore } from './archive';
 import { RuntimeUnavailableError, type ArchiveSource, type DatasetMeta, type HostRuntime } from './runtime';
 import {
-  LIMITS, type BoundaryEvidence, type BundleSlice, type Evidence, type EvidencePage, type EvidenceRef, type JournalSnapshot, type RawPage,
-  type RollupWatermark, type Snapshot,
+  LIMITS, type BoundaryEvidence, type BundleSlice, type CheckpointInfo, type Evidence, type EvidencePage, type EvidenceRef,
+  type JournalSnapshot, type RawPage, type RollupWatermark, type SegmentGeometry, type Snapshot, type StoredCheckpoint,
 } from './types';
 
 /** The archive behind `ArchiveSource`: answers in process, async for the same reason the rest of the runtime is. */
@@ -84,6 +84,8 @@ export class LocalRuntime implements HostRuntime {
     return this.journal.readBoundaries(snapshot, afterId, maxEntries);
   }
 
+  async segmentGeometry(snapshot: Snapshot): Promise<SegmentGeometry[]> { return this.journal.segmentGeometry(snapshot); }
+
   async watermark(): Promise<RollupWatermark | null> { return this.rollups.watermark(); }
 
   async readMinutes(
@@ -94,6 +96,10 @@ export class LocalRuntime implements HostRuntime {
 
   async sources(): Promise<string[]> { return this.rollups.sources(); }
 
+  async checkpoints(): Promise<CheckpointInfo[]> { return this.rollups.checkpoints(); }
+
+  async readCheckpoint(throughEntryId: number): Promise<Uint8Array | null> { return this.rollups.readCheckpoint(throughEntryId); }
+
   /**
    * The Worker's one write, so it is bounded here where both files are known: a
    * watermark no further than the journal's end, and a batch that leaves the
@@ -101,12 +107,12 @@ export class LocalRuntime implements HostRuntime {
    * which the journal's `stop` relies on. A refusal rejects (`RangeError`) and
    * `runtimeRpc` answers it as an error reply; nothing is written.
    */
-  async appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number): Promise<void> {
+  async appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number, checkpoints: StoredCheckpoint[] = []): Promise<void> {
     const snapshot = this.journal.snapshot();
     this.rollups.appendMinutes(minutes, watermark, afterEntryId, {
       journalThroughEntryId: snapshot.throughEntryId,
       maxBatchBytes: this.journal.limitBytes - LIMITS.closingReserveBytes - snapshot.writtenBytes - this.rollups.size(),
-    });
+    }, checkpoints);
   }
 
   /** What the caller opened the runtime with: a dataset's identity is a file's, and there is nothing here to invent one from. */

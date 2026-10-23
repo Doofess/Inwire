@@ -11,7 +11,8 @@
  * utility all share it.
  */
 import type {
-  BoundaryEvidence, BundleSlice, Evidence, EvidencePage, EvidenceRef, JournalSnapshot, RawPage, RollupWatermark, Snapshot,
+  BoundaryEvidence, BundleSlice, CheckpointInfo, Evidence, EvidencePage, EvidenceRef, JournalSnapshot, RawPage, RollupWatermark,
+  SegmentGeometry, Snapshot, StoredCheckpoint,
 } from './types';
 import type { DatasetFile } from './datasetPlan';
 import type { MinuteInput, RollupOpenStatus } from './rollupStore';
@@ -32,6 +33,8 @@ export interface EvidenceReader {
   readBoundaries(
     snapshot: Snapshot, afterId: number, maxEntries: number,
   ): Promise<{ entries: BoundaryEvidence[]; nextAfterId: number; done: boolean }>;
+  /** The retained segments the snapshot reaches, oldest first: ids, bytes and policy, for a replay's start and bound (ADR 0066). */
+  segmentGeometry(snapshot: Snapshot): Promise<SegmentGeometry[]>;
 }
 
 export interface RollupReader {
@@ -43,11 +46,15 @@ export interface RollupReader {
   ): Promise<{ minuteMs: number; throughEntryId: number; bytes: Uint8Array }[]>;
   /** Every source key the sidecar holds a minute for, sorted: the engines already admitted. */
   sources(): Promise<string[]>;
+  /** The template checkpoints the sidecar holds (ADR 0066), in entry order, without their bytes. */
+  checkpoints(): Promise<CheckpointInfo[]>;
+  /** The deflated checkpoint through `throughEntryId`, or null for none; `DecodeState.fromCheckpoint` checks what it holds. */
+  readCheckpoint(throughEntryId: number): Promise<Uint8Array | null>;
 }
 
 export interface RollupWriter {
   /** One batch, its minutes and then its watermark, in one write; `afterEntryId` is where its aggregation began, and the sidecar refuses a batch that does not continue it. */
-  appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number): Promise<void>;
+  appendMinutes(minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number, checkpoints?: StoredCheckpoint[]): Promise<void>;
 }
 
 /**

@@ -17,7 +17,7 @@
  *
  * Pure: no `node:*`, no Electron, like everything under `src/services/`.
  */
-import { LIMITS, type DatagramEvidence } from './types';
+import { LIMITS, type ClockStatus, type DatagramEvidence } from './types';
 import type { FlowDecode, OptionsReport } from './flowDecode';
 
 export type SamplingStatus =
@@ -25,7 +25,7 @@ export type SamplingStatus =
   | { kind: 'known'; interval: number; sinceEntryId: number }
   | { kind: 'unsupported'; reason: string };
 
-export interface ClockStatus { latestSkewMs: number | null; minSkewMs: number | null; maxSkewMs: number | null; flagged: boolean }
+export type { ClockStatus };
 
 export interface SequenceStatus { mode: 'learning' | 'rfc' | 'own-records' | 'unrecognized'; suspectedGap: number; reordered: number }
 
@@ -266,6 +266,13 @@ export class ExporterState {
   clock(sourceKey: string): ClockStatus {
     const c = this.sources.get(sourceKey)?.clock;
     return c === undefined ? { latestSkewMs: null, minSkewMs: null, maxSkewMs: null, flagged: false } : { ...c };
+  }
+
+  /** A sampler's whole rate, or null where the source has no such sampler or it states none: a record that cites it is sampled at this. */
+  samplerRate(sourceKey: string, samplerId: number): number | null {
+    const st = this.sources.get(sourceKey);
+    const s = st?.samplers.get(samplerId);
+    return st === undefined || s === undefined ? null : samplerRate(st.protocol, s);
   }
 
   sequence(sourceKey: string): SequenceStatus {

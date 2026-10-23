@@ -26,10 +26,14 @@ import { DEFAULT_RETENTION, planExpiry } from '../../src/services/monitoring/ret
 import { ACCEPTED_POLICIES, LIMITS, WRITE_POLICY_VERSION,type DatagramEvidence, type HistoryResult, type MinuteRollup, type NormalizedV5 } from '../../src/services/monitoring/types';
 import { decodeV5, exporterKey, sourceKey } from '../../src/services/monitoring/v5';
 import type { EvidenceInput } from '../../src/services/monitoring/journal';
-import { EXPORTER, GENERATION, evidence, v5Payload, type FlowSpec, type HeaderSpec } from './fixtures';
+import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
+import {
+  COLLECTOR, EXPORTER, GENERATION, be, dataSet, evidence, ipfixMessage, templateRecord, templateSet, v5Payload, v9Message,
+  type FlowSpec, type HeaderSpec, type WireField,
+} from './fixtures';
 import {
   BASE, MIN, NOW, S1, S2, S3, SRC, SRC1, Rig, ask, askBoth, askOk, boundary, deflate, dgram, inflate, junk, prng, rollUp, runAll,
-  spec, start, stop, test, v9, withoutProvenance,
+  spec, start, stop, test, unreadVersion, withoutProvenance,
 } from './queryRig';
 
 const m = (n: number, offset = 0): number => BASE + n * MIN + offset;
@@ -198,7 +202,7 @@ test('admission: learned from the sidecar\'s source keys, and an exporter key is
 
 test('budget: exactly 16,384 keys stay complete and the 16,385th makes the minute incomplete', () => {
   assert.equal(LIMITS.minuteKeyBudget, 16_384);
-  const acc = new MinuteAccumulator(SRC, m(0));
+  const acc = new MinuteAccumulator(SRC, m(0), 2);
   let id = 1;
   const flows = fan(100, 8191, m(0, 1), id); // 8,191 sources + 1 destination + 8,191 conversations = 16,383 keys
   for (const f of flows) acc.addFlow(f);
@@ -224,15 +228,15 @@ test('budget: exactly 16,384 keys stay complete and the 16,385th makes the minut
 });
 
 test('budget: two fragments each within it whose union is past it make the sum incomplete', () => {
-  const left = new MinuteAccumulator(SRC, m(0));
+  const left = new MinuteAccumulator(SRC, m(0), 2);
   for (const f of fan(110, 4500, m(0, 1), 1)) left.addFlow(f);
-  const right = new MinuteAccumulator(SRC, m(0));
+  const right = new MinuteAccumulator(SRC, m(0), 2);
   for (const f of fan(111, 4500, m(0, 2), 10)) right.addFlow(f);
   const a = left.toRollup();
   const b = right.toRollup();
   assert.equal(a.complete && b.complete, true);
   assert.ok(keyCount(a) <= LIMITS.minuteKeyBudget && keyCount(b) <= LIMITS.minuteKeyBudget);
-  const merged = new MinuteAccumulator(SRC, m(0));
+  const merged = new MinuteAccumulator(SRC, m(0), 2);
   merged.absorb(a);
   assert.equal(merged.complete, true);
   merged.absorb(b);
@@ -243,10 +247,10 @@ test('budget: two fragments each within it whose union is past it make the sum i
 });
 
 test('budget: an incomplete fragment makes any sum it joins incomplete', () => {
-  const full = new MinuteAccumulator(SRC, m(0));
+  const full = new MinuteAccumulator(SRC, m(0), 2);
   full.abandon();
   full.records = 4;
-  const sum = new MinuteAccumulator(SRC, m(0));
+  const sum = new MinuteAccumulator(SRC, m(0), 2);
   for (const f of flowsOf([{}], m(0, 1), 1)) sum.addFlow(f);
   sum.absorb(full.toRollup());
   assert.equal(sum.complete, false);
@@ -294,13 +298,13 @@ function buildWorld(seed = 7): World {
   push(start(m(0, -1000), S1));
   push(...traffic(0, 0, 60_000, 4));
   push(...traffic(1, 0, 60_000, 5));
-  push(junk(m(1, 100)), v9(m(1, 150)), junk(m(1, 160), OTHER));
+  push(junk(m(1, 100)), unreadVersion(m(1, 150)), junk(m(1, 160), OTHER));
   w.bad.push({ ms: m(1, 100), exporter: EXPORTER, kind: 'malformed' }, { ms: m(1, 150), exporter: EXPORTER, kind: 'unsupported' });
   push(...traffic(2, 0, 60_000, 4, { sampling: 0 })); // a whole minute whose sampling is unknown
   for (let e = 0; e < 20; e++) push(put(m(2, 1000 + e), e, [rflow()], {}, BUSY)); // 20 engines on one exporter: 16 are admitted
   push(...traffic(3, 0, 60_000, 6));
   push(...traffic(4, 0, 60_000, 4));
-  push(v9(m(4, 200)));
+  push(unreadVersion(m(4, 200)));
   w.bad.push({ ms: m(4, 200), exporter: EXPORTER, kind: 'unsupported' });
   push(...traffic(5, 0, 40_000, 3));
   push(stop(m(5, 50_000), S1));
@@ -806,22 +810,20 @@ test('replay: a restart reopens the same journal and the sidecar, and the answer
 
 // --- accepted policies and expiry (ADR 0062) -----------------------------------------------------------------
 
-test('codec: a rollup is written under the newest accepted policy, and every accepted policy decodes', () => {
-  const acc = new MinuteAccumulator(SRC, m(0));
-  for (const f of flowsOf([{ src: '10.1.1.1', dst: '10.1.1.2', octets: 5, packets: 2 }], m(0, 5), 1)) acc.addFlow(f);
-  const rollup = acc.toRollup();
-  const bytes = encodeMinuteRollup(rollup, deflate);
-  assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint16(0, true), WRITE_POLICY_VERSION);
+test('codec: a minute is written under its own policy, the newest is the written one, and every accepted policy round-trips', () => {
   assert.equal(WRITE_POLICY_VERSION, Math.max(...ACCEPTED_POLICIES));
   for (const v of ACCEPTED_POLICIES) {
-    const copy = bytes.slice();
-    new DataView(copy.buffer).setUint16(0, v, true);
-    assert.deepEqual(decodeMinuteRollup(copy, inflate), rollup, `policy ${v}`);
+    const acc = new MinuteAccumulator(SRC, m(0), v);
+    for (const f of flowsOf([{ src: '10.1.1.1', dst: '10.1.1.2', octets: 5, packets: 2 }], m(0, 5), 1)) acc.addFlow(f);
+    const rollup = acc.toRollup();
+    const bytes = encodeMinuteRollup(rollup, deflate);
+    assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint16(0, true), v, `policy ${v} prefix`);
+    assert.deepEqual(decodeMinuteRollup(bytes, inflate), rollup, `policy ${v}`);
   }
 });
 
 test('codec: a policy this build does not accept is refused before anything is inflated', () => {
-  const bytes = encodeMinuteRollup(new MinuteAccumulator(SRC, m(0)).toRollup(), deflate);
+  const bytes = encodeMinuteRollup(new MinuteAccumulator(SRC, m(0), 2).toRollup(), deflate);
   const refused = [0, Math.max(...ACCEPTED_POLICIES) + 1, 0xffff].filter((v) => !ACCEPTED_POLICIES.includes(v));
   for (const v of refused) {
     const copy = bytes.slice();
@@ -873,6 +875,144 @@ test('equality after an expiry: the retained journal is answered the same from r
     }
   }
   assert.ok(asked > 100 && rollupMinutes > 0, 'the property was asked of rollups, not only of raw reads');
+});
+
+
+// --- v9 and IPFIX: the same property over a journal whose records need templates ---------------------------------
+
+const TF_SRC: WireField = { type: 8, length: 4 };
+const TF_DST: WireField = { type: 12, length: 4 };
+const TF_OCT: WireField = { type: 1, length: 4 };
+const TF_PKT: WireField = { type: 2, length: 4 };
+const TF_SAMP: WireField = { type: 34, length: 4 };
+const LAYOUT_OP: WireField[] = [TF_SRC, TF_DST, TF_OCT, TF_PKT, TF_SAMP];
+const LAYOUT_PO: WireField[] = [TF_SRC, TF_DST, TF_PKT, TF_OCT, TF_SAMP];
+
+let tseq = 0;
+const V9_1 = sourceKeyFor('v9', EXPORTER, 1);
+const V9_2 = sourceKeyFor('v9', EXPORTER, 2);
+const IPFIX_5 = sourceKeyFor('ipfix', EXPORTER, 5);
+
+function tdata(layout: 'OP' | 'PO', src: string, dst: string, octets: number, packets: number, samp = 0): number[] {
+  const counts = layout === 'OP' ? [octets, packets] : [packets, octets];
+  return [...be.ipv4(src), ...be.ipv4(dst), ...be.u32(counts[0]), ...be.u32(counts[1]), ...be.u32(samp)];
+}
+function v9Ev(ms: number, sets: number[][], id: number, skewSecs = 0): EvidenceInput {
+  const bytes = v9Message({ uptime: ms - BASE + 5_000_000, secs: Math.floor(ms / 1000) + skewSecs, sequence: tseq++, sourceId: id }, sets);
+  return { kind: 'datagram', receivedMs: ms, localIPv4: COLLECTOR, localPort: 2055, remoteIPv4: EXPORTER, remotePort: 40_000, bytes };
+}
+function ipfixEv(ms: number, sets: number[][], domain: number): EvidenceInput {
+  const bytes = ipfixMessage({ secs: Math.floor(ms / 1000), sequence: tseq++, domain }, sets);
+  return { kind: 'datagram', receivedMs: ms, localIPv4: COLLECTOR, localPort: 4739, remoteIPv4: EXPORTER, remotePort: 40_000, bytes };
+}
+const tplV9 = (id: number, layout: 'OP' | 'PO'): number[] => templateSet(9, [templateRecord(9, id, layout === 'OP' ? LAYOUT_OP : LAYOUT_PO)]);
+const tplIpfix = (id: number): number[] => templateSet(10, [templateRecord(10, id, LAYOUT_OP)]);
+
+/** Templates in minute 0, data after; a redefinition mid-minute; awaiting data; a skewed clock; a second session; a tail. */
+function templatedWorld(): { phase1: EvidenceInput[]; phase2: EvidenceInput[]; minute1V9: bigint; minute1Ipfix: bigint } {
+  const phase1: EvidenceInput[] = [];
+  const phase2: EvidenceInput[] = [];
+  phase1.push(start(m(0), S1));
+  phase1.push(v9Ev(m(0, 1000), [tplV9(256, 'OP')], 1), v9Ev(m(0, 2000), [tplV9(256, 'PO')], 2), ipfixEv(m(0, 3000), [tplIpfix(300)], 5));
+  // Minute 1: the templates are a minute old.
+  const v9a = [tdata('OP', '10.4.0.1', '10.4.0.2', 1000, 10, 100), tdata('OP', '10.4.0.3', '10.4.0.2', 2000, 20, 100)];
+  phase1.push(v9Ev(m(1, 1000), [dataSet(256, v9a)], 1));
+  phase1.push(v9Ev(m(1, 2000), [dataSet(256, [tdata('PO', '10.4.1.1', '10.4.1.2', 700, 7)])], 2));
+  phase1.push(ipfixEv(m(1, 3000), [dataSet(300, [tdata('OP', '10.4.2.1', '10.4.2.2', 50, 5), tdata('OP', '10.4.2.1', '10.4.2.3', 60, 6)])], 5));
+  phase1.push(v9Ev(m(1, 4000), [dataSet(999, [[1, 2, 3, 4]])], 1)); // a template nobody sent
+  // Minute 2: id 1 redefines 256 in the middle of the minute, with data either side and a different rate.
+  phase1.push(v9Ev(m(2, 1000), [dataSet(256, [tdata('OP', '10.4.0.1', '10.4.0.2', 111, 1, 200)])], 1));
+  phase1.push(v9Ev(m(2, 20_000), [tplV9(256, 'PO'), dataSet(256, [tdata('PO', '10.4.0.1', '10.4.0.2', 222, 2, 200)])], 1));
+  phase1.push(v9Ev(m(2, 40_000), [dataSet(256, [tdata('PO', '10.4.0.5', '10.4.0.6', 333, 3, 100)])], 1));
+  // Minute 3: an export clock 20 s ahead, and a v5 datagram beside the templated ones.
+  phase1.push(v9Ev(m(3, 5000), [dataSet(256, [tdata('PO', '10.4.0.1', '10.4.0.2', 5, 5)])], 1, 20));
+  phase1.push(dgram(m(3, 6000), [{ src: '10.9.0.1', dst: '10.9.0.2', octets: 9, packets: 9 }]));
+  phase1.push(junk(m(3, 7000)));
+  phase1.push(stop(m(3, 50_000), S1));
+  // A second session, after a gap: whatever the store keeps of the first session's templates, both paths must say the same.
+  phase1.push(start(m(5, 10_000), S2));
+  phase1.push(v9Ev(m(5, 12_000), [dataSet(256, [tdata('PO', '10.4.0.1', '10.4.0.2', 17, 1)])], 1));
+  phase1.push(v9Ev(m(5, 20_000), [tplV9(256, 'OP'), dataSet(256, [tdata('OP', '10.4.0.1', '10.4.0.2', 19, 1)])], 1));
+  phase1.push(ipfixEv(m(5, 30_000), [dataSet(300, [tdata('OP', '10.4.2.1', '10.4.2.2', 23, 1)])], 5));
+  phase1.push(stop(m(6, 20_000), S2));
+  // The tail: a third session the sidecar never sees, with entries that land in minutes it already holds.
+  phase2.push(start(m(7, 5000), S3));
+  phase2.push(v9Ev(m(7, 6000), [dataSet(256, [tdata('OP', '10.4.0.1', '10.4.0.2', 29, 1)])], 1));
+  phase2.push(v9Ev(m(2, 50_000), [dataSet(256, [tdata('OP', '10.4.0.8', '10.4.0.9', 31, 1)])], 1));
+  phase2.push(ipfixEv(m(1, 55_000), [dataSet(300, [tdata('OP', '10.4.2.1', '10.4.2.2', 37, 1)])], 5));
+  return { phase1, phase2, minute1V9: 1000n + 2000n, minute1Ipfix: 50n + 60n };
+}
+
+const templated = (async () => {
+  const w = templatedWorld();
+  const rig = new Rig(0xb0);
+  rig.append(w.phase1);
+  const host = await rollUp(rig);
+  host.host.handle({ type: 'shutdown', requestId: 9100 });
+  await host.host.settled();
+  rig.append(w.phase2);
+  return { rig, ...w };
+})();
+
+const TEMPLATED_RANGES: [string, number, number, number[]][] = [
+  ['everything, minute-aligned', m(0), m(9), [1, 3, 9]],
+  ['everything, ragged edges', m(0, 12_345), m(9, -6789), [4, 7]],
+  ['minute 1, where the templates are a minute old', m(1), m(2), [1, 2]],
+  ['the redefined minute', m(2), m(3), [1, 3]],
+  ['the skewed minute', m(3), m(4), [1]],
+  ['inside a minute, both edges raw', m(2, 5000), m(2, 45_000), [1, 2]],
+  ['across the gap into the second session', m(4), m(7), [3]],
+  ['into the tail', m(6), m(9), [3]],
+];
+const TEMPLATED_SOURCES = [V9_1, V9_2, IPFIX_5, SRC, sourceKeyFor('v9', EXPORTER, 3)];
+
+test('templated: a rollup answer is the raw-scan answer over a v9 and an IPFIX journal whose templates came a minute earlier', async () => {
+  const { rig } = await templated;
+  let asked = 0;
+  let rollupMinutes = 0;
+  for (const [label, from, to, counts] of TEMPLATED_RANGES) {
+    for (const n of counts) {
+      for (const source of TEMPLATED_SOURCES) {
+        const { fast, raw } = await askBoth(rig, spec(from, to, n, { sourceKey: source }));
+        assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw), `${label}, ${n} buckets, ${source} (${describe(fast)})`);
+        assert.equal(raw.answeredFrom.rollupMinutes, 0);
+        rollupMinutes += fast.answeredFrom.rollupMinutes;
+        asked++;
+      }
+    }
+  }
+  assert.ok(asked > 60 && rollupMinutes > 0, `asked ${asked}, ${rollupMinutes} minutes from rollups`);
+});
+
+test('templated: focused queries, which read the journal, are the same on both paths', async () => {
+  const { rig } = await templated;
+  for (const [source, focus] of [
+    [V9_1, { kind: 'endpoint', address: '10.4.0.1' }],
+    [V9_1, { kind: 'conversation', srcAddr: '10.4.0.1', dstAddr: '10.4.0.2' }],
+    [IPFIX_5, { kind: 'endpoint', address: '10.4.2.1' }],
+  ] as const) {
+    const { fast, raw } = await askBoth(rig, spec(m(0), m(9), 5, { sourceKey: source, focus }));
+    assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw), `${source} ${focus.kind}`);
+    assert.ok(raw.matchingRecords > 0, `${source} ${focus.kind} matched something`);
+  }
+});
+
+test('templated: the totals of a minute whose templates came earlier equal a sum from the generator\'s list', async () => {
+  const { rig, minute1V9, minute1Ipfix } = await templated;
+  const nine = await askBoth(rig, spec(m(1), m(2), 1, { sourceKey: V9_1 }));
+  assert.equal(nine.fast.buckets[0].reportedOctets, minute1V9);
+  assert.equal(nine.fast.buckets[0].reportedPackets, 30n);
+  assert.equal(nine.fast.matchingRecords, 2);
+  assert.equal(nine.fast.awaitingTemplate, 1, 'the data set of the template nobody sent');
+  assert.ok(nine.fast.answeredFrom.rollupMinutes > 0, 'answered from rollups');
+  // Source id 2 defined layout PO for itself: its 700 octets are 700, not 7.
+  const two = await askBoth(rig, spec(m(1), m(2), 1, { sourceKey: V9_2 }));
+  assert.equal(two.fast.buckets[0].reportedOctets, 700n);
+  assert.equal(two.fast.buckets[0].reportedPackets, 7n);
+  // IPFIX: the tail adds one more record of 37 to minute 1.
+  const ip = await askBoth(rig, spec(m(1), m(2), 1, { sourceKey: IPFIX_5 }));
+  assert.equal(ip.fast.buckets[0].reportedOctets, minute1Ipfix + 37n);
+  assert.equal(ip.fast.matchingRecords, 3);
 });
 
 process.exit((await runAll()) === 0 ? 0 : 1);

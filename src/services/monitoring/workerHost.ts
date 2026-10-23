@@ -29,17 +29,22 @@
  *   journal is a reset or a failure, never a guess.
  */
 import { BundleError, bundleStream, type BundleErrorCode } from './bundle';
+import { planCheckpoints, type CheckpointCandidate, type CheckpointSpacing } from './checkpointPlan';
+import type { NormalizedFlow } from './flowDecode';
 import { StaleGenerationError } from './journal';
+import { ROLLUP_FRAMING } from './journalCodec';
 import { BoundaryCache, runHistoryQuery } from './queries';
 import { encodeMinuteRollup, type Deflate, type Inflate } from './rollupCodec';
-import { EngineAdmission, MinuteAggregator, feedEntry } from './rollup';
+import { EngineAdmission, MinuteAggregator, feedEntry, v5View } from './rollup';
+import { DecodeState, type DecodeStep } from './decodeState';
 import { RuntimeUnavailableError, type HostRuntime } from './runtime';
-import { initialSourceHealth, reduceSourceHealth, type HealthEvent, type SourceHealth } from './sourceHealth';
+import { initialSourceHealth, reduceSourceHealth, type ExporterSnapshot, type HealthEvent, type SourceHealth } from './sourceHealth';
+import { parseSourceKey, sourceKeyFor } from './sourceKeys';
+import { decodeStateBefore } from './stateAt';
 import {
-  DECODER_POLICY_VERSION, LIMITS, type DatagramEvidence, type Evidence, type EvidenceRef, type HistoryReply, type NormalizedV5,
+  ACCEPTED_POLICIES, LIMITS, isReadablePolicy, type DatagramEvidence, type Evidence, type EvidenceRef, type HistoryReply, type NormalizedV5,
   type JournalSnapshot, type QuerySpec, type Snapshot,
 } from './types';
-import { decodeV5, sourceKey } from './v5';
 
 // --- the messages --------------------------------------------------------------------------------------
 
@@ -57,14 +62,14 @@ export type ToMonitoringWorker =
 
 export type RebuildPhase = 'idle' | 'rebuilding' | 'live' | 'failed';
 
-export type DetailFailure = 'stale-generation' | 'not-found' | 'runtime-unavailable' | 'storage-failed' | 'cancelled';
+export type DetailFailure = 'stale-generation' | 'not-found' | 'runtime-unavailable' | 'storage-failed' | 'cancelled' | 'range-too-large';
 
 export type FromMonitoringWorker =
   | { type: 'connect-reply'; requestId: number; ok: true; phase: RebuildPhase; watermark: number }
   | { type: 'connect-reply'; requestId: number; ok: false; code: 'already-connected' | 'runtime-unavailable' | 'storage-failed' | 'cancelled'; message: string }
   | { type: 'query-reply'; requestId: number; reply: HistoryReply }
   | { type: 'cancel-reply'; requestId: number; cancelled: boolean }
-  | { type: 'detail-reply'; requestId: number; ok: true; evidence: DatagramEvidence; record: NormalizedV5 }
+  | { type: 'detail-reply'; requestId: number; ok: true; evidence: DatagramEvidence; record: NormalizedV5 | NormalizedFlow }
   | { type: 'detail-reply'; requestId: number; ok: false; code: DetailFailure; message: string }
   | { type: 'bundle-reply'; requestId: number; ok: true; exportId: number }
   | { type: 'bundle-reply'; requestId: number; ok: false; code: BundleErrorCode; message: string }
@@ -85,8 +90,10 @@ export type FromMonitoringWorker =
    * and only when something besides the clock changed. `health` is null until the first
    * datagram that arrived after the connect names an exporter. `sources` are the engine-form
    * keys this Worker knows (the sidecar's at connect plus every one admitted since), sorted.
+   * `exporters` is the live state of each known v9 or IPFIX source, and empty unless the rollups
+   * are live: a rebuild's state is history's, not the exporter's now.
    */
-  | { type: 'health'; health: SourceHealth | null; sources: string[] };
+  | { type: 'health'; health: SourceHealth | null; sources: string[]; exporters: ExporterSnapshot[] };
 
 export interface HostOptions {
   post(message: FromMonitoringWorker, transfer?: Transferable[]): void;
@@ -115,6 +122,11 @@ export interface HostOptions {
 
 /** How long a loop runs before it yields. */
 const SLICE_MS = 8;
+
+/** A sidecar that holds no watermark yet has decoded nothing: its first watermark names the lowest policy it covers. */
+const LOWEST_POLICY = Math.min(...ACCEPTED_POLICIES);
+
+type DatagramStep = Extract<DecodeStep, { kind: 'datagram' }>;
 
 /**
  * How many times a lost or slow runtime is retried before the rollups are `failed`, with the
@@ -186,6 +198,15 @@ export class MonitoringWorkerHost {
   private phase: RebuildPhase = 'idle';
   private generation = '';
   private aggregator = new MinuteAggregator();
+  // The decode state as of the aggregator's position (ADR 0066). `rebuild` sets it from the newest checkpoint
+  // at or below the watermark before anything is fed; until then, and while `failed`, it is best effort for
+  // the health only and reaches nothing stored.
+  private decodeState = DecodeState.empty();
+  // Checkpoints captured and not yet posted, the spacing the sidecar's own say has reached, and the highest
+  // policy its watermark names: what `postDrained` needs to write what a rebuild would (`checkpointPlan.ts`).
+  private pendingCheckpoints: CheckpointCandidate[] = [];
+  private spacing: CheckpointSpacing = { role1Through: 0, latestMs: 0, storedThrough: 0 };
+  private markPolicy = LOWEST_POLICY;
   private admission = new EngineAdmission();
   private targetEntryId = 0;
   private stopRebuild = false;
@@ -266,7 +287,7 @@ export class MonitoringWorkerHost {
   ): Promise<Awaited<ReturnType<HostRuntime['watermark']>>> {
     let wipe = false;
     if (mark !== null) {
-      if (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION) wipe = true;
+      if (mark.generation !== snapshot.generation || !isReadablePolicy(mark.policyVersion)) wipe = true;
       else if (mark.throughEntryId < snapshot.firstEntryId - 1) wipe = true;
       else if (mark.throughEntryId < await this.newestExpiredBoundary(runtime, snapshot)) wipe = true;
     } else if (snapshot.firstEntryId > 1) {
@@ -377,6 +398,9 @@ export class MonitoringWorkerHost {
     this.targetEntryId = 0;
     this.admission = new EngineAdmission(sources);
     this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
+    this.decodeState = DecodeState.empty(this.aggregator.fedThrough);
+    this.pendingCheckpoints = [];
+    this.markPolicy = mark?.policyVersion ?? LOWEST_POLICY;
     this.runtime = runtime;
     this.phase = status.status === 'failed' || sidecarFault !== null ? 'failed' : 'rebuilding';
     return sidecarFault === null
@@ -495,6 +519,9 @@ export class MonitoringWorkerHost {
       const snapshot = await runtime.snapshot();
       const mark = await this.settleSidecar(runtime, await runtime.watermark(), snapshot);
       this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
+      this.decodeState = DecodeState.empty(this.aggregator.fedThrough);
+      this.pendingCheckpoints = [];
+      this.markPolicy = mark?.policyVersion ?? LOWEST_POLICY;
     } catch (e) {
       this.rollupFault(e);
       return;
@@ -520,11 +547,44 @@ export class MonitoringWorkerHost {
     }
   }
 
+  /**
+   * The decode state as of the aggregator's start, and the checkpoint spacing the sidecar already holds
+   * (ADRs 0064, 0066). Every rebuild begins with a new aggregator, so every rebuild begins here. The
+   * catch-up replays from the newest checkpoint at or below the watermark, not from entry 1, and it is not
+   * held to `replayBytes`: that bound protects a query, and the rollups must be exact.
+   */
+  private async prepareDecode(runtime: HostRuntime, snapshot: JournalSnapshot): Promise<void> {
+    const state = await decodeStateBefore(runtime, snapshot, this.aggregator.fedThrough + 1, this.options.inflate, Infinity);
+    if (state === 'range-too-large') throw new Error('the decode state could not be rebuilt');
+    const stored = await runtime.checkpoints();
+    const cut = runtime.archive === undefined ? null : await runtime.archive.lastCut();
+    const firstRetained = snapshot.firstEntryId;
+    // The base is the archive's last cut, or else the first retained entry (ADR 0066).
+    let baseMs = 0;
+    if (cut !== null && cut.throughEntryId >= firstRetained - 1) {
+      baseMs = cut.throughMs;
+    } else if (snapshot.throughEntryId >= firstRetained) {
+      baseMs = (await runtime.readEvidence({ generation: snapshot.generation, entryId: firstRetained }))?.receivedMs ?? 0;
+    }
+    let role1Through = firstRetained - 1;
+    let latestMs = baseMs;
+    for (const c of stored) {
+      if (c.role === 1) role1Through = Math.max(role1Through, c.throughEntryId);
+      latestMs = Math.max(latestMs, c.throughMs);
+    }
+    this.spacing = { role1Through, latestMs, storedThrough: stored.at(-1)?.throughEntryId ?? 0 };
+    this.pendingCheckpoints = [];
+    this.decodeState = state;
+  }
+
   private async rebuild(): Promise<void> {
     const runtime = this.runtime;
     if (runtime === null || this.phase !== 'rebuilding') return;
     try {
       let snapshot: Snapshot = await runtime.snapshot();
+      if (snapshot.generation !== this.generation) throw new StaleGenerationError(this.generation, snapshot.generation);
+      await this.prepareDecode(runtime, snapshot as JournalSnapshot);
+      if (this.stopRebuild) return;
       for (;;) {
         if (snapshot.generation !== this.generation) throw new StaleGenerationError(this.generation, snapshot.generation);
         this.targetEntryId = snapshot.throughEntryId;
@@ -638,31 +698,58 @@ export class MonitoringWorkerHost {
   /** Posts when anything but the clock differs from the last post (or when forced); the tick calls it once per flush window. */
   private postHealth(force: boolean): void {
     const sources = [...this.knownSources].sort();
-    const signature = JSON.stringify([this.health === null ? null : { ...this.health, elapsedMs: 0 }, sources]);
+    const exporters = this.exporterSnapshots();
+    // A refresh moves only a template's last-seen time: not a change worth a post.
+    const steady = exporters.map((x) => ({ ...x, templates: x.templates.map((t) => ({ ...t, lastSeenMs: 0 })) }));
+    const signature = JSON.stringify([this.health === null ? null : { ...this.health, elapsedMs: 0 }, sources, steady]);
     if (!force && signature === this.lastSignature) return;
     this.lastSignature = signature;
-    this.options.post({ type: 'health', health: this.health, sources });
+    this.options.post({ type: 'health', health: this.health, sources, exporters });
   }
 
-  /** One entry into the aggregator, in strict id order; an id already fed is ignored. */
+  /** The live state of every known v9 or IPFIX source; none while the decode state is a rebuild's or a failed host's. */
+  private exporterSnapshots(): ExporterSnapshot[] {
+    if (this.phase !== 'live') return [];
+    const state = this.decodeState;
+    const inventory = state.store.inventory();
+    const out: ExporterSnapshot[] = [];
+    for (const key of [...this.knownSources].sort()) {
+      const parsed = parseSourceKey(key);
+      if (parsed === null || parsed.protocol === 'v5') continue;
+      out.push({
+        sourceKey: key, protocol: parsed.protocol,
+        templates: inventory.filter((t) => sourceKeyFor(t.scope.protocol, t.scope.exporter, t.scope.domain) === key),
+        sampling: state.exporter.sampling(key), clock: state.exporter.clock(key), sequence: state.exporter.sequence(key),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * One entry into the decode state and the aggregator, in strict id order; an id already fed is ignored.
+   * The candidates for a template checkpoint are taken here, where the state is exactly at them: the
+   * state before a segment's first entry (role 1), and the state after a `stop` (role 2). Whether one is
+   * written is `postDrained`'s decision.
+   */
   private feed(e: Evidence): void {
+    const id = e.ref.entryId;
+    const fresh = id > this.aggregator.fedThrough && this.decodeState.throughEntryId === id - 1;
+    if (fresh && e.segmentFirstId === id && id > 1) {
+      this.pendingCheckpoints.push({ role: 1, throughEntryId: id - 1, throughMs: this.decodeState.throughMs, raw: this.decodeState.checkpoint() });
+    }
     // The aggregator's own steps are `feedEntry`'s, shared with the expiry's replay; the health and
     // the source list are this host's.
-    const fed = feedEntry(this.aggregator, this.admission, e);
-    if (fed === null || e.kind !== 'datagram') return;
-    if (fed.decoded.kind === 'valid' && fed.admitted) {
-      this.knownSources.add(sourceKey(e.remoteIPv4, fed.decoded.engineType, fed.decoded.engineId));
+    const fed = feedEntry(this.aggregator, this.admission, this.decodeState, e);
+    if (e.kind === 'boundary') {
+      if (fresh && e.action === 'stop') {
+        this.pendingCheckpoints.push({ role: 2, throughEntryId: id, throughMs: e.receivedMs, raw: this.decodeState.checkpoint() });
+      }
+      return;
     }
-    this.watch(e, fed.decoded, fed.admitted);
-  }
-
-  /** Engine admission and the source list: the Worker's own facts, replay included, and independent of the aggregator. */
-  private admit(e: DatagramEvidence, decoded: ReturnType<typeof decodeV5>): boolean {
-    if (decoded.kind !== 'valid') return false;
-    const key = sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId);
-    const admitted = this.admission.admit(key);
-    if (admitted) this.knownSources.add(key);
-    return admitted;
+    if (fed === null) return;
+    const d = fed.step.decoded;
+    if (d.kind === 'valid' && fed.admitted) this.knownSources.add(d.sourceKey);
+    this.watch(e, fed.step, fed.admitted);
   }
 
   /**
@@ -671,12 +758,26 @@ export class MonitoringWorkerHost {
    * moment it is fed: the rebuild's later passes read entries that arrived minutes earlier, and
    * a source that went quiet meanwhile must not look fresh for another `staleMs`.
    */
-  private watch(e: DatagramEvidence, decoded: ReturnType<typeof decodeV5>, admitted: boolean): void {
+  private watch(e: DatagramEvidence, step: DatagramStep, admitted: boolean): void {
     const id = e.ref.entryId;
     if (id <= Math.max(this.healthFloor, this.healthThrough)) return;
     this.healthThrough = id;
     const age = Math.max(0, this.options.wallNow() - e.receivedMs);
     const timing = { elapsedMs: this.options.now() - age, wallMs: e.receivedMs };
+    const d = step.decoded;
+    if (d.kind === 'valid' && d.protocol !== 'v5') {
+      let awaitingSets = 0;
+      let awaitingBytes = 0;
+      for (const a of [...d.awaiting, ...d.refused]) { awaitingSets += a.sets; awaitingBytes += a.bytes; }
+      this.observeDatagram(e.remoteIPv4, {
+        kind: 'datagram', outcome: 'valid-template', protocol: d.protocol, sourceKey: d.sourceKey, flowCount: d.flows.length,
+        entryId: id, awaitingSets, awaitingBytes, admitted, ...timing,
+      });
+      // What `ExporterState` saw in it, on the source's row (none without one).
+      if (admitted) for (const event of step.events) this.observe({ ...event, ...timing });
+      return;
+    }
+    const decoded = v5View(d);
     if (decoded.kind === 'valid') {
       this.observeDatagram(e.remoteIPv4, {
         kind: 'datagram', outcome: 'valid', engineType: decoded.engineType, engineId: decoded.engineId,
@@ -695,9 +796,20 @@ export class MonitoringWorkerHost {
   private feedHealthOnly(entries: Evidence[]): void {
     if (this.shuttingDown) return;
     for (const e of entries) {
-      if (e.kind !== 'datagram' || e.ref.generation !== this.generation) continue;
-      const decoded = decodeV5(e, e.remoteIPv4);
-      this.watch(e, decoded, this.admit(e, decoded));
+      if (e.ref.generation !== this.generation) continue;
+      const id = e.ref.entryId;
+      // Stepped already, and watched then if it was past the floor.
+      if (id <= this.decodeState.throughEntryId) continue;
+      // Best effort: after a hole the state never saw what was in it, so it starts again empty rather than step
+      // past it, and v9 data reads as awaiting until its template comes again. Nothing decoded here is stored.
+      if (id !== this.decodeState.throughEntryId + 1) this.decodeState = DecodeState.empty(id - 1);
+      const step = this.decodeState.step(e);
+      if (e.kind !== 'datagram' || step === null || step.kind !== 'datagram') continue;
+      const d = step.decoded;
+      // Engine admission and the source list are the Worker's own facts, independent of the aggregator.
+      const admitted = d.kind === 'valid' && this.admission.admit(d.sourceKey);
+      if (admitted) this.knownSources.add(d.sourceKey);
+      this.watch(e, step, admitted);
     }
   }
 
@@ -705,22 +817,37 @@ export class MonitoringWorkerHost {
     // Whatever has been fed has been analyzed; what is rolled up is what the sidecar acknowledged.
     const live = this.aggregator.fedThrough > this.healthFloor;
     if (live) this.noteWatermark('analyzed', this.aggregator.fedThrough);
-    const drained = this.aggregator.drain();
+    // A checkpoint the watermark has reached is posted even in a batch with no minute (ADR 0066).
+    const pending = this.pendingCheckpoints;
+    const drained = this.aggregator.drain(pending.length === 0 ? undefined : (watermark) => pending[0].throughEntryId <= watermark);
     if (drained === null) return;
+    const watermark = drained.watermark;
+    const geometry = pending.some((c) => c.role === 1 && c.throughEntryId <= watermark)
+      ? await runtime.segmentGeometry({ generation: this.generation, throughEntryId: watermark })
+      : null;
+    const plan = planCheckpoints(pending, watermark, geometry, this.spacing, this.options.deflate, {
+      spacingBytes: LIMITS.checkpointSpacingBytes, stopMs: LIMITS.checkpointStopMs,
+      maxBodyBytes: ROLLUP_FRAMING.maxBodyBytes, maxPerBatch: LIMITS.checkpointsPerAppend,
+    });
+    const decided = pending.length - plan.pending.length;
     const minutes = drained.fragments.map((f) => ({
       sourceKey: f.rollup.sourceKey,
       minuteMs: f.rollup.minuteMs,
       bytes: encodeMinuteRollup(f.rollup, this.options.deflate),
     }));
+    // The highest policy of any minute the watermark covers, and never lower than the last one said (ADR 0066).
+    const policyVersion = drained.fragments.reduce((p, f) => Math.max(p, f.rollup.policy), this.markPolicy);
     try {
-      await runtime.appendMinutes(
-        minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION }, drained.afterEntryId,
-      );
+      await runtime.appendMinutes(minutes, { generation: this.generation, throughEntryId: watermark, policyVersion }, drained.afterEntryId, plan.write);
     } catch (e) {
       // Only the sidecar's refusal; a RangeError from encoding the batch above is thrown before this.
       if (e instanceof RangeError) throw new AppendRefused(e.message);
       throw e;
     }
+    // Candidates taken while the post was out are behind the ones it decided.
+    this.pendingCheckpoints = this.pendingCheckpoints.slice(decided);
+    this.spacing = plan.spacing;
+    this.markPolicy = policyVersion;
     this.refusals = 0;
     // Replay posts to the sidecar too, but it is history and updates nothing (R7.2).
     if (live) this.noteWatermark('rolled-up', drained.watermark);
@@ -831,8 +958,18 @@ export class MonitoringWorkerHost {
       const evidence = await runtime.readEvidence(ref);
       if (evidence === null) return fail('not-found', `no entry ${ref.entryId} in the journal`);
       if (evidence.kind !== 'datagram') return fail('not-found', `entry ${ref.entryId} is a boundary, not a datagram`);
-      const decoded = decodeV5(evidence, evidence.remoteIPv4);
-      const record = decoded.kind === 'valid' ? decoded.flows[recordIndex] : undefined;
+      // A fresh state, never the live one: v9 and IPFIX decode by what came before, and v5 and policy 1 need nothing.
+      const version = evidence.bytes.length >= 2 ? (evidence.bytes[0] << 8) | evidence.bytes[1] : 0;
+      const templated = evidence.policy !== 1 && (version === 9 || version === 10);
+      const state = templated ? await decodeStateBefore(runtime, current, ref.entryId, this.options.inflate) : DecodeState.empty(ref.entryId - 1);
+      if (state === 'range-too-large') {
+        return fail('range-too-large', 'the templates before this record are too far back to replay: the checkpoints that would reach them are missing');
+      }
+      const step = state.step(evidence);
+      const decoded = step !== null && step.kind === 'datagram' ? step.decoded : null;
+      const record = decoded === null || decoded.kind !== 'valid' ? undefined
+        : decoded.protocol === 'v5' ? (decoded.v5?.kind === 'valid' ? decoded.v5.flows[recordIndex] : undefined)
+          : decoded.flows[recordIndex];
       if (record === undefined) return fail('not-found', `entry ${ref.entryId} holds no record ${recordIndex}`);
       post({ type: 'detail-reply', requestId, ok: true, evidence, record });
     } catch (e) {

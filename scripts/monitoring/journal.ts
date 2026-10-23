@@ -26,7 +26,7 @@ import {
   LEGACY_JOURNAL_NAME, MemorySegmentDirectory, SEGMENT_HEADER_BYTES, encodeSegmentHeader, segmentName, type SegmentDirectory,
 } from '../../src/services/monitoring/segments';
 import {
-  DECODER_POLICY_VERSION, FORMAT_VERSION, LIMITS,
+  ACCEPTED_POLICIES, WRITE_POLICY_VERSION, FORMAT_VERSION, LIMITS,
   type BoundaryEvidence, type DatagramEvidence, type Evidence, type MinuteRollup,
 } from '../../src/services/monitoring/types';
 import {
@@ -359,11 +359,11 @@ function journalCases(kind: 'memory' | 'disk'): void {
     assert.equal(r.appended, 5);
     assert.equal(r.snapshot.throughEntryId, 5);
     const expected: Evidence[] = [
-      { kind: 'boundary', ref: { generation: GEN, entryId: 1 }, sessionId: S1, receivedMs: T0 + 5, action: 'start', reason: 'user', droppedDatagrams: null },
-      { kind: 'datagram', ref: { generation: GEN, entryId: 2 }, sessionId: S1, receivedMs: T0 + 6, receiveOrdinal: 2, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40001, bytes: payload },
-      { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: S1, receivedMs: T0 + 7, action: 'gap', reason: 'inbox full', droppedDatagrams: 12 },
-      { kind: 'datagram', ref: { generation: GEN, entryId: 4 }, sessionId: S1, receivedMs: T0 + 8, receiveOrdinal: 4, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40002, bytes: Uint8Array.from([9]) },
-      { kind: 'boundary', ref: { generation: GEN, entryId: 5 }, sessionId: S1, receivedMs: T0 + 9, action: 'stop', reason: 'user', droppedDatagrams: 3 },
+      { kind: 'boundary', ref: { generation: GEN, entryId: 1 }, sessionId: S1, receivedMs: T0 + 5, action: 'start', reason: 'user', droppedDatagrams: null, policy: 2, segmentFirstId: 1 },
+      { kind: 'datagram', ref: { generation: GEN, entryId: 2 }, sessionId: S1, receivedMs: T0 + 6, receiveOrdinal: 2, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40001, bytes: payload, policy: 2, segmentFirstId: 1 },
+      { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: S1, receivedMs: T0 + 7, action: 'gap', reason: 'inbox full', droppedDatagrams: 12, policy: 2, segmentFirstId: 1 },
+      { kind: 'datagram', ref: { generation: GEN, entryId: 4 }, sessionId: S1, receivedMs: T0 + 8, receiveOrdinal: 4, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: '192.0.2.1', remotePort: 40002, bytes: Uint8Array.from([9]), policy: 2, segmentFirstId: 1 },
+      { kind: 'boundary', ref: { generation: GEN, entryId: 5 }, sessionId: S1, receivedMs: T0 + 9, action: 'stop', reason: 'user', droppedDatagrams: 3, policy: 2, segmentFirstId: 1 },
     ];
     const reopened = open(rig.reopen()).journal;
     expected.forEach((e) => assert.deepEqual(reopened.readEvidence(e.ref), e));
@@ -963,7 +963,7 @@ function journalCases(kind: 'memory' | 'disk'): void {
   });
 
   test(tag('unknown format version and unknown decoder-policy version: preserved and refused'), () => {
-    for (const [name, over] of [['format', { formatVersion: FORMAT_VERSION + 1 }], ['policy', { policyVersion: DECODER_POLICY_VERSION + 1 }]] as const) {
+    for (const [name, over] of [['format', { formatVersion: FORMAT_VERSION + 1 }], ['policy', { policyVersion: WRITE_POLICY_VERSION + 1 }]] as const) {
       const rig = newJRig(kind);
       const header = encodeFileHeader(JOURNAL_FRAMING, { generation: GEN_BYTES, createdMs: T0, ...over });
       const tail = encodeEntry(JOURNAL_FRAMING, 1, KIND_BOUNDARY, new TextEncoder().encode('whatever a future decoder wrote'));
@@ -1329,6 +1329,7 @@ function rollup(over: Partial<MinuteRollup> = {}): MinuteRollup {
       { srcAddr: '10.0.0.2', dstAddr: '10.0.0.1', reportedOctets: 0n, reportedPackets: 0n },
     ],
     malformed: 2, unsupported: 1, unknownSamplingRecords: 3,
+    policy: 2, awaitingSets: 0, awaitingBytes: 0, unsupportedTemplateRecords: 0, unsupportedSamplingRecords: 0, samplingInterval: 0, clock: null,
     ...over,
   };
 }
@@ -1338,7 +1339,7 @@ test('rollupCodec: round trip with bigints above 2^53, exactly', () => {
   const bytes = encodeMinuteRollup(r, deflate);
   assert.deepEqual(decodeMinuteRollup(bytes, inflate), r);
   assert.deepEqual(encodeMinuteRollup(r, deflate), bytes, 'deterministic');
-  assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint16(0, true), DECODER_POLICY_VERSION);
+  assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint16(0, true), WRITE_POLICY_VERSION);
 });
 
 test('rollupCodec: an incomplete minute and empty maps', () => {
@@ -1350,31 +1351,52 @@ test('rollupCodec: an incomplete minute and empty maps', () => {
   assert.deepEqual(decodeMinuteRollup(encodeMinuteRollup(unicode, deflate), inflate), unicode);
 });
 
-test('rollupCodec: refuses what it cannot carry or trust', () => {
-  assert.throws(() => encodeMinuteRollup(rollup({ reportedOctets: 2n ** 64n }), deflate), RangeError);
-  assert.throws(() => encodeMinuteRollup(rollup({ reportedOctets: -1n }), deflate), RangeError);
-  assert.throws(() => encodeMinuteRollup(rollup({ records: 1.5 }), deflate), RangeError);
-  const bytes = encodeMinuteRollup(rollup(), deflate);
-  const other = bytes.slice();
-  other[0] = DECODER_POLICY_VERSION + 1;
-  assert.throws(() => decodeMinuteRollup(other, inflate), /version/i);
-  assert.throws(() => decodeMinuteRollup(bytes.subarray(0, 1), inflate));
-  assert.throws(() => decodeMinuteRollup(bytes.subarray(0, bytes.length - 3), inflate));
-  const raw = (rollupBytes: Uint8Array) => { const o = new Uint8Array(2 + rollupBytes.length); o[0] = DECODER_POLICY_VERSION; o.set(rollupBytes, 2); return o; };
-  // A count that promises more than the body holds is refused before allocating.
-  const lying = inflate(bytes.subarray(2), MAX_ROLLUP_INFLATED_BYTES).slice();
-  const dv = new DataView(lying.buffer);
-  // The endpoint count is followed by the first endpoint, 10.0.0.1: 2 as a u32, then 0a 00 00 01.
-  let patched = false;
-  for (let off = 0; off + 8 <= lying.length; off++) {
-    if (dv.getUint32(off, true) === 2 && lying[off + 4] === 10 && lying[off + 5] === 0 && lying[off + 6] === 0 && lying[off + 7] === 1) {
-      dv.setUint32(off, 0xffffffff, true);
-      patched = true;
-      break;
+for (const policy of ACCEPTED_POLICIES) {
+  test(`rollupCodec: refuses what it cannot carry or trust (policy ${policy})`, () => {
+    const base = policy === 1
+      ? { policy, awaitingSets: 0, awaitingBytes: 0, unsupportedTemplateRecords: 0, unsupportedSamplingRecords: 0, samplingInterval: 0, clock: null }
+      : { policy };
+    assert.throws(() => encodeMinuteRollup(rollup({ ...base, reportedOctets: 2n ** 64n }), deflate), RangeError);
+    assert.throws(() => encodeMinuteRollup(rollup({ ...base, reportedOctets: -1n }), deflate), RangeError);
+    assert.throws(() => encodeMinuteRollup(rollup({ ...base, records: 1.5 }), deflate), RangeError);
+    const bytes = encodeMinuteRollup(rollup(base), deflate);
+    const other = bytes.slice();
+    other[0] = WRITE_POLICY_VERSION + 1;
+    assert.throws(() => decodeMinuteRollup(other, inflate), /version/i);
+    assert.throws(() => decodeMinuteRollup(bytes.subarray(0, 1), inflate));
+    assert.throws(() => decodeMinuteRollup(bytes.subarray(0, bytes.length - 3), inflate));
+    const raw = (rollupBytes: Uint8Array) => { const o = new Uint8Array(2 + rollupBytes.length); o[0] = policy; o.set(rollupBytes, 2); return o; };
+    // A count that promises more than the body holds is refused before allocating.
+    const lying = inflate(bytes.subarray(2), MAX_ROLLUP_INFLATED_BYTES).slice();
+    const dv = new DataView(lying.buffer);
+    // The endpoint count is followed by the first endpoint, 10.0.0.1: 2 as a u32, then (policy 2: its length, 04) 0a 00 00 01.
+    const first = policy === 1 ? [10, 0, 0, 1] : [4, 10, 0, 0, 1];
+    let patched = false;
+    for (let off = 0; off + 4 + first.length <= lying.length; off++) {
+      if (dv.getUint32(off, true) === 2 && first.every((b, i) => lying[off + 4 + i] === b)) {
+        dv.setUint32(off, 0xffffffff, true);
+        patched = true;
+        break;
+      }
     }
-  }
-  assert.ok(patched, 'the test found the endpoint count');
-  assert.throws(() => decodeMinuteRollup(raw(deflate(lying)), inflate));
+    assert.ok(patched, 'the test found the endpoint count');
+    assert.throws(() => decodeMinuteRollup(raw(deflate(lying)), inflate));
+  });
+}
+
+test('rollupCodec: a policy-1 minute cannot carry a policy-2 field, and a policy-2 minute keeps IPv6 addresses', () => {
+  assert.throws(() => encodeMinuteRollup(rollup({ policy: 1, awaitingSets: 1 }), deflate), RangeError);
+  assert.throws(() => encodeMinuteRollup(rollup({ policy: 1, endpoints: [{ address: '2001:db8::1', sentOctets: 1n, receivedOctets: 0n }], conversations: [] }), deflate), RangeError);
+  const v6 = rollup({
+    policy: 2, awaitingSets: 3, awaitingBytes: 900, unsupportedTemplateRecords: 4, unsupportedSamplingRecords: 5,
+    samplingInterval: 0xffffffff, clock: { minSkewMs: -1500, maxSkewMs: 2500, lastSkewMs: 7 },
+    endpoints: [
+      { address: '10.0.0.1', sentOctets: 1n, receivedOctets: 0n },
+      { address: '2001:db8::1', sentOctets: 0n, receivedOctets: 1n },
+    ],
+    conversations: [{ srcAddr: '10.0.0.1', dstAddr: '2001:db8::1', reportedOctets: 1n, reportedPackets: 1n }],
+  });
+  assert.deepEqual(decodeMinuteRollup(encodeMinuteRollup(v6, deflate), inflate), v6);
 });
 
 test('rollupCodec: the inflate bound is computed and the key budget is a total of endpoints and conversations', () => {
@@ -1392,26 +1414,35 @@ test('rollupCodec: the inflate bound is computed and the key budget is a total o
   assert.throws(() => encodeMinuteRollup(rollup({ endpoints: Array.from({ length: half + 1 }, (_, i) => ep(i)), conversations: Array.from({ length: half }, (_, i) => cv(i)) }), deflate), RangeError);
 
   // A hand-built body whose counts are over budget but honest about the bytes they carry is refused by the decoder.
-  const handBuilt = (endpoints: number, conversations: number): Uint8Array => {
+  // Policy 1: 4-byte addresses. Policy 2: four more counters and the sampling interval, and each address is
+  // preceded by its length (zero bytes here, so every row's addresses are 4 zero bytes after a 4).
+  const handBuilt = (policy: number, endpoints: number, conversations: number): Uint8Array => {
     const key = new TextEncoder().encode('k');
-    const raw = new Uint8Array(1 + 2 + key.length + 56 + 4 + endpoints * 20 + 4 + conversations * 24);
+    const fixed = policy === 1 ? 56 : 56 + 32 + 4;
+    const ep = policy === 1 ? 20 : 21;
+    const cv = policy === 1 ? 24 : 26;
+    const raw = new Uint8Array(1 + 2 + key.length + fixed + 4 + endpoints * ep + 4 + conversations * cv);
     const v = new DataView(raw.buffer);
     let at = 0;
     raw[at++] = 1;
     v.setUint16(at, key.length, true); at += 2;
     raw.set(key, at); at += key.length;
-    at += 56;
-    v.setUint32(at, endpoints, true); at += 4 + endpoints * 20;
-    v.setUint32(at, conversations, true);
+    at += fixed;
+    v.setUint32(at, endpoints, true); at += 4;
+    for (let i = 0; i < endpoints; i++) { if (policy !== 1) raw[at] = 4; at += ep; }
+    v.setUint32(at, conversations, true); at += 4;
+    for (let i = 0; i < conversations; i++) { if (policy !== 1) { raw[at] = 4; raw[at + 5] = 4; } at += cv; }
     const out = new Uint8Array(2 + deflate(raw).length);
-    new DataView(out.buffer).setUint16(0, DECODER_POLICY_VERSION, true);
+    new DataView(out.buffer).setUint16(0, policy, true);
     out.set(deflate(raw), 2);
     return out;
   };
-  assert.doesNotThrow(() => decodeMinuteRollup(handBuilt(half, half), inflate), 'the control: exactly the budget decodes');
-  assert.throws(() => decodeMinuteRollup(handBuilt(budget + 1, 0), inflate), /endpoints/, 'endpoints alone over budget');
-  assert.throws(() => decodeMinuteRollup(handBuilt(0, budget + 1), inflate), /endpoints and conversations/, 'conversations alone over budget');
-  assert.throws(() => decodeMinuteRollup(handBuilt(half + 1, half), inflate), /endpoints and conversations/, 'the total is what is held to the budget');
+  for (const policy of ACCEPTED_POLICIES) {
+    assert.doesNotThrow(() => decodeMinuteRollup(handBuilt(policy, half, half), inflate), `the control: exactly the budget decodes (policy ${policy})`);
+    assert.throws(() => decodeMinuteRollup(handBuilt(policy, budget + 1, 0), inflate), /endpoints/, `endpoints alone over budget (policy ${policy})`);
+    assert.throws(() => decodeMinuteRollup(handBuilt(policy, 0, budget + 1), inflate), /endpoints and conversations/, `conversations alone over budget (policy ${policy})`);
+    assert.throws(() => decodeMinuteRollup(handBuilt(policy, half + 1, half), inflate), /endpoints and conversations/, `the total is what is held to the budget (policy ${policy})`);
+  }
 
   // The codec hands the inflate its bound, and refuses an inflate that ignores it.
   const good = encodeMinuteRollup(rollup(), deflate);
@@ -1421,7 +1452,7 @@ test('rollupCodec: the inflate bound is computed and the key budget is a total o
   assert.throws(() => decodeMinuteRollup(good, () => new Uint8Array(MAX_ROLLUP_INFLATED_BYTES + 1)), /inflates past/);
   // A real bomb: a few kilobytes that inflate to megabytes are stopped by the inflate's own limit.
   const bomb = new Uint8Array(2 + deflateRawSync(new Uint8Array(MAX_ROLLUP_INFLATED_BYTES * 4)).length);
-  new DataView(bomb.buffer).setUint16(0, DECODER_POLICY_VERSION, true);
+  new DataView(bomb.buffer).setUint16(0, WRITE_POLICY_VERSION, true);
   bomb.set(deflateRawSync(new Uint8Array(MAX_ROLLUP_INFLATED_BYTES * 4)), 2);
   assert.ok(bomb.length < 50_000, 'the bomb is small on disk');
   assert.throws(() => decodeMinuteRollup(bomb, inflate));
@@ -1429,8 +1460,8 @@ test('rollupCodec: the inflate bound is computed and the key budget is a total o
 
 // --- the sidecar ---------------------------------------------------------------------------------
 
-const JOURNAL_INFO = { generation: GEN, throughEntryId: 100, policyVersion: DECODER_POLICY_VERSION };
-const WM = (through: number) => ({ generation: GEN, throughEntryId: through, policyVersion: DECODER_POLICY_VERSION });
+const JOURNAL_INFO = { generation: GEN, throughEntryId: 100 };
+const WM = (through: number) => ({ generation: GEN, throughEntryId: through, policyVersion: WRITE_POLICY_VERSION });
 const MIN = 60_000;
 const M0 = Math.floor(T0 / MIN) * MIN;
 const mb = (n: number, len = 40) => Uint8Array.from({ length: len }, (_, i) => (n * 31 + i) & 0xff);
@@ -1626,7 +1657,6 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     const cases: [string, ReturnType<typeof openStore>][] = [
       ['past the journal', openStore(rig.reopen(), { ...JOURNAL_INFO, throughEntryId: 59 })],
       ['wrong generation', openStore(rig.reopen(), { ...JOURNAL_INFO, generation: 'b'.repeat(32) })],
-      ['wrong policy', openStore(rig.reopen(), { ...JOURNAL_INFO, policyVersion: DECODER_POLICY_VERSION + 1 })],
     ];
     for (const [name, r] of cases) {
       assert.equal(r.status, 'rebuild-required', name);
@@ -1757,7 +1787,7 @@ test('volume: opens both files under a temp root, creates the directory, plain t
     journal.append([bnd('start', S1, T0), dg(T0 + 1, [4, 5, 6])]);
     assert.deepEqual(volume.segments.list(), [segmentName(1)]);
     assert.equal(existsSync(path.join(root, 'journal.iwmj')), false, 'the milestone-1 name is only ever read');
-    const store = RollupStore.open(volume.rollups, { generation: GEN, throughEntryId: 2, policyVersion: DECODER_POLICY_VERSION });
+    const store = RollupStore.open(volume.rollups, { generation: GEN, throughEntryId: 2 });
     store.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(2), 0);
     assert.ok(statSync(path.join(root, segmentName(1))).size > SEGMENT_HEADER_BYTES);
   } finally {
@@ -1848,7 +1878,7 @@ function timeIndexCases(kind: 'memory' | 'disk'): void {
     assert.deepEqual(ids(all), [1, 3, 5, 6]);
     assert.equal(all.done, true);
     assert.equal(all.nextAfterId, 7, 'complete through the snapshot, whatever the ids in between held');
-    assert.deepEqual(all.entries[1], { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: S1, receivedMs: T0 + 2, action: 'gap', reason: 'inbox full', droppedDatagrams: 5 });
+    assert.deepEqual(all.entries[1], { kind: 'boundary', ref: { generation: GEN, entryId: 3 }, sessionId: S1, receivedMs: T0 + 2, action: 'gap', reason: 'inbox full', droppedDatagrams: 5, policy: 2, segmentFirstId: 1 });
     // Paging by two.
     const p1 = journal.readBoundaries(snap, 0, 2);
     assert.deepEqual([ids(p1), p1.done, p1.nextAfterId], [[1, 3], false, 3]);

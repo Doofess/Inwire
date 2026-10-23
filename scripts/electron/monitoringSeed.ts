@@ -26,7 +26,7 @@ import { MonitoringJournal, type EvidenceInput } from '../../src/services/monito
 import { planExpiry } from '../../src/services/monitoring/retention';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { isSegmentFileName } from '../../src/services/monitoring/segments';
-import { DECODER_POLICY_VERSION, LIMITS } from '../../src/services/monitoring/types';
+import { LIMITS } from '../../src/services/monitoring/types';
 import { dgram, deflate, MIN, S1, start, stop } from '../monitoring/queryRig';
 import { EXPORTER } from '../monitoring/fixtures';
 
@@ -132,7 +132,7 @@ function build(folder: string, inputs: EvidenceInput[], expireThroughMs: number 
       const archive = ArchiveStore.open(volume.archive, { generation: GENERATION, createdMs: first });
       const cache = RollupStore.open(
         volume.rollups,
-        { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION },
+        { generation: snap.generation, throughEntryId: snap.throughEntryId },
         { nowMs: () => first },
       );
       // An age plan: a one-day retention judged on a clock a day past the cut drops exactly what ends before it.

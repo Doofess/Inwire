@@ -19,7 +19,7 @@ import { runHistoryQuery, type QueryOptions } from '../../src/services/monitorin
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import type { HostRuntime } from '../../src/services/monitoring/runtime';
 import {
-  DECODER_POLICY_VERSION, LIMITS, type BoundaryAction, type Evidence, type HistoryReply, type HistoryResult, type QuerySpec,
+  LIMITS, type BoundaryAction, type Evidence, type HistoryReply, type HistoryResult, type QuerySpec,
 } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import {
@@ -70,10 +70,10 @@ export function junk(receivedMs: number, remoteIPv4 = EXPORTER): EvidenceInput {
   };
 }
 
-/** A NetFlow version this build does not read: it decodes as unsupported. */
-export function v9(receivedMs: number, remoteIPv4 = EXPORTER): EvidenceInput {
+/** A NetFlow version no policy reads (v7): it decodes as unsupported. A v9 header is read under policy 2. */
+export function unreadVersion(receivedMs: number, remoteIPv4 = EXPORTER): EvidenceInput {
   const bytes = new Uint8Array(24);
-  bytes[1] = 9;
+  bytes[1] = 7;
   return { kind: 'datagram', receivedMs, localIPv4: COLLECTOR, localPort: 2055, remoteIPv4, remotePort: 40_000, bytes };
 }
 
@@ -147,7 +147,7 @@ export class Rig {
     const snap = this.journal.snapshot();
     const r = RollupStore.open(
       this.sfile,
-      { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION },
+      { generation: snap.generation, throughEntryId: snap.throughEntryId },
       { nowMs: () => NOW },
     );
     this.sidecarStatus = r.status;

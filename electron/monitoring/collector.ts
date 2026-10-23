@@ -57,7 +57,7 @@ import { isSegmentFileName, type SegmentInfo } from '../../src/services/monitori
 import { RuntimeUnavailableError, archiveOf, type DatasetMeta, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { serveRuntime, type RpcPort, type RuntimeServer } from '../../src/services/monitoring/runtimeRpc';
 import type { ListenerState } from '../../src/services/monitoring/sourceHealth';
-import { DECODER_POLICY_VERSION, LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
+import { LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
 
 // --- what is injected -------------------------------------------------------------------------
 
@@ -389,8 +389,13 @@ export class Collector {
     readMinutes: async (sourceKey, from, to, maxBytes) => this.local().readMinutes(
       sourceKey, from, to, clampSize(maxBytes, LIMITS.rollupReadBytes),
     ),
+    // Small: a segment per row, and the checkpoints' index without their bytes. One checkpoint is bounded by
+    // one sidecar entry body (`ROLLUP_FRAMING`), which the sidecar's scan holds it to.
+    segmentGeometry: async (snapshot) => this.local().segmentGeometry(snapshot),
     sources: async () => this.local().sources(),
-    appendMinutes: async (minutes, watermark, afterEntryId) => this.local().appendMinutes(minutes, watermark, afterEntryId),
+    checkpoints: async () => this.local().checkpoints(),
+    readCheckpoint: async (throughEntryId) => this.local().readCheckpoint(throughEntryId),
+    appendMinutes: async (minutes, watermark, afterEntryId, checkpoints) => this.local().appendMinutes(minutes, watermark, afterEntryId, checkpoints),
     rollupStatus: async () => this.local().rollupStatus(),
     resetRollups: async () => this.local().resetRollups(),
     // The evidence bundle (ADR 0063): raw pages are bounded like `readPage`; the slice and the dataset's identity
@@ -732,7 +737,7 @@ export class Collector {
       const archive = archiveHex === snapshot.generation && archiveStatus !== 'corrupt' && archiveStatus !== 'failed' ? holder.archive : null;
 
       const opened = RollupStore.open(volume.rollups, {
-        generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
+        generation: snapshot.generation, throughEntryId: snapshot.throughEntryId,
       }, { nowMs: this.env.now, readOnly: false });
       holder.rollups = opened.store;
       const writable = journal.state === 'open';
@@ -788,7 +793,7 @@ export class Collector {
         ? ArchiveStore.open(unwritable(folder.archive!), { generation: new Uint8Array(16), createdMs: this.env.now() }).store
         : null;
       const rollups = RollupStore.open(NO_SIDECAR, {
-        generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
+        generation: snapshot.generation, throughEntryId: snapshot.throughEntryId,
       }, { nowMs: this.env.now, readOnly: true });
       // Only a dataset.json that is this journal's names it; without one the bundle has no identity to write.
       const meta: DatasetMeta | undefined = look.file !== null && look.file.generation === snapshot.generation

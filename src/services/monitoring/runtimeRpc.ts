@@ -34,7 +34,7 @@ import {
   type ArchiveSource, type DatasetMeta, type HostRuntime, type LiveMessage, type ReopenedMessage,
 } from './runtime';
 import type { ArchiveCut } from './archive';
-import type { BundleSlice, Evidence, RawEntry, RawPage } from './types';
+import type { BundleSlice, CheckpointInfo, Evidence, RawEntry, RawPage, SegmentGeometry } from './types';
 
 export interface RpcPort {
   postMessage(message: unknown): void;
@@ -68,12 +68,12 @@ export function domPort(port: PortLike): RpcPort {
 type ArchiveMethod = 'archive.read' | 'archive.coveredThroughMs' | 'archive.lastCut' | 'archive.sources' | 'archive.cuts' | 'archive.summary';
 
 type Method =
-  | 'snapshot' | 'readPage' | 'readRawPage' | 'bundleSlice' | 'readEvidence' | 'locate' | 'readBoundaries' | 'watermark' | 'readMinutes'
-  | 'sources' | 'appendMinutes' | 'rollupStatus' | 'resetRollups' | 'dataset' | ArchiveMethod;
+  | 'snapshot' | 'readPage' | 'readRawPage' | 'bundleSlice' | 'readEvidence' | 'locate' | 'readBoundaries' | 'segmentGeometry' | 'watermark'
+  | 'readMinutes' | 'sources' | 'checkpoints' | 'readCheckpoint' | 'appendMinutes' | 'rollupStatus' | 'resetRollups' | 'dataset' | ArchiveMethod;
 
 const METHODS: ReadonlySet<string> = new Set<Method>([
-  'snapshot', 'readPage', 'readRawPage', 'bundleSlice', 'readEvidence', 'locate', 'readBoundaries', 'watermark', 'readMinutes',
-  'sources', 'appendMinutes', 'rollupStatus', 'resetRollups', 'dataset',
+  'snapshot', 'readPage', 'readRawPage', 'bundleSlice', 'readEvidence', 'locate', 'readBoundaries', 'segmentGeometry', 'watermark',
+  'readMinutes', 'sources', 'checkpoints', 'readCheckpoint', 'appendMinutes', 'rollupStatus', 'resetRollups', 'dataset',
   'archive.read', 'archive.coveredThroughMs', 'archive.lastCut', 'archive.sources', 'archive.cuts', 'archive.summary',
 ]);
 
@@ -106,6 +106,15 @@ const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isS
 // --- what a reply must look like -----------------------------------------------------------------------------
 // A reply is data from another process: the calls that carry a body or a count are checked on arrival, and one
 // that is not what its method returns is `RuntimeUnavailableError`, never a value the bundle would write.
+
+function isGeometry(v: unknown): v is SegmentGeometry {
+  return isObject(v) && isCount(v.firstEntryId) && isCount(v.lastEntryId) && v.lastEntryId >= v.firstEntryId
+    && isCount(v.bytes) && isCount(v.policy);
+}
+
+function isCheckpointInfo(v: unknown): v is CheckpointInfo {
+  return isObject(v) && (v.role === 1 || v.role === 2) && isCount(v.throughEntryId) && isCount(v.throughMs);
+}
 
 function isRawEntry(v: unknown): v is RawEntry {
   return isObject(v) && isCount(v.entryId) && (v.kind === 1 || v.kind === 2) && isCount(v.policy) && isCount(v.receivedMs) && v.body instanceof Uint8Array;
@@ -312,10 +321,16 @@ export function createRuntimeClient(port: RpcPort, options: ClientOptions): Host
     readEvidence: (ref) => call('readEvidence', ref),
     locate: (snapshot, fromMs, toMs) => call('locate', snapshot, fromMs, toMs),
     readBoundaries: (snapshot, afterId, maxEntries) => call('readBoundaries', snapshot, afterId, maxEntries),
+    segmentGeometry: async (snapshot) =>
+      checked<SegmentGeometry[]>('segmentGeometry', await call('segmentGeometry', snapshot), (v) => Array.isArray(v) && v.every(isGeometry)),
     watermark: () => call('watermark'),
     readMinutes: (sourceKey, from, to, maxBytes) => call('readMinutes', sourceKey, from, to, maxBytes),
     sources: () => call('sources'),
-    appendMinutes: (minutes, watermark, afterEntryId) => call('appendMinutes', minutes, watermark, afterEntryId),
+    checkpoints: async () =>
+      checked<CheckpointInfo[]>('checkpoints', await call('checkpoints'), (v) => Array.isArray(v) && v.every(isCheckpointInfo)),
+    readCheckpoint: async (throughEntryId) =>
+      checked<Uint8Array | null>('readCheckpoint', await call('readCheckpoint', throughEntryId), (v) => v === null || v instanceof Uint8Array),
+    appendMinutes: (minutes, watermark, afterEntryId, checkpoints = []) => call('appendMinutes', minutes, watermark, afterEntryId, checkpoints),
     rollupStatus: () => call('rollupStatus'),
     resetRollups: () => call('resetRollups'),
     onLive: (handler) => { live.push(handler); },

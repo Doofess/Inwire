@@ -30,16 +30,17 @@ import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, domPort, serveRuntime } from '../../src/services/monitoring/runtimeRpc';
 import {
-  DECODER_POLICY_VERSION, LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type JournalSnapshot, type Snapshot, type SegmentSource,
+  LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type JournalSnapshot, type Snapshot, type SegmentSource,
   type HistoryResult,
 } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import type { FromMonitoringWorker } from '../../src/services/monitoring/workerHost';
 import {
   BASE, FlakyDirectory, HostRig, MIN, NOW, Rig, S1, S2, SRC, SRC1, ask, askBoth, askOk, deflate, dgram, inflate, junk, rollUp, runAll, spec, start, stop,
-  test, v9, waitTick, withoutProvenance, boundary,
+  test, unreadVersion, waitTick, withoutProvenance, boundary,
 } from './queryRig';
-import { EXPORTER } from './fixtures';
+import { COLLECTOR, EXPORTER, be, dataSet, ipfixMessage, templateRecord, templateSet, v9Message, type WireField } from './fixtures';
+import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
 
 const m = (n: number, off = 0): number => BASE + n * MIN + off;
 const OTHER = '192.0.2.9';
@@ -257,7 +258,7 @@ test('sources: an engine, another engine and another exporter are three differen
     junk(m(1, 3000)),
     junk(m(1, 4000)),
     junk(m(1, 5000), OTHER),
-    v9(m(1, 6000)),
+    unreadVersion(m(1, 6000)),
   ]);
   const a = await check(rig, spec(m(0), m(3), 3));
   const b = await check(rig, spec(m(0), m(3), 3, { sourceKey: SRC1 }));
@@ -926,7 +927,7 @@ function failedSidecarRuntime(rig: Rig): { runtime: LocalRuntime; status: string
   const snap = rig.journal.snapshot();
   const opened = RollupStore.open(
     new FailingWrites(),
-    { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION },
+    { generation: snap.generation, throughEntryId: snap.throughEntryId },
     { nowMs: () => NOW },
   );
   const runtime = new LocalRuntime(rig.journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
@@ -1546,7 +1547,7 @@ test('degraded: a fault of the sidecar after a chunk was folded and with a real 
   for (let i = 0; i < 100; i++) {
     first.push(dgram(m(i, 1000), [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 100 + i, packets: 1 }, { src: '10.0.0.3', dst: '10.0.0.1', octets: 7, packets: 2 }]));
     if (i % 7 === 0) first.push(junk(m(i, 2000)));
-    if (i % 11 === 0) first.push(v9(m(i, 3000)));
+    if (i % 11 === 0) first.push(unreadVersion(m(i, 3000)));
   }
   rig.append(first);
   const host = await rollUp(rig);
@@ -1735,6 +1736,7 @@ test('inflate: the codec round-trips through it, and a stored rollup that lies a
     endpoints: [{ address: '10.0.0.1', sentOctets: 1000n, receivedOctets: 500n }],
     conversations: [{ srcAddr: '10.0.0.1', dstAddr: '10.0.0.2', reportedOctets: 1500n, reportedPackets: 12n }],
     malformed: 1, unsupported: 2, unknownSamplingRecords: 1,
+    policy: 2, awaitingSets: 0, awaitingBytes: 0, unsupportedTemplateRecords: 0, unsupportedSamplingRecords: 0, samplingInterval: 0, clock: null,
   };
   const stored = encodeMinuteRollup(rollup, deflate);
   assert.deepEqual(decodeMinuteRollup(stored, boundedInflate), rollup);
@@ -2611,6 +2613,75 @@ test('the recorded exporter survives the expiry of the only start boundary', asy
   const kept = await rig.runtime.readBoundaries(snap, snap.firstEntryId - 1, 100);
   assert.ok(!kept.entries.some((b) => b.action === 'start'), 'the start went with the first segment');
   assert.deepEqual(recordedSource(kept.entries), EXP_SOURCE);
+});
+
+
+// --- v9 and IPFIX through the same queries -----------------------------------------------------------------------
+
+const QF: WireField[] = [{ type: 8, length: 4 }, { type: 12, length: 4 }, { type: 1, length: 4 }, { type: 2, length: 4 }];
+let qseq = 0;
+const qrec = (src: string, dst: string, octets: number, packets: number): number[] =>
+  [...be.ipv4(src), ...be.ipv4(dst), ...be.u32(octets), ...be.u32(packets)];
+function v9At(ms: number, sets: number[][], id = 1): EvidenceInput {
+  const bytes = v9Message({ uptime: ms - BASE + 1_000_000, secs: Math.floor(ms / 1000), sequence: qseq++, sourceId: id }, sets);
+  return { kind: 'datagram', receivedMs: ms, localIPv4: COLLECTOR, localPort: 2055, remoteIPv4: EXPORTER, remotePort: 40_000, bytes };
+}
+function ipfixAt(ms: number, sets: number[][], domain = 1): EvidenceInput {
+  const bytes = ipfixMessage({ secs: Math.floor(ms / 1000), sequence: qseq++, domain }, sets);
+  return { kind: 'datagram', receivedMs: ms, localIPv4: COLLECTOR, localPort: 4739, remoteIPv4: EXPORTER, remotePort: 40_000, bytes };
+}
+
+test('templated tables: a v9 and an IPFIX source list directional rows, ties by address as a number, and are separate histories from a v5 engine', async () => {
+  const rig = new Rig();
+  const V9K = sourceKeyFor('v9', EXPORTER, 1);
+  const IPK = sourceKeyFor('ipfix', EXPORTER, 1);
+  rig.append([
+    start(m(0), S1),
+    v9At(m(0, 1000), [templateSet(9, [templateRecord(9, 256, QF)]), dataSet(256, [qrec('10.0.0.9', '10.0.0.1', 500, 5), qrec('10.0.0.10', '10.0.0.1', 500, 5)])]),
+    ipfixAt(m(0, 2000), [templateSet(10, [templateRecord(10, 256, QF)]), dataSet(256, [qrec('10.0.0.1', '10.0.0.9', 70, 7)])]),
+    dgram(m(0, 3000), [{ src: '10.0.0.1', dst: '10.0.0.9', octets: 11, packets: 1 }]),
+    stop(m(0, 4000), S1),
+  ]);
+  const nine = await askBoth(rig, spec(m(0), m(1), 1, { sourceKey: V9K }));
+  assert.deepEqual(withoutProvenance(nine.fast), withoutProvenance(nine.raw));
+  assert.equal(nine.raw.buckets[0].reportedOctets, 1000n);
+  assert.equal(nine.raw.conversations.status, 'ok');
+  if (nine.raw.conversations.status === 'ok') {
+    assert.deepEqual(nine.raw.conversations.rows.map((r) => r.srcAddr), ['10.0.0.9', '10.0.0.10'], 'equal octets: 9 before 10, not "10" before "9"');
+  }
+  const ip = await askBoth(rig, spec(m(0), m(1), 1, { sourceKey: IPK }));
+  assert.deepEqual(withoutProvenance(ip.fast), withoutProvenance(ip.raw));
+  assert.equal(ip.raw.buckets[0].reportedOctets, 70n);
+  const five = await askBoth(rig, spec(m(0), m(1), 1));
+  assert.deepEqual(withoutProvenance(five.fast), withoutProvenance(five.raw));
+  assert.equal(five.raw.buckets[0].reportedOctets, 11n, 'the v5 engine sees only its own datagram');
+});
+
+test('budget: the replay that rebuilds the templates is not counted against the raw scan\'s datagram budget', async () => {
+  const limits = LIMITS as unknown as { rawQueryDatagrams: number };
+  const saved = limits.rawQueryDatagrams;
+  try {
+    const rig = new Rig();
+    const inputs: EvidenceInput[] = [start(m(0), S1), v9At(m(0, 1000), [templateSet(9, [templateRecord(9, 256, QF)])])];
+    for (let i = 0; i < 600; i++) inputs.push(v9At(m(0, 2000 + i), [dataSet(256, [qrec('10.0.0.1', '10.0.0.2', 1, 1)])]));
+    for (let i = 0; i < 10; i++) inputs.push(v9At(m(1, 1000 + i), [dataSet(256, [qrec('10.0.0.3', '10.0.0.4', 2, 1)])]));
+    inputs.push(stop(m(1, 5000), S1));
+    rig.append(inputs);
+    limits.rawQueryDatagrams = 50;
+    const window = spec(m(1), m(2), 1, { sourceKey: sourceKeyFor('v9', EXPORTER, 1) });
+    const narrow = await ask(rig, window, { forceRaw: true });
+    assert.ok(narrow.ok, narrow.ok ? '' : narrow.message);
+    if (narrow.ok) {
+      assert.equal(narrow.value.matchingRecords, 10, 'the window is read with the templates the replay rebuilt');
+      assert.equal(narrow.value.awaitingTemplate, 0);
+      assert.equal(narrow.value.buckets[0].reportedOctets, 20n);
+    }
+    // The window itself is still bounded by the budget.
+    const wide = await ask(rig, spec(m(0), m(2), 1, { sourceKey: sourceKeyFor('v9', EXPORTER, 1) }), { forceRaw: true });
+    assert.ok(!wide.ok && wide.code === 'range-too-large');
+  } finally {
+    limits.rawQueryDatagrams = saved;
+  }
 });
 
 process.exit((await runAll()) === 0 ? 0 : 1);

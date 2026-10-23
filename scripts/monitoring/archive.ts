@@ -20,6 +20,7 @@ import { ENTRY_HEADER_BYTES, FILE_HEADER_BYTES, encodeEntry } from '../../src/se
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan } from '../../src/services/monitoring/retention';
 import { EngineAdmission, MinuteAccumulator, MinuteAggregator, feedEntry, minuteOf } from '../../src/services/monitoring/rollup';
+import { DecodeState } from '../../src/services/monitoring/decodeState';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
 import type { Evidence, MinuteRollup, SegmentSource } from '../../src/services/monitoring/types';
@@ -201,7 +202,7 @@ test('append refuses what the archive could not read back, and writes nothing', 
     assert.equal(hex(bytesOf(file)), hex(before));
   };
   bad([VECTOR_MINUTE], { ...VECTOR_CUT, fragments: 2 });
-  bad([{ ...VECTOR_MINUTE, policyVersion: 2, bytes: fromHex('02 00 de ad') }], VECTOR_CUT);
+  bad([{ ...VECTOR_MINUTE, policyVersion: 3, bytes: fromHex('03 00 de ad') }], VECTOR_CUT);
   bad([{ ...VECTOR_MINUTE, policyVersion: 1, bytes: fromHex('02 00 de ad') }], VECTOR_CUT);
   bad([VECTOR_MINUTE], { ...VECTOR_CUT, throughEntryId: 0 });
   bad([VECTOR_MINUTE], { ...VECTOR_CUT, throughMs: VECTOR_CUT.fromMs - 1 });
@@ -263,14 +264,15 @@ function readFrom(rig: Rig, afterId: number): Evidence[] {
 function rollUpEntries(entries: Evidence[], afterId: number, known: string[]): { rollup: MinuteRollup; bytes: Uint8Array }[] {
   const agg = new MinuteAggregator(afterId);
   const admission = new EngineAdmission(known);
-  for (const e of entries) feedEntry(agg, admission, e);
+  const state = DecodeState.empty(afterId);
+  for (const e of entries) feedEntry(agg, admission, state, e);
   agg.seal(Infinity);
   const drained = agg.drain();
   return (drained?.fragments ?? []).map((f) => ({ rollup: f.rollup, bytes: encodeMinuteRollup(f.rollup, deflate) }));
 }
 
 function merge(rollups: MinuteRollup[], key: string, minuteMs: number): MinuteRollup {
-  const acc = new MinuteAccumulator(key, minuteMs);
+  const acc = new MinuteAccumulator(key, minuteMs, 2);
   for (const r of rollups) acc.absorb(r);
   return acc.toRollup();
 }
@@ -298,7 +300,7 @@ function world(jdir?: MemorySegmentDirectory): World {
   const rolled = rollUpEntries(all, 0, []);
   rig.store.appendMinutes(
     rolled.map((r) => ({ sourceKey: r.rollup.sourceKey, minuteMs: r.rollup.minuteMs, bytes: r.bytes })),
-    { generation: rig.generation, throughEntryId: rig.through, policyVersion: 1 },
+    { generation: rig.generation, throughEntryId: rig.through, policyVersion: 2 },
     0,
   );
   const before = new Map<string, MinuteRollup>();
@@ -384,7 +386,7 @@ test('a wholly expired minute is byte-identical to the cache minute it replaces'
   assert.equal(archived.length, 1);
   const wantBytes = encodeMinuteRollup(merge([decodeMinuteRollup(cached[0].bytes, inflate)], SRC, wholly), deflate);
   assert.equal(hex(archived[0].bytes), hex(wantBytes));
-  assert.equal(archived[0].policyVersion, 1);
+  assert.equal(archived[0].policyVersion, 2);
 });
 
 test('the minute the cut falls inside is split: the archive fragment and the retained one add up to the cache minute', () => {
@@ -455,7 +457,7 @@ test('I2: the cache an expiry resets continues from where the journal now begins
   const base = rig.journal.snapshot().firstEntryId - 1;
   assert.ok(base > 0);
   const one = [{ sourceKey: SRC, minuteMs: BASE, bytes: new Uint8Array(0) }];
-  const mark = { generation: rig.generation, throughEntryId: wasThrough, policyVersion: 1 };
+  const mark = { generation: rig.generation, throughEntryId: wasThrough, policyVersion: 2 };
   assert.throws(() => rig.store.appendMinutes(one, mark, wasThrough), RangeError, 'a batch continuing from the live point the old cache had');
   assert.throws(() => rig.store.appendMinutes(one, mark, 0), RangeError, 'one that covers the entries that expired');
   assert.equal(rig.store.watermark(), null, 'a refusal writes nothing');
@@ -478,7 +480,7 @@ test('crash (a): fragments written, no cut - the reopened archive drops them and
   // What a crash between the fragments and the cut leaves: the fragments, no cut, the journal untouched.
   const first = rig.journal.segments()[0].firstEntryId;
   const entries = readFrom(rig, first - 1).filter((e) => e.ref.entryId <= w.plan.throughEntryId);
-  const frags = expiryFragments(entries, { knownSources: w.cacheKnown }, deflate);
+  const frags = expiryFragments(entries, { knownSources: w.cacheKnown }, deflate, DecodeState.empty(first - 1)).minutes;
   assert.ok(frags.length > 10);
   rig.archive.append(frags, {
     fromEntryId: first, throughEntryId: w.plan.throughEntryId, fromMs: entries[0].receivedMs, throughMs: w.plan.throughMs,
@@ -631,10 +633,10 @@ test('a replay that throws, or a cache that cannot say who is admitted, fails th
 test('expiryFragments is deterministic and carries the policy it wrote under', () => {
   const w = world();
   const entries = readFrom(w.rig, 0).slice(0, 700);
-  const a = expiryFragments(entries, { knownSources: [] }, deflate);
-  const b = expiryFragments(entries, { knownSources: [] }, deflate);
+  const a = expiryFragments(entries, { knownSources: [] }, deflate, DecodeState.empty(0)).minutes;
+  const b = expiryFragments(entries, { knownSources: [] }, deflate, DecodeState.empty(0)).minutes;
   assert.deepEqual(a.map((m) => hex(m.bytes)), b.map((m) => hex(m.bytes)));
-  assert.ok(a.length > 0 && a.every((m) => m.policyVersion === 1 && m.bytes[0] === 1 && m.bytes[1] === 0));
+  assert.ok(a.length > 0 && a.every((m) => m.policyVersion === 2 && m.bytes[0] === 2 && m.bytes[1] === 0));
   assert.ok(a.every((m) => m.throughEntryId <= 700));
   assert.equal(sourceKey(EXPORTER, 0, 0), SRC);
 });

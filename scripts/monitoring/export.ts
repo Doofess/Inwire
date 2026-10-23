@@ -71,6 +71,8 @@ function result(over: Partial<HistoryResult> = {}): HistoryResult {
     malformed: 1, unsupported: 2, samplingKnown: true, matchingRecords: 5,
     answeredFrom: { rollupMinutes: 30, rawMinutes: 2 },
     evidence: [],
+    awaitingTemplate: 0, awaitingBytes: 0, unsupportedTemplates: 0, sampling: { kind: 'known', interval: 1 },
+    clock: { latestSkewMs: null, minSkewMs: null, maxSkewMs: null, flagged: false },
     ...over,
   };
 }

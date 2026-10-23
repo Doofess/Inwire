@@ -39,6 +39,7 @@
  */
 import type { BundleChunkResult, BundleOpenResult } from './bundle';
 import { readSourceConfig } from './config';
+import type { NormalizedFlow } from './flowDecode';
 import {
   readDiscardResult, readIntakeStatus, readLocationReply, readRetentionSaveReply, readRuntimeExit, readStartResult, readStopResult,
   type DiscardResult, type DiscardScope, type LocationReply, type RetentionSaveReply, type StartResult, type StopResult,
@@ -121,8 +122,14 @@ export type ConnectResult =
   | { ok: true; phase: RebuildPhase; watermark: number }
   | { ok: false; message: string };
 
-/** A datagram and the record decoded from it (the Worker answers both; the UI needs both). */
-export interface DetailResult { evidence: DatagramEvidence; record: NormalizedV5 }
+/**
+ * A datagram and the record decoded from it (the Worker answers both; the UI needs both). A v5
+ * datagram's record is `NormalizedV5`; a v9 or IPFIX one's is `NormalizedFlow` (ADR 0066).
+ */
+export interface DetailResult { evidence: DatagramEvidence; record: NormalizedV5 | NormalizedFlow }
+
+/** Whether a detail's record came from a v5 datagram. */
+export const isV5Record = (record: DetailResult['record']): record is NormalizedV5 => 'sampling' in record;
 
 export type ConfigReadReply =
   | { ok: true; config: SourceConfig | null; location: string | null; retention: RetentionPolicy }

@@ -68,15 +68,15 @@ import {
 import {
   ACCEPTED_POLICIES, FORMAT_VERSION, LIMITS,
   type BoundaryAction, type BoundaryEvidence, type BundleSlice, type DatagramEvidence, type Evidence,
-  type EvidencePage, type EvidenceRef, type ExpiredRange, type JournalSnapshot, type RawPage, type SegmentSource,
+  type EvidencePage, type EvidenceRef, type ExpiredRange, type JournalSnapshot, type RawPage, type SegmentGeometry, type SegmentSource,
 } from './types';
 
 // --- the vocabulary ------------------------------------------------------------------------
 
 /** What a caller hands to `append`; the journal assigns the id and the session. */
 export type EvidenceInput =
-  | Omit<DatagramEvidence, 'ref' | 'receiveOrdinal' | 'sessionId'>
-  | Omit<BoundaryEvidence, 'ref'>;
+  | Omit<DatagramEvidence, 'ref' | 'receiveOrdinal' | 'sessionId' | 'policy' | 'segmentFirstId'>
+  | Omit<BoundaryEvidence, 'ref' | 'policy' | 'segmentFirstId'>;
 
 export type JournalState = 'open' | 'storage-limit' | 'refused-corrupt' | 'refused-version' | 'failed' | 'closed';
 
@@ -268,10 +268,10 @@ export function encodeBoundaryBody(b: BoundaryFields): Uint8Array {
   return utf8.encode(JSON.stringify(base));
 }
 
-function boundaryEvidence(generation: string, entryId: number, b: BoundaryFields): BoundaryEvidence {
+function boundaryEvidence(generation: string, entryId: number, b: BoundaryFields, policy: number, segmentFirstId: number): BoundaryEvidence {
   const e: BoundaryEvidence = {
     kind: 'boundary', ref: { generation, entryId }, sessionId: b.sessionId, receivedMs: b.receivedMs,
-    action: b.action, reason: b.reason, droppedDatagrams: b.droppedDatagrams,
+    action: b.action, reason: b.reason, droppedDatagrams: b.droppedDatagrams, policy, segmentFirstId,
   };
   if (b.source !== undefined) e.source = b.source;
   if (b.expired !== undefined) e.expired = b.expired;
@@ -591,7 +591,7 @@ function scanDataset(dir: SegmentDirectory, lastCut: number, limitBytes: number)
         }
         applyBoundary(t, b.value);
         receivedMs = b.value.receivedMs;
-        out.boundaries.push(boundaryEvidence(gen, e.entryId, b.value));
+        out.boundaries.push(boundaryEvidence(gen, e.entryId, b.value, seg.policy, seg.firstId));
       } else {
         return `unknown kind ${e.kind}`;
       }
@@ -1096,16 +1096,22 @@ export class MonitoringJournal {
     seg.lastMs = receivedMs;
     seg.bytes += bytes.length;
     this.lastReceivedMs = receivedMs;
-    if (boundary !== null) this.boundaryList.push(boundaryEvidence(this.generationHex, id, boundary));
+    if (boundary !== null) this.boundaryList.push(boundaryEvidence(this.generationHex, id, boundary, seg.policy, seg.firstId));
     this.lastId = id;
     if (boundary !== null) applyBoundary(this.track, boundary);
     return 'written';
   }
 
-  /** Whether an entry of `entryBytes` starts a new segment: the newest is full or is the sealed legacy file. */
+  /**
+   * Whether an entry of `entryBytes` starts a new segment: the newest is full, is the sealed legacy file, or
+   * holds entries of an older policy than this build writes. The last is how an upgraded dataset starts
+   * decoding under the new policy at its next append, the next Start, rather than when the old segment
+   * fills (ADR 0066). An older-policy segment with no entry (a roll torn before its first) is written into.
+   */
   private rollsFor(entryBytes: number): boolean {
     const seg = this.segs[this.segs.length - 1];
-    return seg.legacy || (seg.lastId >= seg.firstId && seg.bytes + entryBytes > seg.maxBytes);
+    const holds = seg.lastId >= seg.firstId;
+    return seg.legacy || (holds && seg.policy !== NEWEST_POLICY) || (holds && seg.bytes + entryBytes > seg.maxBytes);
   }
 
   private overCeiling(entryBytes: number, roll: boolean, ceiling: number): boolean {
@@ -1491,6 +1497,22 @@ export class MonitoringJournal {
     return { entries, nextAfterId: Math.max(afterId, through), done: true };
   }
 
+  /**
+   * The retained segments a snapshot reaches, oldest first, clipped to its last entry: what a reader that
+   * replays decode state needs to choose a checkpoint and bound the replay (ADR 0066). A segment's bytes are
+   * its size now, so the newest one may count bytes past the snapshot; a bound read from them errs high.
+   */
+  segmentGeometry(snapshot: { generation: string; throughEntryId: number }): SegmentGeometry[] {
+    if (snapshot.generation !== this.generationHex) throw new StaleGenerationError(snapshot.generation, this.generationHex);
+    const through = Math.min(snapshot.throughEntryId, this.lastId);
+    const out: SegmentGeometry[] = [];
+    for (const seg of this.segs) {
+      if (seg.firstId > through || seg.lastId < seg.firstId) break;
+      out.push({ firstEntryId: seg.firstId, lastEntryId: Math.min(seg.lastId, through), bytes: seg.bytes, policy: seg.policy });
+    }
+    return out;
+  }
+
   /** The index in `segs` of the segment holding `entryId`, or -1: a binary search on first ids. */
   private segIndexOf(entryId: number): number {
     let lo = 0;
@@ -1553,6 +1575,7 @@ export class MonitoringJournal {
           kind: 'datagram', ref, sessionId: session, receivedMs: d.value.receivedMs, receiveOrdinal: entryId,
           localIPv4: d.value.localIPv4, localPort: d.value.localPort,
           remoteIPv4: d.value.remoteIPv4, remotePort: d.value.remotePort, bytes: d.value.payload,
+          policy: seg.policy, segmentFirstId: seg.firstId,
         },
         entryId, kind: 1, body, policy: seg.policy, receivedMs: d.value.receivedMs,
         nextOffset, sessionAfter: session, entryBytes,
@@ -1561,7 +1584,7 @@ export class MonitoringJournal {
     const b = parseBoundary(body);
     if (header.kind !== KIND_BOUNDARY || !b.ok) throw new Error(`journal: entry ${entryId} is not a readable boundary`);
     return {
-      evidence: boundaryEvidence(this.generationHex, entryId, b.value),
+      evidence: boundaryEvidence(this.generationHex, entryId, b.value, seg.policy, seg.firstId),
       entryId, kind: 2, body, policy: seg.policy, receivedMs: b.value.receivedMs,
       nextOffset, sessionAfter: sessionAfter(session, b.value), entryBytes,
     };
