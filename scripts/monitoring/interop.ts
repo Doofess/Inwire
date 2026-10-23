@@ -510,6 +510,325 @@ let profile: string | null = null;
 let chosenPath = '(b) keeper fallback';
 let electronVersion = 'unknown';
 
+// --- v9 and IPFIX through the app (milestone 2) ---------------------------------------------------------
+
+/**
+ * softflowd and pmacct's nfprobe export the same capture as NetFlow v9 and IPFIX. Each pass goes through
+ * the built app as the v5 passes do (kept in WSL, replayed to the app's loopback port) and is set beside
+ * tshark's verbose decode of the same datagrams - its tree marks an RFC 5103 reverse count
+ * "(Reverse Type 1 BYTES)", which its field export cannot, so forward and reverse are told apart there -
+ * and beside nfdump, after the same bytes are replayed into nfcapd in WSL. The two accounting differences
+ * Task 7 measured are asserted as differences: nfdump scales a sampled counter by the interval and sums a
+ * biflow's two directions; Inwire keeps counters as reported, with the rate beside them, and directional.
+ */
+interface TemplatedPass { name: string; exporter: 'softflowd' | 'pmacct'; flags: string; interval: number | null; biflow: boolean }
+const TEMPLATED: TemplatedPass[] = [
+  { name: 'softflowd -v 9', exporter: 'softflowd', flags: '-v 9', interval: null, biflow: false },
+  { name: 'softflowd -v 10', exporter: 'softflowd', flags: '-v 10', interval: null, biflow: false },
+  { name: 'softflowd -v 10 -b', exporter: 'softflowd', flags: '-v 10 -b', interval: null, biflow: true },
+  { name: 'softflowd -v 9 -s 10', exporter: 'softflowd', flags: '-v 9 -s 10', interval: 10, biflow: false },
+  { name: 'softflowd -v 10 -s 10', exporter: 'softflowd', flags: '-v 10 -s 10', interval: 10, biflow: false },
+  { name: 'pmacct nfprobe v9', exporter: 'pmacct', flags: '9', interval: null, biflow: false },
+  { name: 'pmacct nfprobe v10', exporter: 'pmacct', flags: '10', interval: null, biflow: false },
+];
+// softflowd names the -r file in its options data, so the capture is read from a fixed WSL path.
+const WSL_DIR = '/tmp/inwire-interop';
+
+/** One data record as tshark's tree shows it: forward counts, and RFC 5103 reverse counts when present. */
+interface TreeFlow { src: string; dst: string; octets: bigint; packets: bigint; reverseOctets: bigint; reversePackets: bigint }
+function tsharkTree(datagrams: Uint8Array[], port: number, name: string): { flows: TreeFlow[]; versions: string[] } {
+  const pcap = path.join(work, `${name}.pcap`);
+  writeFileSync(pcap, rawUdpPcap(datagrams, port));
+  const out = spawnSync(tshark!, ['-r', pcap, '-d', `udp.port==${port},cflow`, '-V'], { encoding: 'utf8', maxBuffer: 1 << 28 }).stdout;
+  const flows: TreeFlow[] = [];
+  const versions = new Set<string>();
+  let cur: TreeFlow | null = null;
+  // An options record (no address) is not a flow; it ends where the next record, set or frame begins.
+  const close = () => { if (cur !== null && cur.src !== '') flows.push(cur); cur = null; };
+  for (const line of out.split(/\r?\n/)) {
+    const v = /^\s*Version: (\d+)$/.exec(line);
+    if (v !== null && cur === null) versions.add(v[1]);
+    if (/^\s*Flow \d+$/.test(line)) {
+      close();
+      cur = { src: '', dst: '', octets: 0n, packets: 0n, reverseOctets: 0n, reversePackets: 0n };
+      continue;
+    }
+    if (/^\S/.test(line) || /^\s*(?:Set|FlowSet) \d+/.test(line)) { close(); continue; }
+    if (cur === null) continue;
+    const a = /^\s*(Src|Dst)Addr: (\S+)/.exec(line);
+    if (a !== null) {
+      if (a[1] === 'Src' && cur.src === '') cur.src = a[2];
+      if (a[1] === 'Dst' && cur.dst === '') cur.dst = a[2];
+      continue;
+    }
+    const c = /^\s*(?:Permanent )?(Octets|Packets): (\d+)( \(Reverse)?/.exec(line);
+    if (c === null) continue;
+    const n = BigInt(c[2]);
+    if (c[1] === 'Octets') {
+      if (c[3]) cur.reverseOctets += n; else cur.octets += n;
+    } else if (c[3]) cur.reversePackets += n; else cur.packets += n;
+  }
+  close();
+  return { flows, versions: [...versions] };
+}
+
+const WSL_REPLAY = `
+import socket, struct, sys, time
+port, path = int(sys.argv[1]), sys.argv[2]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('127.0.0.1', 0))
+raw = open(path, 'rb').read()
+p = 0
+while p + 4 <= len(raw):
+    n = struct.unpack_from('<I', raw, p)[0]
+    s.sendto(raw[p + 4:p + 4 + n], ('127.0.0.1', port))
+    time.sleep(0.02)
+    p += 4 + n
+`;
+
+/** nfdump's summary of the kept datagrams, replayed byte for byte into nfcapd on WSL loopback. */
+async function nfdumpSummary(keptFile: string, name: string): Promise<{ flows: bigint; bytes: bigint; packets: bigint } | string> {
+  const port = await freePort();
+  const dir = `${WSL_DIR}/nfcapd-${port}`;
+  const replay = path.join(work, 'replay.py');
+  writeFileSync(replay, WSL_REPLAY);
+  // Run from a file: a script handed to `bash -c` with the replayer on stdin left nfcapd's wait hanging (Task 7).
+  const script = path.join(work, `nfdump-${name}.sh`);
+  writeFileSync(script, [
+    `rm -rf ${dir}; mkdir -p ${dir}`,
+    `nfcapd -b 127.0.0.1 -p ${port} -w ${dir} -t 3600 >${dir}.log 2>&1 </dev/null &`,
+    'pid=$!',
+    'sleep 1',
+    `python3 '${winToWsl(replay)}' ${port} '${winToWsl(keptFile)}'`,
+    'sleep 1; kill -TERM $pid; wait $pid',
+    `for f in ${dir}/nfcapd.*; do nfdump -r "$f" -N -o 'fmt:%pkt' 2>&1 | tail -4; done`,
+    `ls ${dir}/nfcapd.* >/dev/null 2>&1 || { echo "no nfcapd file; its log:"; tail -5 ${dir}.log; }`,
+    `rm -rf ${dir} ${dir}.log`,
+    '',
+  ].join('\n'));
+  const out = spawnSync('wsl.exe', ['-d', 'Ubuntu', '--', 'bash', winToWsl(script)], { encoding: 'utf8', timeout: 120_000 }).stdout.replace(/\0/g, '');
+  const sums = [...out.matchAll(/total flows: (\d+), total bytes: (\d+), total packets: (\d+)/g)];
+  if (sums.length === 0) return `no nfdump summary: ${out.trim().split('\n').slice(-3).join(' | ')}`;
+  return sums.reduce((a, m) => ({ flows: a.flows + BigInt(m[1]), bytes: a.bytes + BigInt(m[2]), packets: a.packets + BigInt(m[3]) }),
+    { flows: 0n, bytes: 0n, packets: 0n });
+}
+
+async function templatedPasses(): Promise<void> {
+  console.log('\n=== v9 and IPFIX: softflowd and pmacct through the app ===');
+  wsl(['sh', '-c', `mkdir -p ${WSL_DIR} && cp '${winToWsl(pcapPath)}' ${WSL_DIR}/fixture.pcap`]);
+  const hasPmacct = wsl(['sh', '-c', 'command -v pmacctd']).status === 0;
+  const hasNfdump = wsl(['sh', '-c', 'command -v nfcapd']).status === 0 && wsl(['sh', '-c', 'command -v nfdump']).status === 0;
+  console.log(`pmacct:  ${hasPmacct ? firstLine(wsl(['sh', '-c', 'pmacctd -V 2>&1']).stdout) : 'not installed'}`);
+  console.log(`nfdump:  ${hasNfdump ? firstLine(wsl(['sh', '-c', 'nfdump -V 2>&1']).stdout) : 'not installed'}`);
+  const show = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? `${x}n` : x));
+
+  for (const pass of TEMPLATED) {
+    const only = argValue('--pass');
+    if (only !== undefined && !pass.name.includes(only)) continue;
+    console.log(`\n--- ${pass.name} ---`);
+    // WSL's /tmp does not outlive an idle shutdown of the VM, which a pass through the app can outlast.
+    wsl(['sh', '-c', `mkdir -p ${WSL_DIR} && cp '${winToWsl(pcapPath)}' ${WSL_DIR}/fixture.pcap`]);
+    if (pass.exporter === 'pmacct' && !hasPmacct) {
+      console.log(`NOT RUN  ${pass.name}: pmacctd is not installed in WSL Ubuntu`);
+      continue;
+    }
+    const tag = pass.name.replace(/[^a-z0-9]+/gi, '-');
+
+    // 1. the exporter's datagrams, recorded in WSL.
+    const kept = path.join(work, `templated-${tag}.bin`);
+    const keeperPort = await freePort();
+    const keeper = await startKeeper(kept, keeperPort);
+    let exported;
+    if (pass.exporter === 'softflowd') {
+      exported = wsl(['sh', '-c', `softflowd -r ${WSL_DIR}/fixture.pcap -n 127.0.0.1:${keeperPort} ${pass.flags} -d`]);
+    } else {
+      const conf = path.join(work, `nfprobe-${tag}.conf`);
+      writeFileSync(conf, ['daemonize: false', `pcap_savefile: ${WSL_DIR}/fixture.pcap`, 'plugins: nfprobe',
+        `nfprobe_receiver: 127.0.0.1:${keeperPort}`, `nfprobe_version: ${pass.flags}`, ''].join('\n'));
+      exported = wsl(['sh', '-c', `timeout 60 pmacctd -f '${winToWsl(conf)}' </dev/null`]);
+    }
+    await keeper.done;
+    const datagrams = readKept(kept);
+    console.log(`exporter exit ${exported.status}; ${datagrams.length} datagrams kept (${datagrams.reduce((a, d) => a + d.length, 0)} bytes)`);
+    check(`${pass.name}: the exporter sent datagrams`, datagrams.length > 0);
+    if (datagrams.length === 0) continue;
+
+    // 2. tshark's tree and nfdump over exactly those datagrams.
+    const tree = tsharkTree(datagrams, keeperPort, tag);
+    const flows = tree.flows;
+    const total = (f: (x: TreeFlow) => bigint) => flows.reduce((a, x) => a + f(x), 0n);
+    const fwdOctets = total((x) => x.octets), fwdPackets = total((x) => x.packets);
+    const revOctets = total((x) => x.reverseOctets), revPackets = total((x) => x.reversePackets);
+    const protocol = tree.versions.includes('10') ? 'ipfix' : 'v9';
+    console.log(`tshark tree: versions ${tree.versions.join(',')}, ${flows.length} records, ${fwdPackets} packets, ${fwdOctets} octets; reverse ${revPackets} packets, ${revOctets} octets`);
+    check(`${pass.name}: tshark reads every datagram as ${protocol === 'ipfix' ? 'IPFIX (10)' : 'v9'}`, tree.versions.length === 1);
+    check(`${pass.name}: ...and reverse counts appear exactly when the exporter was asked for biflows`, (revOctets + revPackets > 0n) === pass.biflow);
+    // The app's leg model (ADR 0059's key): forward is source to destination, reverse destination to source.
+    const sent = new Map<string, bigint>(), recv = new Map<string, bigint>();
+    const conv = new Map<string, { octets: bigint; packets: bigint }>();
+    const leg = (s: string, d: string, o: bigint, pk: bigint) => {
+      sent.set(s, (sent.get(s) ?? 0n) + o);
+      recv.set(d, (recv.get(d) ?? 0n) + o);
+      const c = conv.get(`${s}>${d}`) ?? { octets: 0n, packets: 0n };
+      c.octets += o;
+      c.packets += pk;
+      conv.set(`${s}>${d}`, c);
+    };
+    for (const f of flows) {
+      leg(f.src, f.dst, f.octets, f.packets);
+      if (f.reverseOctets !== 0n || f.reversePackets !== 0n) leg(f.dst, f.src, f.reverseOctets, f.reversePackets);
+    }
+    const addresses = new Set([...sent.keys(), ...recv.keys()]);
+
+    const nf = hasNfdump ? await nfdumpSummary(kept, tag) : 'nfdump is not installed in WSL Ubuntu';
+    if (typeof nf === 'string') {
+      console.log(`NOT RUN  ${pass.name}: nfdump: ${nf}`);
+    } else {
+      console.log(`nfdump: ${nf.flows} flows, ${nf.packets} packets, ${nf.bytes} bytes`);
+      check(`${pass.name}: nfdump counts the records tshark does`, nf.flows === BigInt(flows.length));
+      if (pass.interval !== null) {
+        const k = BigInt(pass.interval);
+        check(`${pass.name}: ACCOUNTING: nfdump scales the sampled counters by ${pass.interval}; Inwire keeps them as reported (${fwdPackets} packets, ${fwdOctets} octets)`,
+          nf.packets === fwdPackets * k && nf.bytes === fwdOctets * k, `nfdump ${nf.packets} / ${nf.bytes}`);
+      } else if (pass.biflow) {
+        check(`${pass.name}: ACCOUNTING: nfdump sums a biflow's two directions (${fwdPackets} + ${revPackets} packets); Inwire keeps them directional`,
+          nf.packets === fwdPackets + revPackets && nf.bytes === fwdOctets + revOctets, `nfdump ${nf.packets} / ${nf.bytes}`);
+      } else {
+        check(`${pass.name}: nfdump's packets and bytes equal tshark's`, nf.packets === fwdPackets && nf.bytes === fwdOctets, `nfdump ${nf.packets} / ${nf.bytes}`);
+      }
+    }
+
+    // 3. the app.
+    const appPort = await freePort();
+    agent = await startStubAgent(PIPE, 5);
+    profile = mkdtempSync(path.join(tmpdir(), 'inwire-interop-profile-'));
+    app = await launchApp({ args: ['.'], env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: PIPE } });
+    electronVersion = await app.evaluate(() => process.versions.electron).catch(() => 'unknown');
+    const p = await app.firstWindow();
+    p.setDefaultTimeout(30_000);
+    await p.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
+    await p.getByRole('button', { name: 'Skip' }).click({ timeout: 3000 }).catch(() => {});
+    const until = async (cond: () => Promise<boolean>, ms: number) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) { if (await cond()) return true; await sleep(250); }
+      return false;
+    };
+    const sheetText = () => p.locator(SHEET).innerText().catch(() => '');
+    const recordsOf = (t: string) => digits(/packets in ([\d.,\s  ]+) records,/.exec(t)?.[1] ?? '0');
+    await p.getByRole('button', { name: 'Statistics', exact: true }).click();
+    await p.getByRole('button', { name: 'Network', exact: true }).click();
+    await p.getByRole('button', { name: 'Open monitoring' }).click();
+    await p.locator(SHEET).waitFor();
+    await p.getByRole('textbox', { name: 'Exporter', exact: true }).fill('127.0.0.1');
+    await p.getByRole('textbox', { name: 'Listen on', exact: true }).fill('127.0.0.1');
+    await p.getByRole('textbox', { name: 'Port', exact: true }).fill(String(appPort));
+    await p.getByRole('button', { name: 'Start', exact: true }).click();
+    check(`${pass.name}: the app listens`, await until(async () => /Listening, nothing received yet/.test(await sheetText()), 20_000));
+    const sender = createSocket('udp4');
+    await new Promise<void>((resolve) => sender.bind(0, '127.0.0.1', resolve));
+    for (const d of datagrams) {
+      await new Promise<void>((resolve, reject) => sender.send(d, appPort, '127.0.0.1', (e) => (e ? reject(e) : resolve())));
+      await sleep(40);
+    }
+    sender.close();
+
+    const reached = await until(async () => recordsOf(await sheetText()) === flows.length, 40_000);
+    const text = await sheetText();
+    check(`${pass.name}: the sheet counts ${flows.length} received traffic records, as tshark decodes`, reached,
+      `sheet says ${recordsOf(text)}; ${text.replace(/\s+/g, ' ').slice(0, 500)}`);
+    const accepted = digits(/Accepted\s+([\d.,\s  ]+)/.exec(text)?.[1] ?? '-1');
+    check(`${pass.name}: ...and ${datagrams.length} accepted datagrams`, accepted === datagrams.length, `sheet says ${accepted}`);
+    const card = (await p.locator('section[aria-labelledby="monitoring-exporter"]').innerText().catch(() => '')).replace(/\s+/g, ' ');
+    console.log(`exporter card: ${card.slice(0, 400)}`);
+    check(`${pass.name}: the exporter card names the source and says every data set had its template`,
+      card.includes(protocol === 'ipfix' ? 'IPFIX, domain' : 'NetFlow v9, source ID') && card.includes('Every data set had its template'));
+    if (pass.interval !== null) {
+      check(`${pass.name}: ...and states the sampling, 1 in ${pass.interval}`, card.includes(`Sampled 1 in ${pass.interval}`));
+      const estimate = /Estimate\s+About (.+?) and ([\d.,\s  ]+) packets/.exec(text);
+      const want = fwdPackets * BigInt(pass.interval);
+      check(`${pass.name}: History's estimate is the reported packets x ${pass.interval} (${want}), labelled an estimate${typeof nf === 'string' ? '' : ', which is nfdump\'s scaled total'}`,
+        estimate !== null && BigInt(digits(estimate[2])) === want && /an estimate, not a count/.test(text), estimate?.[0] ?? '(no estimate line)');
+    }
+
+    const readTable = (title: string): Promise<string[][]> => p.evaluate((t) => {
+      const h = [...document.querySelectorAll('h3')].find((e) => e.textContent?.trim() === t);
+      const box = h?.parentElement;
+      return box ? [...box.querySelectorAll('tbody tr')].map((tr) => [...tr.querySelectorAll('td')].map((td) => (td as HTMLElement).innerText.trim())) : [];
+    }, title);
+    const fmt = (n: bigint) => formatBytes(Number(n));
+    const top = (n: number) => Math.min(n, 20);
+    const endpoints = await readTable('Top endpoints');
+    check(`${pass.name}: the sheet's Top endpoints show ${top(addresses.size)} addresses, each with tshark's sent and received (directional legs)`,
+      endpoints.length === top(addresses.size) && endpoints.every(([a, s, r]) => s === fmt(sent.get(a) ?? 0n) && r === fmt(recv.get(a) ?? 0n)),
+      `${endpoints.length} rows; ` + endpoints.slice(0, 4).map((r) => `${r.join(' / ')} (want ${fmt(sent.get(r[0]) ?? 0n)} / ${fmt(recv.get(r[0]) ?? 0n)})`).join(' | '));
+    const conversations = await readTable('Top conversations');
+    check(`${pass.name}: the sheet's Top conversations show ${top(conv.size)} directional pairs with tshark's bytes`,
+      conversations.length === top(conv.size) && conversations.every(([s, d, b]) => b === fmt(conv.get(`${s}>${d}`)?.octets ?? -1n)),
+      conversations.slice(0, 4).map((r) => r.join(' / ')).join(' | '));
+
+    await p.getByRole('button', { name: 'Stop', exact: true }).click();
+    await until(async () => /Stopped/.test(await sheetText()), 15_000);
+    await p.evaluate(() => (window as unknown as { inwire?: { setUnsavedCapture?: (v: boolean) => void } }).inwire?.setUnsavedCapture?.(false));
+    await app.close().catch(() => {});
+    app = null;
+    await agent.close();
+    agent = null;
+
+    // 4. the journal and the sidecar, read with the repo's own code, exactly.
+    const copy = path.join(work, `copy-${tag}`);
+    mkdirSync(copy, { recursive: true });
+    copyMonitoring(monitoringRoot(profile), copy);
+    const volume = openMonitoringVolume(copy);
+    try {
+      const { journal } = MonitoringJournal.open(volume.segments, { limitBytes: 1 << 30 });
+      const snap = journal.snapshot();
+      const opened = RollupStore.open(volume.rollups,
+        { generation: snap.generation, throughEntryId: snap.throughEntryId }, { nowMs: () => Date.now() });
+      const runtime = new LocalRuntime(journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
+      await new HostRig(runtime, { wallNow: () => Date.now() }).connect();
+      const sources = await runtime.sources();
+      const key = sources.find((s) => s.startsWith(`${protocol}:127.0.0.1/`));
+      console.log(`journal copy: ${snap.throughEntryId} entries; sidecar ${opened.status}; sources ${sources.join(', ')}`);
+      check(`${pass.name}: the journal holds one ${protocol} source for the exporter`,
+        key !== undefined && sources.filter((s) => s.startsWith(`${protocol}:`)).length === 1, sources.join(','));
+      if (key !== undefined) {
+        const now = Date.now();
+        const query = { sourceKey: key, fromMs: now - 3_600_000, toMs: now + 60_000, bucketCount: 60 };
+        const ask = async (forceRaw: boolean): Promise<HistoryResult> => {
+          const reply = await runHistoryQuery(runtime, runtime, query, new AbortController().signal, { inflate, nowMs: now, forceRaw });
+          if (!reply.ok) throw new Error(`${reply.code}: ${reply.message}`);
+          return reply.value;
+        };
+        const [fast, raw] = [await ask(false), await ask(true)];
+        for (const [label, result] of [['rollup', fast], ['raw', raw]] as const) {
+          const octets = result.buckets.reduce((a, b) => a + (b.reportedOctets ?? 0n), 0n);
+          const packets = result.buckets.reduce((a, b) => a + (b.reportedPackets ?? 0n), 0n);
+          check(`${pass.name}: ${label} path: ${flows.length} records, ${fwdPackets + revPackets} packets, ${fwdOctets + revOctets} octets (both legs), as tshark decodes`,
+            result.matchingRecords === flows.length && packets === fwdPackets + revPackets && octets === fwdOctets + revOctets,
+            `records ${result.matchingRecords}, packets ${packets}, octets ${octets}`);
+          const eps = result.endpoints.status === 'ok' ? result.endpoints.rows : [];
+          check(`${pass.name}: ${label} path: every endpoint's sent and received equal tshark's, exactly`,
+            eps.length === top(addresses.size) && eps.every((e) => e.sentOctets === (sent.get(e.address) ?? 0n) && e.receivedOctets === (recv.get(e.address) ?? 0n)),
+            `${eps.length} rows of ${addresses.size}; ` + show(eps.slice(0, 3).map((e) => ({ ...e, wantSent: sent.get(e.address), wantRecv: recv.get(e.address) }))));
+          const convs = result.conversations.status === 'ok' ? result.conversations.rows : [];
+          check(`${pass.name}: ${label} path: every directional pair's bytes and packets equal tshark's, exactly`,
+            convs.length === top(conv.size) && convs.every((c) => {
+              const want = conv.get(`${c.srcAddr}>${c.dstAddr}`);
+              return want !== undefined && c.reportedOctets === want.octets && BigInt(c.reportedPackets) === want.packets;
+            }), show(convs.slice(0, 3)));
+        }
+        check(`${pass.name}: the rollup path and the raw path agree on everything but provenance`,
+          show({ ...fast, answeredFrom: 0 }) === show({ ...raw, answeredFrom: 0 }));
+      }
+      journal.close?.();
+    } finally {
+      volume.close();
+    }
+    try { rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* the finally below reports */ }
+    profile = null;
+  }
+}
+
 try {
   const electronExe = path.resolve('node_modules', 'electron', 'dist', 'electron.exe');
   const rule = inboundRuleFor(electronExe);
@@ -530,7 +849,7 @@ try {
     { label: 'PASS 1: softflowd -r <capture> -v 5 -d (as Task 1 ran it)', flags: [] as string[], exact: false },
     { label: 'PASS 2: softflowd -r <capture> -a -v 5 -d (header clock follows the capture)', flags: ['-a'], exact: true },
   ];
-  for (const [passIndex, pass] of passes.entries()) {
+  for (const [passIndex, pass] of (hasFlag('--templated-only') ? [] : passes).entries()) {
   console.log(`\n=== ${pass.label} ===`);
   const endPass = async (): Promise<void> => {
     await app?.close().catch(() => {});
@@ -641,7 +960,7 @@ try {
     await sleep(6000);
     const t = await sheetText();
     const acc = digits(/Accepted\s+([\d.,\s  ]+)/.exec(t)?.[1] ?? '-1');
-    const recs = digits(/([\d.,\s  ]+) received traffic records/.exec(t)?.[1] ?? '0');
+    const recs = digits(/packets in ([\d.,\s  ]+) records,/.exec(t)?.[1] ?? '0');
     console.log(`RECORDED: the sheet after 6 s: Accepted ${acc}, ${recs} received traffic records; history says: ${/No received traffic records yet[^.]*\.?/.exec(t)?.[0] ?? '(no empty-history note)'}`);
     await p.getByRole('button', { name: 'Stop', exact: true }).click();
     await until(async () => /Stopped/.test(await sheetText()), 15_000);
@@ -678,9 +997,9 @@ try {
 
   // 3. the sheet.
   const wantRecords = refs.length;
-  const reached = await until(async () => digits(/([\d.,\s  ]+) received traffic records/.exec(await sheetText())?.[1] ?? '0') === wantRecords, 40_000);
+  const reached = await until(async () => digits(/packets in ([\d.,\s  ]+) records,/.exec(await sheetText())?.[1] ?? '0') === wantRecords, 40_000);
   const text = await sheetText();
-  const sheetRecords = digits(/([\d.,\s  ]+) received traffic records/.exec(text)?.[1] ?? '0');
+  const sheetRecords = digits(/packets in ([\d.,\s  ]+) records,/.exec(text)?.[1] ?? '0');
   check(`the sheet counts ${wantRecords} received traffic records, as tshark decodes`, reached,
     `sheet says ${sheetRecords}; sheet text: ${text.replace(/\s+/g, ' ').slice(0, 700)}`);
   const accepted = digits(/Accepted\s+([\d.,\s  ]+)/.exec(text)?.[1] ?? '-1');
@@ -801,6 +1120,7 @@ try {
   }
   await endPass();
   }
+  if (!hasFlag('--v5-only')) await templatedPasses();
   console.log(`\nElectron ${electronVersion}`);
 } finally {
   await app?.evaluate(() => {}).catch(() => {});
