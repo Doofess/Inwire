@@ -129,6 +129,15 @@ console.log('\n--- the conversation table, TCP from the digest ---\n');
   }
   check('the pane follows streams from the row and the menu', follows.length >= 3, true);
   check('...and no follow then returns to Packets', follows.filter((f) => f.includes('onReturnToPackets')).length, 0);
+
+  // The level buttons are how the TCP level is reached. At a 1024 window with
+  // the side bar open the tab row is wider than the pane, and the pane clips:
+  // TCP and UDP sat past its edge where nothing could scroll to them. The row
+  // wraps instead, and a tab's label never breaks inside itself.
+  const tabRow = pane.slice(pane.indexOf('<div', pane.indexOf("setTab('hierarchy')") - 200), pane.indexOf("setTab('hierarchy')"));
+  check('the tab row wraps rather than clipping the level buttons', /\bflex-wrap\b/.test(tabRow), true);
+  const tabClass = pane.slice(pane.indexOf('const tabClass'), pane.indexOf('const kindClass'));
+  check('...and a tab label stays on one line', /\bwhitespace-nowrap\b/.test(tabClass), true);
 }
 
 console.log('\n--- the client, with no store at all ---\n');

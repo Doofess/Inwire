@@ -260,7 +260,9 @@ try {
             await sleep(300);
             await shot('stats-4-filter-focus');
             await p.mouse.move(5, 5);
-            await p.locator('tbody tr').first().locator('td').first().click();
+            // A row with the filter button, not the virtual list's spacer row.
+            await p.locator('tbody tr').filter({ has: p.getByRole('button', { name: 'Filter to this conversation' }) })
+              .first().locator('td').first().click();
             const opened = await p.locator('[data-state-map]').waitFor({ timeout: 10_000 }).then(() => true, () => false);
             console.log(`  row click opened the stream: ${opened}`);
             await shot('stats-5-row-opened');

@@ -283,7 +283,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   ];
 
   const tabClass = (id: Tab) =>
-    `px-3 py-1.5 rounded-md font-medium transition-colors ${
+    `px-3 py-1.5 rounded-md font-medium whitespace-nowrap transition-colors ${
       tab === id
         ? 'bg-primary text-primary-foreground shadow-sm'
         : 'text-muted-foreground hover:text-foreground hover:bg-accent'
@@ -342,7 +342,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
               weaker way of doing one of those. */}
         </div>
 
-        <div className="px-5 py-2 border-b border-border flex items-center gap-2 text-xs shrink-0">
+        <div className="px-5 py-2 border-b border-border flex flex-wrap items-center gap-2 text-xs shrink-0">
           <button onClick={() => setTab('hierarchy')} className={tabClass('hierarchy')}>Protocol Hierarchy</button>
           <button onClick={() => setTab('conversations')} className={tabClass('conversations')}>Conversations</button>
           <button onClick={() => setTab('endpoints')} className={tabClass('endpoints')}>Endpoints</button>
