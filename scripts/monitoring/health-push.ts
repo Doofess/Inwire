@@ -15,7 +15,7 @@ import { LIMITS, type Evidence } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import { EXPORTER } from './fixtures';
 import {
-  BASE, HostRig, MIN, Rig, S2, SRC, SRC1, dgram, junk, rollUp, runAll, start, stop, test, v9,
+  BASE, HostRig, MIN, Rig, S2, SRC, SRC1, dgram, junk, rollUp, runAll, start, stop, test, unreadVersion,
 } from './queryRig';
 
 const m = (n: number, ms = 0): number => BASE + n * MIN + ms;
@@ -107,7 +107,7 @@ test('health: a hole read through to fill a missed push counts, because those en
 
 test('health: malformed and unsupported datagrams are counted and do not make the source fresh', async () => {
   const { rig, h } = await live();
-  await push(rig, h, junk(m(1)), v9(m(1, 1)));
+  await push(rig, h, junk(m(1)), unreadVersion(m(1, 1)));
   h.tick();
   const health = h.healthPosts().at(-1)?.health;
   assert.ok(health);

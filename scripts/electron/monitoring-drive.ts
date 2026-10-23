@@ -46,7 +46,7 @@ import { NodeSegmentDirectory } from '../../electron/monitoring/volume';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { runHistoryQuery } from '../../src/services/monitoring/queries';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
-import { DECODER_POLICY_VERSION, type Evidence, type HistoryResult, type QuerySpec } from '../../src/services/monitoring/types';
+import { type Evidence, type HistoryResult, type QuerySpec } from '../../src/services/monitoring/types';
 import { decodeV5, sourceKey } from '../../src/services/monitoring/v5';
 
 let failures = 0;
@@ -380,7 +380,7 @@ async function oracle(profile: string): Promise<Oracle> {
       else out.unsupported++;
     }
     const opened = RollupStore.open(
-      sf, { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION },
+      sf, { generation: snap.generation, throughEntryId: snap.throughEntryId },
       { nowMs: () => Date.now() },
     );
     out.sidecar = opened.status;

@@ -20,21 +20,26 @@
 export const FORMAT_VERSION = 1;
 
 /**
- * How datagrams are read into records. A journal written under another policy
- * is preserved and refused, never reinterpreted (ADR 0059).
- */
-export const DECODER_POLICY_VERSION = 1;
-
-/**
  * The decoder policies this build reads (ADR 0062). Each segment records the
  * policy it was written under; one outside this set is refused as
  * `refused-version` and left untouched. A new segment is written under the
- * newest of them.
+ * newest of them. Policy 1 reads NetFlow v5; policy 2 adds v9 and IPFIX and
+ * reads v5 exactly as policy 1 does (ADR 0064). A datagram is decoded under
+ * its segment's policy, never reinterpreted.
  */
-export const ACCEPTED_POLICIES: readonly number[] = [1];
+export const ACCEPTED_POLICIES: readonly number[] = [1, 2];
 
-/** The policy a rollup, a segment or an archived minute is written under: the newest accepted. */
+/**
+ * The policy a segment is written under: the newest accepted. A rollup minute
+ * carries its segment's policy, and the sidecar's watermark the highest policy
+ * it has decoded (ADR 0066).
+ */
 export const WRITE_POLICY_VERSION: number = Math.max(...ACCEPTED_POLICIES);
+
+/** Whether a stored policy is one this build may read: accepted, and not written by a newer build. */
+export function isReadablePolicy(policy: number): boolean {
+  return ACCEPTED_POLICIES.includes(policy) && policy <= WRITE_POLICY_VERSION;
+}
 
 const KiB = 1024;
 const MiB = 1024 * KiB;
@@ -101,6 +106,16 @@ export const LIMITS = {
   clockFlagMs: 10_000,
   /** Discriminating message pairs a source needs before its sequence convention is settled. */
   sequenceLearningPairs: 8,
+  /**
+   * Entry bytes a raw scan may replay from its checkpoint to rebuild template state before its window,
+   * not counted against `rawQueryDatagrams` (ADR 0066). Role-1 checkpoints are 256 MiB apart, so a
+   * scan that has its checkpoints never needs more.
+   */
+  replayBytes: 512 * MiB,
+  /** Role-1 checkpoints are written at the first segment start this many retained journal bytes past the last (ADR 0064). */
+  checkpointSpacingBytes: 256 * MiB,
+  /** A role-2 checkpoint is written at a stop this long in receipt time after the latest one (ADR 0064). */
+  checkpointStopMs: 60 * 60_000,
 } as const;
 
 // --- configuration --------------------------------------------------------------
@@ -135,6 +150,10 @@ export interface DatagramEvidence {
   remoteIPv4: string;
   remotePort: number;
   bytes: Uint8Array;
+  /** The decoder policy of the entry's segment: the one it is decoded under (ADRs 0062, 0066). */
+  policy: number;
+  /** The first entry id of the entry's segment: a reader sees a segment start where they are equal. */
+  segmentFirstId: number;
 }
 
 /** The configuration a session was started with: where it listened and for whom (ADR 0062). */
@@ -159,6 +178,9 @@ export interface BoundaryEvidence {
   source?: SegmentSource | null;
   /** Present on an `expired` boundary. It does not change the open session. */
   expired?: ExpiredRange | null;
+  /** As on a datagram: the entry's segment's policy and first entry id. */
+  policy: number;
+  segmentFirstId: number;
 }
 
 export type Evidence = DatagramEvidence | BoundaryEvidence;
@@ -256,10 +278,37 @@ export interface MinuteRollup {
    * known only if none of its records are in this count.
    */
   unknownSamplingRecords: number;
+  /** The decoder policy of the segment its entries came from; it decides the stored layout (ADR 0066). */
+  policy: number;
+  // What policy 2 adds; a policy-1 minute has these zero and no clock.
+  /** Data sets left undecoded because their template was not in scope or was refused, and their bytes. */
+  awaitingSets: number;
+  awaitingBytes: number;
+  /** Records of templates with no octet count: counted in `records`, never totalled. */
+  unsupportedTemplateRecords: number;
+  /** Records whose source's sampling was unsupported. */
+  unsupportedSamplingRecords: number;
+  /** `0` when no record stated a rate, `SAMPLING_MIXED` when they stated different ones, else the one rate. */
+  samplingInterval: number;
+  /** v9 and IPFIX export time less receipt time over the minute's datagrams, in entry order; null when none. */
+  clock: MinuteClock | null;
 }
 
-/** What the sidecar covers. Any disagreement with the journal means rebuild, never trust. */
+/** `MinuteRollup.samplingInterval` when its records stated different rates. */
+export const SAMPLING_MIXED = 0xffff_ffff;
+
+export interface MinuteClock { minSkewMs: number; maxSkewMs: number; lastSkewMs: number }
+
+/** What the sidecar covers. Any disagreement with the journal means rebuild, never trust. `policyVersion` is the highest policy decoded (ADR 0066). */
 export interface RollupWatermark { generation: Generation; throughEntryId: number; policyVersion: number }
+
+/** One sidecar kind-3 entry as the store indexes it (ADRs 0064, 0066): `bytes` is the deflated checkpoint. */
+export interface StoredCheckpoint { role: 1 | 2; throughEntryId: number; throughMs: number; bytes: Uint8Array }
+
+export type CheckpointInfo = Omit<StoredCheckpoint, 'bytes'>;
+
+/** One retained journal segment's place and size, for the role-1 checkpoint spacing. */
+export interface SegmentGeometry { firstEntryId: number; lastEntryId: number; bytes: number; policy: number }
 
 // --- history queries ----------------------------------------------------------------
 
@@ -307,6 +356,15 @@ export interface ExpiryCause {
   atMs: number;
 }
 
+/**
+ * A range's sampling (ADR 0066): `unsupported` if any record's was, `absent` if no record stated a
+ * rate, `known` when they all stated one, `mixed` when they stated different ones.
+ */
+export type RangeSampling = { kind: 'absent' } | { kind: 'known'; interval: number } | { kind: 'mixed' } | { kind: 'unsupported' };
+
+/** A source's export clock against receipt time: flagged when a bound is past `LIMITS.clockFlagMs`. */
+export interface ClockStatus { latestSkewMs: number | null; minSkewMs: number | null; maxSkewMs: number | null; flagged: boolean }
+
 export interface HistoryResult {
   snapshot: Snapshot;
   query: QuerySpec;
@@ -318,6 +376,14 @@ export interface HistoryResult {
   unsupported: number;
   samplingKnown: boolean;
   matchingRecords: number;
+  /** Data sets of the source left undecoded, template refused included, and their bytes (ADR 0066). */
+  awaitingTemplate: number;
+  awaitingBytes: number;
+  /** Records of templates with no octet count: in `matchingRecords`, not in the totals. */
+  unsupportedTemplates: number;
+  /** The range's sampling, summed over its minutes; the live per-source status is pushed apart. */
+  sampling: RangeSampling;
+  clock: ClockStatus;
   answeredFrom: { rollupMinutes: number; rawMinutes: number };
   /**
    * A focused query's first `LIMITS.focusedReferences` (100) supporting

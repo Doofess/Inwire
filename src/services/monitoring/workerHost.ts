@@ -32,11 +32,12 @@ import { BundleError, bundleStream, type BundleErrorCode } from './bundle';
 import { StaleGenerationError } from './journal';
 import { BoundaryCache, runHistoryQuery } from './queries';
 import { encodeMinuteRollup, type Deflate, type Inflate } from './rollupCodec';
-import { EngineAdmission, MinuteAggregator, feedEntry } from './rollup';
+import { EngineAdmission, MinuteAggregator, feedEntry, v5View } from './rollup';
+import { DecodeState } from './decodeState';
 import { RuntimeUnavailableError, type HostRuntime } from './runtime';
 import { initialSourceHealth, reduceSourceHealth, type HealthEvent, type SourceHealth } from './sourceHealth';
 import {
-  DECODER_POLICY_VERSION, LIMITS, type DatagramEvidence, type Evidence, type EvidenceRef, type HistoryReply, type NormalizedV5,
+  WRITE_POLICY_VERSION, LIMITS, isReadablePolicy, type DatagramEvidence, type Evidence, type EvidenceRef, type HistoryReply, type NormalizedV5,
   type JournalSnapshot, type QuerySpec, type Snapshot,
 } from './types';
 import { decodeV5, sourceKey } from './v5';
@@ -186,6 +187,7 @@ export class MonitoringWorkerHost {
   private phase: RebuildPhase = 'idle';
   private generation = '';
   private aggregator = new MinuteAggregator();
+  private decodeState = DecodeState.empty();
   private admission = new EngineAdmission();
   private targetEntryId = 0;
   private stopRebuild = false;
@@ -266,7 +268,7 @@ export class MonitoringWorkerHost {
   ): Promise<Awaited<ReturnType<HostRuntime['watermark']>>> {
     let wipe = false;
     if (mark !== null) {
-      if (mark.generation !== snapshot.generation || mark.policyVersion !== DECODER_POLICY_VERSION) wipe = true;
+      if (mark.generation !== snapshot.generation || !isReadablePolicy(mark.policyVersion)) wipe = true;
       else if (mark.throughEntryId < snapshot.firstEntryId - 1) wipe = true;
       else if (mark.throughEntryId < await this.newestExpiredBoundary(runtime, snapshot)) wipe = true;
     } else if (snapshot.firstEntryId > 1) {
@@ -377,6 +379,7 @@ export class MonitoringWorkerHost {
     this.targetEntryId = 0;
     this.admission = new EngineAdmission(sources);
     this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
+    this.decodeState = DecodeState.empty(this.aggregator.fedThrough);
     this.runtime = runtime;
     this.phase = status.status === 'failed' || sidecarFault !== null ? 'failed' : 'rebuilding';
     return sidecarFault === null
@@ -495,6 +498,7 @@ export class MonitoringWorkerHost {
       const snapshot = await runtime.snapshot();
       const mark = await this.settleSidecar(runtime, await runtime.watermark(), snapshot);
       this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
+      this.decodeState = DecodeState.empty(this.aggregator.fedThrough);
     } catch (e) {
       this.rollupFault(e);
       return;
@@ -648,12 +652,13 @@ export class MonitoringWorkerHost {
   private feed(e: Evidence): void {
     // The aggregator's own steps are `feedEntry`'s, shared with the expiry's replay; the health and
     // the source list are this host's.
-    const fed = feedEntry(this.aggregator, this.admission, e);
+    const fed = feedEntry(this.aggregator, this.admission, this.decodeState, e);
     if (fed === null || e.kind !== 'datagram') return;
-    if (fed.decoded.kind === 'valid' && fed.admitted) {
-      this.knownSources.add(sourceKey(e.remoteIPv4, fed.decoded.engineType, fed.decoded.engineId));
+    const decoded = v5View(fed.step.decoded);
+    if (decoded.kind === 'valid' && fed.admitted) {
+      this.knownSources.add(sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId));
     }
-    this.watch(e, fed.decoded, fed.admitted);
+    this.watch(e, decoded, fed.admitted);
   }
 
   /** Engine admission and the source list: the Worker's own facts, replay included, and independent of the aggregator. */
@@ -714,7 +719,7 @@ export class MonitoringWorkerHost {
     }));
     try {
       await runtime.appendMinutes(
-        minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: DECODER_POLICY_VERSION }, drained.afterEntryId,
+        minutes, { generation: this.generation, throughEntryId: drained.watermark, policyVersion: WRITE_POLICY_VERSION }, drained.afterEntryId,
       );
     } catch (e) {
       // Only the sidecar's refusal; a RangeError from encoding the batch above is thrown before this.

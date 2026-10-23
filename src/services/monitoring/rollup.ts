@@ -27,9 +27,11 @@
  * same journal produces the same fragments to the byte (`sortedRollup`).
  */
 import {
-  LIMITS, type ConversationTotals, type DecodeResult, type EndpointTotals, type Evidence, type MinuteRollup, type NormalizedV5,
+  LIMITS, WRITE_POLICY_VERSION, type ConversationTotals, type DecodeResult, type EndpointTotals, type Evidence, type MinuteRollup, type NormalizedV5,
 } from './types';
-import { decodeV5, exporterKey, exporterOf, isEngineSourceKey, sourceKey } from './v5';
+import { exporterKey, exporterOf, isEngineSourceKey, sourceKey } from './v5';
+import type { DecodeState, DecodeStep } from './decodeState';
+import type { FlowDecode } from './flowDecode';
 
 export const MINUTE_MS = 60_000;
 
@@ -62,7 +64,8 @@ export class MinuteAccumulator {
   readonly endpoints = new Map<string, { sent: bigint; received: bigint }>();
   readonly conversations = new Map<string, { src: string; dst: string; octets: bigint; packets: bigint }>();
 
-  constructor(readonly sourceKey: string, readonly minuteMs: number) {}
+  /** `policy` is the decoder policy of the segment the minute's entries came from (ADR 0066). */
+  constructor(readonly sourceKey: string, readonly minuteMs: number, readonly policy: number) {}
 
   get keyCount(): number { return this.endpoints.size + this.conversations.size; }
 
@@ -154,6 +157,8 @@ export class MinuteAccumulator {
       sourceKey: this.sourceKey, minuteMs: this.minuteMs, complete: this.complete, records: this.records,
       reportedOctets: this.reportedOctets, reportedPackets: this.reportedPackets, endpoints, conversations,
       malformed: this.malformed, unsupported: this.unsupported, unknownSamplingRecords: this.unknownSamplingRecords,
+      policy: this.policy, awaitingSets: 0, awaitingBytes: 0, unsupportedTemplateRecords: 0, unsupportedSamplingRecords: 0,
+      samplingInterval: 0, clock: null,
     };
   }
 }
@@ -206,6 +211,8 @@ export class MinuteAggregator {
   private readonly open = new Map<string, OpenMinute>();
   private held: Fragment[] = [];
   private lastFed: number;
+  /** The policy of the entries being fed; a change seals every open minute (ADR 0066). */
+  private policy = WRITE_POLICY_VERSION;
   /** The watermark of the last batch drained, or the one this aggregator began after: where the next batch continues from. */
   private drainedThrough: number;
 
@@ -217,6 +224,16 @@ export class MinuteAggregator {
 
   /** The highest entry id fed so far. */
   get fedThrough(): number { return this.lastFed; }
+
+  /**
+   * The policy of the entry about to be fed. A minute is encoded under its segment's policy, so a change
+   * seals every open minute, as a `stop` does; in practice it comes at a `start`, after one.
+   */
+  enterPolicy(policy: number): void {
+    if (policy === this.policy) return;
+    this.seal(Infinity);
+    this.policy = policy;
+  }
 
   /** Notes an entry that rolled up nothing - a boundary, a datagram of an engine not admitted. */
   fed(entryId: number): void {
@@ -232,7 +249,7 @@ export class MinuteAggregator {
       o = undefined;
     }
     if (o === undefined) {
-      o = { acc: new MinuteAccumulator(key, minuteMs), firstId: entryId, lastId: entryId };
+      o = { acc: new MinuteAccumulator(key, minuteMs, this.policy), firstId: entryId, lastId: entryId };
       this.open.set(key, o);
     }
     o.lastId = entryId;
@@ -309,18 +326,29 @@ export class MinuteAggregator {
   }
 }
 
+/** A decode as v5's own result, for what reads only v5: a v9 or IPFIX export is not rolled up by it. */
+export function v5View(d: FlowDecode): DecodeResult {
+  if (d.kind !== 'valid') return d;
+  if (d.protocol === 'v5' && d.v5 !== undefined) return d.v5;
+  return { kind: 'unsupported', reason: `NetFlow ${d.protocol} is not rolled up here` };
+}
+
 /**
- * One journal entry into the aggregator, in strict id order; an id already fed is ignored and
- * returns null, as does a boundary. The live feed, the rebuild and the expiry's replay all go
- * through this, so the archive's minutes are made by the same code as the cache's (ADR 0062).
- * A datagram returns what it decoded to and whether its engine was admitted, which the live
- * feed's health and source list need and a replay does not.
+ * One journal entry into the decode state and the aggregator, in strict id order. The state steps
+ * every entry; an id the aggregator already fed is then ignored and returns null, which is how a
+ * catch-up from a checkpoint at or below the watermark replays state alone. A boundary returns null.
+ * The live feed, the rebuild and the expiry's replay all go through this, so the archive's minutes are
+ * made by the same code as the cache's (ADR 0062). A datagram returns its decode step and whether its
+ * engine was admitted, which the live feed's health and source list need and a replay does not.
  */
 export function feedEntry(
-  agg: MinuteAggregator, admission: EngineAdmission, e: Evidence,
-): { decoded: DecodeResult; admitted: boolean } | null {
+  agg: MinuteAggregator, admission: EngineAdmission, state: DecodeState, e: Evidence,
+): { step: Extract<DecodeStep, { kind: 'datagram' }>; admitted: boolean } | null {
   const id = e.ref.entryId;
+  const step = state.step(e);
   if (id <= agg.fedThrough) return null;
+  if (step === null) throw new Error(`entry ${id} is already in the decode state but not in the aggregator`);
+  agg.enterPolicy(e.policy);
   if (e.kind === 'boundary') {
     agg.fed(id);
     // A stop, a suspend and a reopen after a crash all end the collector's
@@ -328,7 +356,8 @@ export function feedEntry(
     if (e.action === 'stop' || e.action === 'suspend' || e.action === 'interrupted') agg.seal(Infinity);
     return null;
   }
-  const decoded = decodeV5(e, e.remoteIPv4);
+  if (step.kind !== 'datagram') throw new Error(`entry ${id} is a datagram the decode state stepped as a boundary`);
+  const decoded = v5View(step.decoded);
   const admitted = decoded.kind === 'valid' && admission.admit(sourceKey(e.remoteIPv4, decoded.engineType, decoded.engineId));
   if (decoded.kind === 'valid') {
     if (!admitted) agg.fed(id);
@@ -342,5 +371,5 @@ export function feedEntry(
   // Receipt time has passed every earlier minute; the watermark, not the
   // wall clock, is what makes it safe to post them.
   agg.seal(minuteOf(e.receivedMs));
-  return { decoded, admitted };
+  return { step, admitted };
 }

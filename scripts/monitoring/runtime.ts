@@ -23,7 +23,7 @@ import { MonitoringJournal } from '../../src/services/monitoring/journal';
 import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, serveRuntime, type RpcPort } from '../../src/services/monitoring/runtimeRpc';
-import { DECODER_POLICY_VERSION, LIMITS, type BoundaryEvidence, type DatagramEvidence, type Evidence, type SourceConfig } from '../../src/services/monitoring/types';
+import { WRITE_POLICY_VERSION, LIMITS, type BoundaryEvidence, type DatagramEvidence, type Evidence, type SourceConfig } from '../../src/services/monitoring/types';
 
 const MiB = 1024 * 1024;
 const CFG: SourceConfig = { exporterIPv4: '10.0.0.1', bindIPv4: '192.168.1.5', port: 2055, storageLimitBytes: 16 * MiB };
@@ -1277,7 +1277,7 @@ async function main(): Promise<void> {
     // Nine stored minutes of ~1 MB are over rollupReadBytes (8 MiB); seven are under it.
     const minutes = Array.from({ length: 9 }, (_, i) => ({ sourceKey: 'a', minuteMs: M0 + i * 60_000, bytes: body }));
     await rig.collector.runtime.appendMinutes(minutes, {
-      generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: DECODER_POLICY_VERSION,
+      generation: snapshot.generation, throughEntryId: snapshot.throughEntryId, policyVersion: WRITE_POLICY_VERSION,
     }, 0);
     await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, Infinity), RangeError);
     await assert.rejects(rig.collector.runtime.readMinutes('a', M0, M0 + 9 * 60_000, 1e12), RangeError);
@@ -1299,7 +1299,7 @@ async function main(): Promise<void> {
     }
     const snapshot = await rig.collector.runtime.snapshot();
     const M0 = 1_700_000_000_000 - (1_700_000_000_000 % 60_000);
-    const mark = (through: number) => ({ generation: snapshot.generation, throughEntryId: through, policyVersion: DECODER_POLICY_VERSION });
+    const mark = (through: number) => ({ generation: snapshot.generation, throughEntryId: through, policyVersion: WRITE_POLICY_VERSION });
     const minute = (i: number, n: number) => ({ sourceKey: 'a', minuteMs: M0 + i * 60_000, bytes: new Uint8Array(n).fill(3) });
     const runtime = rig.collector.runtime;
 
@@ -1691,6 +1691,7 @@ function stubRuntime(overrides: Partial<Omit<HostRuntime, 'onLive'>> = {}): Omit
   return {
     snapshot: nope, readPage: nope, readEvidence: nope, locate: nope, readBoundaries: nope, watermark: nope,
     readMinutes: nope, sources: nope, appendMinutes: nope, rollupStatus: nope, resetRollups: nope,
+    segmentGeometry: nope, checkpoints: nope, readCheckpoint: nope,
     readRawPage: nope, bundleSlice: nope, dataset: nope,
     ...overrides,
   };

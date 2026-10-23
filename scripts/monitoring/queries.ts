@@ -30,14 +30,14 @@ import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { createRuntimeClient, domPort, serveRuntime } from '../../src/services/monitoring/runtimeRpc';
 import {
-  DECODER_POLICY_VERSION, LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type JournalSnapshot, type Snapshot, type SegmentSource,
+  LIMITS, type Evidence, type EvidenceRef, type QuerySpec, type JournalSnapshot, type Snapshot, type SegmentSource,
   type HistoryResult,
 } from '../../src/services/monitoring/types';
 import { sourceKey } from '../../src/services/monitoring/v5';
 import type { FromMonitoringWorker } from '../../src/services/monitoring/workerHost';
 import {
   BASE, FlakyDirectory, HostRig, MIN, NOW, Rig, S1, S2, SRC, SRC1, ask, askBoth, askOk, deflate, dgram, inflate, junk, rollUp, runAll, spec, start, stop,
-  test, v9, waitTick, withoutProvenance, boundary,
+  test, unreadVersion, waitTick, withoutProvenance, boundary,
 } from './queryRig';
 import { EXPORTER } from './fixtures';
 
@@ -257,7 +257,7 @@ test('sources: an engine, another engine and another exporter are three differen
     junk(m(1, 3000)),
     junk(m(1, 4000)),
     junk(m(1, 5000), OTHER),
-    v9(m(1, 6000)),
+    unreadVersion(m(1, 6000)),
   ]);
   const a = await check(rig, spec(m(0), m(3), 3));
   const b = await check(rig, spec(m(0), m(3), 3, { sourceKey: SRC1 }));
@@ -926,7 +926,7 @@ function failedSidecarRuntime(rig: Rig): { runtime: LocalRuntime; status: string
   const snap = rig.journal.snapshot();
   const opened = RollupStore.open(
     new FailingWrites(),
-    { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION },
+    { generation: snap.generation, throughEntryId: snap.throughEntryId },
     { nowMs: () => NOW },
   );
   const runtime = new LocalRuntime(rig.journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
@@ -1546,7 +1546,7 @@ test('degraded: a fault of the sidecar after a chunk was folded and with a real 
   for (let i = 0; i < 100; i++) {
     first.push(dgram(m(i, 1000), [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 100 + i, packets: 1 }, { src: '10.0.0.3', dst: '10.0.0.1', octets: 7, packets: 2 }]));
     if (i % 7 === 0) first.push(junk(m(i, 2000)));
-    if (i % 11 === 0) first.push(v9(m(i, 3000)));
+    if (i % 11 === 0) first.push(unreadVersion(m(i, 3000)));
   }
   rig.append(first);
   const host = await rollUp(rig);
@@ -1735,6 +1735,7 @@ test('inflate: the codec round-trips through it, and a stored rollup that lies a
     endpoints: [{ address: '10.0.0.1', sentOctets: 1000n, receivedOctets: 500n }],
     conversations: [{ srcAddr: '10.0.0.1', dstAddr: '10.0.0.2', reportedOctets: 1500n, reportedPackets: 12n }],
     malformed: 1, unsupported: 2, unknownSamplingRecords: 1,
+    policy: 2, awaitingSets: 0, awaitingBytes: 0, unsupportedTemplateRecords: 0, unsupportedSamplingRecords: 0, samplingInterval: 0, clock: null,
   };
   const stored = encodeMinuteRollup(rollup, deflate);
   assert.deepEqual(decodeMinuteRollup(stored, boundedInflate), rollup);

@@ -48,7 +48,7 @@ import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { runHistoryQuery } from '../../src/services/monitoring/queries';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { decodeV5 } from '../../src/services/monitoring/v5';
-import { DECODER_POLICY_VERSION, type DatagramEvidence, type HistoryResult } from '../../src/services/monitoring/types';
+import { type DatagramEvidence, type HistoryResult } from '../../src/services/monitoring/types';
 import { ROLLUP_FILE, monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
 import { isSegmentFileName } from '../../src/services/monitoring/segments';
 import { HostRig, deflate, inflate } from './queryRig';
@@ -656,7 +656,7 @@ try {
       const { journal } = MonitoringJournal.open(vol1.segments, { limitBytes: 1 << 30 });
       const snap = journal.snapshot();
       const opened = RollupStore.open(vol1.rollups,
-        { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION }, { nowMs: () => Date.now() });
+        { generation: snap.generation, throughEntryId: snap.throughEntryId }, { nowMs: () => Date.now() });
       const rt = new LocalRuntime(journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
       await new HostRig(rt, { wallNow: () => Date.now() }).connect();
       const srcs = await rt.sources();
@@ -726,7 +726,7 @@ try {
     const { journal } = MonitoringJournal.open(volume.segments, { limitBytes: 1 << 30 });
     const snap = journal.snapshot();
     const opened = RollupStore.open(volume.rollups,
-      { generation: snap.generation, throughEntryId: snap.throughEntryId, policyVersion: DECODER_POLICY_VERSION }, { nowMs: () => Date.now() });
+      { generation: snap.generation, throughEntryId: snap.throughEntryId }, { nowMs: () => Date.now() });
     const runtime = new LocalRuntime(journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
     const rig = new HostRig(runtime, { wallNow: () => Date.now() });
     await rig.connect();

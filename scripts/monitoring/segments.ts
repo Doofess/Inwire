@@ -477,8 +477,24 @@ test('legacy dropped beside a newer segment is allowed without a second roll', (
 
 // --- accepted policies and the shape of a dataset --------------------------------------------
 
-test('accepted-policies: only policy 1 is accepted today', () => {
-  assert.deepEqual([...ACCEPTED_POLICIES], [1]);
+test('accepted-policies: policies 1 and 2 are accepted (ADR 0066)', () => {
+  assert.deepEqual([...ACCEPTED_POLICIES], [1, 2]);
+});
+
+test('accepted-policies: a newest policy-1 segment that holds entries rolls at the next append; its bytes stay', () => {
+  const dir = new MemorySegmentDirectory(twoSegments());
+  const before = sha(bytesOf(dir, segmentName(4)));
+  const j = open(dir);
+  assert.equal(j.state, 'open');
+  assert.equal(j.append([bnd('start', S2, T0 + 10, { source: SRC }), dg(T0 + 11, Uint8Array.from([7]))]).appended, 2);
+  assert.deepEqual(dir.list().sort(), [segmentName(1), segmentName(4), segmentName(6)]);
+  assert.equal(sha(bytesOf(dir, segmentName(4))), before, 'the policy-1 segment is not written into');
+  const header = decodeSegmentHeader(bytesOf(dir, segmentName(6)));
+  assert.ok(header.ok);
+  if (header.ok) assert.equal(header.value.policyVersion, 2);
+  const all = readAll(j);
+  assert.deepEqual(all.map((e) => [e.ref.entryId, e.policy, e.segmentFirstId]),
+    [[1, 1, 1], [2, 1, 1], [3, 1, 1], [4, 1, 4], [5, 1, 4], [6, 2, 6], [7, 2, 6]]);
 });
 
 test('accepted-policies: a policy-3 segment is refused-version with every file byte-identical; policy 1 opens', () => {
@@ -731,7 +747,7 @@ test('leading-gap: the oldest segment must start at 1 or right after the archive
   assert.equal((all[0] as DatagramEvidence).sessionId, S1, 'the header seeds the session its predecessors held');
 });
 
-test('empty directory: open creates journal-000000000001.iwmj with a format-2 header, policy 1, a new generation and no session', () => {
+test('empty directory: open creates journal-000000000001.iwmj with a format-2 header, policy 2, a new generation and no session', () => {
   const dir = new MemorySegmentDirectory();
   const { journal, recovery } = MonitoringJournal.open(dir, options());
   assert.equal(journal.state, 'open');
@@ -741,7 +757,7 @@ test('empty directory: open creates journal-000000000001.iwmj with a format-2 he
   assert.ok(header.ok);
   if (header.ok) {
     assert.equal(header.value.formatVersion, 2);
-    assert.equal(header.value.policyVersion, 1);
+    assert.equal(header.value.policyVersion, 2);
     assert.equal(header.value.firstEntryId, 1);
     assert.equal(header.value.openSession, null);
     assert.equal(header.value.source, null);

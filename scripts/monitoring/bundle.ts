@@ -22,7 +22,7 @@ import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan } from '../../src/servic
 import { minuteOf } from '../../src/services/monitoring/rollup';
 import type { HostRuntime } from '../../src/services/monitoring/runtime';
 import type { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
-import { DECODER_POLICY_VERSION, LIMITS, type RawEntry, type SegmentSource } from '../../src/services/monitoring/types';
+import { WRITE_POLICY_VERSION, LIMITS, type RawEntry, type SegmentSource } from '../../src/services/monitoring/types';
 import type { FromMonitoringWorker } from '../../src/services/monitoring/workerHost';
 import {
   BASE, boundary, deflate, dgram, HostRig, MIN, NOW, Rig, rollUp, runAll, S1, S2, start, stop, test,
@@ -336,7 +336,7 @@ test('the manifest names the first and last journal entry, and they are the firs
   const rig = smallWorld();
   for (const [from, to, first, last] of [[m(1), m(5), 3, 9], [m(0), m(6), 1, 10], [m(2, 2000), m(4, 2000), 5, 9], [m(4), m(4, 1001), 8, 9]]) {
     const { d } = await bundleOf(rig, { fromMs: from, toMs: to });
-    assert.deepEqual(d.manifest.journal, { firstEntryId: first, throughEntryId: last, policies: [DECODER_POLICY_VERSION] }, `range ${from - BASE}..${to - BASE}`);
+    assert.deepEqual(d.manifest.journal, { firstEntryId: first, throughEntryId: last, policies: [WRITE_POLICY_VERSION] }, `range ${from - BASE}..${to - BASE}`);
     assert.equal(d.journal[0].originalId, first);
     assert.equal(d.journal[d.journal.length - 1].originalId, last);
     assert.equal(d.journal.length, last - first + 1);
@@ -366,7 +366,7 @@ test('a clock that stepped back inside the range leaves no hole: the ids in betw
   ]);
   const { d } = await bundleOf(rig, { fromMs: m(2), toMs: m(3, 500) });
   // Entry 3 is at minute 4, after the range, and between entries 2 and 4 which are in it (4's clock stepped back).
-  assert.deepEqual(d.manifest.journal, { firstEntryId: 2, throughEntryId: 4, policies: [DECODER_POLICY_VERSION] });
+  assert.deepEqual(d.manifest.journal, { firstEntryId: 2, throughEntryId: 4, policies: [WRITE_POLICY_VERSION] });
   assert.deepEqual(d.journal.map((j) => j.originalId), [2, 3, 4]);
 });
 
@@ -380,7 +380,7 @@ test('the slice ends at the last entry really in the range: a later entry whose 
     dgram(m(5, 1000), flow(4)),
   ]);
   const { d } = await bundleOf(rig, { fromMs: m(2), toMs: m(4) });
-  assert.deepEqual(d.manifest.journal, { firstEntryId: 2, throughEntryId: 3, policies: [DECODER_POLICY_VERSION] });
+  assert.deepEqual(d.manifest.journal, { firstEntryId: 2, throughEntryId: 3, policies: [WRITE_POLICY_VERSION] });
   assert.deepEqual(d.journal.map((j) => j.originalId), [2, 3]);
 });
 
@@ -393,7 +393,7 @@ test('the slice starts at the first entry really in the range: an earlier entry 
     dgram(m(3, 1000), flow(3)),
   ]);
   const { d } = await bundleOf(rig, { fromMs: m(2), toMs: m(4) });
-  assert.deepEqual(d.manifest.journal, { firstEntryId: 3, throughEntryId: 4, policies: [DECODER_POLICY_VERSION] });
+  assert.deepEqual(d.manifest.journal, { firstEntryId: 3, throughEntryId: 4, policies: [WRITE_POLICY_VERSION] });
   assert.deepEqual(d.journal.map((j) => j.originalId), [3, 4]);
 });
 
@@ -543,7 +543,7 @@ test('a wholly expired range is archive minutes only: the counts agree and the m
   assert.equal(d.journal.length, 0);
   assert.ok(d.archive.length > 0);
   assert.equal(d.manifest.archive.minutes, d.archive.length);
-  assert.deepEqual(d.manifest.archive.policies, [DECODER_POLICY_VERSION]);
+  assert.deepEqual(d.manifest.archive.policies, [WRITE_POLICY_VERSION]);
   assert.deepEqual(d.end, { journalEntries: 0, archivedMinutes: d.archive.length });
   const cuts = rig.archive.cuts();
   assert.equal(cuts.length, 1);
@@ -569,7 +569,7 @@ test('a kind-3 entry is the archive\'s fragment body, byte for byte as archive.i
   assert.deepEqual(d.archive.map((e) => hex(e.body)).sort(), held);
   // And that is what the codec makes of the fragment it was written from.
   const f = fragmentOf(d.archive[0].body);
-  assert.equal(hex(encodeArchiveFragmentBody({ sourceKey: f.key, minuteMs: f.minuteMs, throughEntryId: f.throughEntryId, policyVersion: DECODER_POLICY_VERSION, bytes: f.rollup })), hex(d.archive[0].body));
+  assert.equal(hex(encodeArchiveFragmentBody({ sourceKey: f.key, minuteMs: f.minuteMs, throughEntryId: f.throughEntryId, policyVersion: WRITE_POLICY_VERSION, bytes: f.rollup })), hex(d.archive[0].body));
 });
 
 test('a range across the cut holds both: archive minutes for what expired, journal entries for what did not', async () => {

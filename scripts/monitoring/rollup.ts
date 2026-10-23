@@ -29,7 +29,7 @@ import type { EvidenceInput } from '../../src/services/monitoring/journal';
 import { EXPORTER, GENERATION, evidence, v5Payload, type FlowSpec, type HeaderSpec } from './fixtures';
 import {
   BASE, MIN, NOW, S1, S2, S3, SRC, SRC1, Rig, ask, askBoth, askOk, boundary, deflate, dgram, inflate, junk, prng, rollUp, runAll,
-  spec, start, stop, test, v9, withoutProvenance,
+  spec, start, stop, test, unreadVersion, withoutProvenance,
 } from './queryRig';
 
 const m = (n: number, offset = 0): number => BASE + n * MIN + offset;
@@ -198,7 +198,7 @@ test('admission: learned from the sidecar\'s source keys, and an exporter key is
 
 test('budget: exactly 16,384 keys stay complete and the 16,385th makes the minute incomplete', () => {
   assert.equal(LIMITS.minuteKeyBudget, 16_384);
-  const acc = new MinuteAccumulator(SRC, m(0));
+  const acc = new MinuteAccumulator(SRC, m(0), 2);
   let id = 1;
   const flows = fan(100, 8191, m(0, 1), id); // 8,191 sources + 1 destination + 8,191 conversations = 16,383 keys
   for (const f of flows) acc.addFlow(f);
@@ -224,15 +224,15 @@ test('budget: exactly 16,384 keys stay complete and the 16,385th makes the minut
 });
 
 test('budget: two fragments each within it whose union is past it make the sum incomplete', () => {
-  const left = new MinuteAccumulator(SRC, m(0));
+  const left = new MinuteAccumulator(SRC, m(0), 2);
   for (const f of fan(110, 4500, m(0, 1), 1)) left.addFlow(f);
-  const right = new MinuteAccumulator(SRC, m(0));
+  const right = new MinuteAccumulator(SRC, m(0), 2);
   for (const f of fan(111, 4500, m(0, 2), 10)) right.addFlow(f);
   const a = left.toRollup();
   const b = right.toRollup();
   assert.equal(a.complete && b.complete, true);
   assert.ok(keyCount(a) <= LIMITS.minuteKeyBudget && keyCount(b) <= LIMITS.minuteKeyBudget);
-  const merged = new MinuteAccumulator(SRC, m(0));
+  const merged = new MinuteAccumulator(SRC, m(0), 2);
   merged.absorb(a);
   assert.equal(merged.complete, true);
   merged.absorb(b);
@@ -243,10 +243,10 @@ test('budget: two fragments each within it whose union is past it make the sum i
 });
 
 test('budget: an incomplete fragment makes any sum it joins incomplete', () => {
-  const full = new MinuteAccumulator(SRC, m(0));
+  const full = new MinuteAccumulator(SRC, m(0), 2);
   full.abandon();
   full.records = 4;
-  const sum = new MinuteAccumulator(SRC, m(0));
+  const sum = new MinuteAccumulator(SRC, m(0), 2);
   for (const f of flowsOf([{}], m(0, 1), 1)) sum.addFlow(f);
   sum.absorb(full.toRollup());
   assert.equal(sum.complete, false);
@@ -294,13 +294,13 @@ function buildWorld(seed = 7): World {
   push(start(m(0, -1000), S1));
   push(...traffic(0, 0, 60_000, 4));
   push(...traffic(1, 0, 60_000, 5));
-  push(junk(m(1, 100)), v9(m(1, 150)), junk(m(1, 160), OTHER));
+  push(junk(m(1, 100)), unreadVersion(m(1, 150)), junk(m(1, 160), OTHER));
   w.bad.push({ ms: m(1, 100), exporter: EXPORTER, kind: 'malformed' }, { ms: m(1, 150), exporter: EXPORTER, kind: 'unsupported' });
   push(...traffic(2, 0, 60_000, 4, { sampling: 0 })); // a whole minute whose sampling is unknown
   for (let e = 0; e < 20; e++) push(put(m(2, 1000 + e), e, [rflow()], {}, BUSY)); // 20 engines on one exporter: 16 are admitted
   push(...traffic(3, 0, 60_000, 6));
   push(...traffic(4, 0, 60_000, 4));
-  push(v9(m(4, 200)));
+  push(unreadVersion(m(4, 200)));
   w.bad.push({ ms: m(4, 200), exporter: EXPORTER, kind: 'unsupported' });
   push(...traffic(5, 0, 40_000, 3));
   push(stop(m(5, 50_000), S1));
@@ -806,22 +806,20 @@ test('replay: a restart reopens the same journal and the sidecar, and the answer
 
 // --- accepted policies and expiry (ADR 0062) -----------------------------------------------------------------
 
-test('codec: a rollup is written under the newest accepted policy, and every accepted policy decodes', () => {
-  const acc = new MinuteAccumulator(SRC, m(0));
-  for (const f of flowsOf([{ src: '10.1.1.1', dst: '10.1.1.2', octets: 5, packets: 2 }], m(0, 5), 1)) acc.addFlow(f);
-  const rollup = acc.toRollup();
-  const bytes = encodeMinuteRollup(rollup, deflate);
-  assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint16(0, true), WRITE_POLICY_VERSION);
+test('codec: a minute is written under its own policy, the newest is the written one, and every accepted policy round-trips', () => {
   assert.equal(WRITE_POLICY_VERSION, Math.max(...ACCEPTED_POLICIES));
   for (const v of ACCEPTED_POLICIES) {
-    const copy = bytes.slice();
-    new DataView(copy.buffer).setUint16(0, v, true);
-    assert.deepEqual(decodeMinuteRollup(copy, inflate), rollup, `policy ${v}`);
+    const acc = new MinuteAccumulator(SRC, m(0), v);
+    for (const f of flowsOf([{ src: '10.1.1.1', dst: '10.1.1.2', octets: 5, packets: 2 }], m(0, 5), 1)) acc.addFlow(f);
+    const rollup = acc.toRollup();
+    const bytes = encodeMinuteRollup(rollup, deflate);
+    assert.equal(new DataView(bytes.buffer, bytes.byteOffset).getUint16(0, true), v, `policy ${v} prefix`);
+    assert.deepEqual(decodeMinuteRollup(bytes, inflate), rollup, `policy ${v}`);
   }
 });
 
 test('codec: a policy this build does not accept is refused before anything is inflated', () => {
-  const bytes = encodeMinuteRollup(new MinuteAccumulator(SRC, m(0)).toRollup(), deflate);
+  const bytes = encodeMinuteRollup(new MinuteAccumulator(SRC, m(0), 2).toRollup(), deflate);
   const refused = [0, Math.max(...ACCEPTED_POLICIES) + 1, 0xffff].filter((v) => !ACCEPTED_POLICIES.includes(v));
   for (const v of refused) {
     const copy = bytes.slice();

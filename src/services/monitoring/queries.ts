@@ -38,7 +38,7 @@ import { decodeMinuteRollup, type Inflate } from './rollupCodec';
 import { MINUTE_MS, EngineAdmission, MinuteAccumulator, ipv4Number, minuteOf } from './rollup';
 import { CorruptRollupError, RuntimeUnavailableError, type ArchiveSource, type EvidenceReader, type RollupReader } from './runtime';
 import {
-  DECODER_POLICY_VERSION, LIMITS, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
+  WRITE_POLICY_VERSION, LIMITS, isReadablePolicy, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
   type EvidenceRef, type ExpiryCause, type HistoryBucket, type HistoryReply, type HistoryResult, type HistoryTable, type MinuteRollup,
   type NormalizedV5, type QueryFocus, type QuerySpec, type SegmentSource, type Snapshot,
 } from './types';
@@ -569,8 +569,8 @@ class Query {
       if (mark.generation !== snap.generation) {
         throw new RollupUnusable(`the rollups belong to generation ${mark.generation}, the journal is generation ${snap.generation}`);
       }
-      if (mark.policyVersion !== DECODER_POLICY_VERSION) {
-        throw new RollupUnusable(`the rollups were made by decoder policy ${mark.policyVersion}, this build is ${DECODER_POLICY_VERSION}`);
+      if (!isReadablePolicy(mark.policyVersion)) {
+        throw new RollupUnusable(`the rollups were made by decoder policy ${mark.policyVersion}, which this build does not read`);
       }
       if (mark.throughEntryId > snap.throughEntryId) {
         throw new RollupUnusable(`the rollups claim entry ${mark.throughEntryId}, the journal ends at ${snap.throughEntryId}`);
@@ -837,7 +837,7 @@ class Query {
       const d = decodeV5(e, e.remoteIPv4);
       let t = tail.get(m);
       const minute = (): TailMinute => {
-        if (t === undefined) { t = { acc: new MinuteAccumulator(this.spec.sourceKey, m) }; tail.set(m, t); }
+        if (t === undefined) { t = { acc: new MinuteAccumulator(this.spec.sourceKey, m, WRITE_POLICY_VERSION) }; tail.set(m, t); }
         return t;
       };
       if (d.kind !== 'valid') {
@@ -892,7 +892,7 @@ class Query {
       for (const m of tail.keys()) if (m >= a && m < b) minutes.add(m);
       for (const m of [...minutes].sort((x, y) => x - y)) {
         if (lostMinutes.has(m)) { this.markLost(m, m + MINUTE_MS); continue; }
-        const merged = new MinuteAccumulator(source, m);
+        const merged = new MinuteAccumulator(source, m, WRITE_POLICY_VERSION);
         for (const f of fromSource.get(m) ?? []) merged.absorb(f);
         for (const f of fromExporter.get(m) ?? []) merged.absorb(f);
         const drewArchive = archivedSource.has(m) || archivedExporter.has(m);
@@ -1174,6 +1174,11 @@ class Query {
       matchingRecords: this.matching,
       answeredFrom: { rollupMinutes, rawMinutes },
       evidence: this.focused ? this.evidence : [],
+      awaitingTemplate: 0,
+      awaitingBytes: 0,
+      unsupportedTemplates: 0,
+      sampling: { kind: 'absent' },
+      clock: { latestSkewMs: null, minSkewMs: null, maxSkewMs: null, flagged: false },
     };
   }
 }

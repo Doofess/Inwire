@@ -26,9 +26,10 @@ import {
 import type { MonitoringJournal } from './journal';
 import type { ExpiryPlan } from './retention';
 import { EngineAdmission, MinuteAccumulator, MinuteAggregator, feedEntry } from './rollup';
+import { DecodeState } from './decodeState';
 import { encodeMinuteRollup, type Deflate } from './rollupCodec';
 import type { RollupStore } from './rollupStore';
-import { ACCEPTED_POLICIES, LIMITS, WRITE_POLICY_VERSION, type Evidence, type MinuteRollup, type SessionContext } from './types';
+import { ACCEPTED_POLICIES, LIMITS, type Evidence, type MinuteRollup, type SessionContext } from './types';
 
 export const ARCHIVE_FRAMING: Framing = { magic: 'INWIREMA', maxBodyBytes: 1 << 20 };
 
@@ -413,7 +414,8 @@ export function expiryFragments(entries: Evidence[], session: SessionContext, de
   if (entries.length === 0) return [];
   const agg = new MinuteAggregator(entries[0].ref.entryId - 1);
   const admission = new EngineAdmission(session.knownSources);
-  for (const e of entries) feedEntry(agg, admission, e);
+  const state = DecodeState.empty(entries[0].ref.entryId - 1);
+  for (const e of entries) feedEntry(agg, admission, state, e);
   agg.seal(Infinity);
   const drained = agg.drain();
   if (drained === null) return [];
@@ -428,12 +430,12 @@ export function expiryFragments(entries: Evidence[], session: SessionContext, de
   for (const g of groups.values()) {
     let rollup = g.rollups[0];
     if (g.rollups.length > 1) {
-      const acc = new MinuteAccumulator(rollup.sourceKey, rollup.minuteMs);
+      const acc = new MinuteAccumulator(rollup.sourceKey, rollup.minuteMs, rollup.policy);
       for (const r of g.rollups) acc.absorb(r);
       rollup = acc.toRollup();
     }
     out.push({
-      sourceKey: rollup.sourceKey, minuteMs: rollup.minuteMs, throughEntryId: g.lastId, policyVersion: WRITE_POLICY_VERSION,
+      sourceKey: rollup.sourceKey, minuteMs: rollup.minuteMs, throughEntryId: g.lastId, policyVersion: rollup.policy,
       bytes: encodeMinuteRollup(rollup, deflate),
     });
   }

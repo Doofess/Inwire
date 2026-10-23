@@ -6,7 +6,7 @@
  * 48-byte records - so the decoder is checked against an author that is not
  * the decoder. No captured file is read.
  */
-import type { DatagramEvidence } from '../../src/services/monitoring/types';
+import { WRITE_POLICY_VERSION, type DatagramEvidence } from '../../src/services/monitoring/types';
 
 export const EXPORTER = '192.0.2.1';
 export const COLLECTOR = '192.0.2.50';
@@ -104,6 +104,8 @@ export function evidence(bytes: Uint8Array, over: Partial<DatagramEvidence> = {}
     remoteIPv4: EXPORTER,
     remotePort: 40_000,
     bytes,
+    policy: WRITE_POLICY_VERSION,
+    segmentFirstId: 1,
     ...over,
   };
 }

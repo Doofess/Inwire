@@ -26,7 +26,14 @@
  * (a deflated 16,384-key minute can pass the journal's 65,531). Entry kind 1
  * is a minute: `u16 keyLength, key, u64 minuteMs, u64 throughEntryId`, then
  * the rollup's own bytes, which this file never interprets. Kind 2 is the
- * watermark: `16 generation, u64 throughEntryId, u16 policyVersion`.
+ * watermark: `16 generation, u64 throughEntryId, u16 policyVersion`, the policy
+ * being the highest any minute it covers was decoded under: it never decreases,
+ * and the header's is the policy the file was created under (ADR 0066), so a
+ * cache from a build that read only policy 1 is continued, not rebuilt. Kind 3
+ * is a template checkpoint (ADRs 0064, 0066): `u8 role, 3 reserved, u32 length,
+ * u64 throughEntryId, u64 throughMs`, then the checkpoint deflated by the Worker.
+ * It is written in a batch before the batch's watermark and never past it, and
+ * is indexed by its through entry without being inflated.
  *
  * The in-memory index (per source, the minutes in file order) is rebuilt on
  * open by the same scan that checks the CRCs.
@@ -39,10 +46,22 @@ import {
 } from './journalCodec';
 import { MAX_ROLLUP_INFLATED_BYTES } from './rollupCodec';
 import { CorruptRollupError } from './runtime';
-import { FORMAT_VERSION, LIMITS, type Generation, type RollupWatermark } from './types';
+import {
+  FORMAT_VERSION, LIMITS, WRITE_POLICY_VERSION, isReadablePolicy,
+  type CheckpointInfo, type Generation, type RollupWatermark, type StoredCheckpoint,
+} from './types';
 
 const KIND_MINUTE = 1;
 const KIND_WATERMARK = 2;
+const KIND_CHECKPOINT = 3;
+/** role, three reserved bytes, the deflated length, the through entry and its receipt time (ADRs 0064, 0066). */
+const CHECKPOINT_FIXED_BYTES = 1 + 3 + 4 + 8 + 8;
+
+/** What the sidecar is checked against: the journal it was derived from. */
+export interface JournalBounds { generation: Generation; throughEntryId: number }
+
+/** The most checkpoints one `appendMinutes` may carry; the Worker posts the rest with the next. */
+export const MAX_APPEND_CHECKPOINTS = 4;
 const WATERMARK_BODY_BYTES = 16 + 8 + 2;
 const utf8 = new TextEncoder();
 const utf8Strict = new TextDecoder('utf-8', { fatal: true });
@@ -91,13 +110,16 @@ interface SidecarScan {
   lastEntryId: number;
   watermark: RollupWatermark | null;
   minutes: Map<string, Located[]>;
+  checkpoints: LocatedCheckpoint[];
 }
+
+interface LocatedCheckpoint extends CheckpointInfo { offset: number; bodyLength: number }
 
 function emptyScan(verdict: SidecarScan['verdict'], reason?: string): SidecarScan {
-  return { verdict, ...(reason === undefined ? {} : { reason }), batchEnd: FILE_HEADER_BYTES, lastEntryId: 0, watermark: null, minutes: new Map() };
+  return { verdict, ...(reason === undefined ? {} : { reason }), batchEnd: FILE_HEADER_BYTES, lastEntryId: 0, watermark: null, minutes: new Map(), checkpoints: [] };
 }
 
-function scanSidecar(file: BlockFile, journal: { generation: Generation; throughEntryId: number; policyVersion: number }): SidecarScan {
+function scanSidecar(file: BlockFile, journal: JournalBounds): SidecarScan {
   const size = file.size();
   if (size === 0) return emptyScan('empty');
   if (size < FILE_HEADER_BYTES) {
@@ -112,8 +134,9 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
   if (header.formatVersion !== FORMAT_VERSION) {
     return emptyScan('rebuild-required', `sidecar format ${header.formatVersion}; this build reads ${FORMAT_VERSION}`);
   }
-  if (header.policyVersion !== journal.policyVersion) {
-    return emptyScan('rebuild-required', `sidecar decoder policy ${header.policyVersion}, journal ${journal.policyVersion}`);
+  // The header's policy is the one the file was created under; a newer build's is not ours to continue (ADR 0066).
+  if (!isReadablePolicy(header.policyVersion)) {
+    return emptyScan('rebuild-required', `sidecar decoder policy ${header.policyVersion}; this build writes ${WRITE_POLICY_VERSION}`);
   }
   const generation = generationToHex(header.generation);
   if (generation !== journal.generation) {
@@ -122,6 +145,8 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
 
   const minutes = new Map<string, Located[]>();
   let pending: [string, Located, number][] = [];
+  let pendingCheckpoints: LocatedCheckpoint[] = [];
+  const checkpoints: LocatedCheckpoint[] = [];
   let batchEnd = FILE_HEADER_BYTES;
   let batchLastId = 0;
   // An object, because TypeScript cannot see a closure assign a `let`.
@@ -155,8 +180,14 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
       if (generationToHex(e.body.subarray(0, 16)) !== generation) return 'a watermark names another generation';
       const through = v.getBigUint64(16, true);
       if (through > BigInt(Number.MAX_SAFE_INTEGER)) return 'a watermark is out of range';
-      if (v.getUint16(24, true) !== header.policyVersion) return 'a watermark names another policy';
+      const policy = v.getUint16(24, true);
+      if (!isReadablePolicy(policy)) return `a watermark names policy ${policy}`;
       if (seen.watermark !== null && Number(through) < seen.watermark.throughEntryId) return 'a watermark moves backwards';
+      // The highest policy decoded only rises (ADR 0066).
+      if (seen.watermark !== null && policy < seen.watermark.policyVersion) return 'a watermark\'s policy moves backwards';
+      for (const c of pendingCheckpoints) {
+        if (c.throughEntryId > Number(through)) return `a checkpoint through entry ${c.throughEntryId} is past its batch's watermark ${Number(through)}`;
+      }
       // A batch is written with one closing watermark, and every minute in it
       // says which. One that names another was not written by this code.
       for (const [, , minuteThrough] of pending) {
@@ -164,7 +195,9 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
           return `a minute entry names watermark ${minuteThrough}, but its batch closes at ${Number(through)}`;
         }
       }
-      seen.watermark = { generation, throughEntryId: Number(through), policyVersion: header.policyVersion };
+      seen.watermark = { generation, throughEntryId: Number(through), policyVersion: policy };
+      checkpoints.push(...pendingCheckpoints);
+      pendingCheckpoints = [];
       for (const [key, loc] of pending) {
         const list = minutes.get(key);
         if (list === undefined) minutes.set(key, [loc]); else list.push(loc);
@@ -172,6 +205,22 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
       pending = [];
       batchEnd = e.end;
       batchLastId = e.entryId;
+      return null;
+    }
+    if (e.kind === KIND_CHECKPOINT) {
+      if (e.body.length < CHECKPOINT_FIXED_BYTES) return 'a checkpoint entry is shorter than its metadata';
+      const role = e.body[0];
+      if (role !== 1 && role !== 2) return `a checkpoint has role ${role}`;
+      if (e.body[1] !== 0 || e.body[2] !== 0 || e.body[3] !== 0) return 'a checkpoint\'s reserved bytes are not zero';
+      if (v.getUint32(4, true) !== e.body.length - CHECKPOINT_FIXED_BYTES) return 'a checkpoint\'s length disagrees with its entry';
+      const through = v.getBigUint64(8, true);
+      const throughMs = v.getBigUint64(16, true);
+      if (through > BigInt(Number.MAX_SAFE_INTEGER) || throughMs > BigInt(Number.MAX_SAFE_INTEGER)) return 'a checkpoint is out of range';
+      const last = pendingCheckpoints.at(-1) ?? checkpoints.at(-1);
+      if (last !== undefined && Number(through) <= last.throughEntryId) return 'a checkpoint does not move forwards';
+      pendingCheckpoints.push({
+        role, throughEntryId: Number(through), throughMs: Number(throughMs), offset: e.offset + ENTRY_HEADER_BYTES, bodyLength: e.body.length,
+      });
       return null;
     }
     return `unknown kind ${e.kind}`;
@@ -183,7 +232,7 @@ function scanSidecar(file: BlockFile, journal: { generation: Generation; through
   if (wm.throughEntryId > journal.throughEntryId) {
     return emptyScan('rebuild-required', `the sidecar covers entry ${wm.throughEntryId}, past the journal's ${journal.throughEntryId}`);
   }
-  return { verdict: 'ok', batchEnd, lastEntryId: batchLastId, watermark: wm, minutes };
+  return { verdict: 'ok', batchEnd, lastEntryId: batchLastId, watermark: wm, minutes, checkpoints };
 }
 
 export class RollupStore {
@@ -194,18 +243,19 @@ export class RollupStore {
 
   private constructor(
     private readonly file: BlockFile,
-    private readonly journal: { generation: Generation; throughEntryId: number; policyVersion: number },
+    private readonly journal: JournalBounds,
     private readonly nowMs: () => number,
     private end: number,
     private lastId: number,
     private mark: RollupWatermark | null,
     private minutes: Map<string, Located[]>,
     private rebuildReason: string | null,
+    private checkpointIndex: LocatedCheckpoint[] = [],
   ) {}
 
   static open(
     file: BlockFile,
-    journal: { generation: Generation; throughEntryId: number; policyVersion: number },
+    journal: JournalBounds,
     options: RollupStoreOptions = {},
   ): { store: RollupStore; status: RollupOpenStatus; reason?: string } {
     const nowMs = options.nowMs ?? Date.now;
@@ -244,19 +294,20 @@ export class RollupStore {
         };
       }
     }
-    const store = new RollupStore(file, journal, nowMs, scan.batchEnd, scan.lastEntryId, scan.watermark, scan.minutes, null);
+    const store = new RollupStore(file, journal, nowMs, scan.batchEnd, scan.lastEntryId, scan.watermark, scan.minutes, null, scan.checkpoints);
     return { store, status: 'ok' };
   }
 
   private writeFreshHeader(): void {
     this.file.truncate(0);
     this.file.write(0, encodeFileHeader(ROLLUP_FRAMING, {
-      generation: generationFromHex(this.journal.generation), createdMs: this.nowMs(), policyVersion: this.journal.policyVersion,
+      generation: generationFromHex(this.journal.generation), createdMs: this.nowMs(), policyVersion: WRITE_POLICY_VERSION,
     }));
     this.end = FILE_HEADER_BYTES;
     this.lastId = 0;
     this.mark = null;
     this.minutes = new Map();
+    this.checkpointIndex = [];
     this.rebuildReason = null;
   }
 
@@ -290,6 +341,7 @@ export class RollupStore {
   appendMinutes(
     minutes: MinuteInput[], watermark: RollupWatermark, afterEntryId: number,
     bounds: { journalThroughEntryId?: number; maxBatchBytes?: number } = {},
+    checkpoints: StoredCheckpoint[] = [],
   ): void {
     this.requireUsable();
     if (!Array.isArray(minutes) || minutes.length > MAX_APPEND_MINUTES) {
@@ -298,8 +350,16 @@ export class RollupStore {
     let rollupBytes = 0;
     for (const m of minutes) rollupBytes += m.bytes instanceof Uint8Array ? m.bytes.length : 0;
     if (rollupBytes > MAX_APPEND_BYTES) throw new RangeError(`a batch is at most ${MAX_APPEND_BYTES} bytes of rollup (got ${rollupBytes})`);
-    if (watermark.generation !== this.journal.generation || watermark.policyVersion !== this.journal.policyVersion) {
-      throw new Error('a watermark must name the journal generation and policy this sidecar was opened for');
+    if (watermark.generation !== this.journal.generation) {
+      throw new Error('a watermark must name the journal generation this sidecar was opened for');
+    }
+    // A watermark's policy is the highest any minute it covers was decoded under, so it never decreases. It may be
+    // below the header's: a sidecar created by this build that rebuilds an upgraded journal's policy-1 prefix (ADR 0066).
+    if (!isReadablePolicy(watermark.policyVersion) || (this.mark !== null && watermark.policyVersion < this.mark.policyVersion)) {
+      throw new Error(`a watermark of policy ${watermark.policyVersion} does not continue this sidecar's policy ${this.mark?.policyVersion ?? 'none'}`);
+    }
+    if (!Array.isArray(checkpoints) || checkpoints.length > MAX_APPEND_CHECKPOINTS) {
+      throw new RangeError(`a batch carries at most ${MAX_APPEND_CHECKPOINTS} checkpoints`);
     }
     if (!Number.isSafeInteger(watermark.throughEntryId) || watermark.throughEntryId < 0) throw new RangeError('a watermark is a non-negative entry id');
     if (this.mark !== null && watermark.throughEntryId < this.mark.throughEntryId) {
@@ -315,8 +375,32 @@ export class RollupStore {
 
     const encoded: Uint8Array[] = [];
     const placed: [string, Located][] = [];
+    const placedCheckpoints: LocatedCheckpoint[] = [];
     let id = this.lastId;
     let at = this.end;
+    // Checkpoints first: each is state through an entry at or below this batch's watermark (ADRs 0064, 0066).
+    let lastCheckpoint = this.checkpointIndex.at(-1)?.throughEntryId ?? -1;
+    for (const c of checkpoints) {
+      if (c.role !== 1 && c.role !== 2) throw new RangeError('a checkpoint\'s role is 1 or 2');
+      if (!Number.isSafeInteger(c.throughEntryId) || !Number.isSafeInteger(c.throughMs) || c.throughEntryId < 0 || c.throughMs < 0) {
+        throw new RangeError('a checkpoint names a non-negative entry and time');
+      }
+      if (c.throughEntryId <= lastCheckpoint) throw new RangeError(`a checkpoint through entry ${c.throughEntryId} does not follow ${lastCheckpoint}`);
+      if (c.throughEntryId > watermark.throughEntryId) throw new RangeError(`a checkpoint through entry ${c.throughEntryId} is past the watermark`);
+      if (!(c.bytes instanceof Uint8Array)) throw new RangeError('a checkpoint is bytes');
+      lastCheckpoint = c.throughEntryId;
+      const body = new Uint8Array(CHECKPOINT_FIXED_BYTES + c.bytes.length);
+      const v = new DataView(body.buffer);
+      body[0] = c.role;
+      v.setUint32(4, c.bytes.length, true);
+      v.setBigUint64(8, BigInt(c.throughEntryId), true);
+      v.setBigUint64(16, BigInt(c.throughMs), true);
+      body.set(c.bytes, CHECKPOINT_FIXED_BYTES);
+      const entry = encodeEntry(ROLLUP_FRAMING, ++id, KIND_CHECKPOINT, body);
+      encoded.push(entry);
+      placedCheckpoints.push({ role: c.role, throughEntryId: c.throughEntryId, throughMs: c.throughMs, offset: at + ENTRY_HEADER_BYTES, bodyLength: body.length });
+      at += entry.length;
+    }
     for (const m of minutes) {
       if (!Number.isSafeInteger(m.minuteMs) || m.minuteMs < 0) throw new RangeError('a minute is a non-negative safe integer of milliseconds');
       const key = utf8.encode(m.sourceKey);
@@ -360,6 +444,7 @@ export class RollupStore {
       const list = this.minutes.get(key);
       if (list === undefined) this.minutes.set(key, [loc]); else list.push(loc);
     }
+    this.checkpointIndex.push(...placedCheckpoints);
     this.end += all.length;
     this.lastId = id;
     this.mark = { generation: watermark.generation, throughEntryId: watermark.throughEntryId, policyVersion: watermark.policyVersion };
@@ -393,6 +478,30 @@ export class RollupStore {
       if (!parsed.ok || parsed.crc !== entryCrc(header, body)) throw new CorruptRollupError('a stored minute no longer matches its checksum');
       return { minuteMs: m.minuteMs, throughEntryId: m.throughEntryId, bytes: body.slice(2 + keyLength + 16) };
     });
+  }
+
+  /** The checkpoints the sidecar holds (ADR 0066), in entry order: what a reader picks from without inflating any. */
+  checkpoints(): CheckpointInfo[] {
+    this.requireUsable();
+    return this.checkpointIndex.map((c) => ({ role: c.role, throughEntryId: c.throughEntryId, throughMs: c.throughMs }));
+  }
+
+  /**
+   * The deflated checkpoint through `throughEntryId`, or null if the sidecar holds none there. Its entry's CRC is
+   * checked as a minute's is; what the bytes hold is the reader's to check (`DecodeState.fromCheckpoint`).
+   */
+  readCheckpoint(throughEntryId: number): Uint8Array | null {
+    this.requireUsable();
+    const c = this.checkpointIndex.find((x) => x.throughEntryId === throughEntryId);
+    if (c === undefined) return null;
+    const header = new Uint8Array(ENTRY_HEADER_BYTES);
+    const body = new Uint8Array(c.bodyLength);
+    if (this.file.read(c.offset - ENTRY_HEADER_BYTES, header) !== header.length || this.file.read(c.offset, body) !== body.length) {
+      throw new CorruptRollupError('the rollup sidecar is shorter than its index');
+    }
+    const parsed = parseEntryHeader(ROLLUP_FRAMING, header);
+    if (!parsed.ok || parsed.crc !== entryCrc(header, body)) throw new CorruptRollupError('a stored checkpoint no longer matches its checksum');
+    return body.slice(CHECKPOINT_FIXED_BYTES);
   }
 
   /**
