@@ -50,6 +50,13 @@ const wired = (event: string, matcher: string | undefined, script: string, condi
   (hooks[event] ?? []).some((e) => e.matcher === matcher && (e.hooks ?? []).some((h) =>
     h.type === 'command' && h.command === `node "$CLAUDE_PROJECT_DIR/.claude/hooks/${script}"` && h.if === condition));
 check('guard-shell runs before every Bash and PowerShell call', wired('PreToolUse', 'Bash|PowerShell', 'guard-shell.mjs'));
+// The `if` only saves a node spawn per shell call; the script's own regex is the filter.
+check('ensure-modules runs after a Bash worktree add', wired('PostToolUse', 'Bash', 'ensure-modules.mjs', 'Bash(*worktree add*)'));
+check('ensure-modules runs after a PowerShell worktree add', wired('PostToolUse', 'PowerShell', 'ensure-modules.mjs', 'PowerShell(*worktree add*)'));
+check('ensure-modules runs after EnterWorktree', wired('PostToolUse', 'EnterWorktree', 'ensure-modules.mjs'));
+check('ensure-modules runs as each subagent starts', wired('SubagentStart', undefined, 'ensure-modules.mjs'));
+const timeouts = Object.values(hooks).flat().flatMap((e) => e.hooks ?? []).filter((h) => h.command?.includes('ensure-modules.mjs')).map((h) => h.timeout);
+check('ensure-modules has 30 seconds wherever it runs', timeouts.length === 4 && timeouts.every((t) => t === 30), JSON.stringify(timeouts));
 for (const entry of Object.values(hooks).flat()) {
   for (const h of entry.hooks ?? []) {
     const script = h.command?.match(/\.claude\/hooks\/([\w.-]+\.mjs)/)?.[1];

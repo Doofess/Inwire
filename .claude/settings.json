@@ -15,6 +15,33 @@
           { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-shell.mjs\"", "timeout": 10 }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "if": "Bash(*worktree add*)", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ensure-modules.mjs\"", "timeout": 30 }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          { "type": "command", "if": "PowerShell(*worktree add*)", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ensure-modules.mjs\"", "timeout": 30 }
+        ]
+      },
+      {
+        "matcher": "EnterWorktree",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ensure-modules.mjs\"", "timeout": 30 }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ensure-modules.mjs\"", "timeout": 30 }
+        ]
+      }
     ]
   }
 }
