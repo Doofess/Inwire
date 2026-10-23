@@ -73,3 +73,7 @@ agent-rs/target-fix/
 # self-signed one, the build must not change. Certificates themselves never
 # belong here either; scripts/sign/signing.ts fails on a tracked .cer/.pfx.
 .signing.json
+# Claude Code: per-machine settings and the worktrees its sessions create.
+# The shared project setup is .claude/settings.json; see .claude/README.md.
+.claude/settings.local.json
+.claude/worktrees/
