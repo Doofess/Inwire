@@ -1,6 +1,6 @@
 # src/services/monitoring/CLAUDE.md
 
-The NetFlow v5 monitoring collector (ADRs 0058, 0059, 0060); loaded when you work under `src/services/monitoring/`, and relevant to `electron/monitoring/`, `src/workers/monitoring.worker.ts` and the Monitoring sheet. It is implemented, not planned. It shares no code or state with the capture path: its files are not captures and `planPrune` never reaches them.
+The NetFlow v5, v9 and IPFIX monitoring collector (ADRs 0058-0066); loaded when you work under `src/services/monitoring/`, and relevant to `electron/monitoring/`, `src/workers/monitoring.worker.ts` and the Monitoring sheet. It is implemented, not planned. It shares no code or state with the capture path: its files are not captures and `planPrune` never reaches them.
 
 ## Process split
 
@@ -35,13 +35,14 @@ The NetFlow v5 monitoring collector (ADRs 0058, 0059, 0060); loaded when you wor
 - Quit drains: the `will-quit` handler in `electron/main.ts` uses `planQuitDrain` and `runQuitDrain` (`electron/monitoring/quitDrain.ts`), which always ends in `settled` so a rejecting drain cannot hold the quit, then calls `app.quit()` again from `setImmediate`. `powerMonitor` `suspend` calls `monitoring.suspend()`.
 - Windows shutdown, logoff and the installer's Restart Manager never reach `will-quit`. Recovery at the next open is the design; do not add a handler that claims to cover them.
 
-## Rulings (the owner's, in ADRs 0058-0060)
+## Rulings (the owner's, in ADRs 0058-0060 and 0064)
 
 - A conversation is a **directional address pair** (source to destination). Ports and protocols are answered by a raw drill-down over the journal, not by widening the key.
 - Bounds are per table, with exact totals (above). The default storage is 8 GiB.
-- The configured exporter address is an intake filter, **not authentication**: v5 has none. Datagrams from other senders are counted for at most 16 addresses plus an overflow count, and dropped.
+- The configured exporter address is an intake filter, **not authentication**: NetFlow v5, v9 and IPFIX over UDP carry none. Datagrams from other senders are counted for at most 16 addresses plus an overflow count, and dropped.
 - `src/services/monitoring/config.ts` refuses a bind address of `0.0.0.0`, and an exporter address of `0.0.0.0` or `255.255.255.255`.
-- Source health is derived (`sourceHealth.ts`) and pushed by the Worker; the sheet does not invent a state.
+- Source health is derived (`sourceHealth.ts`) and pushed by the Worker; the sheet does not invent a state. The push carries one `ExporterSnapshot` per v9/IPFIX source while the host is live, which the sheet's Exporter block (`src/components/monitoring/ExporterDetail.tsx`) draws: sampling, clock, numbering, data sets that waited for a template, restarts and each template's uninterpreted fields.
+- Counters are kept as reported. A sampled source's History shows the reported totals and, separately, an estimate (reported times the interval) labelled as one; nothing is scaled in storage. A biflow (RFC 5103) record is two legs, forward and reverse, never summed into one.
 
 ## Enforcers
 
@@ -62,6 +63,6 @@ All plain `tsx`, under `scripts/monitoring/` and run by `npm run check`:
 - `segments.ts`: segment runs, the accepted-policies rule, refusals byte-for-byte untouched. `retention.ts`: which segments expire. `archive.ts`: the archive's vectors and reopen rules, and that what leaves the journal is in the archive exactly once with totals unchanged.
 - `checkpoints.ts` and `host-checkpoints.ts`: where a replay starts (checkpoint, archive cut, policy-1 boundary), when the Worker writes a checkpoint, and that the host's catch-up, health and detail decode v9 by templates from before the watermark.
 - `templates.ts`, `flow-decode.ts`, `exporter-state.ts`, `checkpoint-codec.ts`: the v9/IPFIX store (isolation, restart, lifetime, bounds), the decoder (what softflowd and pmacct sent equals tshark's totals, plus synthetic messages cross-checked with tshark), sequence and sampling, and the checkpoint (ADR 0064's 246-byte vector, live equals restored).
-- `sheet-source.ts`: facts about the sheet read from component source.
+- `sheet-source.ts`: facts about the sheet read from component source, including the v9/IPFIX copy (`monitoringCopy.ts`: not-interpreted fields, awaiting a template, the four sampling states, the estimate, the clock) and the onboarding snippets (`src/components/monitoring/onboardingSnippets.ts`, a pure data module beside `Onboarding.tsx`): one per surveyed vendor, each cited with its read date, filled with the listen address and port, and the caveat shown with every one. A vendor whose page could not be read has no lines and says so rather than guessing them.
 - `scripts/electron/monitoring-ui.ts` drives the sheet: it stubs main's native dialogs with `app.evaluate` and seeds expired, read-only and refused datasets on disk (`scripts/electron/monitoringSeed.ts`), so the native dialog itself is never pressed or photographed; `scripts/electron/monitoring-drive.ts` and `monitoring-shots.ts` are in `NOT_TESTS`, as are `measurement.ts`, `interop.ts`, `load.ts`, `exporter-lab.ts`, `fixtures.ts` and `queryRig.ts` here. A pass elsewhere is not a pass on those.
 - `scripts/monitoring/exporter-vectors.json` is what softflowd and pmacct sent as v9 and IPFIX, recorded by `exporter-lab.ts --write-vectors` from the generated capture, with tshark's and nfdump's totals (ADR 0064). It is data, not a script; re-record it only from the lab.

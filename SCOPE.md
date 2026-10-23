@@ -34,10 +34,10 @@ Windows networking (SMB, DCE/RPC, NTLMSSP, LDAP, RDP), VoIP (SIP and RTP),
 tunnels and mirrors (GRE, ERSPAN, TZSP) and flow-export protocols. NetFlow
 v5/v9, IPFIX and sFlow datagrams can be inspected inside a capture.
 
-**Network monitoring (NetFlow v5)** is implemented
-([ADRs 0058-0063](docs/decisions/README.md)). Inwire collects from one exporter
-over IPv4: a specific local address and UDP port, started explicitly while the
-app is open. An unprivileged utilityProcess owns the socket and the history; a
+**Network monitoring (NetFlow v5, v9 and IPFIX)** is implemented
+([ADRs 0058-0066](docs/decisions/README.md)). Inwire collects from one exporter
+over IPv4 and UDP: a specific local address and port, started explicitly while
+the app is open. An unprivileged utilityProcess owns the socket and the history; a
 sandboxed Worker decodes the datagrams; the capture agent has no listener and no
 extra privilege ([ADR 0058](docs/decisions/0058-monitoring-intake-and-lifetime.md)).
 A standalone journal is the authority and minute rollups are derived caches.
@@ -53,12 +53,20 @@ as a gap
 ([ADR 0062](docs/decisions/0062-monitoring-segments-retention-archive.md)).
 A range can be exported as a `.iwmon` evidence bundle of its raw records
 ([ADR 0063](docs/decisions/0063-monitoring-evidence-bundle.md)).
+v9 and IPFIX templates are kept per source ID or observation domain, and carry
+across a restart only within their lifetime. A data set that arrives before its
+template is kept and counted, never decoded later. Counters are shown as the
+exporter reported them, with a sampled estimate labelled as one, and a
+bidirectional record stays two directions
+([ADR 0064](docs/decisions/0064-monitoring-v9-ipfix-collection.md)).
 The Monitoring sheet opens from the Network sidebar and the command palette,
 leaves the five capture views alone, and does not stop collection when closed. A
 talker can apply a filter to the open capture, labelled as that operation
 ([ADR 0060](docs/decisions/0060-monitoring-workspace-sheet.md)). The
 measurements behind these choices are in
-[the monitoring measurement report](docs/monitoring-v5-measurements.md).
+the monitoring measurement reports for
+[v5](docs/monitoring-v5-measurements.md) and
+[v9 and IPFIX](docs/monitoring-v9-ipfix-measurements.md).
 
 Windows has the desktop app. macOS and Linux retain the Python capture agent;
 desktop apps for those platforms remain future work.
@@ -73,8 +81,8 @@ parity chase stops.
 These areas are in scope, but need their own design and evidence before work
 begins. They are not commitments.
 
-- Additional exporters and formats: multiple sources, IPv6, NetFlow v9/IPFIX,
-  sFlow flow samples and interface-counter samples.
+- Additional exporters and formats: multiple sources, IPv6 exporters, IPFIX
+  over TCP or SCTP, sFlow flow samples and interface-counter samples.
 - SNMP polling for devices that cannot export counters, per-link utilisation,
   overload detection and alerting.
 - Per-process bandwidth analysis from local traffic and the agent's socket table.
