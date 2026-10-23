@@ -245,6 +245,17 @@ function bulk(segments: number, ackRule = 'ack'): Packet[] {
   const pingPong = [row(true, 'S'), ...Array.from({ length: 20 }, (_, i) => row(i % 2 === 0, 'A')), row(true, 'FA')];
   check('pure ACKs both ways do not fold into one another',
     foldRuns(pingPong, CLIENT, ruleKeyOf, NONE).length, pingPong.length);
+
+  // One segment and its ACK are two frames; folded, they read "1 frames ·
+  // 1 ACK" and hide both behind a click. A band is a run of data.
+  nextId = 1;
+  const single = [...handshake(), ...bulk(1), row(true, 'A', { rule: 'ack' }), row(false, 'FA')];
+  check('one data frame and its ACK are drawn as frames, not a band',
+    riders(foldRuns(single, CLIENT, ruleKeyOf, NONE)), single.map(() => 'frame'));
+  nextId = 1;
+  const pair = [...handshake(), ...bulk(2), row(false, 'FA')];
+  check('two data frames and an ACK are a band', riders(foldRuns(pair, CLIENT, ruleKeyOf, NONE)),
+    ['frame', 'frame', 'frame', 'band(2+1)', 'frame']);
 }
 
 // --- An opened band comes back as frames ------------------------------------------------

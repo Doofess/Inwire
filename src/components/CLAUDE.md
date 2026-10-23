@@ -299,8 +299,10 @@ surface's.
 (ADR 0055): each chip is `colorEngine.getPacketStyle` in the active packet
 theme, so a reset, a retransmission or a zero window reads the same on the
 ladder as in the list, and there is no second palette to keep in step. A quiet
-run - consecutive frames under one rule, one direction - folds into a band
-(`ladderRuns.ts`), and a frame with SYN, FIN, RST, an analysis flag or an
+run - consecutive frames under one rule, one direction, at least two of them
+carrying data - folds into a band (`ladderRuns.ts`). Pure ACKs from the other
+lane ride along in it, counted apart and never breaking or colouring it,
+because a receiver acknowledges every second segment. A frame with SYN, FIN, RST, an analysis flag or an
 expert category never folds, because it is the one somebody opened the stream
 to find. A frame named from outside (the selection, a hover, the state map)
 opens the band hiding it once per id - per click for the map - not once per
@@ -327,8 +329,9 @@ UNKNOWN to LISTEN is drawn bare.
 
 **Statistics → Conversations → TCP is the whole capture**, from the same
 digest, with an Outcome column; the other levels still count the buffer and
-keep their "frames X-Y only" note, and the TCP level says "Whole capture" or
-that the digest is rebuilding. **A TCP or UDP row click opens the stream on the
+keep their "frames X-Y only" note, and the TCP level says "Whole capture", that
+the digest is rebuilding, or that a rebuild missed frames and is not the whole
+capture. **A TCP or UDP row click opens the stream on the
 ladder**; filtering moved to a trailing button on the row, and IP and Ethernet
 rows still filter on click, because an IP row is many streams. Follow Stream
 and Show conversation in the row menu must never call `onReturnToPackets`: it

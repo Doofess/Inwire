@@ -88,17 +88,17 @@ export function foldRuns(
   let acks = 0;
 
   const flush = () => {
-    if (run.length === 1) items.push({ kind: 'frame', ...run[0] });
-    else if (run.length > 1) {
-      if (expanded.has(run[0].packet.id)) for (const r of run) items.push({ kind: 'frame', ...r });
-      else {
-        let bytes = 0;
-        for (const r of run) if (r.from === runFrom) bytes += r.packet.length;
-        const first = run[0].packet;
-        const last = run[run.length - 1].packet;
-        items.push({ kind: 'band', from: runFrom, first, last, count: run.length - acks, bytes, acks,
-          time: first.relativeTime, endTime: last.relativeTime, ruleKey: runKey });
-      }
+    // A band is a run of data: one segment and the ACKs riding on it are
+    // drawn as themselves, as a band of one always was.
+    if (run.length - acks < 2 || expanded.has(run[0].packet.id)) {
+      for (const r of run) items.push({ kind: 'frame', ...r });
+    } else {
+      let bytes = 0;
+      for (const r of run) if (r.from === runFrom) bytes += r.packet.length;
+      const first = run[0].packet;
+      const last = run[run.length - 1].packet;
+      items.push({ kind: 'band', from: runFrom, first, last, count: run.length - acks, bytes, acks,
+        time: first.relativeTime, endTime: last.relativeTime, ruleKey: runKey });
     }
     run = [];
     acks = 0;
