@@ -205,3 +205,49 @@ export function ipfixMessage(h: IpfixHeader, sets: number[][]): Uint8Array {
   const body = sets.flat();
   return Uint8Array.from([...be.u16(10), ...be.u16(h.length ?? 16 + body.length), ...be.u32(h.secs), ...be.u32(h.sequence), ...be.u32(h.domain), ...body]);
 }
+
+// --- Sample exports for the sheet's drives and photographs (Task 10) ------------------------------------------
+
+export interface SampleFlow { src: string; dst: string; octets: number; packets: number; proto?: number; sport?: number; dport?: number }
+
+const V9_DATA: WireField[] = [
+  { type: 8, length: 4 }, { type: 12, length: 4 }, { type: 7, length: 2 }, { type: 11, length: 2 }, { type: 4, length: 1 },
+  { type: 1, length: 4 }, { type: 2, length: 4 }, { type: 22, length: 4 }, { type: 21, length: 4 },
+];
+
+/**
+ * A v9 export as a router sends it: the data template (256) every time, an options template (257) and its
+ * record stating "1 in `interval`" when an interval is given, then the data records. `uptime` is the header's.
+ */
+export function v9Sample(h: V9Header, flows: SampleFlow[], interval: number | null): Uint8Array {
+  const sets: number[][] = [templateSet(9, [templateRecord(9, 256, V9_DATA)])];
+  if (interval !== null) {
+    sets.push(optionsTemplateSet(9, [optionsTemplateRecord(9, 257, [{ type: 1, length: 4 }], [{ type: 34, length: 4 }, { type: 35, length: 1 }])]));
+    sets.push(dataSet(257, [[...be.u32(0), ...be.u32(interval), ...be.u8(2)]], 3));
+  }
+  sets.push(dataSet(256, flows.map((f) => [
+    ...be.ipv4(f.src), ...be.ipv4(f.dst), ...be.u16(f.sport ?? 50_000), ...be.u16(f.dport ?? 443), ...be.u8(f.proto ?? 6),
+    ...be.u32(f.octets), ...be.u32(f.packets), ...be.u32(Math.max(0, h.uptime - 20_000)), ...be.u32(Math.max(0, h.uptime - 1_000)),
+  ])));
+  return v9Message({ ...h, count: sets.length }, sets);
+}
+
+const IPFIX_DATA: WireField[] = [
+  { type: 8, length: 4 }, { type: 12, length: 4 }, { type: 7, length: 2 }, { type: 11, length: 2 }, { type: 4, length: 1 },
+  { type: 1, length: 8 }, { type: 2, length: 8 }, { type: 150, length: 4 }, { type: 151, length: 4 },
+  { type: 1, length: 4, pen: 32473 },
+];
+
+/**
+ * An IPFIX export with no sampling statement, one enterprise element the decoder does not interpret (PEN 32473 / IE 1;
+ * 32473 is RFC 5612's documentation number, where 29305 would be RFC 5103's reverse direction, which is read), and, when `orphan` is set, a data set for template 400, which is never defined, so it waits.
+ */
+export function ipfixSample(h: IpfixHeader, flows: SampleFlow[], orphan: boolean): Uint8Array {
+  const sets: number[][] = [templateSet(10, [templateRecord(10, 300, IPFIX_DATA)])];
+  sets.push(dataSet(300, flows.map((f) => [
+    ...be.ipv4(f.src), ...be.ipv4(f.dst), ...be.u16(f.sport ?? 50_000), ...be.u16(f.dport ?? 443), ...be.u8(f.proto ?? 6),
+    ...be.uint(f.octets, 8), ...be.uint(f.packets, 8), ...be.u32(h.secs - 20), ...be.u32(h.secs - 1), ...be.u32(7),
+  ])));
+  if (orphan) sets.push(dataSet(400, [[1, 2, 3, 4, 5, 6, 7, 8]]));
+  return ipfixMessage(h, sets);
+}

@@ -45,7 +45,7 @@ import {
   type DiscardResult, type DiscardScope, type LocationReply, type RetentionSaveReply, type StartResult, type StopResult,
 } from './control';
 import { DEFAULT_RETENTION, validateRetentionPolicy, type RetentionPolicy } from './retention';
-import type { SourceHealth } from './sourceHealth';
+import type { ExporterSnapshot, SourceHealth } from './sourceHealth';
 import {
   initialMonitoringState, reduceMonitoring, type MonitoringEvent, type MonitoringState,
 } from './state';
@@ -158,14 +158,27 @@ function closePort(port: unknown): void {
  * The Worker's `health` push, checked for the shape the sheet reads from. The Worker is ours,
  * but a message is `unknown` until read, and a wrong type here would reach a render.
  */
-export function readHealthPush(v: Record<string, unknown>): { health: SourceHealth | null; sources: string[] } | null {
+export function readHealthPush(
+  v: Record<string, unknown>,
+): { health: SourceHealth | null; sources: string[]; exporters: ExporterSnapshot[] } | null {
   const { health, sources } = v;
   if (!Array.isArray(sources) || !sources.every((s) => typeof s === 'string')) return null;
-  if (health === null) return { health: null, sources: sources as string[] };
+  // A Worker from before ADR 0066 sends none; an entry that is not a snapshot drops the push.
+  const exporters = v.exporters ?? [];
+  if (!Array.isArray(exporters) || !exporters.every(isExporterSnapshot)) return null;
+  if (health === null) return { health: null, sources: sources as string[], exporters };
   if (!isObject(health) || typeof health.exporterIPv4 !== 'string' || typeof health.freshness !== 'string' || !FRESHNESS.has(health.freshness)) return null;
   if (!Array.isArray(health.engines) || typeof health.elapsedMs !== 'number' || typeof health.accepted !== 'number') return null;
   if (!isObject(health.listener) || !isObject(health.storage) || !Array.isArray(health.rejectedSenders)) return null;
-  return { health: health as unknown as SourceHealth, sources: sources as string[] };
+  if (health.templateSources !== undefined && !Array.isArray(health.templateSources)) return null;
+  // Kept as sent when whole, so an unchanged push is the same object; a pre-0066 one gets its empty rows.
+  const read = health.templateSources === undefined ? { ...(health as unknown as SourceHealth), templateSources: [] } : health as unknown as SourceHealth;
+  return { health: read, sources: sources as string[], exporters };
+}
+
+function isExporterSnapshot(x: unknown): x is ExporterSnapshot {
+  return isObject(x) && typeof x.sourceKey === 'string' && (x.protocol === 'v9' || x.protocol === 'ipfix')
+    && Array.isArray(x.templates) && isObject(x.sampling) && isObject(x.clock) && isObject(x.sequence);
 }
 
 /** A refusal main gives instead of a port: `{ ok: false, message }`. Anything else means "wait for the port". */

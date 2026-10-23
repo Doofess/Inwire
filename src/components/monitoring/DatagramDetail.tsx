@@ -119,7 +119,9 @@ function FlowRecord({ record }: { record: NormalizedFlow }) {
           {formatBytes(Number(record.reverseOctets))} ({count(record.reverseOctets)}), {count(record.reversePackets ?? 0n)} packets
         </Item>
       )}
-      <Item label="Interfaces">in {known(record.inputIf)}, out {known(record.outputIf)}</Item>
+      <Item label="Interfaces">
+        {record.inputIf === null && record.outputIf === null ? 'not reported' : `in ${known(record.inputIf)}, out ${known(record.outputIf)}`}
+      </Item>
       <Item label="Flow">
         {record.startMs === null || record.endMs === null
           ? 'times not reported'

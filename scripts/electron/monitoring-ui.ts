@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
-import { EXPORTER, v5Payload } from '../monitoring/fixtures';
+import { EXPORTER, ipfixSample, v5Payload, v9Sample } from '../monitoring/fixtures';
 import { BUNDLE_FRAMING } from '../../src/services/monitoring/bundle';
 import { FOREIGN_NAME, seedAged, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
 
@@ -139,6 +139,18 @@ try {
   await p.getByRole('button', { name: 'Start', exact: true }).click();
   checkTrue('Start listens', await until(() => visible(/Listening, nothing received yet/), 15_000));
 
+  // The empty history's onboarding fills the listener into the vendor's own lines.
+  const picker = p.locator(SHEET).getByLabel('Exporter', { exact: true }).locator('xpath=self::select');
+  await picker.selectOption('sophos');
+  const sophos = await p.locator(`${SHEET} pre[aria-label^="Sophos"]`).textContent().catch(() => '');
+  checkTrue('onboarding: the Sophos steps carry the address and port Inwire listens on',
+    (sophos ?? '').includes('127.0.0.1') && (sophos ?? '').includes(String(port)), JSON.stringify(sophos));
+  checkTrue('...under the vendor-documentation caveat', await visible('From vendor documentation; not tested on this hardware.'));
+  await picker.selectOption('aruba-aoscx');
+  checkTrue('onboarding: Aruba is marked unverified and offers nothing to copy',
+    await visible(/Unverified: the vendor’s page refused to be read/)
+      && await p.locator(SHEET).getByRole('button', { name: /Copy (commands|steps)/ }).isDisabled().catch(() => false));
+
   const secs = Math.floor(Date.now() / 1000);
   for (let i = 0; i < 6; i++) {
     const bytes = v5Payload(
@@ -152,6 +164,31 @@ try {
     await sleep(50);
   }
   checkTrue('datagrams read as Receiving', await until(() => visible('Receiving'), 15_000));
+
+  // v9 and IPFIX from the same exporter: the sheet's Exporter block (ADRs 0064-0066).
+  for (let i = 0; i < 3; i++) {
+    const flow = { src: '127.0.0.1', dst: '10.0.0.4', octets: 2_000 + i * 100, packets: 3 };
+    const v9 = v9Sample({ uptime: 600_000 + i * 1000, secs, sequence: i, sourceId: 7 }, [flow], 100);
+    const ipfix = ipfixSample({ secs, sequence: i, domain: 300 }, [flow], i === 2);
+    for (const bytes of [v9, ipfix]) {
+      await new Promise<void>((resolve, reject) => sender.send(bytes, port, '127.0.0.1', (e) => (e ? reject(e) : resolve())));
+    }
+    await sleep(50);
+  }
+  const exporter = p.locator(`${SHEET} section[aria-labelledby="monitoring-exporter"]`);
+  const card = (label: string) => exporter.locator(`section[aria-label="${label}"]`);
+  checkTrue('v9 and IPFIX each get a card under Exporter',
+    await until(async () => (await card('NetFlow v9, source ID 7').count()) === 1 && (await card('IPFIX, domain 300').count()) === 1, 20_000));
+  checkTrue('...the v9 card states the exporter’s sampling rate', await card('NetFlow v9, source ID 7').getByText(/Sampled 1 in 100/).isVisible().catch(() => false));
+  checkTrue('...the IPFIX card says sampling is not stated, never 1:1',
+    await card('IPFIX, domain 300').getByText(/never assumed 1:1/).isVisible().catch(() => false));
+  checkTrue('...its template lists the element it does not interpret',
+    await card('IPFIX, domain 300').getByText(/^not interpreted: .*PEN 32473 \/ IE 1/).isVisible().catch(() => false),
+    (await card('IPFIX, domain 300').locator('table').textContent().catch(() => '')) ?? '');
+  checkTrue('...and counts the data set that waited for template 400',
+    await until(() => card('IPFIX, domain 300').getByText(/last waited for template 400/).isVisible().catch(() => false), 10_000));
+  checkTrue('...and the clock line shows its offset',
+    await card('NetFlow v9, source ID 7').getByText(/Export clock .* (ahead|behind)/).isVisible().catch(() => false));
   checkTrue('the history draws a chart', await until(() => p.locator(`${SHEET} svg[role="img"]`).count().then((n) => n > 0), 20_000));
   // The chart follows the window once data has arrived (the measuring node
   // must survive the no-data to data switch).

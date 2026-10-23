@@ -73,6 +73,7 @@ export function SourceStatus({ state, config }: { state: MonitoringState; config
               </p>
               <Counters items={[
                 ['Malformed', health.malformed],
+                ['Data sets waiting for a template', health.templateSources.reduce((n, t) => n + t.awaitingSets, 0)],
                 ['Unsupported version', health.unsupported],
                 ['Past the engine limit', health.engineLimitRejected],
               ]} />
@@ -102,7 +103,7 @@ export function SourceStatus({ state, config }: { state: MonitoringState; config
             </li>
             <li>
               The exporter is sending somewhere else. It has to send to{' '}
-              <span className="font-mono">{source.bindIPv4}:{source.port}</span>, as NetFlow version 5.
+              <span className="font-mono">{source.bindIPv4}:{source.port}</span>, as NetFlow v5, v9 or IPFIX.
             </li>
           </ul>
         </Note>

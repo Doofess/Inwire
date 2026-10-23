@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { ChevronRight, Loader2, RefreshCw } from 'lucide-react';
 import { getMonitoringClient } from '../../services/monitoring/appClient';
 import type { SourceConfig } from '../../services/monitoring/types';
 import type { RuntimeExit } from '../../services/monitoring/control';
@@ -9,10 +9,12 @@ import { count, monitoringSummary } from './monitoringCopy';
 import { SourceForm } from './SourceForm';
 import { SourceStatus } from './SourceStatus';
 import { History } from './History';
+import { ExporterDetail } from './ExporterDetail';
+import { Onboarding } from './Onboarding';
 import { Block, Note, ToneDot } from './parts';
 
 /**
- * NetFlow v5 monitoring's sheet (ADRs 0058-0060): one exporter's received
+ * Monitoring's sheet (ADRs 0058-0060, 0064-0066): one exporter's received
  * traffic records, kept as a history on this PC.
  *
  * A sheet by the same rules as Settings and the speed test - the view
@@ -53,7 +55,7 @@ export function MonitoringSheet({ onFilterCapture }: { onFilterCapture: (express
           <header className="max-w-[44rem] space-y-1.5">
             <h1 className="text-lg font-semibold text-foreground">Received traffic records</h1>
             <p className="text-xs leading-relaxed text-muted-foreground">
-              What one router or switch reports about the traffic it forwarded, sent to this PC as NetFlow version 5.
+              What one router or switch reports about the traffic it forwarded, sent to this PC as NetFlow v5, v9 or IPFIX.
               Every number here is reported by the exporter, not measured by Inwire. The history is kept on this PC,
               and collection goes on while this sheet is closed.
             </p>
@@ -97,6 +99,12 @@ export function MonitoringSheet({ onFilterCapture }: { onFilterCapture: (express
             </Block>
           </div>
 
+          {state.exporters.length > 0 && (
+            <Block title="Exporter" labelId="monitoring-exporter">
+              <ExporterDetail exporters={state.exporters} rows={state.health?.templateSources ?? []} />
+            </Block>
+          )}
+
           <Block title="History" labelId="monitoring-history">
             {state.runtime === 'connected' || state.sources.length > 0 ? (
               <History client={client} state={state} config={config} onFilterCapture={onFilterCapture} />
@@ -104,6 +112,20 @@ export function MonitoringSheet({ onFilterCapture }: { onFilterCapture: (express
               <p className="text-xs text-muted-foreground">The history is read once it has opened.</p>
             )}
           </Block>
+
+          {/* The empty history carries these itself; once there is one, they fold away below it. */}
+          {state.sources.length > 0 && (
+            <details className="group" data-testid="monitoring-onboarding">
+              <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-[13px] font-semibold text-foreground
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                <ChevronRight className="h-3.5 w-3.5 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden />
+                Set up the exporter
+              </summary>
+              <div className="mt-2.5">
+                <Onboarding address={config?.bindIPv4 ?? null} port={config?.port ?? 2055} />
+              </div>
+            </details>
+          )}
         </div>
       </div>
     </div>

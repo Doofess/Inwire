@@ -10,7 +10,9 @@ import { MAX_STORAGE_BYTES, readSourceConfig } from '../../services/monitoring/c
 import type { IntakeStopReason } from '../../services/monitoring/control';
 import { nothingArriving, type MonitoringState } from '../../services/monitoring/state';
 import { DEFAULT_RETENTION, validateRetentionPolicy, type RetentionPolicy } from '../../services/monitoring/retention';
-import { LIMITS, type ExpiryCause, type SourceConfig } from '../../services/monitoring/types';
+import type { SamplingStatus, SequenceStatus } from '../../services/monitoring/exporterState';
+import { parseSourceKey } from '../../services/monitoring/sourceKeys';
+import { LIMITS, type ClockStatus, type ExpiryCause, type RangeSampling, type SourceConfig } from '../../services/monitoring/types';
 
 export type Tone = 'neutral' | 'progress' | 'good' | 'warn' | 'bad';
 
@@ -199,10 +201,82 @@ export function localRange(fromMs: number, toMs: number): string {
   return sameDay ? `${short(fromMs)}–${short(toMs)}` : `${localTime(fromMs, true)} – ${localTime(toMs, true)}`;
 }
 
-/** An engine-form source key, `exporter/type/id`, as the selector labels it. */
+/** A source key as the selector labels it: a v5 engine, or what a v9 or IPFIX source calls itself. */
 export function engineLabel(key: string): string {
+  const parsed = parseSourceKey(key);
+  if (parsed?.protocol === 'v9') return `NetFlow v9, source ID ${parsed.a}`;
+  if (parsed?.protocol === 'ipfix') return `IPFIX, domain ${parsed.a}`;
   const parts = key.split('/');
   return parts.length === 3 ? `engine ${parts[1]}/${parts[2]}` : key;
+}
+
+// --- v9 and IPFIX: templates, sampling, clock, sequence (ADRs 0064-0066) -------------------------------
+
+/** Every element a template carries that Inwire does not read, as the spec words it; null when there is none. */
+export function notInterpretedText(elements: { pen: number | null; ie: number }[]): string | null {
+  if (elements.length === 0) return null;
+  return `not interpreted: ${elements.map((e) => (e.pen === null ? `IE ${e.ie}` : `PEN ${e.pen} / IE ${e.ie}`)).join(', ')}`;
+}
+
+/** The word an estimate carries wherever it is shown, so it is never read as a reported figure. */
+export const ESTIMATE_LABEL = 'estimate';
+
+/**
+ * A source's sampling as it is stated now (`SamplingStatus`), or a range's (`RangeSampling`), which adds
+ * `mixed`. Absent is never read as 1:1: counters stay as reported either way.
+ */
+export function samplingText(s: SamplingStatus | RangeSampling | { kind: 'unsupported'; reason?: string }): Summary {
+  switch (s.kind) {
+    case 'known':
+      return { text: `Sampled 1 in ${count(s.interval)}${'sinceEntryId' in s ? ` since entry ${count(s.sinceEntryId)}` : ''}`, tone: 'neutral' };
+    case 'absent':
+      return { text: 'Sampling not stated by the exporter: counters are as reported, never assumed 1:1', tone: 'neutral' };
+    case 'unsupported':
+      return { text: `Sampling unsupported${'reason' in s && s.reason ? `: ${s.reason}` : ''}; counters are as reported`, tone: 'warn' };
+    case 'mixed':
+      return { text: 'Sampling changed within this range: no one rate applies, so there is no estimate', tone: 'warn' };
+  }
+}
+
+/**
+ * Reported counts scaled by the rate, only when the range's rate is known and the same throughout. Kept
+ * apart from the reported totals, and labelled `ESTIMATE_LABEL` wherever it shows. 1 in 1 is no sampling.
+ */
+export function samplingEstimate(s: RangeSampling, octets: bigint, packets: bigint): { interval: number; octets: bigint; packets: bigint } | null {
+  if (s.kind !== 'known' || s.interval <= 1) return null;
+  const n = BigInt(s.interval);
+  return { interval: s.interval, octets: octets * n, packets: packets * n };
+}
+
+function skewWords(ms: number): string {
+  const abs = Math.abs(ms);
+  const amount = abs >= 60_000 ? `${(abs / 60_000).toFixed(1)} min` : abs >= 10_000 ? `${Math.round(abs / 1000)} s` : `${(abs / 1000).toFixed(1)} s`;
+  return abs < 100 ? 'level with receipt' : `${amount} ${ms > 0 ? 'ahead' : 'behind'}`;
+}
+
+/** The export clock against receipt time: export minus receipt, so ahead is positive. Flagged past `LIMITS.clockFlagMs`. */
+export function clockText(c: ClockStatus): Summary {
+  if (c.latestSkewMs === null) return { text: 'No export time received yet', tone: 'neutral' };
+  let text = `Export clock ${skewWords(c.latestSkewMs)}`;
+  if (c.minSkewMs !== null && c.maxSkewMs !== null && c.minSkewMs !== c.maxSkewMs) {
+    text += ` (between ${skewWords(c.minSkewMs)} and ${skewWords(c.maxSkewMs)})`;
+  }
+  if (c.flagged) text += `, past the ${Math.round(LIMITS.clockFlagMs / 1000)} s threshold`;
+  return { text, tone: c.flagged ? 'warn' : 'good' };
+}
+
+/** How the source's sequence numbers are read, and what they suggest: an export gap is evidence, not loss. */
+export function sequenceText(s: SequenceStatus): string {
+  const mode = {
+    learning: 'Learning how this exporter numbers its exports',
+    rfc: 'Numbered as the RFC says',
+    'own-records': 'Numbered by its own records',
+    unrecognized: 'Numbering not recognized: gaps are not counted',
+  }[s.mode];
+  if (s.mode === 'learning' || s.mode === 'unrecognized') return mode;
+  const gaps = s.suspectedGap === 0 ? 'no suspected export gaps' : `${count(s.suspectedGap)} skipped in its numbering (a suspected export gap, not network loss)`;
+  const reordered = s.reordered === 0 ? '' : `, ${count(s.reordered)} out of order`;
+  return `${mode}; ${gaps}${reordered}`;
 }
 
 export const PROTOCOLS: Record<number, string> = { 1: 'ICMP', 6: 'TCP', 17: 'UDP', 47: 'GRE', 50: 'ESP', 58: 'ICMPv6', 132: 'SCTP' };

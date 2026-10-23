@@ -29,7 +29,7 @@ import path from 'node:path';
 import type { Page } from 'playwright';
 import { startStubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
-import { v5Payload, type FlowSpec } from '../monitoring/fixtures';
+import { ipfixSample, v5Payload, v9Sample, type FlowSpec } from '../monitoring/fixtures';
 import { FOREIGN_NAME, seedAged, seedEmpty, seedExpired, seedForeign, seedIncomplete, seedReadOnly, stubDialogs } from './monitoringSeed';
 
 const OUT = process.argv[2];
@@ -45,7 +45,10 @@ const ONLY = arg('only', '') === '' ? null : arg('only', '').split(',');
 const wanted = (name: string) => ONLY === null || ONLY.some((prefix) => name.startsWith(prefix));
 /** The numbered states are one long run (two waits of a minute and a rebuild); skip it when only the newer ones are asked for. */
 const legacy = ONLY === null || ONLY.some((prefix) => /^\d/.test(prefix));
-const fresh = ONLY === null || ONLY.some((prefix) => !/^\d/.test(prefix));
+const TEMPLATE_STATES = /^(onboarding|exporter)/;
+const fresh = ONLY === null || ONLY.some((prefix) => !/^\d/.test(prefix) && !TEMPLATE_STATES.test(prefix));
+/** v9 and IPFIX (Task 10): the exporter cards, the sampled history, their datagrams and the onboarding picker. */
+const templated = ONLY === null || ONLY.some((prefix) => TEMPLATE_STATES.test(prefix));
 mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -416,6 +419,96 @@ for (const width of WIDTHS) {
   }
 
   await close(app, p);
+  if (templated) {
+    // A profile of its own, so the onboarding is photographed over an empty history.
+    const second = mkdtempSync(path.join(tmpdir(), 'inwire-monshots-'));
+    ({ app, p } = await launch(second, width));
+    const sheet = p.locator(SHEET);
+    const picker = sheet.getByLabel('Exporter', { exact: true }).locator('xpath=self::select');
+    console.log('    v9, IPFIX and onboarding');
+    await p.getByRole('button', { name: 'Network', exact: true }).click();
+    await until(() => text('Open monitoring'), 10_000);
+    await openSheet();
+    await until(() => text(/No history yet/), 60_000);
+    await field('Exporter').fill('127.0.0.1');
+    await field('Listen on').fill('127.0.0.1');
+    await field('Port').fill(String(port));
+    await sheet.getByRole('button', { name: 'Start', exact: true }).click();
+    await until(() => text(/Listening, nothing received yet/), 15_000);
+    await scrollTo(`${SHEET} [aria-labelledby="monitoring-history"]`);
+    await sleep(300);
+    await shot('onboarding-cli');
+    await picker.selectOption('pfsense-pflow');
+    await sleep(200);
+    await shot('onboarding-gui');
+    await picker.selectOption('aruba-aoscx');
+    await sleep(200);
+    await shot('onboarding-unverified');
+
+    // v9 alone first, sampled 1 in 100, so the range's rate is known and the estimate shows. Five numbers are skipped.
+    // Sent in the minute after Start's: a bucket the session began inside is drawn as a gap whatever it holds.
+    await sleep(61_000 - (Date.now() % 60_000));
+    const sock = await socketFrom('127.0.0.1');
+    const secs = () => Math.floor(Date.now() / 1000);
+    const flows = (i: number) => flowsFor(i, 6).map((f) => ({
+      src: f.src!, dst: f.dst!, octets: f.octets!, packets: f.packets!, proto: f.protocol, sport: f.srcPort, dport: f.dstPort,
+    }));
+    for (let i = 0; i < 40; i++) {
+      await send(sock, v9Sample({ uptime: 3_600_000 + i * 1000, secs: secs(), sequence: i < 30 ? i : i + 5, sourceId: 7 }, flows(i), 100), port);
+      if (i % 10 === 0) await sleep(20);
+    }
+    await until(() => sheet.locator('[aria-labelledby="monitoring-exporter"]').count().then((n) => n > 0), 20_000);
+    await sleep(5_500);
+    await p.locator(`${SHEET} .overflow-y-auto`).first().evaluate((el) => el.scrollTo(0, 0)).catch(() => {});
+    await scrollTo(`${SHEET} [aria-labelledby="monitoring-exporter"]`);
+    await sleep(300);
+    await shot('exporter-v9');
+    await scrollTo(`${SHEET} [aria-labelledby="monitoring-history"]`);
+    await sleep(300);
+    await shot('exporter-history-estimate');
+
+    await p.getByRole('button', { name: HOSTS[0], exact: true }).first().click();
+    await until(() => text(/Supporting references: \d+ of \d+/), 10_000);
+    await p.locator('[aria-label="Supporting references"] button').first().click();
+    await until(() => p.locator('[aria-label="Datagram detail"]').count().then((n) => n > 0), 10_000);
+    await scrollTo(`${SHEET} [aria-label="Datagram detail"]`);
+    await sleep(300);
+    await shot('exporter-datagram-v9');
+    await sheet.getByRole('button', { name: 'Clear the selection' }).click().catch(() => {});
+
+    // Then IPFIX beside it: no sampling stated, an enterprise element, a set waiting for its template.
+    for (let i = 0; i < 20; i++) {
+      await send(sock, ipfixSample({ secs: secs(), sequence: i * 6, domain: 300 }, flows(i + 100), i % 5 === 4), port);
+    }
+    await until(() => sheet.locator('section[aria-label="IPFIX, domain 300"]').count().then((n) => n > 0), 20_000);
+    await sleep(5_500);
+    await scrollTo(`${SHEET} [aria-labelledby="monitoring-exporter"]`);
+    await sleep(300);
+    await shot('exporter-v9-ipfix');
+    await scrollTo(`${SHEET} [aria-labelledby="monitoring-history"]`);
+    await sleep(300);
+    await shot('exporter-history-mixed');
+
+    await p.getByRole('button', { name: HOSTS[0], exact: true }).first().click();
+    await until(() => text(/Supporting references: \d+ of \d+/), 10_000);
+    await p.locator('[aria-label="Supporting references"] button').last().click();
+    await until(() => p.locator('[aria-label="Datagram detail"]').count().then((n) => n > 0), 10_000);
+    await scrollTo(`${SHEET} [aria-label="Datagram detail"]`);
+    await sleep(300);
+    await shot('exporter-datagram-last');
+    await sheet.getByRole('button', { name: 'Clear the selection' }).click().catch(() => {});
+
+    await sheet.locator('summary', { hasText: 'Set up the exporter' }).click();
+    await sleep(200);
+    await scrollTo(`${SHEET} [data-testid="monitoring-onboarding"]`);
+    await sleep(300);
+    await shot('onboarding-folded');
+    sock.close();
+    await sheet.getByRole('button', { name: 'Stop', exact: true }).click();
+    await until(() => text(/Stopped/), 10_000);
+    await close(app, p);
+    rmSync(second, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
   rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 await agent.close();
