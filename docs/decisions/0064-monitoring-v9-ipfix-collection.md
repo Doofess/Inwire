@@ -1,5 +1,10 @@
 # 0064 — Monitoring collects NetFlow v9 and UDP IPFIX: templates in their RFC scope, checkpointed and never buffered; counts as reported, with sampling, clock and sequence status
 
+> **Amended by [0065](0065-monitoring-checkpoint-gap-state.md).** The
+> checkpoint's scope and template flags gain bit 2 for collection-gap state,
+> a gap ends at `start`, `resume` or `gap`, and a template applies to the data
+> sets after it in its own datagram. Everything else here stands.
+
 **Status:** accepted 2026-10-23 by the owner, who ruled on four of its
 departures from the spec: UDP withdrawals ignored and counted, lifetime by
 time and messages, checkpoints at segment start and stop, and a learned
