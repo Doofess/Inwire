@@ -242,6 +242,7 @@ function read(bytes: Uint8Array): { store: CollectorTemplateStore; state: Export
   }
 
   const sources: SourceSnapshot[] = [];
+  const perExporter = new Map<string, number>();
   let lastKey = '';
   for (let i = 0; i < sourceCount; i++) {
     const k = r.u8();
@@ -249,6 +250,9 @@ function read(bytes: Uint8Array): { store: CollectorTemplateStore; state: Export
     const parsed = parseSourceKey(key);
     expect(parsed !== null && parsed.protocol !== 'v5', 'source key');
     expect(i === 0 || key > lastKey, 'sources out of order');
+    const held = (perExporter.get(parsed!.exporter) ?? 0) + 1;
+    expect(held <= LIMITS.enginesPerExporter, 'sources per exporter');
+    perExporter.set(parsed!.exporter, held);
     lastKey = key;
     const samplingCode = r.u8();
     const sflags = r.u8();

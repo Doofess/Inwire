@@ -363,5 +363,36 @@ test('gap flags: gapEnded() sets scope and template flags, the next datagram cle
   assert.equal(s.lookup(a, 256)!.previousSession, true, 'the template flag clears at its own receipt, not the scope\'s');
 });
 
+test('bounds: an exporter opens at most enginesPerExporter scopes; one it holds, and another exporter, stay open', () => {
+  const s = new CollectorTemplateStore();
+  for (let d = 0; d < LIMITS.enginesPerExporter; d++) {
+    assert.equal(s.canOpen(ipfix(d, 50_000)), true, `scope ${d + 1}`);
+    begin(s, ipfix(d, 50_000), T0);
+  }
+  assert.equal(s.canOpen(ipfix(LIMITS.enginesPerExporter, 50_000)), false, 'a 17th IPFIX domain');
+  assert.equal(s.canOpen(v9(0)), false, 'and a v9 Source ID: the 16 belong to the exporter, not to a protocol');
+  assert.equal(s.canOpen(ipfix(3, 50_000)), true, 'a scope it holds');
+  assert.equal(s.canOpen(ipfix(3, 50_001)), true, 'the same scope from another source port replaces it');
+  assert.equal(s.canOpen({ ...v9(0), exporter: '192.0.2.2' }), true, 'another exporter has its own 16');
+  assert.equal(s.exportScopes().length, LIMITS.enginesPerExporter);
+});
+
+test('retainExporter: scopes of another exporter go with their templates, the bounds follow, the kept exporter keeps its own', () => {
+  const s = new CollectorTemplateStore();
+  const other = (domain: number): TemplateScope => ({ ...v9(domain), exporter: '192.0.2.2' });
+  begin(s, v9(1), T0);
+  s.define(v9(1), 256, flowTemplate(8, 12), 1, T0);
+  begin(s, other(1), T0);
+  s.define(other(1), 256, flowTemplate(8, 12, 1), 2, T0);
+  s.retainExporter('192.0.2.2');
+  assert.deepEqual(s.exportScopes().map((x) => x.exporter), ['192.0.2.2']);
+  assert.equal(s.lookup(v9(1), 256), null);
+  assert.notEqual(s.lookup(other(1), 256), null);
+  // The template count and field bytes went with the dropped scope: the survivor's definition refreshes, and 256 more still fit.
+  for (let id = 257; id < 257 + LIMITS.templatesPerScope - 1; id++) assert.equal(s.define(other(1), id, flowTemplate(8), 3, T0), 'defined');
+  s.retainExporter('192.0.2.2');
+  assert.equal(s.exportScopes().length, 1, 'retaining the same exporter again changes nothing');
+});
+
 console.log(`\n${passes} passed, ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

@@ -25,6 +25,7 @@ import { resumeExpiry, runExpiry } from '../../src/services/monitoring/archive';
 import type { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan } from '../../src/services/monitoring/retention';
 import { minuteOf } from '../../src/services/monitoring/rollup';
+import { samplingEstimate } from '../../src/components/monitoring/monitoringCopy';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { RuntimeUnavailableError, type HostRuntime } from '../../src/services/monitoring/runtime';
@@ -467,6 +468,12 @@ test('sampling: known only where there are records and every one of them said', 
   assert.equal((await check(rig, spec(m(1), m(3), 2))).samplingKnown, false, 'one record said nothing');
   assert.equal((await check(rig, spec(m(2), m(3), 1))).samplingKnown, false, 'the only record said nothing');
   assert.equal((await check(rig, spec(m(3), m(4), 1))).samplingKnown, false);
+  // The range folds to one known rate, and still no estimate: a record of it said nothing.
+  const partial = await check(rig, spec(m(1), m(3), 2));
+  assert.deepEqual(partial.sampling, { kind: 'known', interval: 100 });
+  assert.equal(samplingEstimate(partial.sampling, partial.samplingKnown, 1_500n, 3n), null, 'no estimate over records of unknown rate');
+  const whole = await check(rig, spec(m(1), m(2), 1));
+  assert.equal(samplingEstimate(whole.sampling, whole.samplingKnown, 1_500n, 3n)?.octets, 150_000n, 'an estimate where every record said');
 });
 
 // =====================================================================================================

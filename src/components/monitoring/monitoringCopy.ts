@@ -239,11 +239,13 @@ export function samplingText(s: SamplingStatus | RangeSampling | { kind: 'unsupp
 }
 
 /**
- * Reported counts scaled by the rate, only when the range's rate is known and the same throughout. Kept
+ * Reported counts scaled by the rate, only when the range's rate is known and the same throughout and every
+ * matching record has one (`samplingKnown`: a range whose interval folds to one rate may still hold records of
+ * unknown rate, which the interval would wrongly scale). Kept
  * apart from the reported totals, and labelled `ESTIMATE_LABEL` wherever it shows. 1 in 1 is no sampling.
  */
-export function samplingEstimate(s: RangeSampling, octets: bigint, packets: bigint): { interval: number; octets: bigint; packets: bigint } | null {
-  if (s.kind !== 'known' || s.interval <= 1) return null;
+export function samplingEstimate(s: RangeSampling, samplingKnown: boolean, octets: bigint, packets: bigint): { interval: number; octets: bigint; packets: bigint } | null {
+  if (!samplingKnown || s.kind !== 'known' || s.interval <= 1) return null;
   const n = BigInt(s.interval);
   return { interval: s.interval, octets: octets * n, packets: packets * n };
 }

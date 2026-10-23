@@ -13,7 +13,9 @@
  *   count, not by time;
  * - a restart (v9 `sysUptime` going back, an IPFIX source port changing, IE 160
  *   changing) invalidates the whole scope;
- * - the bounds refuse, never evict.
+ * - the bounds refuse, never evict: an exporter opens at most `LIMITS.enginesPerExporter` scopes (`canOpen`),
+ *   and a start boundary naming another exporter drops the old exporter's scopes (`retainExporter`), so a
+ *   checkpoint never holds two exporters' scopes of one protocol, domain and port.
  *
  * Counting: a scope's message counter increments in `beginDatagram`, before the
  * expiry check, so the datagram doing the checking counts itself. A template
@@ -237,6 +239,26 @@ export class CollectorTemplateStore {
     };
   }
 
+  /**
+   * Whether a datagram of `scope` may be counted by it: the scope exists, or its exporter has fewer than
+   * `LIMITS.enginesPerExporter` scopes. A datagram that may not creates nothing - no scope, no source.
+   */
+  canOpen(scope: TemplateScope): boolean {
+    if (this.scopes.has(CollectorTemplateStore.key(scope))) return true;
+    let held = 0;
+    for (const st of this.scopes.values()) if (st.exporter === scope.exporter) held++;
+    return held < LIMITS.enginesPerExporter;
+  }
+
+  /** Drops every scope, templates included, that is not `exporter`'s: a start boundary naming another exporter (the owner changed it). */
+  retainExporter(exporter: string): void {
+    for (const [key, st] of [...this.scopes]) {
+      if (st.exporter === exporter) continue;
+      this.forget(st);
+      this.scopes.delete(key);
+    }
+  }
+
   private forget(st: ScopeState): void {
     for (const t of st.templates.values()) { this.templateCount--; this.fieldBytes -= specifierBytes(t); }
     st.templates.clear();
@@ -437,9 +459,13 @@ export class CollectorTemplateStore {
   /** A store holding exactly these scopes, or null if they break a bound or repeat a scope. */
   static fromScopes(scopes: ScopeSnapshot[]): CollectorTemplateStore | null {
     const store = new CollectorTemplateStore();
+    const perExporter = new Map<string, number>();
     for (const snap of scopes) {
       const key = CollectorTemplateStore.key(snap);
       if (store.scopes.has(key) || snap.templates.length > LIMITS.templatesPerScope) return null;
+      const held = (perExporter.get(snap.exporter) ?? 0) + 1;
+      if (held > LIMITS.enginesPerExporter) return null;
+      perExporter.set(snap.exporter, held);
       const st: ScopeState = {
         protocol: snap.protocol, exporter: snap.exporter, port: snap.port, domain: snap.domain, templates: new Map(),
         messages: snap.messages, gap: snap.gap, uptimeMs: snap.uptimeMs, systemInitMs: snap.systemInitMs,

@@ -14,13 +14,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeCheckpoint, encodeCheckpoint } from '../../src/services/monitoring/checkpoint';
+import { DecodeState, type DecodeStep } from '../../src/services/monitoring/decodeState';
 import { ExporterState } from '../../src/services/monitoring/exporterState';
 import { decodeDatagram, type FlowDecode } from '../../src/services/monitoring/flowDecode';
 import { CollectorTemplateStore, type TemplateScope } from '../../src/services/monitoring/templates';
 import { crc32 } from '../../src/services/monitoring/journalCodec';
-import { LIMITS } from '../../src/services/monitoring/types';
+import { LIMITS, type BoundaryEvidence, type Evidence } from '../../src/services/monitoring/types';
 import type { FlowTemplate } from '../../src/services/flow/flowExport';
-import { EXPORTER, evidence, be, dataSet, ipfixMessage, setOf, templateRecord, templateSet } from './fixtures';
+import { EXPORTER, GENERATION, evidence, be, dataSet, ipfixMessage, ipfixSample, optionsTemplateRecord, optionsTemplateSet, setOf, templateRecord, templateSet, v9Sample } from './fixtures';
 
 let failures = 0;
 let passes = 0;
@@ -322,6 +323,157 @@ test('malformed: a malformed datagram leaves the checkpoint\'s bytes unchanged',
     state.observe(d, e);
   }
   assert.equal(hex(encodeCheckpoint(store, state, 1, 1)), before);
+});
+
+// --- a decode state's checkpoint always decodes (the final review's C1 and I1) ---------------------------------------
+//
+// The expiry appends a checkpoint to the archive and never rewrites it, so a reachable decode state whose bytes
+// `decodeCheckpoint` refuses would fail every later expiry. Each case below was such a state.
+
+const OTHER = '192.0.2.7';
+const FLOW = { src: '10.0.0.1', dst: '10.0.0.2', octets: 100, packets: 1 };
+let nextEntry = 0;
+const resetEntries = (): void => { nextEntry = 0; };
+
+/** A `start` boundary naming the exporter the session listens for. */
+function start(exporterIPv4: string): BoundaryEvidence {
+  nextEntry++;
+  return {
+    kind: 'boundary', ref: { generation: GENERATION, entryId: nextEntry }, sessionId: 'a1'.repeat(16), receivedMs: 1_760_000_000_600, action: 'start',
+    reason: '', droppedDatagrams: null, source: { exporterIPv4, bindIPv4: '192.0.2.50', port: 2055 }, policy: 2, segmentFirstId: 1,
+  };
+}
+/** An IPFIX datagram (template and data) from `remoteIPv4`'s source port 40,000, in `domain`. */
+function ipfixFrom(remoteIPv4: string, domain: number): Evidence {
+  nextEntry++;
+  return evidence(ipfixSample({ secs: 1_760_000_000, sequence: nextEntry, domain }, [FLOW], false), { ref: { generation: GENERATION, entryId: nextEntry }, remoteIPv4, remotePort: 40_000 });
+}
+function v9From(remoteIPv4: string, sourceId: number): Evidence {
+  nextEntry++;
+  return evidence(v9Sample({ uptime: 600_000, secs: 1_760_000_000, sequence: nextEntry, sourceId }, [FLOW], null), { ref: { generation: GENERATION, entryId: nextEntry }, remoteIPv4, remotePort: 40_000 });
+}
+/** The IPFIX selector 1-in-(1 + 0xFFFFFFFF): a rate of 2^32. */
+function selectorEntry(): Evidence {
+  nextEntry++;
+  const msg = ipfixMessage({ secs: 1_760_000_000, sequence: 0, domain: 1 }, [
+    optionsTemplateSet(10, [optionsTemplateRecord(10, 400, [{ type: 302, length: 4 }], [{ type: 304, length: 2 }, { type: 305, length: 4 }, { type: 306, length: 4 }])]),
+    dataSet(400, [[...be.u32(1), ...be.u16(1), ...be.u32(1), ...be.u32(0xffffffff)]]),
+  ]);
+  return evidence(msg, { ref: { generation: GENERATION, entryId: nextEntry } });
+}
+
+/** The state's checkpoint is bytes `decodeCheckpoint` accepts, within the limit, and restoring then encoding gives the same bytes. */
+function assertRoundTrips(state: DecodeState, what: string): Uint8Array {
+  const bytes = state.checkpoint();
+  assert.ok(bytes.length <= LIMITS.checkpointBytes, `${what}: ${bytes.length} bytes is over the limit`);
+  const back = decodeCheckpoint(bytes);
+  assert.notEqual(back, null, `${what}: the checkpoint does not decode`);
+  assert.equal(hex(encodeCheckpoint(back!.store, back!.state, back!.throughEntryId, back!.throughMs)), hex(bytes), `${what}: restore then re-encode`);
+  return bytes;
+}
+
+test('exporter change: a start naming another exporter drops the old exporter\'s templates and sources, and the checkpoint decodes', () => {
+  for (const [name, from] of [['IPFIX', ipfixFrom], ['v9', v9From]] as const) {
+    resetEntries();
+    const s = DecodeState.empty();
+    const protocol = name === 'IPFIX' ? 'ipfix' : 'v9';
+    // Exporter A and exporter B both use Source ID / domain 0 and source port 40,000: the checkpoint orders scopes by protocol, domain and port alone.
+    assert.equal(s.step(from(EXPORTER, 0))!.kind, 'datagram');
+    assertRoundTrips(s, `${name} A`);
+    s.step(start(OTHER));
+    s.step(from(OTHER, 0));
+    const bytes = assertRoundTrips(s, `${name} B after the change`);
+    const held = decodeCheckpoint(bytes)!;
+    assert.deepEqual(held.store.exportScopes().map((x) => x.exporter), [OTHER], `${name}: only B's scope is held`);
+    assert.deepEqual(held.state.exportSources().map((x) => x.key), [`${protocol}:${OTHER}/0`], `${name}: only B's source is held`);
+    // A's templates are gone: a data-only datagram of A's would now wait, which is what a fresh start would see.
+    assert.equal(s.store.lookup({ protocol, exporter: EXPORTER, exporterPort: protocol === 'ipfix' ? 40_000 : null, domain: 0 }, protocol === 'ipfix' ? 300 : 256), null);
+  }
+});
+
+test('exporter change: a start naming the same exporter keeps its state; a restored state drops the same way', () => {
+  resetEntries();
+  const s = DecodeState.empty();
+  s.step(ipfixFrom(EXPORTER, 5));
+  s.step(start(EXPORTER));
+  assert.deepEqual(s.store.exportScopes().map((x) => [x.exporter, x.domain]), [[EXPORTER, 5]], 'the same exporter: nothing is dropped');
+  assert.equal(s.store.exportScopes()[0].templates.length, 1);
+  // The decision depends on the state and the entry alone: a state restored from the checkpoint and the live one end the same.
+  const restored = DecodeState.fromCheckpoint(s.checkpoint())!;
+  const change = start(OTHER);
+  s.step(change);
+  restored.step(change);
+  assert.equal(hex(restored.checkpoint()), hex(s.checkpoint()));
+  assert.deepEqual(s.store.exportScopes(), [], 'another exporter: A\'s scope is gone');
+  assert.deepEqual(s.exporter.exportSources(), []);
+});
+
+test('bounds: an exporter holds at most enginesPerExporter scopes and sources, and a 17th identity decodes as unsupported', () => {
+  resetEntries();
+  const s = DecodeState.empty();
+  const kinds: string[] = [];
+  const N = 40;
+  for (let domain = 1; domain <= N; domain++) {
+    const step = s.step(ipfixFrom(EXPORTER, domain)) as DecodeStep;
+    kinds.push(step.kind === 'datagram' ? step.decoded.kind : step.kind);
+    assertRoundTrips(s, `after domain ${domain}`);
+  }
+  assert.equal(s.store.exportScopes().length, LIMITS.enginesPerExporter);
+  assert.equal(s.exporter.exportSources().length, LIMITS.enginesPerExporter);
+  assert.deepEqual(kinds.slice(0, LIMITS.enginesPerExporter), Array(LIMITS.enginesPerExporter).fill('valid'));
+  assert.deepEqual(kinds.slice(LIMITS.enginesPerExporter), Array(N - LIMITS.enginesPerExporter).fill('unsupported'), 'the rest are refused, not malformed');
+  // A domain the exporter already has still decodes.
+  const again = s.step(ipfixFrom(EXPORTER, 3)) as DecodeStep;
+  assert.equal(again.kind === 'datagram' && again.decoded.kind, 'valid');
+  assert.ok(s.checkpoint().length <= LIMITS.checkpointBytes);
+});
+
+test('bounds: 40,000 domains from one exporter leave a checkpoint under the limit (the u16 scope count never wraps)', () => {
+  resetEntries();
+  const s = DecodeState.empty();
+  for (let domain = 1; domain <= 40_000; domain++) s.step(ipfixFrom(EXPORTER, domain));
+  assert.equal(s.store.exportScopes().length, LIMITS.enginesPerExporter);
+  assertRoundTrips(s, '40,000 domains');
+});
+
+test('bounds: a checkpoint holding more than enginesPerExporter scopes, or sources, of one exporter is refused: no decode state can reach it', () => {
+  const scope = (domain: number): TemplateScope => ({ protocol: 'ipfix', exporter: EXPORTER, exporterPort: 40_000, domain });
+  const full = new CollectorTemplateStore();
+  for (let d = 0; d < LIMITS.enginesPerExporter; d++) full.beginDatagram(scope(d), 1, null);
+  assert.notEqual(decodeCheckpoint(encodeCheckpoint(full, new ExporterState(), 1, 1)), null, 'the control: 16 scopes');
+  full.beginDatagram(scope(LIMITS.enginesPerExporter), 1, null);
+  assert.equal(decodeCheckpoint(encodeCheckpoint(full, new ExporterState(), 1, 1)), null, '17 scopes of one exporter');
+  const sources = (n: number): ExporterState => ExporterState.fromSources(Array.from({ length: n }, (_, i) => ({
+    key: `ipfix:${EXPORTER}/${i}`, sampling: { kind: 'absent' as const }, samplers: [],
+    sequence: { mode: 'learning' as const, seen: false, last: 0, lastRecords: 0, pairs: 0, fitRfc: 0, fitOwn: 0 },
+  })));
+  assert.notEqual(decodeCheckpoint(encodeCheckpoint(new CollectorTemplateStore(), sources(LIMITS.enginesPerExporter), 1, 1)), null, 'the control: 16 sources');
+  assert.equal(decodeCheckpoint(encodeCheckpoint(new CollectorTemplateStore(), sources(LIMITS.enginesPerExporter + 1), 1, 1)), null, '17 sources of one exporter');
+});
+
+test('selector rate 2^32: the state through a decode state still checkpoints and restores', () => {
+  resetEntries();
+  const s = DecodeState.empty();
+  s.step(selectorEntry());
+  assert.notEqual(s.exporter.sampling(`ipfix:${EXPORTER}/1`).kind, 'known', 'a rate past 2^32 - 1 is not stated');
+  assertRoundTrips(s, 'selector 1 + 0xFFFFFFFF');
+});
+
+test('property: every step of each unsafe sequence leaves a checkpoint that decodes, within the limit, byte-identical on restore', () => {
+  const sequences: [string, () => Evidence[]][] = [
+    ['an exporter change, both protocols', () => [v9From(EXPORTER, 0), ipfixFrom(EXPORTER, 0), start(OTHER), v9From(OTHER, 0), ipfixFrom(OTHER, 0), start(EXPORTER), ipfixFrom(EXPORTER, 0)]],
+    ['unbounded identities', () => Array.from({ length: 60 }, (_, i) => (i % 2 === 0 ? ipfixFrom(EXPORTER, i + 1) : v9From(EXPORTER, i + 1)))],
+    ['an unrepresentable sampling rate', () => [selectorEntry(), ipfixFrom(EXPORTER, 1)]],
+  ];
+  for (const [name, make] of sequences) {
+    resetEntries();
+    const entries = make();
+    const s = DecodeState.empty();
+    entries.forEach((e, i) => {
+      s.step(e);
+      assertRoundTrips(s, `${name}, step ${i + 1}`);
+    });
+  }
 });
 
 console.log(`\n${passes} passed, ${failures} failed`);

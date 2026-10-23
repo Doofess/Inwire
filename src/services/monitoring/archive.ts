@@ -608,6 +608,9 @@ export function runExpiry(
     else if (opts.deflate !== undefined) replayed = expiryFragments(entries, context, opts.deflate, start);
     else return 'failed';
     const fragments = replayed.minutes;
+    // The archive is never rewritten, so a start state it holds that no later run can decode fails every later expiry
+    // for good (`startState` above): such a checkpoint is refused here, with nothing written, and a later run says the same.
+    if (DecodeState.fromCheckpoint(replayed.checkpoint) === null) return 'failed';
 
     // The range the journal's `expired` boundary will record: the first entry's receipt time, the last segment's.
     archive.append(fragments, {
