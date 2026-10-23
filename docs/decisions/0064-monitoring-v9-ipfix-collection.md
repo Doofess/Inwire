@@ -1,6 +1,10 @@
 # 0064 — Monitoring collects NetFlow v9 and UDP IPFIX: templates in their RFC scope, checkpointed and never buffered; counts as reported, with sampling, clock and sequence status
 
-**Status:** proposed 2026-10-23. Measured in
+**Status:** accepted 2026-10-23 by the owner, who ruled on four of its
+departures from the spec: UDP withdrawals ignored and counted, lifetime by
+time and messages, checkpoints at segment start and stop, and a learned
+sequence convention; the restart tolerance and IE 160 rule were accepted as
+written. Measured in
 [`docs/monitoring-v9-ipfix-measurements.md`](../monitoring-v9-ipfix-measurements.md).
 It supersedes one item of
 [0058](0058-monitoring-intake-and-lifetime.md)'s "Later, not built": v9 and
