@@ -1,6 +1,7 @@
 ---
 name: inwire-visual-design
 description: Inwire's typography, theming and brand-mark rules - the system faces and why there is no webfont and no typeface picker, the four themes and the token contract, and the five-plate brand mark every icon is generated from. Use when changing fonts, colours, theme tokens, the CSS in src/index.css, or anything under logo/ and electron/resources/.
+paths: ["src/index.css", "src/**/*.tsx", "src/lib/theme*.ts", "src/lib/accents.ts", "src/lib/brandMark.ts", "src/services/themePalettes.ts", "logo/**", "electron/resources/**"]
 ---
 
 # Visual design: typography, theming, the brand mark

@@ -79,6 +79,7 @@ requests are the four renderer lookups and the three main-process ones listed in
   enforcing script for every invariant below.
 - `docs/decisions/README.md`: decision index, status and supersession notes.
 - `docs/history.md` and historic specs explain past decisions, not current behavior.
+- `.claude/README.md`: this repo's Claude Code setup: settings, hooks, skills, the worker.
 
 Read the relevant sections for your task; do not load every reference by default.
 An accepted ADR is a decision, not proof that its implementation has landed; check code.

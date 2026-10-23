@@ -85,8 +85,29 @@ const SKIP_DIRS = new Set([
   'node_modules', 'dist', 'dist-electron', 'release', 'release-artifacts', 'target', '__pycache__', 'test',
 ]);
 
+/**
+ * The repo's Claude Code setup: the skills, the agents and their README. The
+ * walk above skips dot-directories, so these are named by exact glob - and
+ * never by walking `.claude/`, whose worktrees hold whole checkouts with their
+ * own copies of every document here.
+ */
+function claudeSetupDocs(): string[] {
+  const docs = existsSync('.claude/README.md') ? ['.claude/README.md'] : [];
+  if (existsSync('.claude/agents')) {
+    docs.push(...readdirSync('.claude/agents').filter((n) => n.endsWith('.md')).map((n) => `.claude/agents/${n}`));
+  }
+  if (existsSync('.claude/skills')) {
+    for (const entry of readdirSync('.claude/skills', { withFileTypes: true })) {
+      const skill = `.claude/skills/${entry.name}/SKILL.md`;
+      if (entry.isDirectory() && existsSync(skill)) docs.push(skill);
+    }
+  }
+  return docs.sort();
+}
+
 const DOCS = [
   ...findClaudeMds('.').map((p) => p.replace(/^\.\//, '')).sort(), ...REFERENCE_DOCS, ...PUBLIC_DOCS,
+  ...claudeSetupDocs(),
 ];
 
 /** Extensions that make a backticked token a path even without a slash. */

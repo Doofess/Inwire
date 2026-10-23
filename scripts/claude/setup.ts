@@ -13,6 +13,7 @@
  * may carry a personal path or an email address. It reads only tracked files
  * and the ones it names, so it passes the same on CI's clean clone.
  */
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -40,6 +41,21 @@ check('plugins unused here are off for this project only', JSON.stringify(settin
 }), JSON.stringify(settings?.enabledPlugins));
 check('claude.ai connectors are off for this project', settings?.disableClaudeAiConnectors === true);
 check('the project MCP server is pre-approved', JSON.stringify(settings?.enabledMcpjsonServers) === '["microsoft-learn"]');
+
+// Hook wiring: each hook runs from the project root's copy, and a command
+// naming a script that is not there would fail on every tool call.
+interface HookEntry { matcher?: string; hooks?: Array<{ type?: string; command?: string; if?: string; timeout?: number }> }
+const hooks = (settings?.hooks ?? {}) as Record<string, HookEntry[]>;
+const wired = (event: string, matcher: string | undefined, script: string, condition?: string) =>
+  (hooks[event] ?? []).some((e) => e.matcher === matcher && (e.hooks ?? []).some((h) =>
+    h.type === 'command' && h.command === `node "$CLAUDE_PROJECT_DIR/.claude/hooks/${script}"` && h.if === condition));
+check('guard-shell runs before every Bash and PowerShell call', wired('PreToolUse', 'Bash|PowerShell', 'guard-shell.mjs'));
+for (const entry of Object.values(hooks).flat()) {
+  for (const h of entry.hooks ?? []) {
+    const script = h.command?.match(/\.claude\/hooks\/([\w.-]+\.mjs)/)?.[1];
+    check(`hook command ${h.command} names a script that exists`, script !== undefined && existsSync(`.claude/hooks/${script}`));
+  }
+}
 
 const mcp = readJson('.mcp.json');
 check('.mcp.json holds exactly Microsoft Learn over HTTP', JSON.stringify(mcp?.mcpServers) === JSON.stringify({
@@ -86,6 +102,46 @@ function inDir(dir: string, pick: (name: string) => string | null): string[] {
 const agentFiles = inDir('.claude/agents', (n) => (n.endsWith('.md') ? n : null));
 const skillFiles = inDir('.claude/skills', (n) => (n.endsWith('/') ? `${n}SKILL.md` : null));
 const hookFiles = inDir('.claude/hooks', (n) => (n.endsWith('.mjs') ? n : null));
+
+// Skills: each is listed in full so Claude can pick it, and a `paths:` scope
+// that matches no file would quietly never load it.
+const tracked = execFileSync('git', ['ls-files'], { encoding: 'utf8' }).split('\n').filter(Boolean);
+function globToRegExp(glob: string): RegExp {
+  const body = glob.split('**').map((part) => part.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')).join('.*');
+  return new RegExp(`^${body}$`);
+}
+for (const skill of ['inwire-verify', 'inwire-launch', 'inwire-visual-design']) {
+  check(`skill ${skill} exists`, skillFiles.includes(`.claude/skills/${skill}/SKILL.md`));
+}
+for (const file of skillFiles) {
+  const fm = frontmatter(file);
+  const folder = path.basename(path.dirname(file));
+  check(`${folder}: frontmatter name matches its folder`, fm.name === folder, fm.name);
+  const length = (fm.description ?? '').length;
+  check(`${folder}: description is listed in full (50-1024 chars)`, length >= 50 && length <= 1024, `${length} chars`);
+  if (fm.paths !== undefined) {
+    let globs: string[] = [];
+    try { globs = JSON.parse(fm.paths) as string[]; } catch { /* reported below */ }
+    check(`${folder}: paths is a one-line list`, Array.isArray(globs) && globs.length > 0, fm.paths);
+    for (const glob of globs) {
+      const re = globToRegExp(glob);
+      check(`${folder}: paths ${glob} matches a tracked file`, tracked.some((f) => re.test(f)));
+    }
+  }
+}
+if (skillFiles.includes('.claude/skills/inwire-visual-design/SKILL.md')) {
+  check('inwire-visual-design is scoped to the files it governs', frontmatter('.claude/skills/inwire-visual-design/SKILL.md').paths !== undefined);
+}
+// Per machine and gitignored, so absent on CI: checked only where it exists.
+const local = readJson('.claude/settings.local.json');
+if (local) check('no local override hides a project skill', !('skillOverrides' in local));
+
+// tsc never sees `.claude/`, so a syntax error in a hook would only show as a
+// hook that silently allows everything.
+for (const hook of hookFiles) {
+  const result = spawnSync(process.execPath, ['--check', hook], { encoding: 'utf8' });
+  check(`${hook} parses`, result.status === 0, result.stderr.split('\n')[0]);
+}
 
 /** A personal path or an email address in a public file. */
 const PERSONAL = /[A-Z]:[\\/](Users|dev)[\\/]|Home Office|claude-setup|[\w.+-]+@[\w-]+\.[\w.]+/i;
