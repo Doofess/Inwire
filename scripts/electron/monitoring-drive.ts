@@ -1287,8 +1287,12 @@ await scenario('16. retention expiry during v9 collection', async () => {
   await minuteCloses(lastSentAt);
   const sc = () => { try { return statSync(path.join(profile, 'monitoring', 'rollups.iwmr')).size; } catch { return -1; } };
   await stopListening(p);
+  // Every expiry resets the sidecar to the journal's new start, so Stop's post is refused as not continuing it and
+  // the Worker rebuilds after a one second retry; quitting inside that second would leave the header alone.
+  checkTrue('16: after Stop, the sidecar is rebuilt from the retained journal (rollups.iwmr grows past its 64 B header)',
+    await until(async () => sc() > 64, 15_000), `${sc()} B`);
   await shutdown(r);
-  note(`rollups.iwmr after shutdown: ${sc()} B (64 B is the header alone: nothing summarised)`);
+  note(`rollups.iwmr after shutdown: ${sc()} B`);
   const o = await oracleV9(profile, startMs);
   checkTrue('16: the journal records the expiry (an expired boundary) and starts after entry 1', o.boundaries.some((b) => b.startsWith('expired')) && o.firstEntryId > 1,
     `${json(o.boundaries)} first ${o.firstEntryId}`);

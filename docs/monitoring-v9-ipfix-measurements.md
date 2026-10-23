@@ -5,7 +5,8 @@ and the decode and checkpoint costs ADR
 [0064](decisions/0064-monitoring-v9-ipfix-collection.md) quotes. All of it
 was measured before the collector's decoder exists. The throughput figures
 come from the tree's readers in `flowExport.ts`, not from Task 8's decoder,
-so they are a **pre-implementation estimate**. Task 11 measures them again.
+so they are a **pre-implementation estimate**. Task 11 measured the
+collector's own decoder; see *The collector's decoder*.
 
 Every number is a property of the machine it ran on: the machine in
 [`monitoring-v5-measurements.md`](monitoring-v5-measurements.md#the-machine),
@@ -221,6 +222,60 @@ table**, not measurements:
   checkpoint (ADR 0064 spaces them 256 MiB apart, at segment starts). At
   the slowest pass's rate that is under 10 s.
 
+## The collector's decoder
+
+`npx tsx scripts/monitoring/measurement.ts v9collector` (Task 11) times the
+code the Worker runs, not the readers. Each recorded pass is repeated to a day
+(622,570 datagrams), with its template datagram re-sent every 16 datagrams as
+softflowd does and the headers rewritten so that clock, uptime and sequence
+run on at 7 a second. One pass of each recording first gives the same record
+count through the collector as through the readers.
+
+The figures below are from a `node:worker_threads` thread, the nearest
+plain-tsx stand-in for the Chromium Worker; the main thread's were within
+run-to-run spread of them. Two full runs were made, the first beside an
+Electron drive; where they differ, both are given.
+
+| Input | Decoder only, a day | Datagrams/s | Decoder and the Worker's rollup step, a day | Datagrams/s | A 256 MiB segment, with rollups |
+|---|---|---|---|---|---|
+| v5, 30 records (baseline) | 2.0 s | 304,474 | 60.1 s | 10,366 | - |
+| softflowd v9 | 15.4 to 16.1 s | 38,596 | 20.9 to 22.4 s | 29,837 | 7.5 s |
+| softflowd IPFIX | 15.6 s | 40,031 | 20.3 s | 30,617 | 7.2 s |
+| softflowd IPFIX `-b` | 12.8 s | 48,479 | 18.3 s | 33,944 | 7.0 s |
+| pmacct v9 | 4.7 s | 131,345 | 6.6 s | 95,066 | 6.3 s |
+| pmacct IPFIX | 4.8 s | 129,954 | 6.7 s | 93,408 | 6.5 s |
+
+- **The collector decodes 1.2 to 2.5 times more slowly than the readers**
+  above. It keeps template, sequence, clock and sampling state per datagram,
+  which the readers do not. The slowest pass with rollups still runs about
+  4,000 times the planning rate.
+- **The v5 baseline's rollup step is not 0059's 18 s a day.** These flows
+  have about 10,000 distinct address pairs a minute, near the key bound,
+  where 0059's workload had fewer. A profile puts 4.6 to 5.6 s in
+  `ipv4Number`, called from `byAddress` on every sort comparison when a minute
+  is sealed.
+
+**A day rebuilt through the runtime.** A day of v9 was written under policy
+2 through `MonitoringJournal`, then read by the real `MonitoringWorkerHost`
+over `LocalRuntime` and `RollupStore`:
+
+| Journal | Whole-day rebuild (empty sidecar) | An hour's catch-up with the sidecar current |
+|---|---|---|
+| softflowd v9: 741 MiB, 3 segments | 25.4 s, 30.7 s on the second run | 7.9 s, from the checkpoint at entry 430,443 (217,331 entries) |
+| pmacct v9: 295 MiB, 2 segments | 10.8 s, 17.5 s | 9.5 s, from entry 1: no checkpoint, the second segment being under 256 MiB from the first |
+
+ADR 0064's estimates, against these:
+
+- **"A day of v9 should take under 30 s to rebuild":** on the line, 25 to
+  31 s for softflowd's records.
+- **"A mid-journal query replays under 512 MiB from its checkpoint, which
+  should take under 10 s":** the bound on what is replayed holds, by the
+  checkpoint spacing; the time does not. At 7.0 to 7.5 s per 256 MiB with
+  rollups, 512 MiB is 14 to 15 s, and decoding alone is 9 to 12 s.
+
+Table C used node's zlib and a host clock that never yields; the Worker
+inflates with fflate and yields between messages.
+
 ## The checkpoint
 
 The prototype encoder in `measurement.ts checkpoint` follows the layout ADR
@@ -246,6 +301,116 @@ specifiers as well as the count.
 The deflated sizes are of identical synthetic templates and flatter
 compression. The encoded size is the one that gets bounded.
 
+## Through the app
+
+`npx tsx scripts/monitoring/interop.ts --templated-only` (Task 11) replays
+each pass's recorded datagrams from the lab into the built app, over
+loopback, and reads the result three ways: the sheet, the rollup path and the
+raw path of the closed profile's journal. `--v5-only` runs the v5 passes of
+[the v5 report](monitoring-v5-measurements.md). On 2026-10-23 every pass
+passed (139 checks for v9 and IPFIX, 28 for v5):
+
+| Pass | Datagrams | Records | Packets | Octets | nfdump |
+|---|---|---|---|---|---|
+| softflowd `-v 9` | 4 | 105 | 609 | 161,644 | equal |
+| softflowd `-v 10` | 4 | 105 | 609 | 161,644 | equal |
+| softflowd `-v 10 -b` | 3 | 56 | 348 + 261 reverse | 78,875 + 82,769 reverse | 609 / 161,644: both directions summed |
+| softflowd `-v 9 -s 10` | 3 | 56 | 62 | 4,524 | 620 / 45,240: scaled ×10 |
+| softflowd `-v 10 -s 10` | 3 | 56 | 62 | 4,524 | 620 / 45,240: scaled ×10 |
+| pmacct nfprobe v9 | 15 | 105 | 609 | 159,184 | equal |
+| pmacct nfprobe v10 | 15 | 105 | 609 | 159,184 | equal |
+
+For every pass:
+
+- the sheet's record count and accepted datagrams equal tshark's records and
+  the datagrams sent;
+- the exporter card names the source (`NetFlow v9, source ID 0` or
+  `IPFIX, domain 0`) and says every data set had its template, and a
+  sampled pass's card says `Sampled 1 in 10`;
+- History's estimate on a sampled pass is the reported packets ×10, which is
+  nfdump's scaled total, labelled an estimate;
+- Top endpoints and Top conversations on the sheet, and every endpoint and
+  directional pair on both query paths, equal tshark's per record, exactly,
+  with a biflow's reverse counts as the destination-to-source leg;
+- the journal holds one source for the exporter, and the rollup and raw paths
+  agree on everything but provenance.
+
+The three accounting differences above are asserted as differences: nfdump's
+scaled and summed totals are checked against the app's reported ones times
+the interval, or forward plus reverse.
+
+## Under fault and load
+
+`npx tsx scripts/electron/monitoring-drive.ts` adds four v9 scenarios to the
+v5 ones, each checked on the sheet and then against the closed profile's
+journal by an offline oracle. On 2026-10-23 every scenario passed in 379 s,
+except 10 and 15, which were not run:
+
+- **13, exporter restart mid-run.** v9 template and data, then data-only
+  datagrams with the uptime stepped back to 5 s. The card shows the restart
+  and the data sets that waited for template 256, and the record count does
+  not move. Template and data again, and it grows by exactly the new
+  records. The journal holds every datagram, and both query paths equal the
+  ledger of decodable records only.
+- **14, app restart within the template lifetime.** Template and data, Stop,
+  close, reopen, Start, then data-only datagrams: they decode, nothing waits
+  for a template, and no restart is counted.
+- **15, app restart past the lifetime.** Not run: it needs 31 minutes of wall
+  clock and runs only with `--lifetime`.
+- **16, retention expiry during v9.** The 16 MiB limit with the oldest
+  segment expired at the limit, and 297 datagrams of about 58 KB. A segment
+  expires, data-only datagrams still decode, nothing is shed and intake goes
+  on. History over the whole run equals the ledger, with the expired part as
+  aggregate-only. The retained journal, replayed from the archive cut's
+  template state, equals the raw answer. After Stop, the sidecar is rebuilt
+  from the retained journal within about 2 s.
+
+  A first run quit straight after Stop and left `rollups.iwmr` at 64 bytes,
+  the header alone. Every expiry resets the sidecar to the journal's new start
+  (ADR 0062), and the Worker is not told. So its first post after the expiry
+  continues from the old watermark and is refused ("does not continue the
+  sidecar"), and the retry a second later rebuilds it. That run quit inside
+  the second. Answers stayed exact throughout, and the next open rebuilds. The
+  room the limit left was 2.6 MB against a batch of a few hundred bytes, so
+  this was not a storage refusal. `scripts/monitoring/expiry-sidecar.ts`
+  holds the sequence, and the drive now waits for the sidecar to grow.
+
+  What that reset costs at the default limit is estimated, not measured. At
+  8 GiB a segment is 256 MiB and an expiry at the limit frees two. At
+  softflowd's day of 741 MiB, that is an expiry about every 17 hours. Each one
+  rebuilds the roughly 10 days still retained, from the archive cut's
+  checkpoint. At the measured 25 to 31 s a day, that is 4 to 5 minutes of
+  Worker time, and History reads "Rebuilding summaries" meanwhile. ADR 0062
+  chose reset-and-rebuild and allows a compaction once a test shows it equal.
+
+`npx tsx scripts/monitoring/load.ts --quick --protocol v9` (and `ipfix`)
+sends templated datagrams, the template set in the first and every 20th:
+
+| | v9 | IPFIX |
+|---|---|---|
+| Highest rate sustained | 199.2/s, all accepted, none shed | 199.0/s, all accepted, none shed |
+| Restart, history back | 5,281 ms | 5,023 ms |
+| Restart with the sidecar deleted (a rebuild), history back | 6,030 ms | 5,912 ms |
+| Records before and after the restart | 65,899, equal | 65,939, equal |
+| Storage exhaustion: offered, accepted, shed | 11,169, 10,963, 0 | 11,176, 10,779, 0 |
+
+Both stopped at the 16 MiB limit with the guidance shown and the history
+still readable.
+
+## Not supported
+
+These are outside milestone 2, by decision, and the app says so rather than
+guessing:
+
+- **IPFIX over SCTP or TCP.** The collector binds UDP only.
+- **IPv6 exporters.** The exporter's address and the bind are IPv4
+  (`config.ts`). IPv6 *flow* addresses inside v9 and IPFIX records are
+  decoded and kept in policy-2 minutes (ADR 0066).
+- **Reprocessing policy-1 segments.** Datagrams journalled before the upgrade
+  stay under the policy they were written with; v9 and IPFIX in them count as
+  unsupported and are not decoded again (ADRs 0062 and 0064).
+- **ipt_NETFLOW and hardware exporters:** not run and unverified; see below.
+
 ## Not run
 
 - **ipt_NETFLOW:** it needs a kernel module that WSL does not offer.
@@ -258,10 +423,10 @@ compression. The encoded size is the one that gets bounded.
   IPFIX port change and malformed sets:** no exporter here produces them.
   They are synthetic cases in Task 8's tests, each cross-checked against
   tshark.
-- **Throughput of the collector's own decoder, in the Worker:** the
-  decoder does not exist yet, and the readers ran on Node's main thread.
-  Task 11 measures it.
-- **A rebuild of a day of v9 from a checkpoint:** estimated above from the
-  readers and 0059's rollup figure, not run.
+- **An app restart past the template lifetime** (drive scenario 15): it
+  needs 31 minutes of wall clock and runs only with `--lifetime`. The
+  lifetime rule itself is held by Task 8's template-store tests.
+- **The decoder in the Chromium Worker itself:** it was timed in a Node
+  worker thread and on the main thread, not in the sandboxed Worker.
 - **A real network path:** every datagram crossed WSL's virtual network on
   one machine.

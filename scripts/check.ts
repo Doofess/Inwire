@@ -114,7 +114,7 @@ const NOT_TESTS: Record<string, string> = {
     + 'machine properties with no pass mark, and the firewall mode needs the installed agent, WSL and a person to answer the Windows Security prompt',
   'electron/monitoring-drive.ts':
     'driver; launches the built app a dozen times against its own loopback exporter and kills its Worker, utility and renderer '
-    + 'to prove recovery, quit drain and sidecar rebuild - minutes, and every launch needs a build (Task 8)',
+    + 'to prove recovery, quit drain and sidecar rebuild, then v9 restarts and retention expiry - about six minutes, and every launch needs a build',
   'monitoring/interop.ts':
     'driver; replays softflowd\'s v5 and softflowd\'s and pmacct\'s v9 and IPFIX exports into the built app and compares with '
     + 'tshark and nfdump - needs WSL, Ubuntu, softflowd, pmacct, nfdump and tshark, and says NOT RUN without them, which is never a pass',
