@@ -414,9 +414,11 @@ root guide, and runtime drives and accepted manual gaps in
 ## NetFlow monitoring
 
 Implemented by [ADRs 0058-0060](decisions/README.md) (merge `41b4a43`), with
-location, retention and the evidence bundle by ADRs 0061-0063;
-numbers are in [monitoring-v5-measurements.md](monitoring-v5-measurements.md).
-It is a NetFlow v5 **collector** for one exporter, independent of captures: it
+location, retention and the evidence bundle by ADRs 0061-0063, and v9 and
+IPFIX by ADRs 0064-0066; numbers are in
+[monitoring-v5-measurements.md](monitoring-v5-measurements.md) and
+[monitoring-v9-ipfix-measurements.md](monitoring-v9-ipfix-measurements.md).
+It is a NetFlow v5, v9 and IPFIX (UDP) **collector** for one exporter, independent of captures: it
 reads no adapter, uses no agent or Npcap, and a capture started, cleared or
 imported leaves its totals untouched (scenario 11 of
 `scripts/electron/monitoring-drive.ts`). Dissecting NetFlow/IPFIX frames inside
@@ -428,7 +430,7 @@ parses hostile bytes.
 | Piece | Where | Owns |
 |---|---|---|
 | Collector | unprivileged `utilityProcess`, `serviceName: 'inwire-monitoring'` (`electron/monitoring/host.ts`, `entry.ts`, `collector.ts`) | the UDP socket (`udp.ts`: specific IPv4 bind, no `reuseAddr`, 8 MiB receive buffer), the exporter-address filter, entry ids, the journal segments (`journal-<first id>.iwmj`), `rollups.iwmr`, `archive.iwma` and dataset.json in the dataset folder, by default the `monitoring` folder under userData (`volume.ts`, `location.ts`) |
-| Decoder | sandboxed Worker `src/workers/monitoring.worker.ts`, rules in `src/services/monitoring/workerHost.ts` | v5 decoding, minute rollups, queries. Holds no file: reads and posts over a `MessagePort` the collector gave it, through `runtimeRpc.ts` |
+| Decoder | sandboxed Worker `src/workers/monitoring.worker.ts`, rules in `src/services/monitoring/workerHost.ts` | v5, v9 and IPFIX decoding, template state, minute rollups, queries. Holds no file: reads and posts over a `MessagePort` the collector gave it, through `runtimeRpc.ts` |
 | Client | renderer, `src/services/monitoring/client.ts` and `appClient.ts` | one `MonitoringClient` outliving the sheet; ferries main's port into the Worker without reading it (no datagram crosses the main thread), sends queries, folds state. Built on first ask; connects only when the sheet opens |
 | Host | main, `electron/monitoring/hostCore.ts` and `host.ts` | forks the collector, brokers the `MessageChannelMain`, the start/stop IPC, the saved source, location and retention (`settings.ts`), and the folder, discard and save dialogs. Sees no datagram |
 | Sheet | `sheet: 'monitoring'` in `src/App.tsx`, the third sheet after settings and speed test | the UI; `APP_VIEWS` and `Ctrl+1..5` are unchanged |
@@ -439,6 +441,21 @@ authority; `rollups.iwmr` is a cache that is rebuilt by streaming when missing
 or behind (scenario 9 of the drive). Rollups are keyed by directional address
 pair with a per-minute key budget; a table past its bound is refused while the
 totals stay exact (ADR 0059). A torn tail is the only truncation.
+
+**Templates** (ADRs 0064-0066). v9 and IPFIX need state the datagram does not
+carry, so the Worker keeps a template store per exporter and source ID (v9) or
+observation domain (IPFIX); those are separate sources (`sourceKeys.ts`). A
+segment records the decode policy it was written under: policy 2, from the
+first Start after the upgrade, decodes v9 and IPFIX, and its minutes keep
+IPv6 flow addresses and the template counters. The decode state is
+checkpointed in the sidecar at segment starts (`checkpointPlan.ts`), so a
+catch-up or a raw query that starts mid-journal replays from the nearest checkpoint
+(`stateAt.ts`) rather than from the journal's first entry. A data set whose
+template is unknown is journalled and counted as awaiting, never buffered or
+decoded later. An uptime that steps back is an exporter restart and forgets that
+scope's templates; a template carries across Stop and app restart only within
+its lifetime. Counters are kept as reported; a sampled estimate is computed for
+display and labelled. The exporter's own address is IPv4 only.
 
 **Intake rules** (`src/services/monitoring/config.ts`): the source is an
 exporter IPv4, a *specific* local IPv4 and a UDP port; `0.0.0.0` is refused for

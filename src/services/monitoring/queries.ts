@@ -36,7 +36,7 @@
 import { ExpiredRangeError, StaleGenerationError } from './journal';
 import { decodeMinuteRollup, type Inflate } from './rollupCodec';
 import {
-  MINUTE_MS, EngineAdmission, MinuteAccumulator, byAddress, foldOf, foldSampling, minuteOf, type FlowLeg,
+  MINUTE_MS, EngineAdmission, MinuteAccumulator, foldOf, foldSampling, minuteOf, sortByAddresses, type FlowLeg,
 } from './rollup';
 import { CorruptRollupError, RuntimeUnavailableError, type ArchiveSource, type EvidenceReader, type RollupReader } from './runtime';
 import {
@@ -382,7 +382,7 @@ function endpointTable(t: KeyTable<EndpointAcc>): HistoryTable<EndpointTotals> {
     };
   }
   const rows = [...t.rows].map(([address, e]) => ({ address, sentOctets: e.sent, receivedOctets: e.received }));
-  rows.sort((a, b) => bigintDescending(a.sentOctets + a.receivedOctets, b.sentOctets + b.receivedOctets) || byAddress(a.address, b.address));
+  sortByAddresses(rows, (r) => [r.address], (a, b) => bigintDescending(a.sentOctets + a.receivedOctets, b.sentOctets + b.receivedOctets));
   return { status: 'ok', rows: rows.slice(0, LIMITS.topRows) };
 }
 
@@ -394,7 +394,7 @@ function conversationTable(t: KeyTable<ConversationAcc>): HistoryTable<Conversat
     };
   }
   const rows = [...t.rows.values()].map((c) => ({ srcAddr: c.src, dstAddr: c.dst, reportedOctets: c.octets, reportedPackets: c.packets }));
-  rows.sort((a, b) => bigintDescending(a.reportedOctets, b.reportedOctets) || byAddress(a.srcAddr, b.srcAddr) || byAddress(a.dstAddr, b.dstAddr));
+  sortByAddresses(rows, (r) => [r.srcAddr, r.dstAddr], (a, b) => bigintDescending(a.reportedOctets, b.reportedOctets));
   return { status: 'ok', rows: rows.slice(0, LIMITS.topRows) };
 }
 

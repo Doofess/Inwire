@@ -146,11 +146,14 @@ test('Task 10: the sampling status reads its four states, and absence is never 1
 });
 
 test('Task 10: an estimate exists only when the rate is known and constant over the range, and says so', () => {
-  assert.deepEqual(samplingEstimate({ kind: 'known', interval: 100 }, 1_500n, 3n), { interval: 100, octets: 150_000n, packets: 300n });
+  assert.deepEqual(samplingEstimate({ kind: 'known', interval: 100 }, true, 1_500n, 3n), { interval: 100, octets: 150_000n, packets: 300n });
   for (const s of [{ kind: 'absent' }, { kind: 'mixed' }, { kind: 'unsupported' }] as const) {
-    assert.equal(samplingEstimate(s, 1_500n, 3n), null, `no estimate when sampling is ${s.kind}`);
+    assert.equal(samplingEstimate(s, true, 1_500n, 3n), null, `no estimate when sampling is ${s.kind}`);
   }
-  assert.equal(samplingEstimate({ kind: 'known', interval: 1 }, 1_500n, 3n), null, '1 in 1 is not sampled: the reported figure is the figure');
+  assert.equal(samplingEstimate({ kind: 'known', interval: 1 }, true, 1_500n, 3n), null, '1 in 1 is not sampled: the reported figure is the figure');
+  // Some records of the range with no known rate: the range's interval may be known, the estimate is not.
+  assert.equal(samplingEstimate({ kind: 'known', interval: 10 }, false, 1_500n, 3n), null, 'no estimate when some records have unknown sampling');
+  assert.deepEqual(samplingEstimate({ kind: 'known', interval: 10 }, true, 1_500n, 3n), { interval: 10, octets: 15_000n, packets: 30n });
   assert.equal(ESTIMATE_LABEL, 'estimate');
   const src = read('History.tsx');
   assert.match(src, /samplingEstimate\(/);

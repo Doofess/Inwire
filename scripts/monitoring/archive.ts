@@ -630,6 +630,28 @@ test('a replay that throws, or a cache that cannot say who is admitted, fails th
   assert.equal(hex(bytesOf(rig.afile)), hex(archiveBefore));
 });
 
+test('a replay whose checkpoint does not decode fails the run before anything is written: the archive is never given a start no later run could use', () => {
+  const w = world();
+  const { rig } = w;
+  const segs = rig.journal.segments().map((x) => x.name);
+  const archiveBefore = bytesOf(rig.afile);
+  const journalBefore = rig.journal.snapshot();
+  for (const bad of [new Uint8Array(0), new Uint8Array([1, 2, 3]), (() => { const c = DecodeState.empty(0).checkpoint().slice(); c[10] ^= 0xff; return c; })()]) {
+    const r = runExpiry(rig.journal, rig.store, rig.archive, w.plan, {
+      nowMs: NOW, deflate, replay: (entries, context, start) => ({ ...expiryFragments(entries, context, deflate, start), checkpoint: bad }),
+    });
+    assert.equal(r, 'failed');
+    assert.equal(rig.archive.lastCut(), null, 'no cut was promised');
+    assert.equal(hex(bytesOf(rig.afile)), hex(archiveBefore), 'nothing was written to the archive');
+    assert.deepEqual(rig.journal.segments().map((x) => x.name), segs, 'no segment was dropped');
+    assert.equal(rig.journal.snapshot().throughEntryId, journalBefore.throughEntryId);
+    assert.equal(expiredBoundaries(rig).length, 0, 'and no expired boundary was written');
+    assert.ok(rig.store.watermark() !== null, 'the cache is untouched');
+  }
+  // The control: the replay's own checkpoint is accepted.
+  assert.equal(runExpiry(rig.journal, rig.store, rig.archive, w.plan, { nowMs: NOW, deflate }), 'done');
+});
+
 test('expiryFragments is deterministic and carries the policy it wrote under', () => {
   const w = world();
   const entries = readFrom(w.rig, 0).slice(0, 700);

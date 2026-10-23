@@ -33,7 +33,7 @@ import {
 import { exporterKey, exporterOf, isEngineSourceKey } from './v5';
 import type { DecodeState, DecodeStep, RecordSampling } from './decodeState';
 import type { FlowDecode } from './flowDecode';
-import { compareAddresses } from './rollupCodec';
+import { addressBytes, compareAddresses } from './rollupCodec';
 
 export const MINUTE_MS = 60_000;
 
@@ -52,6 +52,39 @@ export function ipv4Number(address: string): number {
 export function byAddress(a: string, b: string): number {
   if (a.includes(':') || b.includes(':')) return compareAddresses(a, b);
   return ipv4Number(a) - ipv4Number(b);
+}
+
+/** One address as a sort key, parsed once: IPv4 as its number, IPv6 as its 16 bytes. IPv4 sorts before IPv6. */
+export type AddressKey = number | Uint8Array;
+
+export function addressKey(address: string): AddressKey {
+  return address.includes(':') ? addressBytes(address) : ipv4Number(address);
+}
+
+/** The order of `byAddress`, between two keys already made. */
+export function compareAddressKeys(a: AddressKey, b: AddressKey): number {
+  if (typeof a === 'number') return typeof b === 'number' ? a - b : -1;
+  if (typeof b === 'number') return 1;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+}
+
+/**
+ * Sorts `rows` in place by `primary` and then by each of their addresses in turn, every address parsed once per
+ * row (decorate, sort, undecorate) and not twice per comparison. The order is exactly that of `byAddress`.
+ */
+export function sortByAddresses<T>(rows: T[], addressesOf: (row: T) => readonly string[], primary?: (a: T, b: T) => number): void {
+  const decorated = rows.map((row) => ({ row, keys: addressesOf(row).map(addressKey) }));
+  decorated.sort((a, b) => {
+    const p = primary === undefined ? 0 : primary(a.row, b.row);
+    if (p !== 0) return p;
+    for (let i = 0; i < a.keys.length; i++) {
+      const c = compareAddressKeys(a.keys[i], b.keys[i]);
+      if (c !== 0) return c;
+    }
+    return 0;
+  });
+  for (let i = 0; i < rows.length; i++) rows[i] = decorated[i].row;
 }
 
 /** Two samplings of one minute folded into one: none yet, the same rate, or `SAMPLING_MIXED` (ADR 0066). */
@@ -273,11 +306,11 @@ export class MinuteAccumulator {
   /** The rollup, its keys in a fixed order: the same journal always encodes to the same bytes. */
   toRollup(): MinuteRollup {
     const endpoints: EndpointTotals[] = [...this.endpoints]
-      .map(([address, e]) => ({ address, sentOctets: e.sent, receivedOctets: e.received }))
-      .sort((a, b) => byAddress(a.address, b.address));
+      .map(([address, e]) => ({ address, sentOctets: e.sent, receivedOctets: e.received }));
+    sortByAddresses(endpoints, (e) => [e.address]);
     const conversations: ConversationTotals[] = [...this.conversations.values()]
-      .map((c) => ({ srcAddr: c.src, dstAddr: c.dst, reportedOctets: c.octets, reportedPackets: c.packets }))
-      .sort((a, b) => byAddress(a.srcAddr, b.srcAddr) || byAddress(a.dstAddr, b.dstAddr));
+      .map((c) => ({ srcAddr: c.src, dstAddr: c.dst, reportedOctets: c.octets, reportedPackets: c.packets }));
+    sortByAddresses(conversations, (c) => [c.srcAddr, c.dstAddr]);
     return {
       sourceKey: this.sourceKey, minuteMs: this.minuteMs, complete: this.complete, records: this.records,
       reportedOctets: this.reportedOctets, reportedPackets: this.reportedPackets, endpoints, conversations,

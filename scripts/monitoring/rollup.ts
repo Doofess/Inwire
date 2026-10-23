@@ -19,7 +19,7 @@
  */
 import assert from 'node:assert/strict';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
-import { EngineAdmission, MinuteAccumulator, MinuteAggregator, minuteOf } from '../../src/services/monitoring/rollup';
+import { EngineAdmission, MinuteAccumulator, MinuteAggregator, byAddress, minuteOf, sortByAddresses } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { runExpiry } from '../../src/services/monitoring/archive';
 import { DEFAULT_RETENTION, planExpiry } from '../../src/services/monitoring/retention';
@@ -62,6 +62,45 @@ function fan(block: number, n: number, receivedMs: number, firstId: number, dst 
 }
 
 const keyCount = (r: MinuteRollup): number => r.endpoints.length + r.conversations.length;
+
+// --- table order ---------------------------------------------------------------------------------------------
+
+test("order: a table's rows are not re-parsed on every comparison", () => {
+  const acc = new MinuteAccumulator(SRC, m(1), WRITE_POLICY_VERSION);
+  const n = 3000;
+  const flows = fan(7, n, m(1), 1);
+  const rand = prng(5);
+  for (let i = flows.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [flows[i], flows[j]] = [flows[j], flows[i]]; }
+  for (const f of flows) acc.addFlow(f);
+  const real = String.prototype.split;
+  let splits = 0;
+  String.prototype.split = function (this: string, ...a: Parameters<typeof real>) { splits++; return real.apply(this, a); } as typeof real;
+  let rollup: MinuteRollup;
+  try { rollup = acc.toRollup(); } finally { String.prototype.split = real; }
+  assert.equal(rollup.endpoints.length, n + 1);
+  assert.ok(splits <= 4 * n + 8, `${splits} string splits to order ${n} flows: at most one parse per address, not one per comparison`);
+});
+
+test("order: sorting by decorated keys gives byAddress's order for mixed IPv4 and IPv6", () => {
+  const fixed = ["10.0.0.9", "10.0.0.10", "0.0.0.0", "255.255.255.255", "::1", "::ffff:10.0.0.9", "::", "2001:db8::1", "fe80::1", "10.0.0.9", "::1"];
+  const rand = prng(11);
+  const v6 = (): string => `${(rand() * 0xffff | 0).toString(16)}:${(rand() * 0xffff | 0).toString(16)}::${(rand() * 0xffff | 0).toString(16)}`;
+  const v4 = (): string => [0, 0, 0, 0].map(() => rand() * 256 | 0).join(".");
+  const pool = [...fixed];
+  for (let i = 0; i < 400; i++) pool.push(rand() < 0.5 ? v4() : v6());
+  const rows = pool.map((a, i) => ({ a, b: pool[(i * 7 + 3) % pool.length], w: BigInt(i % 5) }));
+  const down = (x: bigint, y: bigint): number => (x === y ? 0 : x > y ? -1 : 1);
+  const want = [...rows].sort((x, y) => down(x.w, y.w) || byAddress(x.a, y.a) || byAddress(x.b, y.b));
+  const got = [...rows];
+  sortByAddresses(got, (r) => [r.a, r.b], (x, y) => down(x.w, y.w));
+  assert.deepEqual(got, want);
+  const plain = [...pool].sort(byAddress);
+  const viaKeys = [...pool];
+  sortByAddresses(viaKeys, (a) => [a]);
+  assert.deepEqual(viaKeys, plain);
+  assert.ok(viaKeys.indexOf("10.0.0.9") < viaKeys.indexOf("10.0.0.10"), "10.0.0.9 before 10.0.0.10");
+  assert.ok(viaKeys.indexOf("255.255.255.255") < viaKeys.indexOf("::"), "IPv4 before IPv6");
+});
 
 // --- the aggregator ----------------------------------------------------------------------------------------
 

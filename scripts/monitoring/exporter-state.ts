@@ -9,6 +9,7 @@
  * real decoder with options records authored in `fixtures.ts`.
  */
 import assert from 'node:assert/strict';
+import { decodeCheckpoint, encodeCheckpoint } from '../../src/services/monitoring/checkpoint';
 import { ExporterState, type ExporterEvent } from '../../src/services/monitoring/exporterState';
 import { decodeDatagram, type FlowDecode, type OptionsReport } from '../../src/services/monitoring/flowDecode';
 import { CollectorTemplateStore } from '../../src/services/monitoring/templates';
@@ -300,6 +301,69 @@ test('options: a random algorithm with no interval, another selector algorithm, 
   }
 });
 
+test('options: a selector rate past 2^32 - 1 is unsupported, and the state still checkpoints and restores', () => {
+  // interval 1, space 0xFFFFFFFF: (1 + 0xFFFFFFFF) / 1 is 2^32, which the checkpoint's 32-bit rate cannot hold (a spoofed datagram can send it).
+  const rec = (interval: number, space: number) => be.concat(be.u32(0), be.u32(interval), be.u32(space), be.u16(1));
+  const { s, send, ipfix } = sampling();
+  send(ipfix([optionsTemplateSet(10, [optionsTemplateRecord(10, 300, [F(143, 4)], [F(305, 4), F(306, 4), F(304, 2)])]), dataSet(300, [rec(1, 0xffffffff)])]));
+  assert.equal(s.sampling(KEY).kind, 'unsupported', 'a rate of 2^32 is not stated');
+  assert.equal(s.samplerRate(KEY, 0), null, 'and the sampler the record names states none');
+  const bytes = encodeCheckpoint(new CollectorTemplateStore(), s, 1, 1);
+  const restored = decodeCheckpoint(bytes);
+  assert.notEqual(restored, null, 'the checkpoint decodes');
+  assert.equal(Buffer.from(encodeCheckpoint(restored!.store, restored!.state, 1, 1)).toString('hex'), Buffer.from(bytes).toString('hex'), 'and re-encodes to the same bytes');
+  // The largest rate the checkpoint holds is still stated: (1 + 0xFFFFFFFE) / 1.
+  const top = sampling();
+  top.send(top.ipfix([optionsTemplateSet(10, [optionsTemplateRecord(10, 300, [F(143, 4)], [F(305, 4), F(306, 4), F(304, 2)])]), dataSet(300, [rec(1, 0xfffffffe)])]));
+  assert.equal(top.s.sampling(KEY).kind, 'known');
+  assert.notEqual(decodeCheckpoint(encodeCheckpoint(new CollectorTemplateStore(), top.s, 1, 1)), null);
+});
+
+// The field-width bound (`templates.ts`: IE 34, 50, 305 and 306 are interpreted at 1 to 4 bytes) is what keeps these
+// values inside the checkpoint's 32-bit fields; only IE 302 may be 8 bytes, and the test above holds that.
+test('options and data: an 8-byte sampling interval or sampler is not interpreted, and the state checkpoints as it is', () => {
+  const roundTrips = (s: ExporterState) => {
+    const bytes = encodeCheckpoint(new CollectorTemplateStore(), s, 1, 1);
+    const restored = decodeCheckpoint(bytes);
+    assert.notEqual(restored, null, 'the checkpoint decodes');
+    assert.equal(Buffer.from(encodeCheckpoint(restored!.store, restored!.state, 1, 1)).toString('hex'), Buffer.from(bytes).toString('hex'), 'and re-encodes to the same bytes');
+  };
+  {
+    // v9 options IE 34 as 8 bytes.
+    const { s, send, v9 } = sampling();
+    send(v9([optionsTemplateSet(9, [optionsTemplateRecord(9, 300, [F(1, 4)], [F(34, 8)])]), dataSet(300, [be.concat(be.u32(0), be.uint(2 ** 33, 8))])]));
+    assert.notEqual(s.sampling(KEY9).kind, 'known', 'an options interval of 2^33 is not stated');
+    roundTrips(s);
+  }
+  {
+    // A data record's own IE 34 as 8 bytes.
+    const { s, send, v9 } = sampling();
+    send(v9([templateSet(9, [templateRecord(9, 256, [F(8, 4), F(12, 4), F(1, 4), F(34, 8)])]), dataSet(256, [be.concat(be.ipv4('10.0.0.1'), be.ipv4('10.0.0.2'), be.u32(5), be.uint(2 ** 33, 8))])]));
+    assert.notEqual(s.sampling(KEY9).kind, 'known', 'a record interval of 2^33 is not stated');
+    roundTrips(s);
+  }
+  {
+    // An IPFIX selector whose interval and space are 8 bytes past 2^32: the live rate would not survive the checkpoint's u32s.
+    const { s, send, ipfix } = sampling();
+    send(ipfix([optionsTemplateSet(10, [optionsTemplateRecord(10, 300, [F(302, 4)], [F(305, 8), F(306, 8), F(304, 2)])]), dataSet(300, [be.concat(be.u32(7), be.uint(2 ** 40, 8), be.uint(2 ** 41, 8), be.u16(1))])]));
+    assert.equal(s.samplerRate(KEY, 7), null, 'the sampler is not filed');
+    roundTrips(s);
+  }
+});
+
+test('options: a selector id past 2^32 - 1 is not filed, and the state still checkpoints and restores', () => {
+  // IE 302 may be 8 bytes; the checkpoint holds a 32-bit id, so 2^32 + 1 would be written as 1 and sort before 5.
+  const rec = (id: number) => be.concat(be.uint(id, 8), be.u32(1), be.u32(9), be.u16(1));
+  const { s, send, ipfix } = sampling();
+  send(ipfix([optionsTemplateSet(10, [optionsTemplateRecord(10, 300, [F(302, 8)], [F(305, 4), F(306, 4), F(304, 2)])]), dataSet(300, [rec(5), rec(2 ** 32 + 1)])]));
+  assert.equal(s.samplerRate(KEY, 5), 10, 'the 32-bit sampler is filed');
+  assert.equal(s.samplerRate(KEY, 2 ** 32 + 1), null, 'the wider one is not');
+  const bytes = encodeCheckpoint(new CollectorTemplateStore(), s, 1, 1);
+  const restored = decodeCheckpoint(bytes);
+  assert.notEqual(restored, null, 'the checkpoint decodes');
+  assert.equal(Buffer.from(encodeCheckpoint(restored!.store, restored!.state, 1, 1)).toString('hex'), Buffer.from(bytes).toString('hex'), 'and re-encodes to the same bytes');
+});
+
 test('options: data records carrying IE 48 use that sampler\'s interval (IE 50)', () => {
   const { s, send, v9 } = sampling();
   const flow: WireField[] = [F(8, 4), F(12, 4), F(1, 4), F(48, 1)];
@@ -357,6 +421,18 @@ test('awaiting-template: one event per template id waiting', () => {
   const s = new ExporterState();
   const events = feed(s, { seq: 1, awaiting: 2 });
   assert.deepEqual(events.filter((x) => x.kind === 'awaiting-template').map((x) => (x as { templateId: number }).templateId), [300, 301]);
+});
+
+test('retainExporter: sources of another exporter are dropped, its own stay', () => {
+  const s = new ExporterState();
+  feed(s, { seq: 1, records: 1 });
+  feed(s, { seq: 1, records: 1, key: 'ipfix:192.0.2.9/0' });
+  feed(s, { seq: 1, records: 1, protocol: 'v9', key: 'v9:192.0.2.9/4' });
+  assert.equal(s.exportSources().length, 3);
+  s.retainExporter(EXPORTER);
+  assert.deepEqual(s.exportSources().map((x) => x.key), [KEY]);
+  s.retainExporter('192.0.2.9');
+  assert.deepEqual(s.exportSources(), []);
 });
 
 console.log(`\n${passes} passed, ${failures} failed`);

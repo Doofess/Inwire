@@ -10,6 +10,7 @@
  *   npx tsx scripts/monitoring/measurement.ts bindpair --electron <electron.exe>
  *   npx tsx scripts/monitoring/measurement.ts softflowd --pcap <capture> [--port n]
  *   npx tsx scripts/monitoring/measurement.ts segments [--quick]   (milestone 1.5, ADR 0062)
+ *   npx tsx scripts/monitoring/measurement.ts v9collector [--quick]   (Task 11: the collector's own v9/IPFIX decoder, a day's rebuild)
  *
  * Not a test: every number is a property of the machine it ran on, and the
  * journal mode writes about 2.7 GB under the OS temp folder (and deletes it).
@@ -36,12 +37,13 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { connect } from 'node:net';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { cpus, networkInterfaces, tmpdir, totalmem } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { crc32 as zlibCrc32, deflateSync, constants as zlibConstants } from 'node:zlib';
 import { FRAME_JSON, FrameReader, encodeFrame } from '../../src/services/agentFraming';
 import { decodePacketBatch } from '../../src/services/agentBinary';
@@ -51,10 +53,18 @@ import {
 } from '../../src/services/flow/flowExport';
 import { formatIpv4Address, formatIpv6Address } from '../../src/services/addressFormat';
 import { decodeV5 } from '../../src/services/monitoring/v5';
+import { CollectorTemplateStore } from '../../src/services/monitoring/templates';
+import { decodeDatagram, type FlowDecode } from '../../src/services/monitoring/flowDecode';
+import { DecodeState } from '../../src/services/monitoring/decodeState';
+import { EngineAdmission, MinuteAggregator, feedEntry } from '../../src/services/monitoring/rollup';
+import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
+import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
+import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import type { DatagramEvidence } from '../../src/services/monitoring/types';
-import { MonitoringJournal, recoverJournal } from '../../src/services/monitoring/journal';
+import { MonitoringJournal, recoverJournal, type EvidenceInput } from '../../src/services/monitoring/journal';
 import { segmentName } from '../../src/services/monitoring/segments';
-import { NodeSegmentDirectory } from '../../electron/monitoring/volume';
+import { NodeSegmentDirectory, openMonitoringVolume } from '../../electron/monitoring/volume';
+import { HostRig, deflate as rigDeflate, inflate as rigInflate } from './queryRig';
 
 const mode = process.argv[2] ?? 'help';
 const quick = process.argv.includes('--quick');
@@ -1416,6 +1426,329 @@ function v9DecodeMode(): void {
   console.log('These are the readers, not Task 8\'s decoder: a pre-implementation estimate, re-measured in Task 11.');
 }
 
+// --- v9 and IPFIX through the collector's own decoder (Task 11) ---------------------------------------
+
+const COLLECTOR_EXPORTER = '192.0.2.1';
+const PLANNING_RATE = 7;
+const PAGE = 256;
+/**
+ * The pass's first datagram, which carries its templates, is sent again this often. A template expires unless it is re-sent (ADR 0065:
+ * both 30 minutes and 48 messages must pass), and the refresh passes in the vectors show softflowd re-sending every 16 datagrams and
+ * pmacct every 18. Without it the rotation would measure a collector whose templates have all expired.
+ */
+const TEMPLATE_EVERY = 16;
+
+/** One recorded (or generated) datagram, as a working copy whose header is rewritten before each use. */
+interface Slot { work: Uint8Array; view: DataView; port: number; version: number; secs0: number; up0: number }
+interface CollectorStream {
+  name: string;
+  protocol: 'v5' | 'v9' | 'ipfix';
+  /** The pass's first datagram, which carries its templates: sent again every `TEMPLATE_EVERY` datagrams. */
+  first: Slot | null;
+  /** The rest of the pass, read in rotation between them. */
+  rest: Slot[];
+  baseSecs: number;
+}
+
+function slotOf(bytes: Uint8Array, port: number): Slot {
+  const work = Uint8Array.from(bytes);
+  const view = new DataView(work.buffer);
+  const version = view.getUint16(0);
+  return { work, view, port, version, secs0: view.getUint32(version === 10 ? 4 : 8), up0: version === 9 ? view.getUint32(4) : 0 };
+}
+
+function collectorStreams(): CollectorStream[] {
+  const out: CollectorStream[] = [];
+  // v5: 1,024 distinct datagrams of 30 records, so a minute holds about 10,000 address pairs (the key bound is 16,384).
+  const next = rng(11);
+  const pick = (n: number) => Math.floor(next() * n);
+  const recs: FlowRec[] = Array.from({ length: 30 * 1024 }, () => ({
+    src: 0x0a000000 + pick(256), dst: 0x0a010000 + pick(64), sport: 1024 + pick(60_000), dport: [80, 443, 53, 22, 8080][pick(5)], proto: 6,
+    octets: 1 + pick(1_000_000), packets: 1 + pick(1000), firstMs: BOOT_MS + 1000, lastMs: BOOT_MS + 2000,
+  }));
+  const v5 = v5Datagrams(recs, BOOT_MS + 5000, { n: 0 }).map((b) => slotOf(b, 50_000));
+  out.push({ name: 'v5, 30 records (baseline)', protocol: 'v5', first: null, rest: v5, baseSecs: 1_700_000_000 });
+  const labels: Record<string, [string, 'v9' | 'ipfix']> = {
+    'softflowd-v9': ['softflowd v9', 'v9'], 'softflowd-v10': ['softflowd IPFIX', 'ipfix'], 'softflowd-v10-b': ['softflowd IPFIX `-b`', 'ipfix'],
+    'pmacct-v9': ['pmacct v9', 'v9'], 'pmacct-v10': ['pmacct IPFIX', 'ipfix'],
+  };
+  for (const pass of exporterVectors()) {
+    const label = labels[pass.name];
+    if (label === undefined) continue;
+    const slots = pass.datagrams.map((d) => slotOf(Uint8Array.from(Buffer.from(d.hex, 'hex')), d.port));
+    out.push({ name: label[0], protocol: label[1], first: slots[0], rest: slots.length > 1 ? slots.slice(1) : slots, baseSecs: slots[0].secs0 });
+  }
+  return out;
+}
+
+/**
+ * The i-th datagram of a day at the planning rate: the working copy's header rewritten so the clock, the uptime
+ * and the sequence run on from one datagram to the next (a repeated pass would otherwise look like an exporter
+ * restart every cycle). A v9 header's uptime moves with its seconds, so the flow times inside a record, which
+ * are relative to it, keep the age they were recorded with.
+ */
+class StreamFeed {
+  private i = 0;
+  private restUsed = 0;
+  private recordsSent = 0;
+  constructor(private readonly stream: CollectorStream) {}
+
+  next(): { slot: Slot; receivedMs: number; ordinal: number } {
+    const i = this.i++;
+    const s = this.stream;
+    const slot = s.first !== null && i % TEMPLATE_EVERY === 0 ? s.first : s.rest[this.restUsed++ % s.rest.length];
+    const receivedMs = s.baseSecs * 1000 + Math.floor((i * 1000) / PLANNING_RATE);
+    const secs = Math.floor(receivedMs / 1000);
+    const v = slot.view;
+    if (slot.version === 5) {
+      v.setUint32(4, (receivedMs - BOOT_MS) >>> 0); v.setUint32(8, secs); v.setUint32(12, (receivedMs % 1000) * 1e6); v.setUint32(16, (i * 30) >>> 0);
+    } else if (slot.version === 9) {
+      v.setUint32(4, (slot.up0 + (secs - slot.secs0) * 1000) >>> 0); v.setUint32(8, secs); v.setUint32(12, (i + 1) >>> 0);
+    } else {
+      v.setUint32(4, secs); v.setUint32(8, this.recordsSent >>> 0);
+    }
+    return { slot, receivedMs, ordinal: i + 1 };
+  }
+
+  /** IPFIX numbers its messages by the records sent before them. */
+  note(d: FlowDecode): void {
+    if (d.kind === 'valid') this.recordsSent += d.dataRecords + d.optionsRecords;
+  }
+}
+
+function collectorEvidence(slot: Slot, receivedMs: number, ordinal: number): DatagramEvidence {
+  return {
+    kind: 'datagram', ref: { generation: 'g', entryId: ordinal }, sessionId: '', receivedMs, receiveOrdinal: ordinal,
+    localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: COLLECTOR_EXPORTER, remotePort: slot.port, bytes: slot.work, policy: 2, segmentFirstId: 1,
+  };
+}
+
+type CollectorStage = 'harness' | 'decode' | 'rollup';
+interface CollectorRow {
+  name: string; protocol: string; datagrams: number; bytes: number; records: number; valid: number; awaitingSets: number;
+  events: number; minutes: number; encodedBytes: number; ms: number;
+}
+
+/**
+ * `harness`: header rewrite and the evidence object, no decode. `decode`: `decodeDatagram` against a live
+ * template store, nothing else. `rollup`: what the Worker's rebuild does per entry - `feedEntry` (the decode
+ * state's step, which also runs `ExporterState`, then `foldOf` and the minute accumulators) - and per page of
+ * 256 entries `drain`, `encodeMinuteRollup` and a level-1 deflate of every sealed minute; not the sidecar's I/O
+ * or the journal's reads, which Table C has.
+ */
+function runCollectorStage(stream: CollectorStream, day: number, stage: CollectorStage): CollectorRow {
+  const feed = new StreamFeed(stream);
+  const store = new CollectorTemplateStore();
+  const state = DecodeState.empty(0);
+  const agg = new MinuteAggregator(0);
+  const admission = new EngineAdmission();
+  const row: CollectorRow = {
+    name: stream.name, protocol: stream.protocol, datagrams: day, bytes: 0, records: 0, valid: 0, awaitingSets: 0, events: 0, minutes: 0, encodedBytes: 0, ms: 0,
+  };
+  let sink = 0;
+  const drainAll = () => {
+    for (;;) {
+      const drained = agg.drain();
+      if (drained === null) return;
+      for (const f of drained.fragments) { row.encodedBytes += encodeMinuteRollup(f.rollup, rigDeflate).length; row.minutes++; }
+    }
+  };
+  const t0 = performance.now();
+  for (let i = 0; i < day; i++) {
+    const { slot, receivedMs, ordinal } = feed.next();
+    row.bytes += slot.work.length;
+    const e = collectorEvidence(slot, receivedMs, ordinal);
+    if (stage === 'harness') { sink += e.bytes[0] + e.receiveOrdinal; continue; }
+    let d: FlowDecode;
+    if (stage === 'decode') {
+      d = decodeDatagram(e, COLLECTOR_EXPORTER, 2, store);
+    } else {
+      const fed = feedEntry(agg, admission, state, e);
+      if (fed === null) throw new Error(`entry ${ordinal} was not fed`);
+      d = fed.step.decoded;
+      row.events += fed.step.events.length;
+      if (ordinal % PAGE === 0) drainAll();
+    }
+    feed.note(d);
+    if (d.kind === 'valid') {
+      row.valid++;
+      row.records += d.protocol === 'v5' ? (d.v5 !== undefined && d.v5.kind === 'valid' ? d.v5.flows.length : 0) : d.flows.length;
+      for (const a of d.awaiting) row.awaitingSets += a.sets;
+    }
+  }
+  if (stage === 'rollup') { agg.seal(Infinity); drainAll(); }
+  row.ms = performance.now() - t0 + (sink < 0 ? 1 : 0);
+  return row;
+}
+
+interface CollectorKernelOut { host: string; harness: CollectorRow[]; decode: CollectorRow[]; rollup: CollectorRow[] }
+
+/** The three stages over every stream; a short warm-up of each first, discarded. Runs on the main thread or in a worker thread. */
+function collectorKernel(day: number): CollectorKernelOut {
+  const out: CollectorKernelOut = { host: isMainThread ? 'main thread' : 'worker thread', harness: [], decode: [], rollup: [] };
+  for (const stream of collectorStreams()) {
+    for (const stage of ['harness', 'decode', 'rollup'] as const) {
+      runCollectorStage(stream, Math.min(day, 20_000), stage);
+      out[stage].push(runCollectorStage(stream, day, stage));
+    }
+  }
+  return out;
+}
+
+function collectorKernelInWorker(day: number): Promise<CollectorKernelOut> {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(fileURLToPath(import.meta.url), { workerData: { collectorDay: day } });
+    w.once('message', (m: CollectorKernelOut) => resolve(m));
+    w.once('error', reject);
+    w.once('exit', (code) => { if (code !== 0) reject(new Error(`the worker thread exited with ${code}`)); });
+  });
+}
+
+function collectorTable(title: string, rows: CollectorRow[], harness: CollectorRow[], withMinutes: boolean): void {
+  console.log(`\n${title}`);
+  console.log(`| Input | Mean datagram | Time for a day | Datagrams/s | Records/s | MiB/s | A 256 MiB segment | Records/datagram | Harness${withMinutes ? ' | Minutes sealed, encoded |' : ' |'}`);
+  console.log(`|---|---|---|---|---|---|---|---|---${withMinutes ? '|---|' : '|'}`);
+  rows.forEach((r, k) => {
+    const s = r.ms / 1000;
+    const mibs = r.bytes / MB / s;
+    console.log(`| ${r.name} | ${fmt(r.bytes / r.datagrams, 0)} B | ${fmt(s, 2)} s | ${fmt(r.datagrams / s, 0)} | ${fmt(r.records / s, 0)} | ${fmt(mibs, 1)} | `
+      + `${r.protocol === 'v5' ? '-' : `${fmt(256 / mibs, 1)} s`} | ${fmt(r.records / r.datagrams, 2)} | ${fmt(harness[k].ms / 1000, 2)} s`
+      + `${withMinutes ? ` | ${r.minutes.toLocaleString()}, ${fmt(r.encodedBytes / 1024, 0)} KiB |` : ' |'}`);
+  });
+  for (const r of rows.filter((x) => x.protocol !== 'v5' && (x.awaitingSets > 0 || x.valid !== x.datagrams))) {
+    console.log(`  WARNING ${r.name}: ${r.valid} of ${r.datagrams} datagrams valid, ${r.awaitingSets} data sets awaiting a template`);
+  }
+}
+
+/** The collector's records over one pass, held to the readers' over the same pass: a decode that disagrees would make the timing meaningless. */
+function collectorValidation(): void {
+  console.log('\nValidation: records over one pass of the recorded datagrams, in order, unpatched');
+  for (const pass of exporterVectors()) {
+    if (!/^(softflowd-v9|softflowd-v10|softflowd-v10-b|pmacct-v9|pmacct-v10)$/.test(pass.name)) continue;
+    const grams = pass.datagrams.map((d) => ({ port: d.port, bytes: Uint8Array.from(Buffer.from(d.hex, 'hex')) }));
+    const readers = new Map<string, FlowTemplate>();
+    const store = new CollectorTemplateStore();
+    let viaReaders = 0, viaCollector = 0;
+    grams.forEach((g, i) => {
+      viaReaders += readerDecode(g.bytes, g.port, readers);
+      const d = decodeDatagram(collectorEvidence(slotOf(g.bytes, g.port), 0, i + 1), COLLECTOR_EXPORTER, 2, store);
+      if (d.kind === 'valid') viaCollector += d.flows.length;
+    });
+    console.log(`  ${pass.name}: readers ${viaReaders} records, collector ${viaCollector} records${viaReaders === viaCollector ? '' : '  MISMATCH'}`);
+  }
+}
+
+const dirBytes = (root: string): number => readdirSync(root).reduce((n, f) => n + statSync(join(root, f)).size, 0);
+
+/** Table C: a day of v9 on disk through `MonitoringJournal`, then the Worker host's own rebuild and catch-up over it. */
+async function collectorRebuild(passName: string, day: number, expectedRecords: number): Promise<void> {
+  const stream = collectorStreams().find((s) => s.name === passName);
+  if (stream === undefined) throw new Error(`no pass named ${passName}`);
+  const root = join(tmpdir(), `inwire-v9collector-${process.pid}-${passName.replace(/\W+/g, '-')}`);
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(root, { recursive: true });
+  const limitBytes = 8 * 1024 * MB;
+  const feed = new StreamFeed(stream);
+  let written = 0;
+  let lastMs = 0;
+  const append = (journal: MonitoringJournal, count: number): void => {
+    for (let done = 0; done < count; done += PAGE) {
+      const batch: EvidenceInput[] = [];
+      for (let k = 0; k < Math.min(PAGE, count - done); k++) {
+        const { slot, receivedMs } = feed.next();
+        lastMs = receivedMs;
+        batch.push({ kind: 'datagram', receivedMs, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: COLLECTOR_EXPORTER, remotePort: slot.port, bytes: slot.work.slice() });
+      }
+      const r = journal.append(batch);
+      if (r.refused > 0) throw new Error(`the journal refused ${r.refused} entries (${r.state})`);
+      written += r.appended;
+    }
+  };
+  const boundary = (sessionId: string, receivedMs: number): EvidenceInput => ({
+    kind: 'boundary', sessionId, receivedMs, action: 'start', reason: '', droppedDatagrams: null,
+    source: { exporterIPv4: COLLECTOR_EXPORTER, bindIPv4: '192.0.2.10', port: 2055 },
+  });
+  try {
+    const vol = openMonitoringVolume(root);
+    const [, writeMs] = timeIt(() => {
+      const { journal } = MonitoringJournal.open(vol.segments, { limitBytes });
+      journal.append([boundary('c1'.repeat(16), stream.baseSecs * 1000)]);
+      append(journal, day);
+      journal.flush();
+      journal.close();
+    });
+    vol.close();
+    console.log(`\n${passName}: ${written.toLocaleString()} datagrams written under policy 2 in ${fmt(writeMs / 1000, 1)} s; ${fmt(dirBytes(root) / MB, 0)} MiB in ${readdirSync(root).filter((f) => f.endsWith('.iwmj')).length} segments`);
+
+    const phase = async (label: string, expected: number | null): Promise<void> => {
+      const v = openMonitoringVolume(root);
+      try {
+        const [{ journal }, openMs] = timeIt(() => MonitoringJournal.open(v.segments, { limitBytes }));
+        const snap = journal.snapshot();
+        const opened = RollupStore.open(v.rollups, { generation: snap.generation, throughEntryId: snap.throughEntryId }, { nowMs: () => Date.now() });
+        const runtime = new LocalRuntime(journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
+        const starts: number[] = [];
+        const innerRead = runtime.readPage.bind(runtime);
+        runtime.readPage = async (s, afterId, maxEntries, maxBytes) => { starts.push(afterId); return innerRead(s, afterId, maxEntries, maxBytes); };
+        const before = opened.store.watermark()?.throughEntryId ?? 0;
+        const rig = new HostRig(runtime, { wallNow: () => lastMs + 60_000 });
+        const t0 = performance.now();
+        const reply = await rig.connect();
+        const ms = performance.now() - t0;
+        if (reply.type !== 'connect-reply' || !reply.ok) throw new Error(`connect failed: ${JSON.stringify(reply)}`);
+        const through = journal.snapshot().throughEntryId;
+        const mark = opened.store.watermark()?.throughEntryId ?? 0;
+        let rollupRecords = 0;
+        for (const key of opened.store.sources()) {
+          for (const m of opened.store.readMinutes(key, 0, Number.MAX_SAFE_INTEGER, 1 << 30)) rollupRecords += decodeMinuteRollup(m.bytes, rigInflate).records;
+        }
+        const cps = opened.store.checkpoints();
+        const replayFrom = starts.length === 0 ? through : Math.min(...starts);
+        console.log(`  ${label}: journal open ${fmt(openMs, 0)} ms (sidecar ${opened.status}, watermark ${before.toLocaleString()} of ${through.toLocaleString()}); `
+          + `rebuild ${fmt(ms / 1000, 2)} s to ${rig.phases().at(-1) ?? reply.phase}, watermark now ${mark.toLocaleString()}`);
+        console.log(`    read from entry ${(replayFrom + 1).toLocaleString()} (${(through - replayFrom).toLocaleString()} entries replayed, ${fmt((through - replayFrom) / (ms / 1000), 0)} entries/s); `
+          + `sidecar ${fmt(opened.store.size() / MB, 1)} MiB, ${cps.length} checkpoints [${cps.map((c) => `role ${c.role} @${c.throughEntryId.toLocaleString()}`).join(', ')}]; `
+          + `rollups hold ${rollupRecords.toLocaleString()} records${expected === null ? ' (the day and its tail)' : rollupRecords === expected ? ' (equal to the day Table B rolled up)' : `  MISMATCH: Table B's day rolled up ${expected.toLocaleString()}`}`);
+        if (mark !== through) console.log(`    WARNING watermark ${mark} is not the journal's end ${through}`);
+        journal.close();
+      } finally { v.close(); }
+    };
+    await phase('C1, empty sidecar (a whole-day rebuild)', expectedRecords);
+    // A tail the sidecar has not seen: an hour at the planning rate, under a new session, the way a crash and a restart leave it.
+    const vol2 = openMonitoringVolume(root);
+    const { journal: j2 } = MonitoringJournal.open(vol2.segments, { limitBytes });
+    j2.append([boundary('c2'.repeat(16), lastMs + 1000)]);
+    append(j2, PLANNING_RATE * 3600);
+    j2.flush(); j2.close(); vol2.close();
+    await phase('C2, sidecar current to the day, an hour of tail (a catch-up from the nearest checkpoint)', null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+async function v9CollectorMode(): Promise<void> {
+  const DAY = quick ? 62_257 : 622_570;
+  console.log(`v9collector: node ${process.versions.node} (${process.platform} ${process.arch}), ${cpus().length} x ${cpus()[0]?.model.trim()}, ${fmt(totalmem() / (1024 ** 3), 1)} GiB RAM, ${new Date().toISOString()}`);
+  console.log(`A day at the planning rate of ${PLANNING_RATE} datagrams a second is ${DAY.toLocaleString()} datagrams${quick ? ' (--quick: a tenth)' : ''}. Recorded passes: scripts/monitoring/exporter-vectors.json; the rest of a pass in rotation with its first datagram (the templates) re-sent every ${TEMPLATE_EVERY}, headers rewritten to run on at the planning rate.`);
+  console.log('The monitoring Worker is a Chromium Worker; a node:worker_threads Worker is the nearest plain-tsx proxy, not the same engine configuration (no sandbox, node\'s zlib in Table C).');
+  collectorValidation();
+  const main = collectorKernel(DAY);
+  const worker = await collectorKernelInWorker(DAY);
+  collectorTable('Table A, decoder only: `decodeDatagram` with a live template store, on the main thread', main.decode, main.harness, false);
+  collectorTable('Table A, decoder only, in a node worker thread', worker.decode, worker.harness, false);
+  collectorTable('Table B, decoder + the Worker\'s rollup step: `feedEntry` (DecodeState.step, foldOf, MinuteAggregator) + drain/encode/deflate per page, on the main thread', main.rollup, main.harness, true);
+  collectorTable('Table B, decoder + rollup step, in a node worker thread', worker.rollup, worker.harness, true);
+  console.log('\nHarness = the same loop with the header rewrite and the evidence object but no decode; it is inside every figure above.');
+  console.log(`\nTable C, a day of v9 on disk, rebuilt by the Worker host over LocalRuntime (journal ${DAY.toLocaleString()} entries, node zlib, a host with a clock that never yields)`);
+  for (const name of ['softflowd v9', 'pmacct v9']) {
+    const expected = main.rollup.find((r) => r.name === name)?.records ?? 0;
+    try {
+      await collectorRebuild(name, DAY, expected);
+    } catch (e) {
+      console.log(`NOT RUN  rebuild of a day (${name}): ${(e as Error).message}`);
+    }
+  }
+  console.log(`\nresident set of this process at the end: ${fmt(process.memoryUsage().rss / MB, 0)} MiB`);
+}
+
 // --- the template checkpoint (ADR 0064) --------------------------------------------------------------
 
 /**
@@ -1536,9 +1869,13 @@ function checkpointMode(): void {
   console.log(`the sidecar's and the archive's framing take a body of at most ${(1 << 20).toLocaleString()} B; an archive cut spends 44 of them before its checkpoint (ADR 0062).`);
 }
 
-switch (mode) {
+if (!isMainThread) {
+  // A worker thread started by `v9collector`: run the kernel and report back; it takes no mode.
+  parentPort?.postMessage(collectorKernel((workerData as { collectorDay: number }).collectorDay));
+} else switch (mode) {
   case 'softflowd': await softflowdMode(); break;
   case 'v9decode': v9DecodeMode(); break;
+  case 'v9collector': await v9CollectorMode(); break;
   case 'checkpoint': checkpointMode(); break;
   case 'bindpair': await bindPairMode(); break;
   case 'socket': await socketMode(); break;
@@ -1548,6 +1885,6 @@ switch (mode) {
   case 'firewall': await firewallMode(); break;
   case 'segments': await segmentsMode(); break;
   default:
-    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick] | v9decode [--quick] | checkpoint');
+    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick] | v9decode [--quick] | v9collector [--quick] | checkpoint');
     process.exitCode = 2;
 }

@@ -308,7 +308,7 @@ function Facts({ result }: { result: HistoryResult }) {
     packets += b.reportedPackets ?? 0n;
   }
   const sampling = samplingText(result.sampling);
-  const estimate = samplingEstimate(result.sampling, octets, packets);
+  const estimate = samplingEstimate(result.sampling, result.samplingKnown, octets, packets);
   const clock = result.clock.latestSkewMs === null ? null : clockText(result.clock);
   const notTotalled: string[] = [];
   if (result.awaitingTemplate > 0) {

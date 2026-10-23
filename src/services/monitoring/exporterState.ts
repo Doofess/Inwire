@@ -17,6 +17,7 @@
  *
  * Pure: no `node:*`, no Electron, like everything under `src/services/`.
  */
+import { parseSourceKey } from './sourceKeys';
 import { LIMITS, type ClockStatus, type DatagramEvidence } from './types';
 import type { FlowDecode, OptionsReport } from './flowDecode';
 
@@ -89,16 +90,21 @@ interface SourceState {
 
 const MOD = 2 ** 32;
 const HALF = 2 ** 31;
+const MAX_RATE = 2 ** 32 - 1;
 
 const freshSequence = (): SequenceState => ({
   mode: 'learning', seen: false, last: 0, lastRecords: 0, pairs: 0, fitRfc: 0, fitOwn: 0, lastOptions: 0, optionsUnknown: false, suspectedGap: 0, reordered: 0,
 });
 
-/** The rate a sampler states: v9 gives it directly, an IPFIX selector as (interval + space) / interval; null where it is not a whole number. */
+/**
+ * The rate a sampler states: v9 gives it directly, an IPFIX selector as (interval + space) / interval; null where it is not a
+ * whole number, or is past 2^32 - 1, which is the widest rate a checkpoint holds (a selector of 1 and 0xFFFFFFFF would be 2^32).
+ */
 function samplerRate(protocol: 'v9' | 'ipfix', s: SamplerEntry): number | null {
   if (protocol === 'v9') return s.interval >= 1 ? s.interval : null;
   if (s.algorithm !== 1 || s.interval < 1 || (s.interval + s.space) % s.interval !== 0) return null;
-  return (s.interval + s.space) / s.interval;
+  const rate = (s.interval + s.space) / s.interval;
+  return rate > MAX_RATE ? null : rate;
 }
 
 export class ExporterState {
@@ -148,6 +154,8 @@ export class ExporterState {
   // --- sampling -----------------------------------------------------------------------------------------------
 
   private addSampler(src: SourceState, s: SamplerEntry): void {
+    // IE 302 may be 8 bytes, but a checkpoint keeps a 32-bit id: a wider one is not filed, so nothing cites it.
+    if (s.id > 0xffffffff) return;
     if (!src.samplers.has(s.id) && src.samplers.size >= LIMITS.samplersPerSource) { src.samplersRefused = true; return; }
     src.samplers.set(s.id, s);
   }
@@ -252,6 +260,11 @@ export class ExporterState {
     } else {
       q.reordered++;
     }
+  }
+
+  /** Drops every source that is not `exporter`'s: a start boundary naming another exporter (the owner changed it). */
+  retainExporter(exporter: string): void {
+    for (const key of [...this.sources.keys()]) if (parseSourceKey(key)?.exporter !== exporter) this.sources.delete(key);
   }
 
   /** A start, resume or gap boundary: the next message of each source is the new reference, whatever its number. The mode is kept. */

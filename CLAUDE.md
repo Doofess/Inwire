@@ -62,8 +62,8 @@ Inwire is a Windows desktop packet analyzer built with Electron, React and TypeS
 The Windows installer ships a Rust capture agent; Python remains the Unix agent
 and the Windows comparison baseline. There is no Unix desktop app yet.
 Capture and analysis are local; optional network services require user action.
-NetFlow v5 monitoring is implemented (ADRs 0058-0060): an opt-in collector the
-user starts each launch, run by the app, not by the agent.
+NetFlow v5, v9 and IPFIX monitoring is implemented (ADRs 0058-0066): an opt-in
+collector the user starts each launch, run by the app, not by the agent.
 
 Everything is local: no account, no backend, no telemetry. The only outbound
 requests are the four renderer lookups and the three main-process ones listed in
@@ -95,7 +95,7 @@ contents here.
 - `local-agent/CLAUDE.md`: Python agent, PyInstaller build, installer, release checklist.
 - `src/services/capture/CLAUDE.md`: on-disk capture format, ring segments, recovery.
 - `src/services/pipeline/CLAUDE.md`: Worker frame path, ports, drain, catch-up, shards.
-- `src/services/monitoring/CLAUDE.md`: NetFlow v5 collector, journal, rollups, limits.
+- `src/services/monitoring/CLAUDE.md`: NetFlow and IPFIX collector, journal, rollups, limits.
 - `scripts/CLAUDE.md`: how assertion scripts and drivers are written and launched.
 
 ## Architecture and code map
@@ -269,7 +269,7 @@ Each of these built, type-checked and failed silently. The fact lives in one pla
 | Main process, windowing, CSP or fuses | `electron/CLAUDE.md` |
 | Security, bridge or signing | `SECURITY.md`, `docs/architecture.md`, ADRs 0029/0033/0047 |
 | New product capability | `SCOPE.md`, `.out-of-scope/`, then the relevant accepted ADR |
-| Monitoring (NetFlow v5) | `src/services/monitoring/CLAUDE.md`, ADRs 0058-0060 |
+| Monitoring (NetFlow v5, v9, IPFIX) | `src/services/monitoring/CLAUDE.md`, ADRs 0058-0066 |
 
 Use `src/lib/commands.ts` for command metadata; App binds implementations by id.
 Preserve the shared view registry, navigation handlers and outermost-first Escape chain.

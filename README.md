@@ -53,19 +53,21 @@ Windows.
 
 ## Watching a network
 
-Inwire can also collect NetFlow v5 from one router, firewall or `softflowd`.
+Inwire can also collect NetFlow v5, NetFlow v9 or IPFIX from one router,
+firewall or `softflowd`.
 It listens on an address and port you choose (2055 by default) and keeps a
 history on disk, up to a storage limit you set, that survives a restart. The
 Monitoring screen, opened from the Network sidebar, shows traffic over time,
 top endpoints and top conversations for any range, and one click on a host
 filters the capture by it. Collection runs apart from capture, so starting,
-clearing or importing a capture leaves it alone. Its numbers are checked
-against tshark's decode of `softflowd`'s exports.
+clearing or importing a capture leaves it alone. Sampled counts are shown as
+reported, with the estimate labelled as one. Its numbers are checked against
+tshark's and nfdump's decode of `softflowd`'s and pmacct's exports.
 
 ![The Monitoring sheet receiving NetFlow v5 from one exporter](docs/images/monitoring.png)
 
-NetFlow v9, IPFIX and sFlow can be inspected inside a packet capture, but
-aren't collected.
+sFlow can be inspected inside a packet capture, but isn't collected, and
+neither is IPFIX over TCP or SCTP.
 
 ## What connects to the internet?
 

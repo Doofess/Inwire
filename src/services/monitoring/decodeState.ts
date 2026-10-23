@@ -10,7 +10,9 @@
  *
  * - A boundary that ends a collection gap (`start`, `resume`, `gap`) marks
  *   every scope and template as across a gap (ADR 0065) and resets sequence
- *   anchors.
+ *   anchors. A `start` naming an exporter first drops every other exporter's
+ *   scopes and sources: the user changed the exporter, and two exporters'
+ *   states of one domain and port are not a checkpoint the codec can hold.
  * - A datagram is decoded under its segment's policy. A policy-1 v9 datagram
  *   is unsupported and touches no state.
  * - Each record's sampling is resolved here, against the state as it stands
@@ -75,6 +77,10 @@ export class DecodeState {
     this.through = e.ref.entryId;
     this.throughAtMs = e.receivedMs;
     if (e.kind === 'boundary') {
+      if (e.action === 'start' && e.source !== undefined && e.source !== null) {
+        this.store.retainExporter(e.source.exporterIPv4);
+        this.exporter.retainExporter(e.source.exporterIPv4);
+      }
       if (e.action === 'start' || e.action === 'resume' || e.action === 'gap') {
         this.store.gapEnded();
         this.exporter.gapEnded();

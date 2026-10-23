@@ -1,7 +1,14 @@
 /**
- * A stepped load measurement of the BUILT app's NetFlow v5 monitoring.
+ * A stepped load measurement of the BUILT app's NetFlow monitoring.
  *
- *   npx tsx scripts/monitoring/load.ts [--quick] [--seed <n>]
+ *   npx tsx scripts/monitoring/load.ts [--quick] [--seed <n>] [--protocol v5|v9|ipfix]
+ *
+ * `--protocol` (default v5, which is unchanged) picks what the sender exports. With v9 or ipfix every datagram
+ * carries a data set of the same recurring or unique address pairs under a template, and a template set rides in
+ * the first datagram of each step and every 20th after it; the rest are data-only. A v9 datagram's uptime runs on
+ * the wall clock across steps (a step back is an exporter restart), and an IPFIX sender keeps one source port for
+ * the whole run (a new port is a new template scope). The pause case's sequence jump moves the protocol's own
+ * sequence field: flows for v5, export packets for v9, data records for IPFIX.
  *
  * A measurement, not a test: it has no pass mark beyond running to the end, it
  * claims no capacity beyond the points it ran, and it is in `check.ts`'s NOT_TESTS.
@@ -41,16 +48,24 @@ import { cpus, platform, release, tmpdir, totalmem, version as osVersion } from 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { be, dataSet, ipfixMessage, templateRecord, templateSet, v9Message, type WireField } from './fixtures';
 
 // --- the sender (runs in the worker) -----------------------------------------------------------------
 
+type Protocol = 'v5' | 'v9' | 'ipfix';
+
 interface SendJob {
   port: number;
+  protocol: Protocol;
+  /** The sender's own source port for v9 and IPFIX, kept for the whole run; 0 lets the system choose (v5). */
+  srcPort: number;
+  /** The wall clock at which a v9 header's uptime read UPTIME_BASE, so the uptime never steps back between steps. */
+  uptimeEpochMs: number;
   rate: number;
   records: number;
   secs: number;
   unique: boolean;
-  /** The next flow_sequence value: the count of flows exported so far. */
+  /** The next sequence value in the protocol's own unit: flows (v5), export packets (v9) or data records (IPFIX). */
   sequence: number;
   /** The next address-pair ordinal when every record is new. */
   uniqueNext: number;
@@ -104,9 +119,49 @@ function datagram(job: { records: number }, sequence: number, uptime: number, wa
   return out;
 }
 
+/** A refresh of the template goes in the first datagram and every 20th after it. */
+const TEMPLATE_EVERY = 20;
+const V9_TEMPLATE_ID = 256;
+const IPFIX_TEMPLATE_ID = 300;
+const V9_FIELDS: WireField[] = [
+  { type: 8, length: 4 }, { type: 12, length: 4 }, { type: 7, length: 2 }, { type: 11, length: 2 }, { type: 4, length: 1 },
+  { type: 1, length: 4 }, { type: 2, length: 4 }, { type: 22, length: 4 }, { type: 21, length: 4 },
+];
+const IPFIX_FIELDS: WireField[] = [
+  { type: 8, length: 4 }, { type: 12, length: 4 }, { type: 7, length: 2 }, { type: 11, length: 2 }, { type: 4, length: 1 },
+  { type: 1, length: 8 }, { type: 2, length: 8 }, { type: 150, length: 4 }, { type: 151, length: 4 },
+];
+
+/** The same flows as the v5 builder's, as data records of the template above. */
+function templatedRecord(protocol: 'v9' | 'ipfix', n: number, unique: boolean, uptime: number, secs: number): number[] {
+  const k = n % 8;
+  const src = unique ? [10, (n >>> 16) & 255, (n >>> 8) & 255, n & 255] : [10, 0, 0, 1 + k];
+  const dst = unique ? [192, 168, (n >>> 8) & 255, (n + 1) & 255] : [10, 0, 1, 1 + k];
+  const octets = 1000 + (n % 5000);
+  const packets = 10 + (n % 90);
+  const head = [...src, ...dst, ...be.u16(40_000 + (n % 20_000)), ...be.u16(443), ...be.u8(6)];
+  if (protocol === 'v9') return [...head, ...be.u32(octets), ...be.u32(packets), ...be.u32((uptime - 5000) >>> 0), ...be.u32((uptime - 100) >>> 0)];
+  return [...head, ...be.uint(octets, 8), ...be.uint(packets, 8), ...be.u32((secs - 5) >>> 0), ...be.u32(secs >>> 0)];
+}
+
+function templated(
+  job: { records: number; protocol: 'v9' | 'ipfix' }, sequence: number, uptime: number, wallMs: number, firstOrdinal: number,
+  unique: boolean, withTemplate: boolean,
+): Uint8Array {
+  const secs = Math.floor(wallMs / 1000);
+  const v9 = job.protocol === 'v9';
+  const records = Array.from({ length: job.records }, (_, i) => templatedRecord(job.protocol, firstOrdinal + i, unique, uptime, secs));
+  const sets: number[][] = [];
+  if (withTemplate) sets.push(templateSet(v9 ? 9 : 10, [templateRecord(v9 ? 9 : 10, v9 ? V9_TEMPLATE_ID : IPFIX_TEMPLATE_ID, v9 ? V9_FIELDS : IPFIX_FIELDS)]));
+  sets.push(dataSet(v9 ? V9_TEMPLATE_ID : IPFIX_TEMPLATE_ID, records));
+  return v9
+    ? v9Message({ uptime: uptime >>> 0, secs, sequence: sequence >>> 0, sourceId: 7, count: job.records + (withTemplate ? 1 : 0) }, sets)
+    : ipfixMessage({ secs, sequence: sequence >>> 0, domain: 300 }, sets);
+}
+
 async function sender(job: SendJob): Promise<SendDone> {
   const sock = createSocket('udp4');
-  await new Promise<void>((resolve) => sock.bind(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => sock.bind(job.srcPort, '127.0.0.1', resolve));
   let strayer: ReturnType<typeof createSocket> | null = null;
   if (job.stray) {
     const s = createSocket('udp4');
@@ -133,8 +188,11 @@ async function sender(job: SendJob): Promise<SendDone> {
     if (due > sent) lateMsMax = Math.max(lateMsMax, elapsed - (sent * 1000) / job.rate);
     while (sent < due) {
       const el = performance.now() - started;
-      const buf = datagram(job, sequence, UPTIME_BASE + Math.floor(el), wall0 + Math.floor(el), uniqueNext, job.unique);
-      sequence = (sequence + job.records) >>> 0;
+      const buf = job.protocol === 'v5'
+        ? datagram(job, sequence, UPTIME_BASE + Math.floor(el), wall0 + Math.floor(el), uniqueNext, job.unique)
+        : templated({ records: job.records, protocol: job.protocol }, sequence, UPTIME_BASE + (Date.now() - job.uptimeEpochMs), wall0 + Math.floor(el),
+          uniqueNext, job.unique, sent % TEMPLATE_EVERY === 0);
+      sequence = (sequence + (job.protocol === 'v9' ? 1 : job.records)) >>> 0;
       uniqueNext += job.records;
       sent++;
       pending++;
@@ -165,6 +223,16 @@ if (!isMainThread) {
 
 const argv = process.argv.slice(2);
 const QUICK = argv.includes('--quick');
+const protocolArg = argv.indexOf('--protocol');
+const PROTOCOL: Protocol = protocolArg >= 0 ? (argv[protocolArg + 1] as Protocol) : 'v5';
+if (PROTOCOL !== 'v5' && PROTOCOL !== 'v9' && PROTOCOL !== 'ipfix') {
+  console.log(`NOT RUN  load: --protocol takes v5, v9 or ipfix (got ${JSON.stringify(argv[protocolArg + 1])})`);
+  process.exit(2);
+}
+const PROTOCOL_NAME = { v5: 'NetFlow v5', v9: 'NetFlow v9', ipfix: 'IPFIX' }[PROTOCOL];
+/** Records per datagram in the storage-exhaustion phase: a datagram near the size v5's 30 records make (~1.5 KB), so the limit comes in comparable time. */
+const EXHAUST_RECORDS = { v5: 30, v9: 50, ipfix: 40 }[PROTOCOL];
+const UPTIME_EPOCH_MS = Date.now();
 const STEP_SECS = QUICK ? 4 : 12;
 const CEILING = QUICK ? 200 : 3200;
 const PAUSE_SECS = QUICK ? 6 : 65;
@@ -209,9 +277,12 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-function runSender(job: SendJob): Promise<SendDone> {
+/** One source port for every sender of the run when the protocol's template scope depends on it (IPFIX); v5 and v9 let the system choose. */
+const SENDER_PORT = PROTOCOL === 'ipfix' ? await freePort() : 0;
+
+function runSender(job: Omit<SendJob, 'protocol' | 'srcPort' | 'uptimeEpochMs'>): Promise<SendDone> {
   return new Promise((resolve, reject) => {
-    const w = new Worker(SELF, { workerData: job });
+    const w = new Worker(SELF, { workerData: { ...job, protocol: PROTOCOL, srcPort: SENDER_PORT, uptimeEpochMs: UPTIME_EPOCH_MS } satisfies SendJob });
     w.once('message', (m: SendDone) => resolve(m));
     w.once('error', reject);
     w.once('exit', (code) => { if (code !== 0) reject(new Error(`sender exited ${code}`)); });
@@ -278,6 +349,8 @@ interface Counters {
   refused: number;
   records: number | null;
   engine: { jumps: number; gaps: number; duplicates: number; reordered: number; resets: number; unresolved: number } | null;
+  /** The v9 or IPFIX card's Numbering line (no v5 engine table exists for those); null when there is none. */
+  numbering: string | null;
   written: number | null;
   limit: number | null;
   tablesNote: string | null;
@@ -288,7 +361,9 @@ async function readCounters(p: Page): Promise<Counters> {
   const grab = (re: RegExp): number => digitsOf(new RegExp(re.source + NUM).exec(t)?.[1]);
   const listener = /Listener\s+([^\n]+)/.exec(t)?.[1]?.trim() ?? '(no listener line)';
   const freshness = /No recent export/.test(t) ? 'stale' : /Nothing received from the exporter yet/.test(t) ? 'never' : /Receiving|Last export/.test(t) ? 'receiving' : 'unknown';
-  const rec = new RegExp(NUM + 'received traffic records').exec(t);
+  // The History facts line: "<bytes> and <packets> packets in <n> records, <range>".
+  const rec = new RegExp('packets in ' + NUM + 'records,').exec(t);
+  const numbering = /Numbering\s+([^\n]+)/.exec(t)?.[1]?.trim() ?? null;
   const engine = await p.evaluate(`(() => {
     const t = [...document.querySelectorAll('table')].find((x) => /Engines the exporter reported/.test(x.querySelector('caption')?.textContent ?? ''));
     const row = t?.querySelector('tbody tr');
@@ -308,7 +383,7 @@ async function readCounters(p: Page): Promise<Counters> {
     shed: grab(/Shed before writing:\s*/),
     refused: digitsOf(new RegExp('127\\.0\\.0\\.2\\s+' + NUM + 'datagram').exec(t)?.[1]),
     records: rec ? digitsOf(rec[1]) : null,
-    engine, written: meter?.now ?? null, limit: meter?.max ?? null, tablesNote,
+    engine, numbering, written: meter?.now ?? null, limit: meter?.max ?? null, tablesNote,
   };
 }
 
@@ -353,7 +428,7 @@ const rangeLatency = (p: Page, label: string): Promise<Timed> => p.evaluate(`(as
   const label = ${JSON.stringify(label)};
   const root = document.querySelector('[data-testid="monitoring-sheet"]');
   if (!root) return { ok: false, ms: 0, why: 'no sheet' };
-  const line = () => { const m = /[^\\n]*received traffic records in[^\\n]*/.exec(root.innerText); return m ? m[0] : null; };
+  const line = () => { const m = /[^\\n]*packets in [^\\n]* records,[^\\n]*/.exec(root.innerText); return m ? m[0] : null; };
   const group = root.querySelector('[role="group"][aria-label="Range"]');
   const btn = group && [...group.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
   if (!btn) return { ok: false, ms: 0, why: 'no range button' };
@@ -566,7 +641,8 @@ async function runStep(s: Session, def: StepDef, collector: number | null): Prom
   out(`  rejected           ${fmt(rejected)} of ${fmt(done.strays)} stray datagrams from 127.0.0.2 (the configured exporter is 127.0.0.1)`);
   out(`  local drop         shed before writing ${fmt(shed)}; malformed/unsupported/engine-limit ${fmt(malformed)}`);
   out(`  unaccounted        ${fmt(done.sent - accountedFor)} datagrams offered but not counted by the app (UDP loss on the way is never reported to Inwire); sender send errors ${fmt(done.errors)}`);
-  out(`  sequence           jumps ${fmt(after.engine?.jumps ?? 0)}  gaps ${fmt(after.engine?.gaps ?? 0)}  duplicates ${fmt(after.engine?.duplicates ?? 0)}  reordered ${fmt(after.engine?.reordered ?? 0)}  resets ${fmt(after.engine?.resets ?? 0)}  unresolved ${fmt(after.engine?.unresolved ?? 0)}  (engine 0/0, cumulative)`);
+  if (PROTOCOL === 'v5') out(`  sequence           jumps ${fmt(after.engine?.jumps ?? 0)}  gaps ${fmt(after.engine?.gaps ?? 0)}  duplicates ${fmt(after.engine?.duplicates ?? 0)}  reordered ${fmt(after.engine?.reordered ?? 0)}  resets ${fmt(after.engine?.resets ?? 0)}  unresolved ${fmt(after.engine?.unresolved ?? 0)}  (engine 0/0, cumulative)`);
+  else out(`  sequence           the ${PROTOCOL_NAME} card reads: ${after.numbering ?? '(no Numbering line)'}`);
   out(`  queue depth        not exposed (the inbox depth is internal; the shed count above is what shows it overflowing)`);
   out(`  JS heap            not exposed; collector process working-set max ${col.length ? mb(peak(col, 'ws')) : 'unknown'}, private-bytes max ${col.length ? mb(peak(col, 'priv')) : 'unknown'}, cpu mean ${col.length ? fmt(mean(col.map((c) => c.cpu)), 1) : 'n/a'}% max ${col.length ? fmt(peak(col, 'cpu'), 1) : 'n/a'}%`);
   const others = [...byPid.entries()].filter(([pid]) => pid !== collector).map(([, xs]) => `${xs[0].type}${xs[0].name ? ` ${xs[0].name}` : ''} pid ${xs[0].pid} ws ${mb(peak(xs, 'ws'))}`).sort();
@@ -578,7 +654,7 @@ async function runStep(s: Session, def: StepDef, collector: number | null): Prom
   out(`  query under load   ranges n=${rangeLoad.length} median ${ms(medianOf(rangeLoad))} max ${ms(rangeLoad.length ? Math.max(...rangeLoad) : NaN)}; Focus n=${focusLoad.length} median ${ms(medianOf(focusLoad))} max ${ms(focusLoad.length ? Math.max(...focusLoad) : NaN)}; not attempted (nothing on the sheet yet) ${notReady}; failed ${loadFailed.length}${loadFailed.length ? ` (${[...new Set(loadFailed.map((u) => u.timed.why ?? '?'))].join(' | ')})` : ''}`);
   out(`  query when idle    ${idle.map((i) => `${i.label} ${i.timed.skipped ? 'already shown' : i.timed.ok ? ms(i.timed.ms) : `FAILED (${i.timed.why})`}`).join('; ')}`);
   out(`  query, raw (Focus) ${focus.ok ? ms(focus.ms) : `FAILED (${focus.why})`}  (a Focus reads the supporting records from the journal; a range is answered from the rollup)`);
-  out(`  history records    sheet lists ${recordsNow === null ? 'nothing' : fmt(recordsNow)} received traffic records in 1 h; the accepted datagrams carried ${fmt(state.expectedRecords)} (cumulative)${recordsNow === state.expectedRecords ? ' - equal' : ' - DIFFER'}${after.tablesNote ? `; sheet note: ${after.tablesNote}` : ''}`);
+  out(`  history records    sheet lists ${recordsNow === null ? 'nothing' : fmt(recordsNow)} records in 1 h; the accepted datagrams carried ${fmt(state.expectedRecords)} (cumulative)${recordsNow === state.expectedRecords ? ' - equal' : ' - DIFFER'}${after.tablesNote ? `; sheet note: ${after.tablesNote}` : ''}`);
   out(`  UI (during load)   ${ui.unsupported ? 'longtask not supported; ' : `longtasks ${ui.longtasks} (max ${ms(ui.longtaskMax)}, total ${ms(ui.longtaskTotal)}); `}animation-frame gaps: ${fmt(ui.frames)} frames, p99 ${ms(ui.gapP99)}, max ${ms(ui.gapMax)}, over 100 ms ${ui.over100}`);
   out(`  sender pacing      slowest catch-up ${ms(done.lateMsMax)}`);
 
@@ -614,7 +690,8 @@ function environment(): string {
 // --- the run -----------------------------------------------------------------------------------------------------
 
 const t0 = Date.now();
-out(`load.ts ${QUICK ? '--quick' : '(full)'}  started ${new Date(t0).toISOString()}`);
+out(`load.ts ${QUICK ? '--quick' : '(full)'} --protocol ${PROTOCOL}  started ${new Date(t0).toISOString()}`);
+out(`protocol: ${PROTOCOL_NAME}${PROTOCOL === 'v5' ? '' : `; a template set in the first datagram of each step and every ${TEMPLATE_EVERY}th, the rest data-only; sequence counts ${PROTOCOL === 'v9' ? 'export packets' : 'data records'}${PROTOCOL === 'ipfix' ? `; one sender source port, ${SENDER_PORT}` : ''}`}`);
 out(environment());
 out('NOTE  the parallel Task 8A worker also launches the built app on this machine; every figure below was taken with whatever it was running');
 
@@ -685,11 +762,13 @@ try {
   state.expectedRecords += acceptedPause * 10;
   const gapsDelta = (post.counters.engine?.gaps ?? 0) - (pre.counters.engine?.gaps ?? 0);
   const jumpsDelta = (post.counters.engine?.jumps ?? 0) - (pre.counters.engine?.jumps ?? 0);
-  out(`  sent ${fmt(a.sent)} datagrams, silence ${PAUSE_SECS} s, then ${fmt(skipped)} flows' worth of numbering skipped, then ${fmt(b.sent)} datagrams`);
+  const unitOfSequence = { v5: 'flows', v9: 'export packets', ipfix: 'data records' }[PROTOCOL];
+  out(`  sent ${fmt(a.sent)} datagrams, silence ${PAUSE_SECS} s, then ${fmt(skipped)} ${unitOfSequence}' worth of numbering skipped (${PROTOCOL_NAME}'s own sequence field), then ${fmt(b.sent)} datagrams`);
   out(`  accepted ${fmt(acceptedPause)} of ${fmt(a.sent + b.sent)} offered; freshness after the burst: ${mid.counters.freshness}; ${staleAfter === null ? `the sheet never turned "No recent export" within ${PAUSE_SECS} s (it needs more than 60 s of silence)` : `the sheet turned "No recent export" after ${fmt(staleAfter, 0)} s of silence`}; after the resume: ${post.counters.freshness}`);
-  out(`  sequence handling: jumps +${fmt(jumpsDelta)} (flows the numbering skipped), gaps +${fmt(gapsDelta)}, duplicates +${fmt((post.counters.engine?.duplicates ?? 0) - (pre.counters.engine?.duplicates ?? 0))}, resets +${fmt((post.counters.engine?.resets ?? 0) - (pre.counters.engine?.resets ?? 0))}, reordered +${fmt((post.counters.engine?.reordered ?? 0) - (pre.counters.engine?.reordered ?? 0))}`);
+  if (PROTOCOL !== 'v5') out(`  sequence handling: the ${PROTOCOL_NAME} card read "${pre.counters.numbering ?? '(none)'}" before and reads "${post.counters.numbering ?? '(none)'}" after the skip`);
+  else out(`  sequence handling: jumps +${fmt(jumpsDelta)} (flows the numbering skipped), gaps +${fmt(gapsDelta)}, duplicates +${fmt((post.counters.engine?.duplicates ?? 0) - (pre.counters.engine?.duplicates ?? 0))}, resets +${fmt((post.counters.engine?.resets ?? 0) - (pre.counters.engine?.resets ?? 0))}, reordered +${fmt((post.counters.engine?.reordered ?? 0) - (pre.counters.engine?.reordered ?? 0))}`);
   if (acceptedPause !== a.sent + b.sent) fail(`pause: ${fmt(a.sent + b.sent - acceptedPause)} datagrams around the pause were not accepted`);
-  if (jumpsDelta !== skipped) out(`  NOTE  the app counted ${fmt(jumpsDelta)} jumped flows for a skip of ${fmt(skipped)}`);
+  if (PROTOCOL === 'v5' && jumpsDelta !== skipped) out(`  NOTE  the app counted ${fmt(jumpsDelta)} jumped flows for a skip of ${fmt(skipped)}`);
   await p.getByRole('group', { name: 'Range' }).getByRole('button', { name: '1 h', exact: true }).click().catch(() => {});
 
   const framesNow = await captureFrames(p);
@@ -757,7 +836,7 @@ try {
   let stoppedAfter: number | null = null;
   let c2 = await readCounters(q);
   while ((Date.now() - start2) / 1000 < EXHAUST_CAP_SECS && stoppedAfter === null) {
-    const d = await runSender({ port: phase2.port, rate: 400, records: 30, secs: 4, unique: true, sequence: flood.sequence, uniqueNext: flood.uniqueNext, stray: false });
+    const d = await runSender({ port: phase2.port, rate: 400, records: EXHAUST_RECORDS, secs: 4, unique: true, sequence: flood.sequence, uniqueNext: flood.uniqueNext, stray: false });
     flood.sequence = d.sequence; flood.uniqueNext = d.uniqueNext; offered2 += d.sent;
     c2 = await readCounters(q);
     if (/storage limit|reached/i.test(c2.listener) || !/Listening/.test(c2.listener)) stoppedAfter = (Date.now() - start2) / 1000;
@@ -769,7 +848,7 @@ try {
   const text2 = await sheetText(q);
   out(`  guidance on screen: ${/Raise the storage limit/.test(text2) ? 'yes ("Raise the storage limit under Source, then press Start. The history already kept stays.")' : 'not shown'}`);
   // Datagrams after the stop go to a closed port.
-  const late = await runSender({ port: phase2.port, rate: 100, records: 30, secs: 2, unique: true, sequence: flood.sequence, uniqueNext: flood.uniqueNext, stray: false });
+  const late = await runSender({ port: phase2.port, rate: 100, records: EXHAUST_RECORDS, secs: 2, unique: true, sequence: flood.sequence, uniqueNext: flood.uniqueNext, stray: false });
   const afterLate = (await settle(q, 8000)).counters;
   out(`  after the stop, ${fmt(late.sent)} more datagrams were offered: accepted rose by ${fmt(afterLate.accepted - after2.accepted)}; journal file ${mb(journalOf(phase2.profile))}`);
   const readable = await rangeLatency(q, '6 h');

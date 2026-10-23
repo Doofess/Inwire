@@ -31,7 +31,7 @@ import { sourceKeyFor } from './sourceKeys';
 import {
   CollectorTemplateStore, REVERSE_PEN, isInterpretedDataField, isInterpretedOptionsField, templateShape, type TemplateScope,
 } from './templates';
-import type { DatagramEvidence, DecodeResult } from './types';
+import { LIMITS, type DatagramEvidence, type DecodeResult } from './types';
 
 export interface NormalizedFlow {
   srcAddr: string;
@@ -445,6 +445,11 @@ function decodeTemplated(e: DatagramEvidence, exporterIPv4: string, version: 9 |
 
   const protocol = version === 9 ? 'v9' : 'ipfix';
   const scope: TemplateScope = { protocol, exporter: exporterIPv4, exporterPort: version === 10 ? e.remotePort : null, domain: header.domain };
+  // An exporter's identities are bounded (LIMITS.enginesPerExporter, as admission bounds its engines): a datagram that
+  // would open one more is not counted and touches no state, so a spoofed or rotating identity cannot grow a checkpoint.
+  if (!store.canOpen(scope)) {
+    return { kind: 'unsupported', reason: `${exporterIPv4} already has ${LIMITS.enginesPerExporter} NetFlow sources; another ${protocol === 'v9' ? 'Source ID' : 'Observation Domain'} is not counted` };
+  }
   const entryId = e.ref.entryId;
   const uptimeMs = version === 9 ? header.sysUptimeMs ?? null : null;
   const exportMs = header.unixSecs * 1000;
