@@ -10,7 +10,10 @@ import { createQueryRefresher } from '../../services/monitoring/queryRefresher';
 import { isByteSink, openSaveSink } from '../../lib/saveSink';
 import { formatBytes } from '../../lib/formatBytes';
 import { useElementSize } from '../../lib/useElementSize';
-import { INCOMPLETE_EXPIRED_MINUTE, count, engineLabel, evidenceExpiredText, localRange } from './monitoringCopy';
+import {
+  ESTIMATE_LABEL, INCOMPLETE_EXPIRED_MINUTE, clockText, count, engineLabel, evidenceExpiredText, localRange, samplingEstimate, samplingText,
+} from './monitoringCopy';
+import { Onboarding } from './Onboarding';
 import { HistoryChart, type Measure } from './HistoryChart';
 import { Focus } from './Focus';
 import { BUTTON_SECONDARY, Note } from './parts';
@@ -291,18 +294,66 @@ function SaveLine({ saving }: { saving: Saving }) {
   );
 }
 
+/**
+ * What the range holds, in words: the reported totals with the sampling rate that qualifies them beside
+ * them, an estimate only when one rate held throughout (and called one), and what was received but not
+ * totalled. Gaps are their own list below.
+ */
 function Facts({ result }: { result: HistoryResult }) {
   const { rollupMinutes, rawMinutes } = result.answeredFrom;
+  let octets = 0n;
+  let packets = 0n;
+  for (const b of result.buckets) {
+    octets += b.reportedOctets ?? 0n;
+    packets += b.reportedPackets ?? 0n;
+  }
+  const sampling = samplingText(result.sampling);
+  const estimate = samplingEstimate(result.sampling, octets, packets);
+  const clock = result.clock.latestSkewMs === null ? null : clockText(result.clock);
+  const notTotalled: string[] = [];
+  if (result.awaitingTemplate > 0) {
+    notTotalled.push(`${count(result.awaitingTemplate)} data ${result.awaitingTemplate === 1 ? 'set' : 'sets'} (${formatBytes(result.awaitingBytes)}) arrived before their template: records unknown`);
+  }
+  if (result.unsupportedTemplates > 0) {
+    notTotalled.push(`${count(result.unsupportedTemplates)} records from templates with no byte count: counted, not totalled`);
+  }
+  if (result.malformed > 0) notTotalled.push(`${count(result.malformed)} malformed`);
+  if (result.unsupported > 0) notTotalled.push(`${count(result.unsupported)} of an unsupported version`);
   return (
-    <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
-      <span>{count(result.matchingRecords)} received traffic records in {localRange(result.query.fromMs, result.query.toMs)}</span>
-      <span>{result.samplingKnown ? 'Sampling reported for every record; counters are not scaled'
-        : 'Sampling unknown for some records; counters are not scaled'}</span>
-      {result.malformed > 0 && <span className="text-warning">{count(result.malformed)} malformed</span>}
-      {result.unsupported > 0 && <span className="text-warning">{count(result.unsupported)} unsupported (not v5)</span>}
-      <span title="Minutes answered from the summaries, and from the journal itself">
-        read from {count(rollupMinutes)} summarised and {count(rawMinutes)} raw minutes
-      </span>
+    <div className="space-y-1.5 text-[11px] tabular-nums">
+      <dl className="grid gap-x-6 gap-y-1 @2xl:grid-cols-[auto_1fr]">
+        <dt className="text-muted-foreground">Reported</dt>
+        <dd className="text-foreground">
+          {formatBytes(Number(octets))} and {count(packets)} packets in {count(result.matchingRecords)} records,{' '}
+          {localRange(result.query.fromMs, result.query.toMs)}
+        </dd>
+        <dt className="text-muted-foreground">Sampling</dt>
+        <dd className={sampling.tone === 'warn' ? 'text-foreground' : 'text-muted-foreground'}>{sampling.text}</dd>
+        {estimate && (
+          <>
+            <dt className="text-muted-foreground first-letter:uppercase">{ESTIMATE_LABEL}</dt>
+            <dd className="text-foreground">
+              About {formatBytes(Number(estimate.octets))} and {count(estimate.packets)} packets{' '}
+              <span className="text-muted-foreground">(reported × {count(estimate.interval)}: an {ESTIMATE_LABEL}, not a count)</span>
+            </dd>
+          </>
+        )}
+        {clock && (
+          <>
+            <dt className="text-muted-foreground">Clock</dt>
+            <dd className={clock.tone === 'warn' ? 'text-foreground' : 'text-muted-foreground'}>{clock.text}</dd>
+          </>
+        )}
+        {notTotalled.length > 0 && (
+          <>
+            <dt className="text-muted-foreground">Not totalled</dt>
+            <dd className="text-foreground">{notTotalled.join('; ')}</dd>
+          </>
+        )}
+      </dl>
+      <p className="text-muted-foreground" title="Minutes answered from the summaries, and from the journal itself">
+        Read from {count(rollupMinutes)} summarised and {count(rawMinutes)} raw minutes
+      </p>
     </div>
   );
 }
@@ -377,36 +428,18 @@ function TopTable<Row>({ title, table, head, rows, leftColumns }: {
 }
 
 function EmptyHistory({ config, state }: { config: SourceConfig | null; state: MonitoringState }) {
-  const bind = config?.bindIPv4 ?? '<this PC’s address>';
-  const port = config?.port ?? 2055;
   const listening = state.intake?.listener === 'listening';
   return (
     <div className="space-y-3 rounded-md border border-dashed border-border px-4 py-4">
       <p className="text-[13px] text-foreground">
         {listening ? 'No received traffic records yet.' : 'No history yet.'}
       </p>
-      <p className="max-w-[38rem] text-xs leading-relaxed text-muted-foreground">
-        Inwire collects NetFlow version 5 over UDP and IPv4 only. NetFlow v9, IPFIX and sFlow arrive and are counted as
-        unsupported. Point the exporter at <span className="font-mono text-foreground">{bind}:{port}</span>:
+      <p className="max-w-[44rem] text-xs leading-relaxed text-muted-foreground">
+        Inwire collects NetFlow v5, v9 and IPFIX sent over UDP to an IPv4 address. sFlow and other versions arrive and are counted as
+        unsupported. Point the exporter at{' '}
+        <span className="font-mono text-foreground">{config?.bindIPv4 ?? '<this PC’s address>'}:{config?.port ?? 2055}</span>:
       </p>
-      <dl className="space-y-2 text-xs">
-        <div>
-          <dt className="mb-1 text-muted-foreground">From WSL on this PC</dt>
-          <dd><Code>{`softflowd -i eth0 -n ${bind}:${port} -v 5`}</Code></dd>
-        </div>
-        <div>
-          <dt className="mb-1 text-muted-foreground">On a Cisco IOS router</dt>
-          <dd><Code>{`ip flow-export destination ${bind} ${port}\nip flow-export version 5`}</Code></dd>
-        </div>
-      </dl>
+      <Onboarding address={config?.bindIPv4 ?? null} port={config?.port ?? 2055} />
     </div>
-  );
-}
-
-function Code({ children }: { children: string }) {
-  return (
-    <pre className="overflow-x-auto rounded-md border border-border bg-muted px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">
-      {children}
-    </pre>
   );
 }

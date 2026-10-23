@@ -24,7 +24,7 @@ import { MonitoringHostCore, openDeadlineMs, type ChildLike, type ContentsLike }
 import { planQuitDrain } from '../../electron/monitoring/quitDrain';
 import { readMonitoringSettings, saveMonitoringSettings, SETTINGS_FILE } from '../../electron/monitoring/settings';
 import {
-  MonitoringClient, MONITORING_PORT_MESSAGE,
+  MonitoringClient, MONITORING_PORT_MESSAGE, readHealthPush,
   type MonitoringBridge, type PortMessageEvent, type WorkerLike,
 } from '../../src/services/monitoring/client';
 import type { IntakeStatus, RuntimeExit, StartResult, StopResult } from '../../src/services/monitoring/control';
@@ -32,7 +32,7 @@ import { DEFAULT_RETENTION, type RetentionPolicy } from '../../src/services/moni
 import {
   initialMonitoringState, nothingArriving, reduceMonitoring, type MonitoringState,
 } from '../../src/services/monitoring/state';
-import { initialSourceHealth } from '../../src/services/monitoring/sourceHealth';
+import { initialSourceHealth, type ExporterSnapshot } from '../../src/services/monitoring/sourceHealth';
 import { LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
 
 // --- the harness --------------------------------------------------------------------------------------------
@@ -2105,29 +2105,47 @@ test('state: an exit with no status yet leaves the intake empty rather than inve
 // --- health, sources and the time listening began (Task 7B) ------------------------------------------------------
 
 const HEALTH = initialSourceHealth('192.0.2.1');
+const SNAPSHOT: ExporterSnapshot = {
+  sourceKey: 'v9:192.0.2.1/1', protocol: 'v9', templates: [], sampling: { kind: 'absent' },
+  clock: { latestSkewMs: 40, minSkewMs: 40, maxSkewMs: 40, flagged: false }, sequence: { mode: 'learning', suspectedGap: 0, reordered: 0 },
+};
 const connectedState = (): MonitoringState => reduceMonitoring(
   reduceMonitoring(initialMonitoringState, { type: 'connecting' }), { type: 'connected', phase: 'live', watermark: 1 },
 );
 
 test('state: a health push is folded with its sources once the runtime is up, and not before or after', () => {
-  const push = { type: 'health' as const, health: HEALTH, sources: ['192.0.2.1/0/0'] };
+  const push = { type: 'health' as const, health: HEALTH, sources: ['192.0.2.1/0/0'], exporters: [SNAPSHOT] };
   assert.equal(reduceMonitoring(initialMonitoringState, push), initialMonitoringState);
   const up = reduceMonitoring(connectedState(), push);
   assert.equal(up.health, HEALTH);
   assert.deepEqual(up.sources, ['192.0.2.1/0/0']);
+  assert.deepEqual(up.exporters, [SNAPSHOT]);
   const gone = reduceMonitoring(up, { type: 'unavailable', message: 'worker died' });
   assert.equal(gone.health, null);
   assert.deepEqual(gone.sources, []);
+  assert.deepEqual(gone.exporters, []);
   assert.equal(reduceMonitoring(gone, push), gone);
 });
 
 test('state: health and sources are cleared by an exit, by connecting again and by reset', () => {
-  const up = reduceMonitoring(connectedState(), { type: 'health', health: HEALTH, sources: ['a'] });
+  const up = reduceMonitoring(connectedState(), { type: 'health', health: HEALTH, sources: ['a'], exporters: [SNAPSHOT] });
   for (const event of [{ type: 'exit' as const, exit: EXIT }, { type: 'connecting' as const }, { type: 'reset' as const }]) {
     const s = reduceMonitoring(up, event);
     assert.equal(s.health, null, event.type);
     assert.deepEqual(s.sources, [], event.type);
+    assert.deepEqual(s.exporters, [], event.type);
   }
+});
+
+test('client: a health push carries the exporter snapshots, tolerates a Worker that sends none, and drops a malformed one', () => {
+  const health = { ...HEALTH };
+  const read = readHealthPush({ type: 'health', health, sources: ['v9:192.0.2.1/1'], exporters: [SNAPSHOT] });
+  assert.ok(read !== null);
+  assert.deepEqual(read.exporters, [SNAPSHOT]);
+  assert.deepEqual(read.health?.templateSources, []);
+  assert.deepEqual(readHealthPush({ type: 'health', health: null, sources: [] })?.exporters, [], 'none sent is none');
+  assert.equal(readHealthPush({ type: 'health', health: null, sources: [], exporters: [{ sourceKey: 1 }] }), null);
+  assert.equal(readHealthPush({ type: 'health', health: null, sources: [], exporters: 'x' }), null);
 });
 
 test('state: listeningSinceMs is set at the first listening status, kept while it stays, and cleared otherwise', () => {

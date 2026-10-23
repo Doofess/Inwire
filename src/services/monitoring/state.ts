@@ -12,7 +12,7 @@
  * drives every transition without React.
  */
 import type { IntakeStatus, RuntimeExit } from './control';
-import type { SourceHealth } from './sourceHealth';
+import type { ExporterSnapshot, SourceHealth } from './sourceHealth';
 import { LIMITS } from './types';
 import type { RebuildPhase } from './workerHost';
 
@@ -44,6 +44,8 @@ export interface MonitoringState {
   health: SourceHealth | null;
   /** The engine-form source keys the Worker knows, sorted. */
   sources: string[];
+  /** The live state of each v9 or IPFIX source (ADR 0066): empty unless the Worker's rollups are live. */
+  exporters: ExporterSnapshot[];
   /**
    * The renderer's clock at the first status that said `listening`, kept while it stays so and
    * null otherwise: when "nothing has arrived for a minute" starts counting (`nothingArriving`).
@@ -56,7 +58,7 @@ export type MonitoringEvent =
   | { type: 'connected'; phase: RebuildPhase; watermark: number }
   /** `atMs` is the client's clock when the status arrived, so the reducer stays pure. */
   | { type: 'status'; status: IntakeStatus; atMs: number }
-  | { type: 'health'; health: SourceHealth | null; sources: string[] }
+  | { type: 'health'; health: SourceHealth | null; sources: string[]; exporters: ExporterSnapshot[] }
   | { type: 'rebuild'; progress: RebuildProgress }
   | { type: 'exit'; exit: RuntimeExit }
   /** The Worker failed or never connected: not the utility's exit, but just as final for this client. */
@@ -64,7 +66,7 @@ export type MonitoringEvent =
   | { type: 'reset' };
 
 export const initialMonitoringState: MonitoringState = {
-  runtime: 'idle', intake: null, rebuild: null, problem: null, exit: null, health: null, sources: [], listeningSinceMs: null,
+  runtime: 'idle', intake: null, rebuild: null, problem: null, exit: null, health: null, sources: [], exporters: [], listeningSinceMs: null,
 };
 
 /**
@@ -81,7 +83,7 @@ export function nothingArriving(state: MonitoringState, nowMs: number): boolean 
 export function reduceMonitoring(state: MonitoringState, event: MonitoringEvent): MonitoringState {
   switch (event.type) {
     case 'connecting':
-      return { ...state, runtime: 'connecting', rebuild: null, problem: null, exit: null, health: null, sources: [] };
+      return { ...state, runtime: 'connecting', rebuild: null, problem: null, exit: null, health: null, sources: [], exporters: [] };
     case 'connected':
       return {
         ...state, runtime: 'connected', problem: null, exit: null,
@@ -97,18 +99,18 @@ export function reduceMonitoring(state: MonitoringState, event: MonitoringEvent)
         listeningSinceMs: event.status.listener === 'listening' ? state.listeningSinceMs ?? event.atMs : null,
       };
     case 'health':
-      return state.runtime === 'unavailable' || state.runtime === 'idle' ? state : { ...state, health: event.health, sources: event.sources };
+      return state.runtime === 'unavailable' || state.runtime === 'idle' ? state : { ...state, health: event.health, sources: event.sources, exporters: event.exporters };
     case 'rebuild':
       return state.runtime === 'unavailable' || state.runtime === 'idle' ? state : { ...state, rebuild: event.progress };
     case 'exit':
       return {
         ...state, runtime: 'unavailable', rebuild: null, problem: event.exit.message, exit: event.exit,
-        health: null, sources: [], listeningSinceMs: null,
+        health: null, sources: [], exporters: [], listeningSinceMs: null,
         // The process is gone, so nothing is listening and nothing is attached.
         intake: state.intake === null ? null : { ...state.intake, listener: 'stopped', sessionId: null, workerAttached: false },
       };
     case 'unavailable':
-      return { ...state, runtime: 'unavailable', rebuild: null, problem: event.message, exit: null, health: null, sources: [] };
+      return { ...state, runtime: 'unavailable', rebuild: null, problem: event.message, exit: null, health: null, sources: [], exporters: [] };
     case 'reset':
       return initialMonitoringState;
   }
