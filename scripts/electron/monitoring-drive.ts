@@ -1,11 +1,11 @@
 /**
- * NetFlow v5 monitoring under fault, through the real built app, against
- * datagrams this script sends itself to loopback ports.
+ * NetFlow v5, v9 and IPFIX monitoring under fault, through the real built app,
+ * against datagrams this script sends itself to loopback ports.
  *
- *   npx tsx scripts/electron/monitoring-drive.ts
+ *   npx tsx scripts/electron/monitoring-drive.ts [--lifetime]
  *
  * `monitoring-ui.ts` proves the sheet works when nothing goes wrong. This
- * proves what happens when something does, in twelve scenarios:
+ * proves what happens when something does, in sixteen scenarios:
  *
  *    1. golden path: exact totals, the source's bytes, Stop releases the port
  *    2. reopen the same profile: history restored once, nothing bound, the
@@ -20,6 +20,13 @@
  *   10. the storage limit reached: a stated stop, not silent continuation
  *   11. a capture started, cleared and imported: monitoring totals untouched
  *   12. the Focus pivot: the capture's filter becomes `ip.addr == <host>`
+ *   13. a v9 exporter restarts mid-run: data sets that wait for a template are
+ *       kept and counted, never decoded; the next template recovers
+ *   14. the app restarted within the template lifetime: data-only v9 decodes
+ *   15. the app restarted past the template lifetime (31 minutes of wall clock,
+ *       so behind --lifetime): data-only v9 waits for a template
+ *   16. retention expires the oldest segments during v9 collection: data-only
+ *       datagrams still decode and the whole run still adds up (aggregate-only)
  *
  * Exact totals come from two places that do not share code with the thing
  * under test: the ledger of flows this script itself sent, and, with the app
@@ -31,19 +38,22 @@
  */
 import { createSocket, type Socket } from 'node:dgram';
 import { randomBytes } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 import type { ElectronApplication, Page } from 'playwright';
 import { startStubAgent, dnsQuery, type StubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
-import { v5Payload } from '../monitoring/fixtures';
+import { V9_SAMPLE_RECORD_BYTES, v5Payload, v9DataOnly, v9Sample } from '../monitoring/fixtures';
 import { formatBytes } from '../../src/lib/formatBytes';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
 import { NodeSegmentDirectory } from '../../electron/monitoring/volume';
-import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
+import { LocalArchiveSource, LocalRuntime } from '../../src/services/monitoring/localRuntime';
+import { ArchiveStore } from '../../src/services/monitoring/archive';
+import { DecodeState } from '../../src/services/monitoring/decodeState';
+import { FILE_HEADER_BYTES } from '../../src/services/monitoring/journalCodec';
 import { runHistoryQuery } from '../../src/services/monitoring/queries';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
 import { type Evidence, type HistoryResult, type QuerySpec } from '../../src/services/monitoring/types';
@@ -268,7 +278,8 @@ async function read(p: Page): Promise<{ text: string; records: number | null; ac
   const text = await sheetText(p);
   return {
     text,
-    records: digits(text.match(/(\d[\d.,  ]*)\s+received traffic records/)?.[1]),
+    // The Reported line of the sheet's facts: "<bytes> and <packets> packets in <n> records, <range>".
+    records: digits(text.match(/packets in (\d[\d.,\s\u00a0\u202f]*?)\s+records,/)?.[1]),
     accepted: digits(text.match(/Accepted\s*(\d[\d.,  ]*)/)?.[1]),
   };
 }
@@ -496,7 +507,7 @@ await scenario('2. reopen with the same profile', async () => {
     (await buttonVisible(p, 'Start')) && !/\bListening\b(?!,)/.test(text) && !(await buttonVisible(p, 'Stop')),
     `start=${await buttonVisible(p, 'Start')} stop=${await buttonVisible(p, 'Stop')} listeningWord=${/\bListening\b(?!,)/.test(text)}`);
   checkTrue('2: ...and the port is free', (await bindProbe(portA)) === 'free');
-  note(`the sheet read: ${text.match(/read from [^\n]+/)?.[0] ?? '(no "read from" line)'}`);
+  note(`the sheet read: ${text.match(/Read from [^\n]+/)?.[0] ?? '(no "Read from" line)'}`);
   await shutdown(r);
 
   const after = await oracle(profileA);
@@ -693,7 +704,7 @@ await scenario('6. occupied port', async () => {
   const t = await sheetText(p);
   checkTrue('6: ...in the header as well: Could not listen', /Could not listen/.test(t));
   checkTrue('6: ...and nothing is journaled: the history is empty',
-    /No history yet|No received traffic records yet/.test(t) && !/received traffic records in/.test(t), t.slice(0, 300));
+    /No history yet|No received traffic records yet/.test(t) && !/packets in [\d.,\s\u00a0\u202f]+ records,/.test(t), t.slice(0, 300));
   checkTrue('6: ...and Start is offered again', await buttonVisible(p, 'Start'));
 
   await new Promise<void>((resolve) => holder.close(() => resolve()));
@@ -898,6 +909,407 @@ await scenario('11. capture independence', async () => {
   await unchanged('after the import');
   await stopListening(p).catch(() => false);
   await shutdown(r);
+});
+
+// --- 13 to 16: NetFlow v9 under fault ---------------------------------------------------------------------------------
+//
+// The expected totals are the ledger of what this script sent, split into what a collector can decode (a template
+// was in force) and what it cannot (a data set that arrived before its template). The product promises to keep the
+// second kind in the journal, count it, and never decode it later; the ledger is authored here and nowhere else.
+
+const V9_SOURCE_ID = 7;
+const V9_KEY = `v9:${EXPORTER}/${V9_SOURCE_ID}`;
+const V9_CARD = `NetFlow v9, source ID ${V9_SOURCE_ID}`;
+const UPTIME0 = 3_600_000;
+
+/** What this script has sent to one profile as v9 from source ID 7, by whether a collector could decode it. */
+class V9Ledger {
+  records = 0; octets = 0; packets = 0;
+  datagrams = 0;
+  awaitingSets = 0; awaitingBytes = 0;
+  lastWaited: number | null = null;
+  private sequence = 0;
+  /**
+   * `template` sends template 256 with the data (what an exporter does when it refreshes); without it the datagram
+   * is a data set alone. `decodable` is the script's own claim about what the collector holds at that moment.
+   */
+  async send(port: number, o: { uptime: number; flows: Flow[]; template: boolean; decodable: boolean }): Promise<void> {
+    const h = { uptime: o.uptime, secs: Math.floor(Date.now() / 1000), sequence: this.sequence++, sourceId: V9_SOURCE_ID };
+    const bytes = o.template ? v9Sample(h, o.flows, null) : v9DataOnly(h, o.flows);
+    await sendRaw(port, bytes);
+    this.datagrams++;
+    if (o.decodable || o.template) {
+      this.records += o.flows.length;
+      for (const f of o.flows) { this.octets += f.octets; this.packets += f.packets; }
+    } else {
+      this.awaitingSets++;
+      this.awaitingBytes += 4 + o.flows.length * V9_SAMPLE_RECORD_BYTES;
+      this.lastWaited = 256;
+    }
+  }
+}
+
+const norm = (s: string) => s.replace(/\s+/g, ' ');
+const v9Card = (p: Page) => p.locator(`${SHEET} section[aria-labelledby="monitoring-exporter"] section[aria-label="${V9_CARD}"]`);
+const cardText = (p: Page) => v9Card(p).innerText().then(norm).catch(() => '');
+const cardHas = (p: Page, text: string) => async () => (await cardText(p)).includes(text);
+const awaitingLine = (sets: number, bytes: number, id: number) =>
+  `${new Intl.NumberFormat(undefined).format(sets)} data ${sets === 1 ? 'set' : 'sets'} (${formatBytes(bytes)}) arrived before ${sets === 1 ? 'its' : 'their'} template: kept, records unknown; last waited for template ${id}`;
+/** The Source block's "Data sets waiting for a template: N" counter; null when it is not shown (zero is not shown). */
+async function waitingCounter(p: Page): Promise<number | null> {
+  const m = norm(await sheetText(p)).match(/Data sets waiting for a template: ([\d.,  ]+)/);
+  return m ? digits(m[1]) : null;
+}
+
+/** Waits for the wall-clock minute after `sentAt` to close, so the rollup sidecar has something to hold. */
+async function minuteCloses(sentAt: number): Promise<void> {
+  const until1 = (Math.floor(sentAt / 60_000) + 1) * 60_000 + 4000;
+  if (until1 > Date.now()) { note(`waiting ${Math.ceil((until1 - Date.now()) / 1000)} s for the minute to close`); await sleep(until1 - Date.now()); }
+}
+
+interface Sum {
+  matchingRecords: number; octets: bigint; packets: bigint; awaitingTemplate: number; awaitingBytes: number;
+  coverage: string[]; rollupMinutes: number; rawMinutes: number;
+}
+const sumOf = (r: HistoryResult): Sum => ({
+  matchingRecords: r.matchingRecords,
+  octets: r.buckets.reduce((n, b) => n + (b.reportedOctets ?? 0n), 0n),
+  packets: r.buckets.reduce((n, b) => n + (b.reportedPackets ?? 0n), 0n),
+  awaitingTemplate: r.awaitingTemplate, awaitingBytes: r.awaitingBytes,
+  coverage: [...new Set(r.buckets.map((b) => b.coverage))].sort(),
+  rollupMinutes: r.answeredFrom.rollupMinutes, rawMinutes: r.answeredFrom.rawMinutes,
+});
+
+interface V9Oracle {
+  datagrams: number; boundaries: string[]; firstEntryId: number; sidecar: string;
+  /** The retained journal replayed through the repo's decoder, from empty state or from the archive's last cut; null where neither is possible. */
+  replay: { records: number; octets: number; packets: number; awaitingSets: number; awaitingBytes: number; restarts: number } | null;
+  rollup: Sum | null; raw: Sum | null;
+  /** The all-raw answer for the range from the first retained entry on: no expired time in it, so every bucket has counters. */
+  rawRetained: Sum | null;
+  /** Whether the rollup answer and the raw answer are the same answer; null where one could not be asked. */
+  equal: boolean | null; why: string;
+}
+
+/**
+ * Reads the monitoring directory of a CLOSED app with the repo's codecs, on a copy, and asks the v9 source's
+ * history over the whole run twice: from the rollups and from the journal. With an archive it serves the expired part.
+ */
+async function oracleV9(profile: string, startMs: number): Promise<V9Oracle> {
+  const copy = mkdtempSync(path.join(tmpdir(), 'inwire-mondrive-oracle-'));
+  profiles.push(copy);
+  cpSync(path.join(profile, 'monitoring'), copy, { recursive: true });
+  const segments = new NodeSegmentDirectory(copy);
+  const sf = NodeBlockFile.open(path.join(copy, 'rollups.iwmr'));
+  let af: NodeBlockFile | null = null;
+  try {
+    let archive: ArchiveStore | null = null;
+    let lastCut = 0;
+    const archivePath = path.join(copy, 'archive.iwma');
+    if (existsSync(archivePath) && statSync(archivePath).size >= FILE_HEADER_BYTES) {
+      af = NodeBlockFile.open(archivePath);
+      archive = ArchiveStore.open(af, { generation: new Uint8Array(16), createdMs: 0 }).store;
+      lastCut = archive.lastCut()?.throughEntryId ?? 0;
+    }
+    const { journal } = MonitoringJournal.open(segments, { limitBytes: 1 << 30, lastCutThroughEntryId: lastCut });
+    const snap = journal.snapshot();
+    const entries: Evidence[] = [];
+    for (let after = Math.max(0, snap.firstEntryId - 1); ;) {
+      const page = journal.readPage(snap, after, 256, 1 << 20);
+      entries.push(...page.entries);
+      after = page.nextAfterId;
+      if (page.done) break;
+    }
+    const out: V9Oracle = {
+      datagrams: entries.filter((e) => e.kind === 'datagram').length,
+      boundaries: entries.flatMap((e) => (e.kind === 'boundary' ? [`${e.action}:${e.reason}`] : [])),
+      firstEntryId: snap.firstEntryId, sidecar: '', replay: null, rollup: null, raw: null, rawRetained: null, equal: null, why: '',
+    };
+    // From empty state while the journal's head is there; else from the template state the archive's last cut kept
+    // (the state through the entry the expiry took out), which is what a replay of the retained journal starts from.
+    const cut = archive === null ? null : archive.lastCut();
+    const ds = snap.firstEntryId <= 1 ? DecodeState.empty() : cut !== null && cut.throughEntryId === snap.firstEntryId - 1 ? DecodeState.fromCheckpoint(cut.checkpoint) : null;
+    if (ds !== null) {
+      const r = { records: 0, octets: 0, packets: 0, awaitingSets: 0, awaitingBytes: 0, restarts: 0 };
+      for (const e of entries) {
+        const s = ds.step(e);
+        if (s === null || s.kind !== 'datagram' || s.decoded.kind !== 'valid') continue;
+        for (const f of s.decoded.flows) { r.records++; r.octets += Number(f.reportedOctets); r.packets += Number(f.reportedPackets); }
+        for (const a of s.decoded.awaiting) { r.awaitingSets += a.sets; r.awaitingBytes += a.bytes; }
+        if (s.decoded.restart) r.restarts++;
+      }
+      out.replay = r;
+    }
+    const opened = RollupStore.open(
+      sf, { generation: snap.generation, throughEntryId: snap.throughEntryId }, { nowMs: () => Date.now() },
+    );
+    out.sidecar = opened.status;
+    const rt = new LocalRuntime(
+      journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason },
+      archive === null ? undefined : new LocalArchiveSource(archive),
+    );
+    const nowMs = Date.now();
+    // One-minute, minute-aligned buckets: the planner folds a rollup minute only when the whole minute is inside one bucket.
+    const fromMs = Math.floor(startMs / 60_000) * 60_000;
+    const minutes = Math.floor(nowMs / 60_000) + 1 - Math.floor(startMs / 60_000);
+    if (minutes > 120) { out.why = `the run is ${minutes} minutes long, more than the 120 buckets a query takes`; return out; }
+    const spec: QuerySpec = { sourceKey: V9_KEY, fromMs, toMs: fromMs + minutes * 60_000, bucketCount: minutes };
+    const ask = async (forceRaw: boolean): Promise<HistoryResult | null> => {
+      const r = await runHistoryQuery(rt, rt, spec, new AbortController().signal, { inflate, nowMs, forceRaw, ...(rt.archive === undefined ? {} : { archive: rt.archive }) });
+      if (!r.ok) out.why += `${forceRaw ? 'raw' : 'rollup'} query refused: ${r.code}: ${r.message}. `;
+      return r.ok ? r.value : null;
+    };
+    const viaRollups = await ask(false);
+    const viaRaw = await ask(true);
+    if (viaRollups !== null) out.rollup = sumOf(viaRollups);
+    const firstRetained = entries.find((e) => e.kind === 'datagram');
+    if (snap.firstEntryId > 1 && firstRetained !== undefined) {
+      const r = await runHistoryQuery(rt, rt, { sourceKey: V9_KEY, fromMs: firstRetained.receivedMs, toMs: nowMs + 1, bucketCount: 1 },
+        new AbortController().signal, { inflate, nowMs, forceRaw: true, ...(rt.archive === undefined ? {} : { archive: rt.archive }) });
+      if (r.ok) out.rawRetained = sumOf(r.value); else out.why += `retained raw query refused: ${r.code}: ${r.message}. `;
+    }
+    if (viaRaw !== null) out.raw = sumOf(viaRaw);
+    if (viaRollups !== null && viaRaw !== null) {
+      const project = (r: HistoryResult) => json({
+        buckets: r.buckets, endpoints: r.endpoints, conversations: r.conversations, matchingRecords: r.matchingRecords,
+        malformed: r.malformed, unsupported: r.unsupported, awaitingTemplate: r.awaitingTemplate, awaitingBytes: r.awaitingBytes,
+      });
+      out.equal = project(viaRollups) === project(viaRaw);
+    }
+    return out;
+  } finally {
+    segments.close();
+    sf.close();
+    af?.close();
+  }
+}
+
+/** The ledger's decodable totals against an answer of the history query; the two paths are held to the same numbers. */
+function totalsMatch(s: Sum | null, led: V9Ledger): boolean {
+  return s !== null && s.matchingRecords === led.records && s.octets === BigInt(led.octets) && s.packets === BigInt(led.packets)
+    && s.awaitingTemplate === led.awaitingSets && s.awaitingBytes === led.awaitingBytes;
+}
+
+const sumText = (s: Sum | null) => (s === null ? 'null' : json(s));
+
+function checkOracle(tag: string, o: V9Oracle, led: V9Ledger): void {
+  checkTrue(`${tag}: the journal holds every datagram sent (${led.datagrams})`, o.datagrams === led.datagrams, `${o.datagrams} vs ${led.datagrams}`);
+  if (o.replay === null) notRan(`${tag}: journal replay`, `the journal's head is gone (first entry id ${o.firstEntryId}), so a replay from empty state has no templates`);
+  else {
+    checkTrue(`${tag}: ...replayed from empty state, the journal decodes to exactly the ledger's records, bytes and packets`,
+      o.replay.records === led.records && o.replay.octets === led.octets && o.replay.packets === led.packets, json([o.replay, led.records, led.octets, led.packets]));
+    checkTrue(`${tag}: ...and holds ${led.awaitingSets} data set(s) (${led.awaitingBytes} B) that waited for a template`,
+      o.replay.awaitingSets === led.awaitingSets && o.replay.awaitingBytes === led.awaitingBytes, json(o.replay));
+  }
+  checkTrue(`${tag}: the history from the rollups equals the ledger of decodable records only`, totalsMatch(o.rollup, led),
+    `${sumText(o.rollup)} vs records ${led.records} octets ${led.octets} packets ${led.packets} awaiting ${led.awaitingSets}/${led.awaitingBytes}; ${o.why}`);
+  checkTrue(`${tag}: ...and so does the history read from the journal`, totalsMatch(o.raw, led), `${sumText(o.raw)}; ${o.why}`);
+  if (o.equal === null) notRan(`${tag}: rollup answer equals raw answer`, o.why || 'a query was not asked');
+  else checkTrue(`${tag}: ...the rollup answer equals the raw answer (${o.rollup?.rollupMinutes ?? 0} summarised, ${o.raw?.rawMinutes ?? 0} raw minute(s))`, o.equal);
+}
+
+const flowsOf = (...f: Flow[]): Flow[] => f;
+
+// --- 13: the exporter restarts -------------------------------------------------------------------------------------
+
+await scenario('13. v9 exporter restart mid-run', async () => {
+  const profile = tempProfile('x');
+  const port = await freePort();
+  const led = new V9Ledger();
+  seed(profile, port);
+  const startMs = Date.now();
+  const r = await launch(profile);
+  const { p } = r;
+  await openSheet(p);
+  checkTrue('13: Start listens', await startListening(p));
+
+  await led.send(port, { uptime: UPTIME0, flows: flowsOf(A, B), template: true, decodable: true });
+  checkTrue('13: the first export (template 256 and 2 records) reads as 2 records', await waitRecords(p, led.records), String((await read(p)).records));
+  checkTrue('13: the source gets a card', await until(async () => (await v9Card(p).count()) === 1, 20_000));
+  checkTrue('13: ...which says every data set had its template', await until(cardHas(p, 'Every data set had its template'), 10_000), await cardText(p));
+
+  // The restart: the header uptime steps back from 3,600,000 ms to 5,000 ms, and the data arrives without its template.
+  const restartAt = Date.now();
+  for (let i = 0; i < 3; i++) {
+    await led.send(port, { uptime: 5_000 + i * 1_000, flows: flowsOf(C), template: false, decodable: false });
+    await sleep(40);
+  }
+  const line = awaitingLine(led.awaitingSets, led.awaitingBytes, 256);
+  checkTrue('13: the card shows the No template line: 3 data sets, their bytes, last waited for template 256',
+    await until(cardHas(p, line), 20_000), `wanted "${line}"; the card reads "${await cardText(p)}"`);
+  checkTrue('13: ...and Restarts: 1', await until(cardHas(p, '1 restart: its templates were dropped and learned again'), 10_000), await cardText(p));
+  checkTrue('13: ...the Source block counts the 3 data sets waiting for a template', await until(async () => (await waitingCounter(p)) === 3, 10_000),
+    String(await waitingCounter(p)));
+  await sleep(6500);
+  checkTrue('13: the sheet\'s record count did not grow by those records', (await read(p)).records === 2, String((await read(p)).records));
+
+  // Recovery: the exporter re-sends its template with new records.
+  await led.send(port, { uptime: 9_000, flows: flowsOf(B, C, A), template: true, decodable: true });
+  checkTrue(`13: recovery: the count grows by exactly the 3 new records (to ${led.records})`, await waitRecords(p, led.records), String((await read(p)).records));
+  checkTrue('13: ...the 3 data sets that waited stay counted, never decoded later', await cardHas(p, line)(), await cardText(p));
+  checkTrue('13: ...and the restart count is still 1', (await cardText(p)).includes('1 restart:'), await cardText(p));
+  note(`restart to recovery: ${((Date.now() - restartAt) / 1000).toFixed(1)} s`);
+
+  await minuteCloses(Date.now());
+  await stopListening(p);
+  await shutdown(r);
+  checkOracle('13', await oracleV9(profile, startMs), led);
+});
+
+// --- 14 and 15: the app restarts ----------------------------------------------------------------------------------
+
+/** One v9 template and its data, Stop, close, relaunch the same profile, Start, then data without a template. */
+async function appRestart(tag: string, past: boolean): Promise<void> {
+  const profile = tempProfile(past ? 'p' : 'l');
+  const port = await freePort();
+  const led = new V9Ledger();
+  seed(profile, port);
+  const startMs = Date.now();
+  const first = await launch(profile);
+  await openSheet(first.p);
+  checkTrue(`${tag}: Start listens`, await startListening(first.p));
+  await led.send(port, { uptime: UPTIME0, flows: flowsOf(A, B), template: true, decodable: true });
+  const templateAt = Date.now();
+  checkTrue(`${tag}: template 256 and 2 records are counted`, await waitRecords(first.p, led.records), String((await read(first.p)).records));
+  checkTrue(`${tag}: Stop stops the listener`, await stopListening(first.p));
+  await shutdown(first);
+
+  if (past) {
+    const wake = templateAt + 31 * 60_000 + 5000;
+    note(`closed; waiting ${Math.ceil((wake - Date.now()) / 1000)} s so the template is over 30 minutes old`);
+    await sleep(Math.max(0, wake - Date.now()));
+  }
+
+  const second = await launch(profile);
+  const { p } = second;
+  await openSheet(p);
+  checkTrue(`${tag}: reopened, the history holds the ${led.records} records`, await waitRecords(p, led.records, 60_000), String((await read(p)).records));
+  checkTrue(`${tag}: ...and nothing listens until Start is pressed`, (await bindProbe(port)) === 'free' && (await buttonVisible(p, 'Start')));
+  checkTrue(`${tag}: Start listens again`, await startListening(p));
+
+  // Data only, the uptime and the sequence continuing forward from where they were.
+  const n = past ? 60 : 3;
+  const sendAt = Date.now();
+  for (let i = 0; i < n; i++) {
+    await led.send(port, { uptime: UPTIME0 + 60_000 + i * 1_000, flows: flowsOf(C, A), template: false, decodable: !past });
+    await sleep(past ? 25 : 60);
+  }
+  if (!past) {
+    checkTrue(`${tag}: data-only datagrams decode: the count grows to ${led.records}`, await waitRecords(p, led.records, 40_000), String((await read(p)).records));
+    checkTrue(`${tag}: ...and the card says every data set had its template`, await until(cardHas(p, 'Every data set had its template'), 20_000), await cardText(p));
+    checkTrue(`${tag}: ...with nothing awaiting a template`, (await waitingCounter(p)) === null, String(await waitingCounter(p)));
+    checkTrue(`${tag}: ...and no restart`, !(await cardText(p)).includes(' restart'), await cardText(p));
+  } else {
+    const line = awaitingLine(led.awaitingSets, led.awaitingBytes, 256);
+    checkTrue(`${tag}: the template is over 30 minutes and 48 messages old: all ${n} data sets wait for a template`,
+      await until(cardHas(p, line), 30_000), `wanted "${line}"; the card reads "${await cardText(p)}"`);
+    await sleep(6500);
+    checkTrue(`${tag}: ...none decoded: the count stays ${led.records}`, (await read(p)).records === led.records, String((await read(p)).records));
+    checkTrue(`${tag}: ...the Source block counts ${n}`, (await waitingCounter(p)) === n, String(await waitingCounter(p)));
+    checkTrue(`${tag}: ...and it was no restart: the uptime only moved forward`, !(await cardText(p)).includes(' restart'), await cardText(p));
+  }
+  note(`data sent ${((Date.now() - sendAt) / 1000).toFixed(1)} s after Start`);
+  await minuteCloses(Date.now());
+  await stopListening(p);
+  await shutdown(second);
+  checkOracle(tag, await oracleV9(profile, startMs), led);
+}
+
+await scenario('14. app restart within the template lifetime', () => appRestart('14', false));
+
+const LIFETIME = process.argv.includes('--lifetime');
+if (LIFETIME) await scenario('15. app restart past the template lifetime', () => appRestart('15', true));
+else if (ONLY.length === 0 || ONLY.includes('15')) notRan('15', 'needs 31 minutes of wall clock; pass --lifetime');
+
+// --- 16: retention expires segments during v9 collection ---------------------------------------------------------------
+
+/** The first entry id of the oldest segment on disk, or 0 with none. */
+function oldestSegmentId(profile: string): number {
+  try {
+    const ids = readdirSync(path.join(profile, 'monitoring')).flatMap((n) => {
+      const m = /^journal-(\d+)\.iwmj$/.exec(n);
+      return m ? [Number(m[1])] : [];
+    });
+    return ids.length === 0 ? 0 : Math.min(...ids);
+  } catch { return 0; }
+}
+
+await scenario('16. retention expiry during v9 collection', async () => {
+  const profile = tempProfile('e');
+  const port = await freePort();
+  const led = new V9Ledger();
+  // The 16 MiB minimum, retention set to expire the oldest segments at the limit instead of stopping.
+  mkdirSync(path.join(profile, 'monitoring'), { recursive: true });
+  writeFileSync(path.join(profile, 'monitoring', 'settings.json'), JSON.stringify({
+    version: 2, source: { exporterIPv4: EXPORTER, bindIPv4: '127.0.0.1', port, storageLimitBytes: 16 * MiB },
+    location: null, retention: { keepRawDays: null, atLimit: 'expire-oldest' },
+  }));
+  const startMs = Date.now();
+  const r = await launch(profile);
+  const { p } = r;
+  await openSheet(p);
+  checkTrue('16: Start listens', await startListening(p));
+
+  // 2,000 records of 29 bytes: 58 KB, close to the datagram maximum, so the limit comes quickly.
+  const flows: Flow[] = Array.from({ length: 2000 }, (_, i) => ({
+    src: `10.0.0.${1 + (i % 8)}`, dst: `10.0.1.${1 + (i % 8)}`, octets: 1000 + (i % 5000), packets: 10 + (i % 90),
+  }));
+  const t0 = Date.now();
+  let uptime = UPTIME0;
+  await led.send(port, { uptime, flows, template: true, decodable: true });
+  let sent = 1;
+  const MAX = 1200;
+  while (sent < MAX && oldestSegmentId(profile) <= 1) {
+    for (let i = 0; i < 4; i++) { uptime += 100; await led.send(port, { uptime, flows, template: false, decodable: true }); sent++; }
+    await sleep(80);
+  }
+  const expiredAfter = (Date.now() - t0) / 1000;
+  const expired = oldestSegmentId(profile) > 1;
+  note(`${sent} datagrams of ~58 KB (${(sent * 58_028 / MiB).toFixed(0)} MiB) sent against a 16 MiB limit; ${expired ? `the oldest segment started at entry ${oldestSegmentId(profile)} after ${expiredAfter.toFixed(1)} s` : 'no segment expired'}`);
+  checkTrue('16: at least one segment expired: the oldest segment file no longer starts at entry 1', expired);
+  if (expired && expiredAfter > 300) note(`NOTE: the minimum limit made this run take ${expiredAfter.toFixed(0)} s, over the ~5 minutes allowed for`);
+
+  // Template 256 was in the datagram that has expired: the live state must still decode data-only datagrams.
+  for (let i = 0; i < 40; i++) {
+    uptime += 100;
+    await led.send(port, { uptime, flows, template: false, decodable: true });
+    if (i % 4 === 3) await sleep(80);
+  }
+  const lastSentAt = Date.now();
+  checkTrue(`16: after the expiry, data-only datagrams still decode: the count reaches all ${led.records.toLocaleString()} records`,
+    await waitRecords(p, led.records, 60_000), `${(await read(p)).records} vs ${led.records}`);
+  checkTrue('16: ...with every data set having its template', await until(cardHas(p, 'Every data set had its template'), 20_000), await cardText(p));
+  checkTrue('16: ...nothing awaiting a template in the Source block', (await waitingCounter(p)) === null, String(await waitingCounter(p)));
+  const t = await sheetText(p);
+  checkTrue('16: ...and still listening: expiring made room instead of stopping', (await buttonVisible(p, 'Stop')) && !/reached its storage limit/.test(t), t.slice(0, 200));
+  checkTrue('16: Accepted counts every datagram: none shed', (await read(p)).accepted === led.datagrams, `${(await read(p)).accepted} vs ${led.datagrams}`);
+
+  await minuteCloses(lastSentAt);
+  const sc = () => { try { return statSync(path.join(profile, 'monitoring', 'rollups.iwmr')).size; } catch { return -1; } };
+  await stopListening(p);
+  await shutdown(r);
+  note(`rollups.iwmr after shutdown: ${sc()} B (64 B is the header alone: nothing summarised)`);
+  const o = await oracleV9(profile, startMs);
+  checkTrue('16: the journal records the expiry (an expired boundary) and starts after entry 1', o.boundaries.some((b) => b.startsWith('expired')) && o.firstEntryId > 1,
+    `${json(o.boundaries)} first ${o.firstEntryId}`);
+  checkTrue(`16: the retained journal holds fewer datagrams than were sent (${o.datagrams} of ${led.datagrams})`, o.datagrams < led.datagrams);
+  checkTrue('16: the history over the whole run equals the ledger, expired part included (rollups + archive)', totalsMatch(o.rollup, led),
+    `${sumText(o.rollup)} vs records ${led.records} octets ${led.octets} packets ${led.packets}; ${o.why}`);
+  checkTrue('16: ...the expired part is reported as aggregate-only coverage', (o.rollup?.coverage ?? []).includes('aggregate-only'), json(o.rollup?.coverage));
+  checkTrue('16: ...and no part of the run is history-lost', !(o.rollup?.coverage ?? []).includes('history-lost'), json(o.rollup?.coverage));
+  // The all-raw answer reads the journal alone (`rawOrLost`: expired time is lost to it, by design), so it is held to the
+  // retained journal replayed independently from the archive's last cut, not to the whole-run ledger.
+  if (o.replay === null) notRan('16: the all-raw answer equals the retained journal replayed from the archive cut', 'the archive cut does not end at the journal head');
+  else {
+    const rp = o.replay;
+    checkTrue('16: the retained journal, replayed from the archive cut template state, decodes every datagram (nothing awaits a template)',
+      rp.awaitingSets === 0 && rp.records > 0 && rp.records < led.records, json([rp, led.records]));
+    checkTrue('16: ...the all-raw answer over the whole run counts those records, and calls the expired part history-lost (it reads no archive)',
+      o.raw !== null && o.raw.matchingRecords === rp.records && o.raw.awaitingTemplate === 0 && o.raw.coverage.includes('history-lost'), `${sumText(o.raw)} vs ${json(rp)}; ${o.why}`);
+    checkTrue('16: ...and from the first retained entry on, the all-raw answer equals that replay (records, bytes, packets)',
+      o.rawRetained !== null && o.rawRetained.matchingRecords === rp.records && o.rawRetained.octets === BigInt(rp.octets) && o.rawRetained.packets === BigInt(rp.packets) && o.rawRetained.awaitingTemplate === 0,
+      `${sumText(o.rawRetained)} vs ${json(rp)}; ${o.why}`);
+  }
 });
 
 // --- the end ---------------------------------------------------------------------------------------------------------

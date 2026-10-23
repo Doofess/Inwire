@@ -251,3 +251,22 @@ export function ipfixSample(h: IpfixHeader, flows: SampleFlow[], orphan: boolean
   if (orphan) sets.push(dataSet(400, [[1, 2, 3, 4, 5, 6, 7, 8]]));
   return ipfixMessage(h, sets);
 }
+
+// --- Data-only v9 (Task 11) ------------------------------------------------------------------------------------
+
+/** One data record of `v9Sample`'s template 256, as that function writes it. */
+export function v9SampleRecord(h: Pick<V9Header, 'uptime'>, f: SampleFlow): number[] {
+  return [
+    ...be.ipv4(f.src), ...be.ipv4(f.dst), ...be.u16(f.sport ?? 50_000), ...be.u16(f.dport ?? 443), ...be.u8(f.proto ?? 6),
+    ...be.u32(f.octets), ...be.u32(f.packets), ...be.u32(Math.max(0, h.uptime - 20_000)), ...be.u32(Math.max(0, h.uptime - 1_000)),
+  ];
+}
+
+/** The bytes of one record of template 256 (`v9SampleRecord`), so a script can state how long a data set is. */
+export const V9_SAMPLE_RECORD_BYTES = 29;
+
+/** A v9 datagram holding only a data set for template 256: what an exporter sends between its template refreshes. */
+export function v9DataOnly(h: V9Header, flows: SampleFlow[]): Uint8Array {
+  const sets: number[][] = [dataSet(256, flows.map((f) => v9SampleRecord(h, f)))];
+  return v9Message({ ...h, count: sets.length }, sets);
+}
