@@ -35,14 +35,21 @@
  */
 import { ExpiredRangeError, StaleGenerationError } from './journal';
 import { decodeMinuteRollup, type Inflate } from './rollupCodec';
-import { MINUTE_MS, EngineAdmission, MinuteAccumulator, ipv4Number, minuteOf } from './rollup';
+import {
+  MINUTE_MS, EngineAdmission, MinuteAccumulator, byAddress, foldOf, foldSampling, minuteOf, type FlowLeg,
+} from './rollup';
 import { CorruptRollupError, RuntimeUnavailableError, type ArchiveSource, type EvidenceReader, type RollupReader } from './runtime';
 import {
-  WRITE_POLICY_VERSION, LIMITS, isReadablePolicy, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
+  LIMITS, SAMPLING_MIXED, isReadablePolicy, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
   type EvidenceRef, type ExpiryCause, type HistoryBucket, type HistoryReply, type HistoryResult, type HistoryTable, type MinuteRollup,
-  type NormalizedV5, type QueryFocus, type QuerySpec, type SegmentSource, type Snapshot,
+  type QueryFocus, type QuerySpec, type RangeSampling, type SegmentSource, type Snapshot,
 } from './types';
-import { decodeV5, exporterKey, exporterOf, isEngineSourceKey, sourceKey } from './v5';
+import { exporterKey, exporterOf, isEngineSourceKey } from './v5';
+import { parseSourceKey } from './sourceKeys';
+import { DecodeState, type DecodeStep } from './decodeState';
+import { decodeDatagram } from './flowDecode';
+import { decodeStateBefore, type StateSource } from './stateAt';
+import { CollectorTemplateStore } from './templates';
 
 export interface QueryOptions {
   /** Bounded: the codec's own `maxOutput` is passed to it. */
@@ -362,7 +369,6 @@ class KeyTable<V> {
 interface EndpointAcc { sent: bigint; received: bigint }
 interface ConversationAcc { src: string; dst: string; octets: bigint; packets: bigint }
 
-const byAddress = (a: string, b: string): number => ipv4Number(a) - ipv4Number(b);
 
 function bigintDescending(a: bigint, b: bigint): number {
   return a === b ? 0 : a > b ? -1 : 1;
@@ -471,6 +477,17 @@ class Query {
   private unsupported = 0;
   private matching = 0;
   private unknownSampling = 0;
+  // What policy 2 adds to the answer (ADR 0066), summed over the minutes and records the range holds.
+  private awaitingSets = 0;
+  private awaitingBytes = 0;
+  private unsupportedTemplateRecords = 0;
+  private unsupportedSampling = 0;
+  /** `foldSampling` over every minute's rate: 0 for none stated, `SAMPLING_MIXED` for different ones. */
+  private samplingInterval = 0;
+  private clockMin: number | null = null;
+  private clockMax: number | null = null;
+  /** Each minute's last export-clock skew; the newest minute's is the answer's `latestSkewMs`. */
+  private readonly lastSkew = new Map<number, number>();
   private read = 0;
   private snapshot!: Snapshot;
   private watermark = 0;
@@ -789,11 +806,14 @@ class Query {
     this.admitted = this.admission.has(key);
     if (this.admitted || this.admission.full(this.exporter)) return;
     let datagrams = 0;
+    // Whether a datagram is valid, and the source it names, come from its header and structure, not from the
+    // templates in force: a scratch store is enough, and admission needs no replay.
+    const scratch = new CollectorTemplateStore();
     await this.scan([{ fromId: this.tailAfter + 1, toId: this.snapshot.throughEntryId }], (e) => {
       if (e.kind !== 'datagram' || e.remoteIPv4 !== this.exporter) return false;
       if (++datagrams > LIMITS.rawQueryDatagrams) throw this.admissionRefusal();
-      const d = decodeV5(e, e.remoteIPv4);
-      if (d.kind === 'valid') this.admission.admit(sourceKey(e.remoteIPv4, d.engineType, d.engineId));
+      const d = decodeDatagram(e, e.remoteIPv4, e.policy, scratch);
+      if (d.kind === 'valid') this.admission.admit(d.sourceKey);
       if (this.admission.has(key)) { this.admitted = true; return true; }
       return this.admission.full(this.exporter);
     });
@@ -829,32 +849,30 @@ class Query {
       .map((x) => ({ fromId: Math.max(x.fromId, this.tailAfter + 1), toId: x.toId }))
       .filter((x) => x.fromId <= x.toId);
     let keys = 0;
-    await this.scan(ranges, (e) => {
+    await this.scanStateful(ranges, (e, step) => {
       if (e.kind !== 'datagram' || e.receivedMs < this.from || e.receivedMs >= this.to) return false;
       if (++this.read > LIMITS.rawQueryDatagrams) throw this.tooLarge('Counting the entries after the last rollup,');
       const m = minuteOf(e.receivedMs);
-      if (m < r.a || m >= r.b) return false;
-      const d = decodeV5(e, e.remoteIPv4);
+      if (m < r.a || m >= r.b || step.kind !== 'datagram') return false;
       let t = tail.get(m);
+      // The tail minute's policy is its first entry's; what is folded into it is gated by each entry's own.
       const minute = (): TailMinute => {
-        if (t === undefined) { t = { acc: new MinuteAccumulator(this.spec.sourceKey, m, WRITE_POLICY_VERSION) }; tail.set(m, t); }
+        if (t === undefined) { t = { acc: new MinuteAccumulator(this.spec.sourceKey, m, e.policy) }; tail.set(m, t); }
         return t;
       };
-      if (d.kind !== 'valid') {
+      const fold = foldOf(step);
+      if (fold === null) {
         if (e.remoteIPv4 === this.exporter) {
-          if (d.kind === 'malformed') minute().acc.malformed++; else minute().acc.unsupported++;
+          if (step.decoded.kind === 'malformed') minute().acc.malformed++; else minute().acc.unsupported++;
         }
         return false;
       }
-      if (!this.admitted || sourceKey(e.remoteIPv4, d.engineType, d.engineId) !== this.spec.sourceKey) return false;
+      if (!this.admitted || fold.sourceKey !== this.spec.sourceKey) return false;
       const acc = minute().acc;
-      if (d.flows.length === 0) return false;
-      for (const flow of d.flows) {
-        const before = acc.keyCount;
-        acc.addFlow(flow);
-        keys += acc.keyCount - before;
-        if (keys > LIMITS.tableKeys) { keys -= acc.keyCount; acc.abandon(); }
-      }
+      const before = acc.keyCount;
+      acc.addDatagram(fold, e.policy);
+      keys += acc.keyCount - before;
+      if (keys > LIMITS.tableKeys) { keys -= acc.keyCount; acc.abandon(); }
       return false;
     });
     return tail;
@@ -892,14 +910,18 @@ class Query {
       for (const m of tail.keys()) if (m >= a && m < b) minutes.add(m);
       for (const m of [...minutes].sort((x, y) => x - y)) {
         if (lostMinutes.has(m)) { this.markLost(m, m + MINUTE_MS); continue; }
-        const merged = new MinuteAccumulator(source, m, WRITE_POLICY_VERSION);
-        for (const f of fromSource.get(m) ?? []) merged.absorb(f);
-        for (const f of fromExporter.get(m) ?? []) merged.absorb(f);
+        // Absorbed in entry order - what expired, then what the sidecar holds, then the tail - because a
+        // minute's last export-clock skew is the later fragment's.
         const drewArchive = archivedSource.has(m) || archivedExporter.has(m);
-        for (const f of archivedSource.get(m) ?? []) merged.absorb(f);
-        for (const f of archivedExporter.get(m) ?? []) merged.absorb(f);
+        const inputs: MinuteRollup[] = [
+          ...(archivedSource.get(m) ?? []), ...(archivedExporter.get(m) ?? []),
+          ...(fromSource.get(m) ?? []), ...(fromExporter.get(m) ?? []),
+        ];
         const t = tail.get(m);
-        if (t !== undefined) merged.absorb(t.acc.toRollup());
+        if (t !== undefined) inputs.push(t.acc.toRollup());
+        // The merged minute is of the newest policy that contributed to it (a policy-1 minute is read as it was written).
+        const merged = new MinuteAccumulator(source, m, inputs.reduce((p, f) => Math.max(p, f.policy), 1));
+        for (const f of inputs) merged.absorb(f);
         const whole = this.bucketOf(m) === this.bucketOf(m + MINUTE_MS - 1);
         if (drewArchive) {
           // The journal no longer holds this minute's expired part, so it cannot be read again to split
@@ -969,9 +991,23 @@ class Query {
     return bucketIndex(this.bounds, t);
   }
 
+  /** A minute's export-clock skews: the range keeps the extremes, and each minute its own last. */
+  private noteClock(minuteMs: number, minSkewMs: number, maxSkewMs: number, lastSkewMs: number): void {
+    this.clockMin = this.clockMin === null ? minSkewMs : Math.min(this.clockMin, minSkewMs);
+    this.clockMax = this.clockMax === null ? maxSkewMs : Math.max(this.clockMax, maxSkewMs);
+    this.lastSkew.set(minuteMs, lastSkewMs);
+  }
+
   private foldMinute(m: MinuteAccumulator, withTables: boolean): void {
     this.malformed += m.malformed;
     this.unsupported += m.unsupported;
+    // These are the minute's, whether or not it holds a record: a datagram that was all awaiting sets has none.
+    this.awaitingSets += m.awaitingSets;
+    this.awaitingBytes += m.awaitingBytes;
+    this.unsupportedTemplateRecords += m.unsupportedTemplateRecords;
+    this.unsupportedSampling += m.unsupportedSamplingRecords;
+    this.samplingInterval = foldSampling(this.samplingInterval, m.samplingInterval);
+    if (m.clock !== null) this.noteClock(m.minuteMs, m.clock.minSkewMs, m.clock.maxSkewMs, m.clock.lastSkewMs);
     if (m.records === 0) return;
     const bucket = this.buckets[this.bucketOf(m.minuteMs)];
     bucket.records += m.records;
@@ -1011,13 +1047,13 @@ class Query {
       }
       return starts[lo] <= t && t < windows[lo].to;
     };
-    await this.scan(ranges, (e) => {
+    await this.scanStateful(ranges, (e, step) => {
       if (e.kind !== 'datagram' || !inWindow(e.receivedMs)) return false;
       // Tail entries were counted when the tail was scanned.
       if (this.rawOnly || e.ref.entryId <= this.watermark) {
         if (++this.read > LIMITS.rawQueryDatagrams) throw this.tooLarge('At least');
       }
-      this.foldDatagram(e);
+      this.foldDatagram(e, step);
       return false;
     });
   }
@@ -1044,42 +1080,71 @@ class Query {
     return merged;
   }
 
-  private foldDatagram(e: DatagramEvidence): void {
-    const d = decodeV5(e, e.remoteIPv4);
-    if (d.kind !== 'valid') {
+  /**
+   * One datagram of the raw pass, folded as `MinuteAccumulator.addDatagram` folds it into a rollup - the same
+   * `foldOf` - so a minute read from the journal and one read from the sidecar part only where a focus
+   * chooses records. A focus matches a *leg* (v9 and IPFIX biflows have a reverse one): a record counts once,
+   * with the octets and packets of the legs that match, and its tables come from those legs alone.
+   * What belongs to the datagram rather than to a record (data sets awaiting a template, the export clock)
+   * counts whatever the focus; records of a template with no octet count have no legs a focus could name, so
+   * only an unfocused query counts them.
+   */
+  private foldDatagram(e: DatagramEvidence, step: DecodeStep): void {
+    if (step.kind !== 'datagram') return;
+    const fold = foldOf(step);
+    if (fold === null) {
       // Malformed and unsupported datagrams belong to the exporter, whatever
       // the source asked for or the focus chose: they are counted by receipt.
-      if (e.remoteIPv4 === this.exporter) { if (d.kind === 'malformed') this.malformed++; else this.unsupported++; }
+      if (e.remoteIPv4 === this.exporter) { if (step.decoded.kind === 'malformed') this.malformed++; else this.unsupported++; }
       return;
     }
-    if (!this.admitted || sourceKey(e.remoteIPv4, d.engineType, d.engineId) !== this.spec.sourceKey) return;
-    for (const flow of d.flows) if (this.matches(flow)) this.foldFlow(flow);
+    if (!this.admitted || fold.sourceKey !== this.spec.sourceKey) return;
+    this.awaitingSets += fold.awaitingSets;
+    this.awaitingBytes += fold.awaitingBytes;
+    if (fold.skewMs !== null) this.noteClock(minuteOf(e.receivedMs), fold.skewMs, fold.skewMs, fold.skewMs);
+    const bucket = this.buckets[this.bucketOf(e.receivedMs)];
+    if (!this.focused && fold.unsupportedTemplateRecords > 0) {
+      bucket.records += fold.unsupportedTemplateRecords;
+      this.matching += fold.unsupportedTemplateRecords;
+      this.unsupportedTemplateRecords += fold.unsupportedTemplateRecords;
+    }
+    for (const record of fold.records) {
+      const legs = this.focused ? record.legs.filter((leg) => this.matches(leg)) : record.legs;
+      if (this.focused && legs.length === 0) continue;
+      bucket.records++;
+      if (this.focused) {
+        for (const leg of legs) { bucket.octets += leg.octets; bucket.packets += leg.packets; }
+      } else {
+        bucket.octets += record.octets;
+        bucket.packets += record.packets;
+      }
+      this.matching++;
+      const sampling = record.sampling;
+      if (sampling.kind === 'unknown') this.unknownSampling++;
+      else if (sampling.kind === 'unsupported') this.unsupportedSampling++;
+      else if (e.policy >= 2) this.samplingInterval = foldSampling(this.samplingInterval, sampling.interval);
+      if (this.focused && this.evidence.length < LIMITS.focusedReferences) {
+        this.evidence.push({ ref: e.ref, recordIndex: record.recordIndex });
+      }
+      for (const leg of legs) this.foldLeg(leg);
+    }
   }
 
-  private matches(flow: NormalizedV5): boolean {
+  private matches(leg: FlowLeg): boolean {
     const f: QueryFocus | undefined = this.spec.focus;
     if (f === undefined) return true;
     return f.kind === 'endpoint'
-      ? flow.srcAddr === f.address || flow.dstAddr === f.address
-      : flow.srcAddr === f.srcAddr && flow.dstAddr === f.dstAddr;
+      ? leg.src === f.address || leg.dst === f.address
+      : leg.src === f.srcAddr && leg.dst === f.dstAddr;
   }
 
-  private foldFlow(flow: NormalizedV5): void {
-    const bucket = this.buckets[this.bucketOf(flow.receivedMs)];
-    bucket.records++;
-    bucket.octets += flow.reportedOctets;
-    bucket.packets += flow.reportedPackets;
-    this.matching++;
-    if (flow.sampling.kind === 'unknown') this.unknownSampling++;
-    if (this.focused && this.evidence.length < LIMITS.focusedReferences) {
-      this.evidence.push({ ref: flow.ref, recordIndex: flow.recordIndex });
-    }
-    const s = this.endpoints.upsert(flow.srcAddr, () => ({ sent: 0n, received: 0n }));
-    if (s !== null) s.sent += flow.reportedOctets;
-    const d = this.endpoints.upsert(flow.dstAddr, () => ({ sent: 0n, received: 0n }));
-    if (d !== null) d.received += flow.reportedOctets;
-    const c = this.conversations.upsert(`${flow.srcAddr}>${flow.dstAddr}`, () => ({ src: flow.srcAddr, dst: flow.dstAddr, octets: 0n, packets: 0n }));
-    if (c !== null) { c.octets += flow.reportedOctets; c.packets += flow.reportedPackets; }
+  private foldLeg(leg: FlowLeg): void {
+    const s = this.endpoints.upsert(leg.src, () => ({ sent: 0n, received: 0n }));
+    if (s !== null) s.sent += leg.octets;
+    const d = this.endpoints.upsert(leg.dst, () => ({ sent: 0n, received: 0n }));
+    if (d !== null) d.received += leg.octets;
+    const c = this.conversations.upsert(`${leg.src}>${leg.dst}`, () => ({ src: leg.src, dst: leg.dst, octets: 0n, packets: 0n }));
+    if (c !== null) { c.octets += leg.octets; c.packets += leg.packets; }
   }
 
   /** Pages through `ranges` in id order; `visit` returns true to stop early. */
@@ -1101,7 +1166,125 @@ class Query {
     }
   }
 
+  /**
+   * What `decodeStateBefore` reads the sidecar's checkpoints and the journal through. A sidecar that cannot
+   * be trusted for the minutes cannot be trusted for the templates either, so it offers none; every read
+   * passes `tick`, so a cancel reaches a long replay.
+   */
+  private stateSource(): StateSource {
+    const noSidecar = this.unusable !== null || this.cacheStale;
+    return {
+      segmentGeometry: async (s) => { await this.tick(); return this.reader.segmentGeometry(s); },
+      readPage: async (s, after, maxEntries, maxBytes) => { await this.tick(); return this.reader.readPage(s, after, maxEntries, maxBytes); },
+      readEvidence: async (ref) => { await this.tick(); return this.reader.readEvidence(ref); },
+      checkpoints: async () => (noSidecar ? [] : this.rollups.checkpoints()),
+      readCheckpoint: (through) => this.rollups.readCheckpoint(through),
+      ...(this.options.archive === undefined ? {} : { archive: this.options.archive }),
+    };
+  }
+
+  /**
+   * Whether decoding `ranges` needs the templates in force before them: only a v9 or IPFIX source does,
+   * and only where a policy-2 segment is in reach. A v5 source's datagrams decode on their own, and a
+   * policy-1 segment never learns a template, so a scan of either steps a fresh state over the entries
+   * it visits and replays nothing.
+   */
+  private async needsState(ranges: Range[]): Promise<boolean> {
+    const parsed = parseSourceKey(this.spec.sourceKey);
+    if (parsed === null || parsed.protocol === 'v5') return false;
+    const lo = ranges[0].fromId;
+    const hi = ranges[ranges.length - 1].toId;
+    const geometry = await this.reader.segmentGeometry(this.snapshot);
+    return geometry.some((g) => g.policy >= 2 && g.firstEntryId <= hi && g.lastEntryId >= lo);
+  }
+
+  private replayRefusal(): Refusal {
+    const note = this.unusable !== null ? `The rollups are unavailable (${this.unusable}), so no template checkpoint can be used. ` : '';
+    const rebuild = this.unusable === null ? this.options.rebuildNote?.() ?? null : null;
+    return new Refusal(
+      'range-too-large',
+      `${note}Reading this range needs the exporter's templates as they were at its start, and replaying the journal to rebuild them would read more than ${Math.floor(LIMITS.replayBytes / (1 << 20))} MiB: no template checkpoint is stored near enough.${rebuild === null ? '' : ` ${rebuild}`}`,
+    );
+  }
+
+  /**
+   * `scan`, with a `DecodeState` carried through every entry from the first range to the last: v9 and IPFIX
+   * records cannot be read without the templates before them (ADR 0066). The state is rebuilt for the first
+   * entry by `decodeStateBefore`, then every entry is stepped in id order - the gaps between ranges and the
+   * entries of a range `visit` ignores included, boundaries too - and `visit` sees the entry with its step.
+   * What is stepped and not visited is not counted against the raw datagram budget; it is counted against
+   * the replay budget, as the replay itself is. Where `needsState` says no, a fresh state steps only what
+   * the ranges hold.
+   */
+  private async scanStateful(ranges: Range[], visit: (e: Evidence, step: DecodeStep) => boolean): Promise<void> {
+    const live = ranges.filter((r) => r.fromId <= r.toId);
+    if (live.length === 0) return;
+    const stateful = await this.needsState(live);
+    let state: DecodeState;
+    if (stateful) {
+      const s = await decodeStateBefore(this.stateSource(), this.snapshot, live[0].fromId, this.options.inflate, LIMITS.replayBytes);
+      if (s === 'range-too-large') throw this.replayRefusal();
+      state = s;
+    } else {
+      state = DecodeState.empty(live[0].fromId - 1);
+    }
+    let bytes = 0;
+    const step = (e: Evidence): DecodeStep | null => {
+      const stepped = state.step(e);
+      if (stateful) {
+        bytes += (e.kind === 'datagram' ? e.bytes.length : 0) + 24;
+        if (bytes > LIMITS.replayBytes) throw this.replayRefusal();
+      }
+      return stepped;
+    };
+    for (const r of live) {
+      // The gap before this range: stepped, not visited.
+      for (let after = state.throughEntryId; stateful && after < r.fromId - 1;) {
+        await this.tick();
+        const page = await this.reader.readPage(this.snapshot, after, LIMITS.pageEntries, LIMITS.pageBytes);
+        for (const e of page.entries) {
+          if (e.ref.entryId >= r.fromId) break;
+          step(e);
+        }
+        if (page.done || page.entries.length === 0) break;
+        after = page.nextAfterId;
+      }
+      let after = Math.max(r.fromId - 1, state.throughEntryId);
+      paging: for (;;) {
+        await this.tick();
+        const page = await this.reader.readPage(this.snapshot, after, LIMITS.pageEntries, LIMITS.pageBytes);
+        for (const e of page.entries) {
+          if (e.ref.entryId > r.toId) break paging;
+          const stepped = step(e);
+          if (stepped !== null && visit(e, stepped)) return;
+        }
+        if (page.done || page.entries.length === 0) break;
+        after = page.nextAfterId;
+      }
+    }
+  }
+
   // --- the answer ---------------------------------------------------------------------------------------
+
+  /** `unsupported` if any record's source sampling was, `absent` if no minute stated a rate, else the one rate or `mixed`. */
+  private rangeSampling(): RangeSampling {
+    if (this.unsupportedSampling > 0) return { kind: 'unsupported' };
+    if (this.samplingInterval === 0) return { kind: 'absent' };
+    return this.samplingInterval === SAMPLING_MIXED ? { kind: 'mixed' } : { kind: 'known', interval: this.samplingInterval };
+  }
+
+  /** The export clock against receipt time over the range; the latest skew is the newest minute's last. */
+  private rangeClock(): HistoryResult['clock'] {
+    if (this.clockMin === null || this.clockMax === null) return { latestSkewMs: null, minSkewMs: null, maxSkewMs: null, flagged: false };
+    let newest = -Infinity;
+    for (const minuteMs of this.lastSkew.keys()) newest = Math.max(newest, minuteMs);
+    return {
+      latestSkewMs: this.lastSkew.get(newest) ?? null,
+      minSkewMs: this.clockMin,
+      maxSkewMs: this.clockMax,
+      flagged: Math.abs(this.clockMin) > LIMITS.clockFlagMs || Math.abs(this.clockMax) > LIMITS.clockFlagMs,
+    };
+  }
 
   private result(boundaries: BoundaryEvidence[], nowMs: number, rollupMinutes: number, windows: Window[]): HistoryResult {
     // Where the raw evidence has expired the boundaries that said whether anything was running went with
@@ -1174,11 +1357,11 @@ class Query {
       matchingRecords: this.matching,
       answeredFrom: { rollupMinutes, rawMinutes },
       evidence: this.focused ? this.evidence : [],
-      awaitingTemplate: 0,
-      awaitingBytes: 0,
-      unsupportedTemplates: 0,
-      sampling: { kind: 'absent' },
-      clock: { latestSkewMs: null, minSkewMs: null, maxSkewMs: null, flagged: false },
+      awaitingTemplate: this.awaitingSets,
+      awaitingBytes: this.awaitingBytes,
+      unsupportedTemplates: this.unsupportedTemplateRecords,
+      sampling: this.rangeSampling(),
+      clock: this.rangeClock(),
     };
   }
 }

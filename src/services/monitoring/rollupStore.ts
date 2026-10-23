@@ -61,7 +61,7 @@ const CHECKPOINT_FIXED_BYTES = 1 + 3 + 4 + 8 + 8;
 export interface JournalBounds { generation: Generation; throughEntryId: number }
 
 /** The most checkpoints one `appendMinutes` may carry; the Worker posts the rest with the next. */
-export const MAX_APPEND_CHECKPOINTS = 4;
+export const MAX_APPEND_CHECKPOINTS = LIMITS.checkpointsPerAppend;
 const WATERMARK_BODY_BYTES = 16 + 8 + 2;
 const utf8 = new TextEncoder();
 const utf8Strict = new TextDecoder('utf-8', { fatal: true });

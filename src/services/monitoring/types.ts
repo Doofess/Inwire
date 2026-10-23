@@ -116,6 +116,8 @@ export const LIMITS = {
   checkpointSpacingBytes: 256 * MiB,
   /** A role-2 checkpoint is written at a stop this long in receipt time after the latest one (ADR 0064). */
   checkpointStopMs: 60 * 60_000,
+  /** The most checkpoints one `appendMinutes` may carry; the Worker posts the rest with the next batch. */
+  checkpointsPerAppend: 4,
 } as const;
 
 // --- configuration --------------------------------------------------------------

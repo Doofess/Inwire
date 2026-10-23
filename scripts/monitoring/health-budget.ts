@@ -501,5 +501,64 @@ test('a datagram fed after the clock moved on keeps its own age, so an old one i
   assert.equal(older.lastValidElapsedMs, 100_000, 'an older stamp never moves the last valid time back');
 });
 
+// --- v9 and IPFIX sources (ADRs 0064, 0066) ------------------------------------------------
+
+const V9 = `v9:${EXPORTER}/1`;
+const IPFIX = `ipfix:${EXPORTER}/7`;
+function templated(
+  elapsedMs: number, key: string, flowCount: number, over: Partial<{ entryId: number; admitted: boolean; awaitingSets: number; awaitingBytes: number }> = {},
+): HealthEvent {
+  return {
+    kind: 'datagram', outcome: 'valid-template', protocol: key.startsWith('v9:') ? 'v9' : 'ipfix', sourceKey: key, flowCount,
+    entryId: over.entryId ?? 1, awaitingSets: over.awaitingSets ?? 0, awaitingBytes: over.awaitingBytes ?? 0,
+    elapsedMs, wallMs: WALL + elapsedMs, ...(over.admitted === undefined ? {} : { admitted: over.admitted }),
+  };
+}
+
+test('a v9 or IPFIX datagram makes the source fresh and gets a row of its own, with no engine and no v5 sequence', () => {
+  const h = run([templated(0, V9, 3, { awaitingSets: 1, awaitingBytes: 40 }), templated(10, IPFIX, 2), templated(20, V9, 1)]);
+  assert.equal(h.freshness, 'fresh');
+  assert.equal(h.accepted, 3);
+  assert.equal(h.engines.length, 0);
+  assert.deepEqual(h.templateSources.map((r) => [r.sourceKey, r.protocol, r.accepted, r.flows, r.awaitingSets, r.awaitingBytes]), [
+    [V9, 'v9', 2, 4, 1, 40], [IPFIX, 'ipfix', 1, 2, 0, 0],
+  ]);
+  assert.equal(h.lastValidElapsedMs, 20);
+});
+
+test('the template sources and the v5 engines share the sixteen rows an exporter gets', () => {
+  const engines = Array.from({ length: LIMITS.enginesPerExporter - 1 }, (_, i) => valid(i, i, 0, 1));
+  const h = run([...engines, templated(100, V9, 1), templated(101, IPFIX, 1), valid(102, 200, 0, 1)]);
+  assert.equal(h.engines.length + h.templateSources.length, LIMITS.enginesPerExporter);
+  assert.equal(h.engineLimitRejected, 2, 'the seventeenth identity of either kind');
+  assert.equal(canAdmitEngine(h, 0, 200), false);
+  const refused = run([templated(0, V9, 1, { admitted: false })]);
+  assert.equal(refused.templateSources.length, 0);
+  assert.equal(refused.engineLimitRejected, 1);
+});
+
+test('the exporter events land on their source\'s row; one for a source with no row changes nothing', () => {
+  const t = { elapsedMs: 5, wallMs: WALL + 5 };
+  const h = run([
+    templated(0, V9, 1),
+    { kind: 'source-restart', sourceKey: V9, entryId: 2, ...t },
+    { kind: 'export-gap', sourceKey: V9, entryId: 3, missing: 7, ...t },
+    { kind: 'export-gap', sourceKey: V9, entryId: 4, missing: 2, ...t },
+    { kind: 'clock-skew', sourceKey: V9, entryId: 5, skewMs: 90_000, ...t },
+    { kind: 'sampling-changed', sourceKey: V9, entryId: 6, status: { kind: 'known', interval: 100, sinceEntryId: 6 }, ...t },
+    { kind: 'awaiting-template', sourceKey: V9, entryId: 7, templateId: 300, ...t },
+    { kind: 'source-restart', sourceKey: IPFIX, entryId: 8, ...t },
+  ]);
+  assert.equal(h.templateSources.length, 1);
+  const row = h.templateSources[0];
+  assert.equal(row.restarts, 1);
+  assert.equal(row.exportGaps, 2);
+  assert.equal(row.missingSequence, 9);
+  assert.equal(row.clockFlags, 1);
+  assert.equal(row.lastFlaggedSkewMs, 90_000);
+  assert.deepEqual(row.sampling, { kind: 'known', interval: 100, sinceEntryId: 6 });
+  assert.equal(row.lastAwaitingTemplateId, 300);
+});
+
 console.log(failures === 0 ? '\nall passed' : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

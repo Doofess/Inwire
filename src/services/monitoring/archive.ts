@@ -76,7 +76,11 @@ export interface ArchiveCut {
   throughMs: number;
   fragments: number;
   reason: 'age' | 'limit' | 'user-before';
-  /** Reserved for the admission state a later policy may carry; empty in this one. */
+  /**
+   * The decode state through `throughEntryId`, as `DecodeState.checkpoint()` encodes it, raw (ADR 0066): what the
+   * template store held when these entries left, so the entry after them can still be decoded. Empty for a cut
+   * made before policy 2 existed, which stands for empty state through that entry.
+   */
   checkpoint: Uint8Array;
 }
 
@@ -410,18 +414,22 @@ export class ArchiveStore {
  * adds the retained fragment to it. A (source, minute) the aggregator sealed more than once - a clock
  * that stepped back - is merged into one. `deflate` is injected like everywhere else a rollup is encoded.
  */
-export function expiryFragments(entries: Evidence[], session: SessionContext, deflate: Deflate): ArchivedMinute[] {
-  if (entries.length === 0) return [];
+export function expiryFragments(
+  entries: Evidence[], session: SessionContext, deflate: Deflate, start: DecodeState,
+): { minutes: ArchivedMinute[]; checkpoint: Uint8Array } {
+  if (entries.length === 0) return { minutes: [], checkpoint: start.checkpoint() };
   const agg = new MinuteAggregator(entries[0].ref.entryId - 1);
   const admission = new EngineAdmission(session.knownSources);
-  const state = DecodeState.empty(entries[0].ref.entryId - 1);
-  for (const e of entries) feedEntry(agg, admission, state, e);
+  for (const e of entries) feedEntry(agg, admission, start, e);
   agg.seal(Infinity);
+  // The state through the last entry: the cut keeps it, so the first retained entry can be decoded after the rest is gone.
+  const checkpoint = start.checkpoint();
   const drained = agg.drain();
-  if (drained === null) return [];
+  if (drained === null) return { minutes: [], checkpoint };
   const groups = new Map<string, { rollups: MinuteRollup[]; lastId: number }>();
   for (const f of drained.fragments) {
-    const key = `${f.rollup.minuteMs}\n${f.rollup.sourceKey}`;
+    // A minute is encoded under its own policy: the same (source, minute) from two segments of different policy stays two.
+    const key = `${f.rollup.minuteMs}\n${f.rollup.sourceKey}\n${f.rollup.policy}`;
     const g = groups.get(key);
     if (g === undefined) groups.set(key, { rollups: [f.rollup], lastId: f.lastId });
     else { g.rollups.push(f.rollup); g.lastId = Math.max(g.lastId, f.lastId); }
@@ -439,7 +447,7 @@ export function expiryFragments(entries: Evidence[], session: SessionContext, de
       bytes: encodeMinuteRollup(rollup, deflate),
     });
   }
-  return out;
+  return { minutes: out, checkpoint };
 }
 
 // --- the run -------------------------------------------------------------------------------------------
@@ -448,8 +456,22 @@ export interface RunExpiryOptions {
   /** Encodes the archived minutes; required unless `replay` makes them. */
   deflate?: Deflate;
   nowMs?: number;
-  /** The seam Task 4 puts the Worker behind: entries and the world before them in, archive fragments out. */
-  replay?: (entries: Evidence[], sessionAtStart: SessionContext) => ArchivedMinute[];
+  /**
+   * The seam Task 4 puts the Worker behind: entries and the world before them in (the sources admitted and the
+   * decode state through the entry before the first), archive fragments and the state through the last entry out.
+   */
+  replay?: (entries: Evidence[], sessionAtStart: SessionContext, start: DecodeState) => { minutes: ArchivedMinute[]; checkpoint: Uint8Array };
+}
+
+/**
+ * The decode state an expiry's replay begins from: the last cut's checkpoint, empty state through the cut
+ * when an older cut kept none, and empty state before the first retained entry when there is no cut. Null
+ * when the checkpoint is not one, or is the state through some entry other than the one before `firstEntryId`.
+ */
+function startState(cut: ArchiveCut | null, firstEntryId: number): DecodeState | null {
+  if (cut === null) return DecodeState.empty(firstEntryId - 1);
+  const state = cut.checkpoint.length === 0 ? DecodeState.empty(cut.throughEntryId, cut.throughMs) : DecodeState.fromCheckpoint(cut.checkpoint);
+  return state !== null && state.throughEntryId === firstEntryId - 1 ? state : null;
 }
 
 /** The newest `expired` boundary the journal still holds: its own entry id and the last entry id it took out. */
@@ -576,15 +598,21 @@ export function runExpiry(
 
     // Everything admitted before this range is in the archive; nothing later is known yet.
     const context: SessionContext = { knownSources: archive.sources() };
-    let fragments: ArchivedMinute[];
-    if (opts.replay !== undefined) fragments = opts.replay(entries, context);
-    else if (opts.deflate !== undefined) fragments = expiryFragments(entries, context, opts.deflate);
+    // The replay starts from the state the last cut kept (ADR 0066): what the templates were when the entries
+    // before these went. A checkpoint that does not decode, or that is not the state just before the first
+    // entry, is not a start to trust: nothing is written, and a later run says the same.
+    const start = startState(archive.lastCut(), first.firstEntryId);
+    if (start === null) return 'failed';
+    let replayed: { minutes: ArchivedMinute[]; checkpoint: Uint8Array };
+    if (opts.replay !== undefined) replayed = opts.replay(entries, context, start);
+    else if (opts.deflate !== undefined) replayed = expiryFragments(entries, context, opts.deflate, start);
     else return 'failed';
+    const fragments = replayed.minutes;
 
     // The range the journal's `expired` boundary will record: the first entry's receipt time, the last segment's.
     archive.append(fragments, {
       fromEntryId: first.firstEntryId, throughEntryId: plan.throughEntryId, fromMs: entries[0].receivedMs, throughMs: plan.throughMs,
-      fragments: fragments.length, reason: plan.reason, checkpoint: new Uint8Array(0),
+      fragments: fragments.length, reason: plan.reason, checkpoint: replayed.checkpoint,
     });
     let r: ReturnType<MonitoringJournal['dropSegments']>;
     try {

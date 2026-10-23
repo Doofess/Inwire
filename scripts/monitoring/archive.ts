@@ -480,7 +480,7 @@ test('crash (a): fragments written, no cut - the reopened archive drops them and
   // What a crash between the fragments and the cut leaves: the fragments, no cut, the journal untouched.
   const first = rig.journal.segments()[0].firstEntryId;
   const entries = readFrom(rig, first - 1).filter((e) => e.ref.entryId <= w.plan.throughEntryId);
-  const frags = expiryFragments(entries, { knownSources: w.cacheKnown }, deflate);
+  const frags = expiryFragments(entries, { knownSources: w.cacheKnown }, deflate, DecodeState.empty(first - 1)).minutes;
   assert.ok(frags.length > 10);
   rig.archive.append(frags, {
     fromEntryId: first, throughEntryId: w.plan.throughEntryId, fromMs: entries[0].receivedMs, throughMs: w.plan.throughMs,
@@ -633,8 +633,8 @@ test('a replay that throws, or a cache that cannot say who is admitted, fails th
 test('expiryFragments is deterministic and carries the policy it wrote under', () => {
   const w = world();
   const entries = readFrom(w.rig, 0).slice(0, 700);
-  const a = expiryFragments(entries, { knownSources: [] }, deflate);
-  const b = expiryFragments(entries, { knownSources: [] }, deflate);
+  const a = expiryFragments(entries, { knownSources: [] }, deflate, DecodeState.empty(0)).minutes;
+  const b = expiryFragments(entries, { knownSources: [] }, deflate, DecodeState.empty(0)).minutes;
   assert.deepEqual(a.map((m) => hex(m.bytes)), b.map((m) => hex(m.bytes)));
   assert.ok(a.length > 0 && a.every((m) => m.policyVersion === 2 && m.bytes[0] === 2 && m.bytes[1] === 0));
   assert.ok(a.every((m) => m.throughEntryId <= 700));
