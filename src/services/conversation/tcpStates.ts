@@ -15,6 +15,16 @@
  * (`tcp.seq`, `tcp.len`, `tcp.ack`): an ACK reaching one past the FIN's
  * sequence number acknowledges it. Without numbers, the other side's next ACK
  * is taken to, which is what a ladder drawn by hand would assume.
+ *
+ * A bare SYN can open a second connection on the same five-tuple, and nothing
+ * in the old one need have announced its end: the close may be unseen, or its
+ * last ACK missed. Each side's raw initial sequence number (`tcp.seq_raw`) is
+ * kept, and a SYN with a different one, or one the TCP analysis flagged as
+ * reused ports, starts a new incarnation; the old one's FINs, RST and states are
+ * dropped first so the new handshake cannot acknowledge them. A SYN with the
+ * same ISN is the same connection (a retransmission, or a mirror-port
+ * duplicate) and changes nothing. With no ISN to compare, a side already past
+ * SYN_SENT cannot be sending its first SYN, so that starts over as well.
  */
 
 export type TcpState =
@@ -34,6 +44,10 @@ export interface TcpSegment {
   seq?: number;
   len?: number;
   ackNo?: number;
+  /** `tcp.seq_raw`: the sequence number as sent, which relative `seq` hides. */
+  rawSeq?: number;
+  /** The row carries the `reused_ports` analysis flag: tshark saw a new session on old ports. */
+  reused?: boolean;
 }
 
 export type Evidence = 'sent' | 'received' | 'inferred';
@@ -65,6 +79,13 @@ export interface TcpMachineState {
   joined: boolean;
   sawSyn: boolean;
   sawSynAck: boolean;
+  /**
+   * Each side's initial sequence number, raw, from its SYN or SYN+ACK. Relative
+   * numbers read 0 on every SYN, so only this tells two connections on one
+   * five-tuple apart. Absent in snapshots from before it existed: read it as
+   * `st.isn?.[side] ?? null`.
+   */
+  isn: { client: number | null; server: number | null };
 }
 
 export function freshMachineState(): TcpMachineState {
@@ -74,6 +95,7 @@ export function freshMachineState(): TcpMachineState {
     finSent: { client: false, server: false },
     finAcked: { client: false, server: false },
     rstFrom: null, everEstablished: false, joined: false, sawSyn: false, sawSynAck: false,
+    isn: { client: null, server: null },
   };
 }
 
@@ -108,17 +130,25 @@ export class TcpStateMachine {
 
     if (seg.syn) {
       if (!seg.ack) {
-        // A new incarnation on a five-tuple that closed: everything the
-        // connection before it left behind belongs to that connection. The
-        // reset runs first, so the SYN below is the new one's first fact.
-        if (CLOSED_LIKE.has(st[s]) && st[s] !== 'UNKNOWN') this.resetIncarnation();
+        const known = st.isn?.[s] ?? null;
+        // The same ISN is the same connection: a retransmission, or a copy the
+        // mirror port delivered twice, and it never splits one, however far
+        // along it is. It is not a new fact either, so it moves nothing.
+        if (known !== null && seg.rawSeq === known) return out;
+        // A new incarnation on a five-tuple: everything the connection before
+        // it left behind belongs to that connection, and the FIN of the old
+        // one must not be acknowledged by the handshake of the new. The reset
+        // runs first, so the SYN below is the new one's first fact.
+        if (this.startsNewIncarnation(seg, known)) this.resetIncarnation(s);
         st.sawSyn = true;
+        if (seg.rawSeq !== undefined) this.recordIsn(s, seg.rawSeq);
         if (CLOSED_LIKE.has(st[s])) move(s, 'SYN_SENT', 'sent', 'syn');
         if (st[r] === 'UNKNOWN' || st[r] === 'CLOSED') move(r, 'LISTEN', 'inferred', 'listen');
         else if (st[r] === 'SYN_SENT') move(r, 'SYN_RCVD', 'received', 'syn');
         return out;
       }
       st.sawSynAck = true;
+      if (seg.rawSeq !== undefined) this.recordIsn(s, seg.rawSeq);
       if (st[s] === 'UNKNOWN' || st[s] === 'CLOSED') move(s, 'LISTEN', 'inferred', 'listen');
       if (st[s] === 'LISTEN' || st[s] === 'SYN_SENT') move(s, 'SYN_RCVD', 'sent', 'syn+ack');
       if (st[r] === 'UNKNOWN') move(r, 'SYN_SENT', 'inferred', 'syn');
@@ -168,8 +198,41 @@ export class TcpStateMachine {
     return ((seg.ackNo - end) | 0) >= 0;
   }
 
-  private resetIncarnation(): void {
+  /**
+   * Whether a bare SYN is not part of the connection folded so far. The row's
+   * reused-ports flag says so outright; a different ISN says so when this
+   * side's is known; with neither to go on, a side already past SYN_SENT cannot
+   * be sending its first SYN (SYN_RCVD is the simultaneous open, and SYN_SENT
+   * and LISTEN are retransmissions and the inferred listener).
+   */
+  private startsNewIncarnation(seg: TcpSegment, known: number | null): boolean {
+    if (seg.reused) return true;
+    if (known !== null && seg.rawSeq !== undefined) return known !== seg.rawSeq;
+    const was = this.state[seg.from];
+    return was !== 'UNKNOWN' && was !== 'LISTEN' && was !== 'SYN_SENT' && was !== 'SYN_RCVD';
+  }
+
+  private recordIsn(side: Side, rawSeq: number): void {
+    // A state restored from a snapshot older than `isn` has none.
+    const isn = this.state.isn ?? (this.state.isn = { client: null, server: null });
+    isn[side] = rawSeq;
+  }
+
+  /**
+   * Forget the connection before a new one's SYN. A side that had closed keeps
+   * its state, so the new SYN reads as leaving it. Any other side's close went
+   * unseen, and is taken to have happened: it is put in CLOSED without a step,
+   * so the new handshake reads as an active and a passive open. UNKNOWN would
+   * read as "SYN not captured" on the map, and this SYN was.
+   */
+  private resetIncarnation(sender: Side): void {
     const st = this.state;
+    for (const side of ['client', 'server'] as const) {
+      if (side === sender ? !CLOSED_LIKE.has(st[side]) : st[side] !== 'CLOSED' && st[side] !== 'UNKNOWN') {
+        st[side] = 'CLOSED';
+      }
+    }
+    st.isn = { client: null, server: null };
     st.finEnd = { client: null, server: null };
     st.finSent = { client: false, server: false };
     st.finAcked = { client: false, server: false };

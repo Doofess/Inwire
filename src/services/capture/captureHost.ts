@@ -118,6 +118,13 @@ interface DigestRebuild {
   total: number;
   deferred: Packet[];
   overflowed: boolean;
+  /**
+   * The newest id of the oldest chunk held when the fold began, when a ring
+   * had already deleted chunks below it; null when nothing was ever removed.
+   * A stream first heard no later than it, and without a SYN, lost its start
+   * to the ring (`StreamDigest.markExpiredStarts`).
+   */
+  floorLastId: number | null;
   /** `protocolLabel` patches that arrived meanwhile, applied after `deferred`. */
   labels: Map<number, string>;
 }
@@ -178,6 +185,8 @@ export interface CaptureHostOptions {
    * test can see the paging on a capture of a few chunks.
    */
   streamOrdinalChunks?: number;
+  /** Rows held back while a rebuild runs. Default `DIGEST_DEFERRED_MAX`. Settable so a test can overflow it. */
+  digestDeferredMax?: number;
 }
 
 export class CaptureHost {
@@ -197,6 +206,7 @@ export class CaptureHost {
    * would pass whether or not the yield happened.
    */
   private readonly scanSliceMs: number;
+  private readonly digestDeferredMax: number;
   private readonly deflate: ((bytes: Uint8Array) => Uint8Array) | undefined;
   private readonly inflate: (bytes: Uint8Array) => Uint8Array;
   private readonly streamOrdinalChunks: number;
@@ -210,6 +220,7 @@ export class CaptureHost {
     this.deflate = options.deflate;
     this.inflate = options.inflate ?? inflateSync;
     this.streamOrdinalChunks = options.streamOrdinalChunks ?? 32;
+    this.digestDeferredMax = options.digestDeferredMax ?? DIGEST_DEFERRED_MAX;
   }
 
   /**
@@ -427,6 +438,8 @@ export class CaptureHost {
       rebuild: restored !== null ? null : {
         next: writer.index.floorChunk, total: writer.index.chunkCount,
         deferred: [], overflowed: false, labels: new Map(),
+        floorLastId: writer.index.floorChunk > 0 && writer.index.floorChunk < writer.index.chunkCount
+          ? writer.index.record(writer.index.floorChunk).lastId : null,
       },
       digestPartial: false,
     };
@@ -487,7 +500,7 @@ export class CaptureHost {
       open.digest.feed(row);
       return;
     }
-    if (rebuild.deferred.length < DIGEST_DEFERRED_MAX) rebuild.deferred.push(row);
+    if (rebuild.deferred.length < this.digestDeferredMax) rebuild.deferred.push(row);
     else rebuild.overflowed = true;
   }
 
@@ -541,6 +554,7 @@ export class CaptureHost {
       setTimeout(() => this.queue.run(() => this.stepRebuild(open)), 0);
       return;
     }
+    if (rebuild.floorLastId !== null) open.digest.markExpiredStarts(rebuild.floorLastId);
     for (const p of rebuild.deferred) open.digest.feed(p);
     for (const [frameId, label] of rebuild.labels) open.digest.relabel(frameId, label);
     open.rebuild = null;
@@ -577,7 +591,7 @@ export class CaptureHost {
     }
     this.post({
       type: 'streamDigest', requestId: message.requestId, captureId: open?.id ?? null,
-      version, summaries, rebuilding,
+      version, summaries, rebuilding, partial: open?.digestPartial ?? false,
     });
   }
 

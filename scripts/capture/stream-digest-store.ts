@@ -20,6 +20,8 @@ import { plainForStore } from '../../src/services/capture/storePacket';
 import { readExact } from '../../src/services/capture/blockFile';
 import { decodeDigest, encodeDigest } from '../../src/services/conversation/digestCodec';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
+import { RingFiling } from '../../src/services/pipeline/ringFiling';
+import type { RawFrame } from '../../src/services/capture/captureWriter';
 import { deflateSync, inflateSync } from 'fflate';
 import { serialize, deserialize } from 'node:v8';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
@@ -142,7 +144,7 @@ console.log('--- 1. every request answers ---\n');
   h.send({ type: 'streamOrdinals', requestId: 2, streamId: 7, fromId: 1, toId: 100, startChunk: 0 });
   await h.store.drain();
   check('streamDigest with nothing open answers empty', h.of('streamDigest'), [
-    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], rebuilding: null },
+    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], rebuilding: null, partial: false },
   ]);
   check('streamOrdinals with nothing open answers empty', h.of('streamOrdinals'), [
     { type: 'streamOrdinals', requestId: 2, ordinals: [], nextChunk: null },
@@ -315,6 +317,112 @@ console.log('\n--- extra: rows arriving during a rebuild are deferred, then fold
     expected7.length);
   check('nothing failed', h.of('failure'), []);
   h.store.close();
+}
+
+console.log('\n--- I2. a rebuild of a ring capture: the removed start is not "joined" ---\n');
+
+{
+  // A ring of 1,000-frame files keeping three, fed the way the pipeline Worker
+  // feeds it (`scripts/capture/segments.ts`): stream 7 opens with its handshake
+  // in file 1, which the ring then deletes; stream 11 really joins mid-stream,
+  // in file 5, which the ring keeps.
+  const FILE_FRAMES = 1_000;
+  const KEEP = 3;
+  const TOTAL = 5 * FILE_FRAMES;
+  nextId = 1;
+  const ringRows: Packet[] = [row(true, 'S', { seq: 0 }), row(false, 'SA', { seq: 0, ack: 1 }), row(true, 'A', { seq: 1, ack: 1 })];
+  while (ringRows.length < TOTAL) {
+    const i = ringRows.length;
+    ringRows.push(i >= 4100 && i < 4103
+      ? row(true, 'A', { seq: 500 + i, ack: 1, len: 10, streamId: 11 })
+      : row(i % 2 === 0, 'A', { seq: i, ack: 1, len: 10 }));
+  }
+  const RING_ID = 'cap-20261009-120000-ring';
+  const ringVolume = new MemoryVolume();
+  {
+    const h = host({ scanSliceMs: 0 }, ringVolume);
+    const filing = new RingFiling();
+    const send = (message: ToCapture) => h.send(deserialize(serialize(message)) as ToCapture);
+    h.send({ type: 'open', captureId: RING_ID });
+    for (let at = 0; at < TOTAL; at += 300) {
+      const batch = ringRows.slice(at, at + 300);
+      const frames: RawFrame[] = [];
+      for (let i = 0; i < batch.length; i++) {
+        const seq = at + i;
+        if (seq % FILE_FRAMES === 0) {
+          const file = seq / FILE_FRAMES + 1;
+          if (file > KEEP) send({ type: 'ringDeleted', epoch: filing.epoch || 1, lastSeq: (file - KEEP) * FILE_FRAMES - 1 });
+          filing.boundary(file, seq);
+        }
+        const part = filing.partOf(seq);
+        const p = batch[i];
+        frames.push(part === undefined
+          ? { id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }
+          : { id: p.id, tsUs: p.tsUs, bytes: p.rawBytes, ring: part });
+      }
+      send({ type: 'appendBytes', frames });
+      send({ type: 'append', packets: batch.map((p) => plainForStore(p)) });
+    }
+    const live = await ask(h, 0, 700);
+    check('live, stream 7 was seen from its handshake', live?.summaries.find((s) => s.streamId === 7)?.joinedMidStream, false);
+    h.send({ type: 'finish' });
+    await h.store.drain();
+    h.store.close();
+  }
+  writeDigestFile(ringVolume, RING_ID, new Uint8Array(0));
+  const h = host({ scanSliceMs: 0 }, ringVolume);
+  h.send({ type: 'open', captureId: RING_ID });
+  const rebuilt = await untilRebuilt(h, 710);
+  checkTrue('the ring really took the first file', (h.of('ready')[0]?.floorOrdinal ?? 0) > 0);
+  const s7 = rebuilt?.summaries.find((s) => s.streamId === 7);
+  const s11 = rebuilt?.summaries.find((s) => s.streamId === 11);
+  check('rebuilt, the stream whose handshake expired folds as joined', s7?.joinedMidStream, true);
+  check('...and says the ring took its start', s7?.startExpired, true);
+  check('a stream that really joined mid-stream, in a file the ring kept, is still only joined',
+    [s11?.joinedMidStream, s11?.startExpired === true], [true, false]);
+  h.store.close();
+}
+
+console.log('\n--- I6. a rebuild that dropped rows says so, and is never written as whole ---\n');
+
+{
+  nextId = bigRows[bigRows.length - 1].id + 3;   // past the "extra" section's two late rows
+  const lastBig = nextId - 1;
+  const late = [row(true, 'S', { seq: 0, streamId: 12 }), row(false, 'SA', { seq: 0, ack: 1, streamId: 12 }),
+    row(true, 'A', { seq: 1, ack: 1, streamId: 12 })];
+
+  // No snapshot, one slice a chunk, three rows queued behind the open and room for one.
+  writeDigestFile(bigVolume, BIG, new Uint8Array(0));
+  const h = host({ scanSliceMs: 0, digestDeferredMax: 1 }, bigVolume);
+  h.send({ type: 'open', captureId: BIG });
+  h.send({ type: 'append', packets: crossed(late) });
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  const during = await ask(h, 0, 800);
+  checkTrue('the rebuild is still running when finish comes', during?.rebuilding !== null && during?.rebuilding !== undefined);
+  check('...a rebuild under way is not partial yet', during?.partial, false);
+  check('no snapshot is written while it runs', digestFile(bigVolume, BIG).length, 0);
+  const done = await untilRebuilt(h, 801);
+  check('overflowing the deferred rows marks the digest partial', done?.partial, true);
+  checkTrue('...and says so in a failure', h.of('failure').some((m) => /missed rows/.test(m.message)));
+  check('...having kept the one row that fitted', done?.summaries.find((s) => s.streamId === 12)?.toServer.packets, 1);
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  check('no snapshot is written after a partial rebuild either', digestFile(bigVolume, BIG).length, 0);
+  h.store.close();
+  check('...and close writes none', digestFile(bigVolume, BIG).length, 0);
+
+  // The same capture with room for them is whole, and a whole rebuild is written.
+  void lastBig;
+  writeDigestFile(bigVolume, BIG, new Uint8Array(0));
+  const roomy = host({ scanSliceMs: 0 }, bigVolume);
+  roomy.send({ type: 'open', captureId: BIG });
+  const whole = await untilRebuilt(roomy, 810);
+  check('with room for every row the rebuild is whole', whole?.partial, false);
+  roomy.send({ type: 'finish' });
+  await roomy.store.drain();
+  checkTrue('...and its snapshot is written', digestFile(bigVolume, BIG).length > 0);
+  roomy.store.close();
 }
 
 console.log(failures === 0

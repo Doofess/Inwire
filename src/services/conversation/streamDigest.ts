@@ -52,6 +52,13 @@ export interface StreamSummary {
   lostSegments: number;
   zeroWindows: number;
   joinedMidStream: boolean;
+  /**
+   * A rebuild folded this stream from the ring's floor and its first frame
+   * there has no SYN: the start was probably captured and then expired, not
+   * missed. Set with `joinedMidStream`, which it overrides in the words. Absent
+   * in older snapshots, which reads as false.
+   */
+  startExpired?: boolean;
   outcome: TcpOutcome;
   /** The digest's version when this summary last changed. */
   version: number;
@@ -75,6 +82,7 @@ export function segmentOf(row: Packet, from: Side): TcpSegment {
   const seq = num('tcp.seq');
   const len = num('tcp.len');
   const ackNo = num('tcp.ack');
+  const rawSeq = num('tcp.seq_raw');
   return {
     from,
     syn: fieldValue(row, 'tcp.flags.syn') === 1,
@@ -84,15 +92,27 @@ export function segmentOf(row: Packet, from: Side): TcpSegment {
     ...(seq !== undefined ? { seq } : {}),
     ...(len !== undefined ? { len } : {}),
     ...(ackNo !== undefined ? { ackNo } : {}),
+    ...(rawSeq !== undefined ? { rawSeq } : {}),
+    ...(row.analysisFlags?.includes('reused_ports') ? { reused: true } : {}),
   };
 }
 
-interface Entry { summary: StreamSummary; machine: TcpMachineState }
+export interface DigestEntry { summary: StreamSummary; machine: TcpMachineState }
+type Entry = DigestEntry;
 
+/**
+ * What `encodeDigest` takes. `entries` is any iterable, so a caller with
+ * hundreds of thousands of streams need not materialise them first.
+ */
 export interface DigestSnapshotData {
   throughId: number;
   version: number;
-  entries: Entry[];
+  entries: Iterable<DigestEntry>;
+}
+
+/** What `snapshot()` returns and `decodeDigest` reads back, and `restore` takes. */
+export interface DigestSnapshot extends DigestSnapshotData {
+  entries: DigestEntry[];
 }
 
 const emptyTotals = (): DirectionTotals => ({ packets: 0, bytes: 0, first: null, last: null });
@@ -170,6 +190,21 @@ export class StreamDigest {
     this.recent.set(row.id, streamId);
   }
 
+  /**
+   * After a rebuild that began above the capture's first frame: a stream that
+   * folded as joined mid-stream and first appears no later than `floorLastId`,
+   * the newest id of the oldest chunk held, most likely lost its start to the
+   * ring rather than never having one. The chunk is the evidence available - a
+   * stream first heard further in is as likely to have joined late.
+   */
+  markExpiredStarts(floorLastId: number): void {
+    for (const { summary } of this.streams.values()) {
+      if (!summary.joinedMidStream || summary.startExpired === true || summary.firstId > floorLastId) continue;
+      summary.startExpired = true;
+      summary.version = ++this.versionValue;
+    }
+  }
+
   /** An `InfoPatch.protocolLabel` for a frame already folded. */
   relabel(frameId: number, label: string): void {
     const streamId = this.recent.get(frameId);
@@ -187,17 +222,28 @@ export class StreamDigest {
     return out;
   }
 
-  snapshot(): DigestSnapshotData {
-    // Copied: the store serialises this later while the digest keeps folding.
-    return { throughId: this.through, version: this.versionValue, entries: structuredClone([...this.streams.values()]) };
+  /**
+   * The digest's own entries, not copies. `encodeDigest` reads them
+   * synchronously (`CaptureHost.writeSnapshot`), so nothing folds in between;
+   * a caller that holds the result across a `feed` holds a moving target. The
+   * copy this used to make was 2.4 s and 239 MB at 100k streams (ADR 0055,
+   * final review I3).
+   */
+  snapshot(): DigestSnapshot {
+    return { throughId: this.through, version: this.versionValue, entries: [...this.streams.values()] };
   }
 
-  static restore(data: DigestSnapshotData): StreamDigest {
+  /**
+   * Adopts `data`'s entries: `feed` goes on to mutate them, so the caller
+   * hands over what `decodeDigest` just built and keeps no hold on it. The
+   * copy this used to make was most of a reopen's time, 6 s of 8 at 500k
+   * streams.
+   */
+  static restore(data: DigestSnapshot): StreamDigest {
     const d = new StreamDigest();
     d.through = data.throughId;
     d.versionValue = data.version;
-    // Copied: the caller keeps its data, and feed mutates what it adopts.
-    for (const entry of structuredClone(data.entries)) d.streams.set(entry.summary.streamId, entry);
+    for (const entry of data.entries) d.streams.set(entry.summary.streamId, entry);
     return d;
   }
 

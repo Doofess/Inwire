@@ -13,9 +13,10 @@ import type { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
 import {
   arrowsThatFit, initialWindow, ladderExtent, layoutLadder, panWindow,
-  revealScroll, rowMeta, windowAround, zoomWindow,
+  rowMeta, windowAround, zoomWindow,
   type LadderArrow, type LadderWindow,
 } from './ladderLayout';
+import { rechoosesWindow, revealStep, type WindowTrigger } from './ladderFollow';
 import { foldRuns, itemPacket, type LadderItem } from './ladderRuns';
 import { lanePills, markLadder, ROW_ABOVE, ROW_BELOW, type LadderMark, type LanePill } from './ladderMarks';
 
@@ -193,10 +194,22 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // live capture would pull a window somebody had panned away back to the
   // selection ten times a second.
   const followedRef = useRef<number | undefined>(undefined);
-  useEffect(() => {
+  // Whether the user has moved the window of the stream on screen: a wheel, a
+  // pan, a minimap drag or a click on the state map. Pages then stop choosing it.
+  const actedRef = useRef(false);
+  // The state map's request already answered. Cleared whenever the window is
+  // chosen again, so the request that was answered against the old window is
+  // answered against the new one.
+  const scrolledRef = useRef<ScrollRequest | null>(null);
+  const rechoose = useCallback((trigger: WindowTrigger) => {
+    if (trigger === 'stream') actedRef.current = false;
+    if (!rechoosesWindow(trigger, actedRef.current)) return;
     followedRef.current = undefined;
+    scrolledRef.current = null;
     setWindow(initialWindow(itemsRef.current, plotHeightRef.current));
-  }, [firstFrame, client, settling]);
+  }, []);
+  useEffect(() => rechoose('stream'), [firstFrame, client, rechoose]);
+  useEffect(() => rechoose('page'), [settling, rechoose]);
 
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -264,27 +277,44 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // past the box's height, and a frame placed below its fold is in the window
   // and still off screen. Answered once the layout has placed it.
   const revealRef = useRef<number | null>(null);
+  // A render is what runs the reveal, and a frame already inside the time
+  // window changes nothing the layout depends on: asking bumps this so it runs.
+  const [revealTick, setRevealTick] = useState(0);
+  const askReveal = useCallback((id: number) => {
+    revealRef.current = id;
+    setRevealTick((t) => t + 1);
+  }, []);
+  // Every move of the window the user makes goes through here: it stops pages
+  // choosing the window again, and withdraws a reveal still waiting - a frame
+  // never placed is not scrolled to later by a zoom that happens to place it.
+  const takeWindow = useCallback((next: React.SetStateAction<LadderWindow>) => {
+    actedRef.current = true;
+    revealRef.current = null;
+    setWindow(next);
+  }, []);
   useEffect(() => {
     if (selectedId === undefined || selectedId === followedRef.current) return;
     // Recorded only once found: a frame still on its way from disk is followed
     // by the page that brings it.
     if (bringIntoView(selectedId)) {
       followedRef.current = selectedId;
-      revealRef.current = selectedId;
+      askReveal(selectedId);
     }
-  }, [selectedId, bringIntoView]);
+  }, [selectedId, bringIntoView, askReveal]);
   // The request answered, by identity: a re-run for a change of
   // `bringIntoView` (every flush) does not pull the window back, and a second
   // click on one state is a new object and so a new request. A request whose
   // frame is not here yet stays pending, and the page that brings it answers it.
-  const scrolledRef = useRef<ScrollRequest | null>(null);
   useEffect(() => {
     if (scrollTo === undefined || scrollTo === null || scrollTo === scrolledRef.current) return;
     if (bringIntoView(scrollTo.frameId)) {
       scrolledRef.current = scrollTo;
-      revealRef.current = scrollTo.frameId;
+      // A click on the state map is the user taking the window: pages still
+      // arriving must not choose it again from under the frame it brought in.
+      actedRef.current = true;
+      askReveal(scrollTo.frameId);
     }
-  }, [scrollTo, bringIntoView]);
+  }, [scrollTo, bringIntoView, askReveal]);
 
   // A frame named from outside that a closed band is hiding opens the band:
   // the selection must be drawn selected, and a frame the state map points at
@@ -319,18 +349,15 @@ export const LadderView: React.FC<LadderViewProps> = ({
     const box = boxRef.current;
     if (box === null) return;
     event.preventDefault();
-    // The user has taken the window: a frame never placed is not scrolled to
-    // later by a zoom that happens to place it.
-    revealRef.current = null;
     const bounds = box.getBoundingClientRect();
     const anchor = Math.min(Math.max(
       (event.clientY - bounds.top - TOP_PAD) / plotHeight, 0), 1);
     // Shift is pan, plain wheel is zoom - the convention every timeline in the
     // app already uses, and the one a trackpad's vertical gesture expects.
-    setWindow((current) => event.shiftKey
+    takeWindow((current) => event.shiftKey
       ? panWindow(current, extent, event.deltaY > 0 ? 0.2 : -0.2)
       : zoomWindow(current, extent, event.deltaY > 0 ? 1.25 : 0.8, anchor));
-  }, [extent, plotHeight]);
+  }, [extent, plotHeight, takeWindow]);
 
   const timeScale = useMemo(
     () => scaleLinear().domain([window.from, window.to]).range([0, plotHeight]),
@@ -344,11 +371,15 @@ export const LadderView: React.FC<LadderViewProps> = ({
     if (id === null || box === null) return;
     const arrow = marked.arrows.find((a) => a.item.kind === 'frame' && a.item.packet.id === id);
     // Not placed yet: the window set above lands on a later render.
-    if (arrow === undefined) return;
-    revealRef.current = null;
-    const y = plotTop + arrow.y;
-    box.scrollTop = revealScroll(box.scrollTop, box.clientHeight, y - ROW_ABOVE, y + ROW_BELOW);
-  }, [marked, plotTop]);
+    const y = arrow === undefined ? 0 : plotTop + arrow.y;
+    const step = revealStep(id, arrow === undefined ? null : { top: y - ROW_ABOVE, bottom: y + ROW_BELOW },
+      box.scrollTop, box.clientHeight);
+    revealRef.current = step.pending;
+    box.scrollTop = step.scrollTop;
+    // `revealTick` is a dependency because a frame already inside the time
+    // window moves nothing in `marked`: without it this ran on whatever render
+    // came next, if one did.
+  }, [marked, plotTop, revealTick]);
   const svgHeight = Math.max(size.height, marked.contentHeight + plotTop + BOTTOM_PAD);
   const clientX = LANE_INSET;
   const serverX = Math.max(size.width - LANE_INSET, LANE_INSET + 120);
@@ -398,7 +429,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
       {/* Frames above and below the window, said rather than left to be
           inferred from a scrollbar that is not there. */}
       {layout.before > 0 && (
-        <button onClick={() => setWindow((c) => panWindow(c, extent, -0.5))}
+        <button onClick={() => takeWindow((c) => panWindow(c, extent, -0.5))}
           className="text-[11px] py-0.5 text-muted-foreground hover:text-foreground active:opacity-70
             border-b border-border shrink-0">
           ↑ {layout.before} earlier {layout.before === 1 ? 'row' : 'rows'}
@@ -487,14 +518,14 @@ export const LadderView: React.FC<LadderViewProps> = ({
       </div>
 
       {layout.after > 0 && (
-        <button onClick={() => setWindow((c) => panWindow(c, extent, 0.5))}
+        <button onClick={() => takeWindow((c) => panWindow(c, extent, 0.5))}
           className="text-[11px] py-0.5 text-muted-foreground hover:text-foreground active:opacity-70
             border-t border-border shrink-0">
           ↓ {layout.after} later {layout.after === 1 ? 'row' : 'rows'}
         </button>
       )}
 
-      <Minimap frames={frames} extent={extent} window={window} onWindow={setWindow} />
+      <Minimap frames={frames} extent={extent} window={window} onWindow={takeWindow} />
     </div>
   );
 };

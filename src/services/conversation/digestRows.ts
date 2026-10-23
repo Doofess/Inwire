@@ -14,6 +14,7 @@ import type { TcpOutcome } from './tcpStates';
 export interface DigestConversation extends Conversation {
   outcome: TcpOutcome;
   joinedMidStream: boolean;
+  startExpired?: boolean;
   summary: StreamSummary;
 }
 
@@ -31,7 +32,8 @@ export function digestConversation(s: StreamSummary): DigestConversation {
     bytes: s.toServer.bytes + s.toClient.bytes,
     startRel: s.start, duration: s.end - s.start,
     streamId: s.streamId, protocol: s.protocol, firstFrame: s.firstId,
-    outcome: s.outcome, joinedMidStream: s.joinedMidStream, summary: s,
+    outcome: s.outcome, joinedMidStream: s.joinedMidStream,
+    ...(s.startExpired === true ? { startExpired: true } : {}), summary: s,
   };
 }
 
@@ -55,12 +57,17 @@ export function conversationRows(
  */
 export function tcpScopeNote(
   summaries: ReadonlyMap<number, StreamSummary>, rebuilding: { done: number; total: number } | null,
+  partial = false,
 ): string | null {
   if (rebuilding !== null) return `Rebuilding the stream digest: ${rebuilding.done} of ${rebuilding.total} chunks`;
-  return summaries.size > 0 ? 'Whole capture' : null;
+  if (summaries.size === 0) return null;
+  return partial
+    ? 'Not the whole capture: the stream digest missed some frames while rebuilding. Reopen the capture to rebuild it'
+    : 'Whole capture';
 }
 
 /** The outcome in the ADR's words, with its one modifier. */
-export function outcomeText(r: { outcome: TcpOutcome; joinedMidStream: boolean }): string {
-  return r.joinedMidStream ? `${r.outcome} · joined mid-stream` : r.outcome;
+export function outcomeText(r: { outcome: TcpOutcome; joinedMidStream: boolean; startExpired?: boolean }): string {
+  if (!r.joinedMidStream) return r.outcome;
+  return r.startExpired === true ? `${r.outcome} · start removed by the ring` : `${r.outcome} · joined mid-stream`;
 }

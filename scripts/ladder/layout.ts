@@ -76,7 +76,7 @@ function band(frames: readonly Packet[]): LadderItem {
   for (const f of frames) bytes += f.length;
   return {
     kind: 'band', from: isFromClient(frames[0], CLIENT) ? 'client' : 'server',
-    first: frames[0], last: frames[frames.length - 1], count: frames.length, bytes,
+    first: frames[0], last: frames[frames.length - 1], count: frames.length, bytes, acks: 0,
     time: frames[0].relativeTime, endTime: frames[frames.length - 1].relativeTime, ruleKey: '',
   };
 }

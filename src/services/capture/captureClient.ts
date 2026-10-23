@@ -44,6 +44,8 @@ export interface StreamDigestAnswer {
   version: number;
   summaries: StreamSummary[];
   rebuilding: { done: number; total: number } | null;
+  /** A rebuild dropped rows: these summaries are not the whole capture. */
+  partial: boolean;
 }
 
 /** One page of a stream's frame positions. `nextChunk` null at the end. */
@@ -328,6 +330,7 @@ class CaptureClient {
           version: message.version,
           summaries: message.summaries,
           rebuilding: message.rebuilding,
+          partial: message.partial,
         });
         break;
       }
@@ -612,7 +615,7 @@ class CaptureClient {
     return this.request(
       this.pendingDigest as never,
       (requestId) => ({ type: 'streamDigest', requestId, since }),
-      { captureId: null, version: since, summaries: [], rebuilding: null } as StreamDigestAnswer,
+      { captureId: null, version: since, summaries: [], rebuilding: null, partial: false } as StreamDigestAnswer,
     );
   }
 
@@ -712,7 +715,7 @@ class CaptureClient {
     // poller reads the null id as "start again" and asks the next capture
     // from zero.
     for (const settle of this.pendingDigest.values()) {
-      settle({ captureId: null, version: 0, summaries: [], rebuilding: null });
+      settle({ captureId: null, version: 0, summaries: [], rebuilding: null, partial: false });
     }
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);

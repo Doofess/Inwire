@@ -76,7 +76,7 @@ export function markLadder(
   // segment on the first row drawn, which has no row above it to sit between.
   const top: { kind: MarkKind; text: string }[] = [];
   if (layout.before === 0) {
-    if (frames[0].id > summary.firstId) {
+    if (frames[0].id > summary.firstId || (summary.startExpired === true && summary.joinedMidStream)) {
       top.push({ kind: 'ring-floor', text: `Frames before #${frames[0].id} were removed by the ring` });
     } else if (summary.joinedMidStream) {
       top.push({ kind: 'joined', text: 'Joined mid-stream: the handshake was not captured' });

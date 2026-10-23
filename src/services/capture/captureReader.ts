@@ -87,6 +87,7 @@ const MAX_SCATTERED_ROWS = 256;
 export class CaptureReader {
   private readonly directories = new Map<number, ChunkDirectory>();
   private readonly recordBlocks = new Map<number, (Uint8Array | null)[]>();
+  private lastRows: { chunk: number; packets: Packet[] } | null = null;
 
   constructor(
     private readonly files: CaptureFiles,
@@ -98,6 +99,7 @@ export class CaptureReader {
   clear(): void {
     this.directories.clear();
     this.recordBlocks.clear();
+    this.lastRows = null;
   }
 
   /**
@@ -262,7 +264,7 @@ export class CaptureReader {
     }
 
     for (const [chunk, wanted] of byChunk) {
-      const packets = this.readRows(chunk);
+      const packets = this.rowsOfChunk(chunk);
       if (packets.length === 0) continue;      // a torn tail
       const first = this.index.record(chunk).firstOrdinal;
       for (const ordinal of wanted) {
@@ -271,6 +273,23 @@ export class CaptureReader {
       }
     }
     return out;
+  }
+
+  /**
+   * A chunk's rows, the last chunk asked for kept.
+   *
+   * A stream read pages 256 ordinals at a time and a chunk holds 4,096 frames,
+   * so without this each page inflated and decoded the whole chunk again, about
+   * sixteen times over (ADR 0055; `scripts/capture/stream-reader.ts`). One chunk
+   * is enough: the pages arrive in ordinal order. Only a non-empty answer is
+   * kept, so a chunk that was torn or has gone is asked again. A sealed chunk
+   * does not change, and `clear()` drops it for a discarded capture.
+   */
+  private rowsOfChunk(chunk: number): Packet[] {
+    if (this.lastRows !== null && this.lastRows.chunk === chunk) return this.lastRows.packets;
+    const packets = this.readRows(chunk);
+    this.lastRows = packets.length > 0 ? { chunk, packets } : null;
+    return packets;
   }
 
   /**
@@ -283,7 +302,10 @@ export class CaptureReader {
     streamId: number, fromId: number, toId: number, startChunk: number, maxChunks: number,
   ): { ordinals: number[]; nextChunk: number | null } {
     const ordinals: number[] = [];
-    let chunk = Math.max(startChunk, this.index.floorChunk);
+    // Not before the stream's first chunk: a caller that begins at 0 would
+    // otherwise spend whole pages stepping over chunks the stream is not in.
+    // -1 (an id in a hole, or one the ring removed) leaves the start alone.
+    let chunk = Math.max(startChunk, this.index.floorChunk, this.index.chunkForId(fromId));
     const stop = Math.min(this.index.chunkCount, chunk + maxChunks);
     for (; chunk < stop; chunk++) {
       const record = this.index.record(chunk);

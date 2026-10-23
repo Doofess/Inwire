@@ -79,6 +79,8 @@ interface StatisticsPaneProps {
   tcpDigest?: {
     summaries: ReadonlyMap<number, StreamSummary>;
     rebuilding: { done: number; total: number } | null;
+    /** A rebuild dropped rows, so the TCP level is not the whole capture. */
+    partial?: boolean;
   };
   /** Everything the dissectors and the anomaly detector found. */
   expert: ExpertLookup;
@@ -153,7 +155,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   );
   const convRows: Conversation[] = digestRows ?? bufferRows;
   const scopeNote = tab === 'conversations' && kind === 'tcp'
-    ? tcpScopeNote(digestSummaries, tcpDigest?.rebuilding ?? null)
+    ? tcpScopeNote(digestSummaries, tcpDigest?.rebuilding ?? null, tcpDigest?.partial ?? false)
     : null;
   const transport = kind === 'tcp' || kind === 'udp';
   /** A transport row is one stream; an address row is many, with no single one to open. */

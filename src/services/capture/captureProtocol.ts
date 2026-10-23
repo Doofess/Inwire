@@ -303,6 +303,8 @@ export type FromCapture =
       version: number;
       summaries: StreamSummary[];
       rebuilding: { done: number; total: number } | null;
+      /** A rebuild dropped rows: the summaries are not the whole capture, and no snapshot will be written. */
+      partial: boolean;
     }
   /**
    * One page of a `streamOrdinals`. `nextChunk` is where to ask from next,

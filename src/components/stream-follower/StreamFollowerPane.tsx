@@ -15,7 +15,7 @@ import {
 } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
-import { loadStreamFrames, progressGate } from '../../services/conversation/streamFrames';
+import { keepFrames, loadStreamFrames, progressGate, recallFrames } from '../../services/conversation/streamFrames';
 import { captureStore } from '../../services/capture/captureClient';
 import type { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -242,8 +242,9 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
    *
    * Pages are published to the views as they arrive, so the ladder is usable
    * from its first page; a cancelled read publishes nothing more. The frames
-   * are kept for the life of the pane by stream id, so switching tabs or
-   * coming back to a stream costs nothing.
+   * are kept by stream id, the last two streams and none over
+   * `KEPT_FRAMES_MAX`, so switching tabs or going back to the stream just
+   * left costs nothing and the pane's memory stays bounded.
    */
   const [stream, setStream] = useState<LoadedStream | null>(null);
   const cache = useRef(new Map<number, Packet[]>());
@@ -292,7 +293,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   useEffect(() => {
     if (summary === null) return;
     const { streamId } = summary;
-    const cached = cache.current.get(streamId);
+    const cached = recallFrames(cache.current, streamId);
     if (cached !== undefined) {
       setStream({ streamId, frames: cached, loading: null });
       return;
@@ -309,7 +310,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
       setStream({ streamId, frames: soFar.slice(), loading: { loaded, total } });
     }, signal).then((frames) => {
       if (signal.cancelled) return;
-      cache.current.set(streamId, frames);
+      keepFrames(cache.current, streamId, frames);
       setStream({ streamId, frames, loading: null });
     }).catch((error: unknown) => {
       // The read failed: the pane falls back to the buffer's frames, as it

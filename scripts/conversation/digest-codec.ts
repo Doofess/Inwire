@@ -8,8 +8,9 @@
  * store folds the digest again from the capture's rows in that case.
  */
 import { deflateSync, inflateSync } from 'fflate';
-import { StreamDigest } from '../../src/services/conversation/streamDigest';
-import { decodeDigest, encodeDigest } from '../../src/services/conversation/digestCodec';
+import { StreamDigest, type DigestEntry } from '../../src/services/conversation/streamDigest';
+import { DIGEST_FORMAT, decodeDigest, encodeDigest } from '../../src/services/conversation/digestCodec';
+import { fnv1a } from '../../src/services/dissect/frameRecord';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -80,15 +81,100 @@ const wrongMagic = encoded.slice();
 wrongMagic[0] ^= 0xff;
 mustBeNull('a wrong magic', wrongMagic);
 
-const version2 = encoded.slice();
-new DataView(version2.buffer).setUint16(4, 2, true);
-mustBeNull('format version 2', version2);
+const newer = encoded.slice();
+new DataView(newer.buffer).setUint16(4, DIGEST_FORMAT + 1, true);
+mustBeNull('a newer format', newer);
+
+// A file written by format 1 (one deflated JSON text), byte for byte what the
+// old encoder wrote: the header's checksum and length are right, only the
+// version is old. It must read as null, so the store folds again.
+{
+  const body = deflate(new TextEncoder().encode(JSON.stringify(data)));
+  const old = new Uint8Array(16 + body.length);
+  const v = new DataView(old.buffer);
+  v.setUint32(0, 0x47445749, true); v.setUint16(4, 1, true);
+  v.setUint32(8, body.length, true); v.setUint32(12, fnv1a(body), true);
+  old.set(body, 16);
+  mustBeNull('an old format 1 file', old);
+}
+
+// Structure, not just bytes: a chunk that lies about its length, a count that
+// does not match, and a chunk that is not an array each read as null even
+// though the checksum (recomputed here) is right.
+{
+  const reseal = (mutate: (body: Uint8Array) => Uint8Array): Uint8Array => {
+    const body = mutate(encoded.slice(16));
+    const out = new Uint8Array(16 + body.length);
+    const v = new DataView(out.buffer);
+    v.setUint32(0, 0x47445749, true); v.setUint16(4, DIGEST_FORMAT, true);
+    v.setUint32(8, body.length, true); v.setUint32(12, fnv1a(body), true);
+    out.set(body, 16);
+    return out;
+  };
+  mustBeNull('a count that does not match the entries', reseal((b) => { new DataView(b.buffer, b.byteOffset).setUint32(16, 99, true); return b; }));
+  mustBeNull('a chunk that claims more bytes than the file has', reseal((b) => { new DataView(b.buffer, b.byteOffset).setUint32(20, 0x7fffffff, true); return b; }));
+  mustBeNull('trailing bytes that are not a whole chunk', reseal((b) => { const c = new Uint8Array(b.length + 2); c.set(b); return c; }));
+  mustBeNull('a chunk that inflates to something that is not an array', reseal((b) => {
+    const z = deflate(new TextEncoder().encode('{"a":1}'));
+    const c = new Uint8Array(20 + 4 + z.length);
+    c.set(b.subarray(0, 20)); new DataView(c.buffer).setUint32(20, z.length, true); c.set(z, 24);
+    return c;
+  }));
+}
 
 mustBeNull('a body one byte short', encoded.slice(0, encoded.length - 1));
 
 const flipped = encoded.slice();
 flipped[flipped.length - 1] ^= 0x01;
 mustBeNull('one flipped body byte', flipped);
+
+// Scale (final review I3): 500,000 streams that were a SYN answered by an RST.
+// Format 1 wrote one JSON text of every entry, and V8 refuses a string past
+// about 512 MB: this many threw "Invalid string length" at Stop. Entries are
+// produced a thousand at a time and never held together on the way in, so
+// the only thing that grows with the count is the encoder's own output.
+{
+  const COUNT = 500_000;
+  const BATCH = 1000;
+  const refusedEntries = function* (): Generator<DigestEntry> {
+    nextId = 1;
+    for (let first = 1; first <= COUNT; first += BATCH) {
+      const d = new StreamDigest();
+      for (let s = first; s < first + BATCH; s++) {
+        d.feed(row(true, 'S', { seq: 0, streamId: s, source: `10.${(s >> 16) & 255}.${(s >> 8) & 255}.${s & 255}` }));
+        d.feed(row(false, 'RA', { seq: 0, ack: 1, streamId: s, destination: `10.${(s >> 16) & 255}.${(s >> 8) & 255}.${s & 255}` }));
+      }
+      yield* d.snapshot().entries;
+    }
+  };
+  const input = { throughId: COUNT * 2, version: COUNT * 2, entries: refusedEntries() };
+
+  // The input must be big enough to have broken the old encoder, or passing
+  // proves nothing: the same entries as one JSON text really do not fit.
+  // 2^29 - 24 is V8's `String::kMaxLength` on 64-bit.
+  let jsonLength = 0;
+  for (const e of refusedEntries()) jsonLength += JSON.stringify(e).length + 1;
+  check('every entry as one JSON text would exceed the longest string V8 allows',
+    jsonLength > 2 ** 29 - 24, true);
+
+  let bytes: Uint8Array | null = null;
+  let error = '';
+  try { bytes = encodeDigest(input, deflate); } catch (e) { error = (e as Error).message; }
+  check('500,000 SYN+RST streams encode without throwing', error, '');
+  const back = bytes === null ? null : decodeDigest(bytes, inflate);
+  check('...and decode', back?.entries.length, COUNT);
+  check('...with the same throughId and version', [back?.throughId, back?.version], [COUNT * 2, COUNT * 2]);
+  let firstDifferent = -1;
+  let i = 0;
+  if (back !== null) {
+    for (const e of refusedEntries()) {
+      if (JSON.stringify(back.entries[i]) !== JSON.stringify(e)) { firstDifferent = i; break; }
+      i++;
+    }
+  }
+  check('...and every entry equals the one encoded', firstDifferent, -1);
+  console.log(`      ${COUNT.toLocaleString()} streams -> ${bytes === null ? 0 : (bytes.length / 1048576).toFixed(1)} MB`);
+}
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

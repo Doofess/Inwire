@@ -13,6 +13,17 @@
  * way and matches the same rule - the chip takes the rule's colour, and a
  * band of two rules has no honest colour.
  *
+ * ## Acknowledgements ride along
+ *
+ * A receiver acknowledges every second segment, so a band that broke on
+ * every change of direction would fold a bulk transfer into runs of two. A
+ * pure ACK - no payload, no flag but ACK, nothing the analysis said about it -
+ * from the other lane joins the band it acknowledges and is counted apart
+ * from it: `count` and `bytes` are the data's, `acks` the riders'. Its own
+ * rule neither breaks the band nor colours it; the band is the data's, in the
+ * data's rule. A band of pure ACKs carries no riders, so two lanes trading
+ * bare ACKs still draw every one.
+ *
  * ## Bands are keyed by their first frame
  *
  * `expanded` holds the ids of bands the user opened, and a band is named by
@@ -29,7 +40,7 @@ import type { Lane } from './ladderLayout';
 export type LadderItem =
   | { kind: 'frame'; packet: Packet; from: Lane }
   | { kind: 'band'; from: Lane; first: Packet; last: Packet; count: number; bytes: number;
-      time: number; endTime: number; ruleKey: string };
+      acks: number; time: number; endTime: number; ruleKey: string };
 
 /**
  * The most frames one band holds. A bound rather than a rule of the data: a
@@ -42,6 +53,12 @@ function standsAlone(p: Packet): boolean {
   return fieldValue(p, 'tcp.flags.syn') === 1 || fieldValue(p, 'tcp.flags.fin') === 1
     || fieldValue(p, 'tcp.flags.reset') === 1 || (p.analysisFlags?.length ?? 0) > 0
     || fieldValue(p, 'inwire.expert.category') !== undefined;
+}
+
+/** No payload and no flag but ACK. `standsAlone` has already taken the rest. */
+function isPureAck(p: Packet): boolean {
+  return fieldValue(p, 'tcp.len') === 0 && fieldValue(p, 'tcp.flags.ack') === 1
+    && fieldValue(p, 'tcp.flags.push') !== 1 && fieldValue(p, 'tcp.flags.urg') !== 1;
 }
 
 /** When an item starts, which is where the ladder places it. */
@@ -63,22 +80,28 @@ export function foldRuns(
   expanded: ReadonlySet<number>,
 ): LadderItem[] {
   const items: LadderItem[] = [];
-  let run: Packet[] = [];
+  // Each frame keeps its own lane: a riding ACK is drawn in its own when the band opens.
+  let run: { packet: Packet; from: Lane }[] = [];
   let runFrom: Lane = 'client';
   let runKey = '';
+  let runCarriesData = false;
+  let acks = 0;
 
   const flush = () => {
-    if (run.length === 1) items.push({ kind: 'frame', packet: run[0], from: runFrom });
+    if (run.length === 1) items.push({ kind: 'frame', ...run[0] });
     else if (run.length > 1) {
-      if (expanded.has(run[0].id)) for (const p of run) items.push({ kind: 'frame', packet: p, from: runFrom });
+      if (expanded.has(run[0].packet.id)) for (const r of run) items.push({ kind: 'frame', ...r });
       else {
         let bytes = 0;
-        for (const p of run) bytes += p.length;
-        items.push({ kind: 'band', from: runFrom, first: run[0], last: run[run.length - 1], count: run.length,
-          bytes, time: run[0].relativeTime, endTime: run[run.length - 1].relativeTime, ruleKey: runKey });
+        for (const r of run) if (r.from === runFrom) bytes += r.packet.length;
+        const first = run[0].packet;
+        const last = run[run.length - 1].packet;
+        items.push({ kind: 'band', from: runFrom, first, last, count: run.length - acks, bytes, acks,
+          time: first.relativeTime, endTime: last.relativeTime, ruleKey: runKey });
       }
     }
     run = [];
+    acks = 0;
   };
 
   frames.forEach((p, i) => {
@@ -88,13 +111,20 @@ export function foldRuns(
       items.push({ kind: 'frame', packet: p, from });
       return;
     }
+    const pureAck = isPureAck(p);
+    if (run.length > 0 && from !== runFrom && runCarriesData && pureAck && run.length < BAND_MAX) {
+      run.push({ packet: p, from });
+      acks++;
+      return;
+    }
     const key = ruleKeyOf(p);
     if (run.length === 0 || from !== runFrom || key !== runKey || run.length >= BAND_MAX) {
       flush();
       runFrom = from;
       runKey = key;
+      runCarriesData = !pureAck;
     }
-    run.push(p);
+    run.push({ packet: p, from });
   });
   flush();
   return items;

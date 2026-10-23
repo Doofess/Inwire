@@ -133,9 +133,13 @@ function flagsOf(packet: Packet): string {
   return set.join(', ');
 }
 
-/** What a band's label says: how many frames, how many bytes, how long. */
-function bandInfo(count: number, bytes: number, time: number, endTime: number): string {
-  return `${count.toLocaleString()} frames · ${formatBytes(bytes)} · ${(endTime - time).toFixed(3)} s`;
+/**
+ * What a band's label says: how many frames, how many bytes, how many ACKs
+ * rode along, how long. The frames and bytes are the data's alone.
+ */
+function bandInfo(count: number, bytes: number, acks: number, time: number, endTime: number): string {
+  const riders = acks > 0 ? ` · ${acks.toLocaleString()} ACK${acks === 1 ? '' : 's'}` : '';
+  return `${count.toLocaleString()} frames · ${formatBytes(bytes)}${riders} · ${(endTime - time).toFixed(3)} s`;
 }
 
 /**
@@ -239,12 +243,13 @@ export function layoutLadder(
     } else {
       // A band's frames carry no flag and no finding, or they would not be in
       // one, so its row has neither. Its thickness is its mean frame length,
-      // which is what makes a band of ACKs and a band of data differ.
+      // which is what makes a band of ACKs and a band of data differ; the ACKs
+      // that rode along in a data band are left out of it.
       arrows.push({
         item, from: item.from, y, time,
         length: item.bytes / item.count,
         flags: '',
-        info: bandInfo(item.count, item.bytes, item.time, item.endTime),
+        info: bandInfo(item.count, item.bytes, item.acks, item.time, item.endTime),
         category: null,
         crowded,
       });
