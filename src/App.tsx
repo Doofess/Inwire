@@ -193,6 +193,10 @@ const CAPTURE_FILTER_CHECK_DELAY_MS = 400;
 
 const DISPLAY_FILTER_KEY = "inwire.displayFilter";
 const SELECTED_PACKET_KEY = "inwire.selectedPacketId";
+// Placeholders until the marks task lands: the row menu has the item, nothing
+// is ever marked. Module-level so the list's props stay stable.
+const NO_MARKS: ReadonlySet<number> = new Set();
+const noMarkToggle = (_id: number): void => {};
 // Preferences this build no longer reads are cleared here rather than left to
 // sit in storage looking like live configuration. The list, and the reasoning,
 // live in services/preferences.
@@ -3400,7 +3404,11 @@ export default function App() {
                   // on the same frame when it is come back to.
                   onInspectPacket={(pkt) => { setSelectedPacket(pkt); setView('detail'); }}
                   onFollowStream={handleFollowStream}
-                  onQuickFilter={handleQuickFilter}
+                  onFieldFilter={handleFieldFilter}
+                  currentFilter={filterText}
+                  // Task 5 wires marks
+                  marks={NO_MARKS}
+                  onToggleMark={noMarkToggle}
                   // So a filter that finds nothing can say whether it searched
                   // the capture or only what is left of it.
                   droppedBuffer={droppedBuffer}

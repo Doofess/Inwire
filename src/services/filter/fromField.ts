@@ -17,6 +17,8 @@
 
 import { Packet } from '../../types/packet';
 import { fieldValue } from '../dissect/fieldAccess';
+import { parseFilter } from './parser';
+import { unknownNames } from './compile';
 
 /** How a new term joins whatever is already in the filter bar. */
 export type FilterCombine = 'replace' | 'not' | 'and' | 'or';
@@ -49,6 +51,50 @@ export function fieldTerm(packet: Packet, abbrev: string | undefined): string | 
   // `10.0.0.0/8` would be read as a network, and quoting removes any chance
   // that a value which merely looks like one changes the term's meaning.
   return typeof value === 'number' ? `${abbrev} == ${value}` : `${abbrev} == ${quote(value)}`;
+}
+
+/** The first of `abbrevs` the frame carries a value for, as a term. */
+function firstTerm(packet: Packet, abbrevs: string[]): string | null {
+  for (const abbrev of abbrevs) {
+    const term = fieldTerm(packet, abbrev);
+    if (term) return term;
+  }
+  return null;
+}
+
+/** True when the strict filter language accepts `name` as a bare protocol. */
+function isFilterProtocol(name: string): boolean {
+  try {
+    return unknownNames(parseFilter(name)).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The terms the packet list's row menu offers: this frame's source, its
+ * destination and its protocol. Each is null when the frame gives nothing to
+ * filter on, and the menu disables that item rather than hiding it.
+ *
+ * Addresses are the most specific layer the frame has - IPv6, then IPv4, then
+ * the Ethernet MAC - so an IPv6 row never gets `ip.src` (which matches
+ * nothing) and an ARP row filters on its MACs. The protocol is the outermost
+ * dissected layer, as a bare name (`dns`, `tls`); when that is not a name the
+ * filter language knows, the coarse label is matched with `proto ==`.
+ */
+export function rowFilterTerms(packet: Packet): {
+  source: string | null;
+  destination: string | null;
+  protocol: string | null;
+} {
+  const layers = (packet.frameProtocols ?? []).filter(p => p !== 'data');
+  const top = layers[layers.length - 1];
+  const label = packet.protocolLabel ?? packet.protocol;
+  return {
+    source: firstTerm(packet, ['ipv6.src', 'ip.src', 'eth.src']),
+    destination: firstTerm(packet, ['ipv6.dst', 'ip.dst', 'eth.dst']),
+    protocol: top && isFilterProtocol(top) ? top : label ? `proto == ${quote(label)}` : null,
+  };
 }
 
 /**

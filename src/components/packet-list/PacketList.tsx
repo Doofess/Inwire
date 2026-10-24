@@ -21,7 +21,6 @@ import {
   ArrowDown,
   MessageSquare,
   ArrowRightLeft,
-  Funnel,
   FunnelX,
   SearchX,
   Radar,
@@ -55,18 +54,24 @@ import { targetForPacket, type StreamTarget } from '../../services/followStream'
 import {
   ContextMenu,
   ContextMenuContent,
+  ContextMenuItem,
   ContextMenuLabel,
   ContextMenuRadioGroup,
   ContextMenuRadioItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '../ui/context-menu';
+import { COMBINE_LABELS, combineFilter, rowFilterTerms, type FilterCombine } from '../../services/filter/fromField';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import {
   loadPreference,
   useDebouncedPreference,
   usePreferenceSync,
 } from '../../services/preferences';
-import { MICRO_LABEL } from '../common/typography';
 
 interface PacketListProps {
   /**
@@ -147,7 +152,17 @@ interface PacketListProps {
   /** Double-clicking a row opens the Frame Detail view on that frame. */
   onInspectPacket?: (packet: Packet) => void;
   onFollowStream: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
-  onQuickFilter: (filter: string) => void;
+  /**
+   * "Apply as Filter" / "Prepare as Filter" from the row menu: the same
+   * handler the protocol tree gets. Prepare leaves the expression in the bar
+   * unapplied.
+   */
+  onFieldFilter: (expression: string, apply: boolean) => void;
+  /** What the filter bar holds now, which the row menu's "…and Selected" joins onto. */
+  currentFilter: string;
+  /** Frame ids marked in this capture. Task 5 wires the real set. */
+  marks: ReadonlySet<number>;
+  onToggleMark: (id: number) => void;
   /**
    * Frames the buffer has dropped since this capture began, or 0.
    *
@@ -316,7 +331,10 @@ export const PacketList: React.FC<PacketListProps> = ({
   onSelectPacket,
   onInspectPacket,
   onFollowStream,
-  onQuickFilter,
+  onFieldFilter,
+  currentFilter,
+  marks,
+  onToggleMark,
   droppedBuffer = 0,
   colorEngine,
   packetTheme,
@@ -338,7 +356,8 @@ export const PacketList: React.FC<PacketListProps> = ({
     SORT_STORAGE_KEY,
     React.useMemo(() => ({ field: sortField, order: sortOrder }), [sortField, sortOrder]),
   );
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; packet: Packet } | null>(null);
+  /** The row the last right-click landed on, for the row menu. Null off a row. */
+  const [menuTarget, setMenuTarget] = useState<Packet | null>(null);
   /** Which header cell the last right-click landed in. See the header's ContextMenu. */
   const [alignColumn, setAlignColumn] = useState<AlignableColumn | null>(null);
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
@@ -988,8 +1007,19 @@ export const PacketList: React.FC<PacketListProps> = ({
         // pointer.
         if (e.shiftKey && selectedPacket) {
           e.preventDefault();
-          const rect = (e.target as HTMLElement).getBoundingClientRect();
-          setContextMenu({ x: rect.left + 16, y: rect.top + 16, packet: selectedPacket });
+          // The row menu is a Radix context menu, which opens only from a
+          // `contextmenu` event, so the keyboard gesture sends the event the
+          // pointer would have: at the selected row, when it is rendered.
+          const row = document.getElementById(`packet-row-${selectedPacket.id}`);
+          if (row) {
+            const rect = row.getBoundingClientRect();
+            row.dispatchEvent(new MouseEvent('contextmenu', {
+              bubbles: true,
+              cancelable: true,
+              clientX: rect.left + 16,
+              clientY: rect.top + rect.height / 2,
+            }));
+          }
         }
         break;
       default:
@@ -997,17 +1027,54 @@ export const PacketList: React.FC<PacketListProps> = ({
     }
   };
 
-  // Context Menu handlers
-  const handleContextMenu = (e: React.MouseEvent, packet: Packet) => {
-    e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, packet });
-  };
+  // The row menu. Radix closes it on an outside click and on Escape, so the
+  // window-level click listener the hand-rolled menu needed is gone. The body's
+  // capture handler has already cleared the target when this runs.
+  const handleContextMenu = (packet: Packet) => setMenuTarget(packet);
 
-  useEffect(() => {
-    const closeMenu = () => setContextMenu(null);
-    window.addEventListener('click', closeMenu);
-    return () => window.removeEventListener('click', closeMenu);
-  }, []);
+  const streamTarget = menuTarget ? targetForPacket(menuTarget) : null;
+  const rowTerms = menuTarget ? rowFilterTerms(menuTarget) : null;
+
+  /**
+   * "Apply as Filter" / "Prepare as Filter" for the right-clicked row: source,
+   * destination or protocol, each with the same four ways of joining the bar as
+   * the protocol tree. An item whose term is null is disabled, not hidden, so
+   * the menu keeps one shape from row to row.
+   */
+  const rowFilterMenu = (apply: boolean) => {
+    if (!menuTarget || !rowTerms) return null;
+    const entries: { label: string; term: string | null }[] = [
+      { label: `Source (${menuTarget.source})`, term: rowTerms.source },
+      { label: `Destination (${menuTarget.destination})`, term: rowTerms.destination },
+      { label: `Protocol (${menuTarget.protocolLabel ?? menuTarget.protocol})`, term: rowTerms.protocol },
+    ];
+    return (
+      <ContextMenuSub>
+        <ContextMenuSubTrigger>
+          {apply ? 'Apply as Filter' : 'Prepare as Filter'}
+        </ContextMenuSubTrigger>
+        <ContextMenuSubContent className="w-56 text-xs">
+          {entries.map(({ label, term }) => (
+            <ContextMenuSub key={label}>
+              <ContextMenuSubTrigger disabled={!term}>
+                <span className="truncate">{label}</span>
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                {(Object.keys(COMBINE_LABELS) as FilterCombine[]).map(how => (
+                  <ContextMenuItem
+                    key={how}
+                    onSelect={() => term && onFieldFilter(combineFilter(currentFilter, term, how), apply)}
+                  >
+                    {COMBINE_LABELS[how]}
+                  </ContextMenuItem>
+                ))}
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+          ))}
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+    );
+  };
 
   /**
    * The sort state, for assistive tech.
@@ -1359,8 +1426,17 @@ export const PacketList: React.FC<PacketListProps> = ({
             </ContextMenu>
           </thead>
 
-          {/* Table Body */}
-          <tbody className={density.body}>
+          {/* Table Body. One row menu for the whole body rather than one per
+              row: the rows are virtualised, so the row that was right-clicked
+              is recorded on `contextmenu` (`menuTarget`), the way the protocol
+              tree does it. It wraps the body and not the scroller because the
+              header inside the scroller has a menu of its own, and two
+              triggers on one ancestry chain would both open. The capture
+              handler clears the target first, so a click on a spacer or the
+              empty state opens nothing. */}
+          <ContextMenu>
+          <ContextMenuTrigger asChild>
+          <tbody className={density.body} onContextMenuCapture={() => setMenuTarget(null)}>
             {totalRows === 0 ? (
               <tr>
                 <td colSpan={visibleColumnCount} className="p-0">
@@ -1476,7 +1552,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // which is what we want: the row ends up selected behind
                     // the window that opens over it.
                     onDoubleClick={() => onInspectPacket?.(packet)}
-                    onContextMenu={e => handleContextMenu(e, packet)}
+                    onContextMenu={() => handleContextMenu(packet)}
                     // A vertical rule between every body cell, drawn by
                     // `.packet-grid` - no `divide-x` here any more. The columns
                     // had no rule at all below the header once, so where one
@@ -1689,6 +1765,74 @@ export const PacketList: React.FC<PacketListProps> = ({
               </>
             )}
           </tbody>
+          </ContextMenuTrigger>
+          {menuTarget && (
+            <ContextMenuContent className="w-60 text-xs">
+              <ContextMenuItem onSelect={() => onToggleMark(menuTarget.id)}>
+                {marks.has(menuTarget.id) ? 'Unmark packet' : 'Mark packet'}
+                <ContextMenuShortcut>Ctrl+M</ContextMenuShortcut>
+              </ContextMenuItem>
+
+              <ContextMenuSeparator />
+
+              {/* Offered for UDP as well as TCP now: a stream is selected by
+                  its five-tuple rather than by the TCP tracker's index, so a
+                  DNS exchange or a QUIC connection - which have no index - can
+                  be followed too. */}
+              {streamTarget && (
+                <ContextMenuItem onSelect={() => onFollowStream(streamTarget)}>
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>
+                    Follow {streamTarget.kind.toUpperCase()} Stream
+                    {streamTarget.streamId !== undefined ? ` (#${streamTarget.streamId})` : ''}
+                  </span>
+                </ContextMenuItem>
+              )}
+
+              {/* The same conversation, asked a different question. Following
+                  it is about what was said; showing it is about the shape - a
+                  request answered four seconds later, a side that went quiet,
+                  a burst of retransmissions. Two doors onto one window. */}
+              {streamTarget && (
+                <ContextMenuItem onSelect={() => onFollowStream(streamTarget, 'ladder')}>
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                  <span>Show conversation</span>
+                </ContextMenuItem>
+              )}
+
+              {streamTarget && <ContextMenuSeparator />}
+
+              {rowFilterMenu(true)}
+              {rowFilterMenu(false)}
+
+              <ContextMenuSeparator />
+
+              <ContextMenuItem
+                onSelect={() => {
+                  // Synchronous while the frame still carries its bytes, which
+                  // is the common case and the one that matters here: a
+                  // clipboard write is only reliably permitted inside the
+                  // gesture that triggered it, and awaiting first can put it
+                  // outside on some browsers. A frame whose bytes the buffer
+                  // has dropped takes the slow path and accepts that risk,
+                  // because the alternative is copying an empty string
+                  // (docs/decisions/0013).
+                  const target = menuTarget;
+                  if (hasBytes(target)) {
+                    void copyText(packetHexDump(target));
+                    return;
+                  }
+                  void packetBytes(target).then((rawBytes) => {
+                    void copyText(packetHexDump({ ...target, rawBytes }));
+                  });
+                }}
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy Raw Hex Stream</span>
+              </ContextMenuItem>
+            </ContextMenuContent>
+          )}
+          </ContextMenu>
         </table>
       </div>
 
@@ -1712,106 +1856,6 @@ export const PacketList: React.FC<PacketListProps> = ({
       )}
       </div>
 
-      {/* Right Click Context Menu */}
-      {contextMenu && (
-        <div
-          className="fixed z-50 rounded-lg border p-1 shadow-2xl transition-all bg-popover border-border text-popover-foreground min-w-[240px] font-sans text-xs"
-          style={{ top: Math.min(contextMenu.y, window.innerHeight - 300), left: Math.min(contextMenu.x, window.innerWidth - 260) }}
-        >
-          <div className={`${MICRO_LABEL} px-2 py-1 border-b border-border`}>
-            Packet #{contextMenu.packet.id} Options
-          </div>
-
-          {/* Offered for UDP as well as TCP now: a stream is selected by its
-              five-tuple rather than by the TCP tracker's index, so a DNS
-              exchange or a QUIC connection - which have no index - can be
-              followed too. */}
-          {(() => {
-            const target = targetForPacket(contextMenu.packet);
-            if (!target) return null;
-            return (
-              <button
-                onClick={() => onFollowStream(target)}
-                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-              >
-                <MessageSquare className="w-3.5 h-3.5 text-foreground" />
-                <span>
-                  Follow {target.kind.toUpperCase()} Stream
-                  {target.streamId !== undefined ? ` (#${target.streamId})` : ''}
-                </span>
-              </button>
-            );
-          })()}
-
-          {/* The same conversation, asked a different question. Following it
-              is about what was said; showing it is about the shape - a request
-              answered four seconds later, a side that went quiet, a burst of
-              retransmissions. Two doors onto one window. */}
-          {(() => {
-            const target = targetForPacket(contextMenu.packet);
-            if (!target) return null;
-            return (
-              <button
-                onClick={() => onFollowStream(target, 'ladder')}
-                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-              >
-                <ArrowRightLeft className="w-3.5 h-3.5 text-foreground" />
-                <span>Show conversation</span>
-              </button>
-            );
-          })()}
-
-          <button
-            onClick={() => onQuickFilter(`ip.src == "${contextMenu.packet.source}"`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Funnel className="w-3.5 h-3.5" />
-            <span>Filter by Source ({contextMenu.packet.source})</span>
-          </button>
-
-          <button
-            onClick={() => onQuickFilter(`ip.dst == "${contextMenu.packet.destination}"`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Funnel className="w-3.5 h-3.5" />
-            <span>Filter by Destination ({contextMenu.packet.destination})</span>
-          </button>
-
-          <button
-            onClick={() => onQuickFilter(`proto == ${contextMenu.packet.protocol.toLowerCase()}`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Funnel className="w-3.5 h-3.5" />
-            <span>Filter by Protocol ({contextMenu.packet.protocol})</span>
-          </button>
-
-          <div className="my-1 border-t border-border" />
-
-          <button
-            onClick={() => {
-              // Synchronous while the frame still carries its bytes, which is
-              // the common case and the one that matters here: a clipboard
-              // write is only reliably permitted inside the gesture that
-              // triggered it, and awaiting first can put it outside on some
-              // browsers. A frame whose bytes the buffer has dropped takes the
-              // slow path and accepts that risk, because the alternative is
-              // copying an empty string (docs/decisions/0013).
-              const target = contextMenu.packet;
-              if (hasBytes(target)) {
-                void copyText(packetHexDump(target));
-                return;
-              }
-              void packetBytes(target).then((rawBytes) => {
-                void copyText(packetHexDump({ ...target, rawBytes }));
-              });
-            }}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Copy className="w-3.5 h-3.5 text-foreground" />
-            <span>Copy Raw Hex Stream</span>
-          </button>
-        </div>
-      )}
     </div>
   );
 };
