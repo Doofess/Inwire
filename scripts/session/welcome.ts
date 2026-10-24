@@ -67,6 +67,11 @@ check('(g) Welcome disables Start from gate.blocked',
   /disabled=\{gate\.blocked !== null\}/.test(welcome));
 check('(h) TransferPanel reads pickRequest', /\bpickRequest\b/.test(transfer));
 check('(i) Welcome calls useEscapeLayer', /useEscapeLayer\(/.test(welcome));
+// The welcome's adapters sit right above its Start, so with none picked it
+// points at them rather than repeating the rail's "Choose an interface first".
+check('(j) with adapters listed and none picked, Start points up at them',
+  welcome.includes("'Pick an adapter above.'")
+  && /selectedInterfaces\.length === 0 && interfaces\.length > 0/.test(welcome));
 check('the welcome keeps data-tour="list"', /data-tour="list"/.test(app)
   && (app.match(/data-tour="list"/g) ?? []).length === 2);
 

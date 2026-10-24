@@ -113,7 +113,7 @@ function Segmented<T extends string>({
           className={cn(
             "relative rounded font-medium whitespace-nowrap outline-none",
             size === 'sm' ? "px-1.5 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
-            fill ? "flex-1 min-w-0 px-1 text-center overflow-hidden text-ellipsis" : null,
+            fill ? "flex-auto min-w-0 px-1 text-center overflow-hidden text-ellipsis" : null,
             "transition-colors cursor-pointer",
             "text-muted-foreground hover:text-foreground",
             // Fill + border + foreground, all three. See the note above.

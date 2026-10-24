@@ -28,7 +28,10 @@ check('the calendar is never drawn disabled', !panel.includes('disabled={!calend
 
 check('Segmented takes fill', /fill\?: boolean/.test(segmented));
 check('a filled group spans the column', /fill && "flex w-full"/.test(segmented));
-check('a filled segment can shrink below its label', /fill \? "flex-1 min-w-0 px-1 text-center\b/.test(segmented));
+// `flex-auto`, not `flex-1`: equal thirds clipped "At a time" at 192px while
+// "After" had room to spare. Sized from the label, shrinking only when short.
+check('a filled segment grows from its label and can shrink below it',
+  /fill \? "flex-auto min-w-0 px-1 text-center\b/.test(segmented));
 
 const uses = [...panel.matchAll(/<Segmented[\s\S]*?\/>/g)].map((m) => m[0]);
 check('the panel has the Start and Stop segmented controls', uses.length === 2, `found ${uses.length}`);

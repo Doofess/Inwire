@@ -73,6 +73,12 @@ export const Welcome: React.FC<WelcomeProps> = ({
     if (confirming) confirmRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus();
   }, [confirming]);
 
+  // The gate's words are the rail's, written for a button with no list beside
+  // it. Here the list is right above, so with none picked Start points at it.
+  const blockedText = gate.blocked !== null && selectedInterfaces.length === 0 && interfaces.length > 0
+    ? 'Pick an adapter above.'
+    : gate.blocked;
+
   // One scale for every chart, so two adapters can be compared.
   const peakRate = Math.max(1, ...Object.values(interfaceRates).flatMap((series) => series));
 
@@ -160,8 +166,8 @@ export const Welcome: React.FC<WelcomeProps> = ({
                 Start capture
               </button>
             </div>
-            {gate.blocked !== null && (
-              <p className="text-[11px] text-muted-foreground">{gate.blocked}</p>
+            {blockedText !== null && (
+              <p className="text-[11px] text-muted-foreground">{blockedText}</p>
             )}
             {confirming && previousCapture !== null && (
               <div
