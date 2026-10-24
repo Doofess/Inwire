@@ -3249,6 +3249,7 @@ export default function App() {
                 // is stable - so none of them adds a render or a computation
                 // this component was not already doing.
                 belowWindow={Math.max(0, belowWindow - captureFloor)}
+                captureFloor={captureFloor}
                 captureRowCount={captureRowCount}
                 filteredRowCount={shownRowCount}
                 filterScan={captureFilter.state}

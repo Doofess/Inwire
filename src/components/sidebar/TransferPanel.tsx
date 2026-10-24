@@ -13,6 +13,7 @@ import { FilterEngine } from '../../services/filterEngine';
 import { keyLog } from '../../services/tls/keyLog';
 import { captureStore } from '../../services/capture/captureClient';
 import { saveCaptured, type SaveOutcome } from '../../lib/saveFile';
+import { markedExportCount } from '../../lib/captureRowSpace';
 import {
   beginExportJob, cancelExportJob, dismissExportJob, type ExportFormat, type ExportJobState, type ExportPhase,
 } from '../../services/export/exportJob';
@@ -85,6 +86,8 @@ export interface TransferPanelProps {
   captureStats?: CaptureDropStats | null;
   /** Capture ordinals below the window (`useWindowOrdinal`). */
   belowWindow: number;
+  /** The capture's first ordinal still held (0 unless a ring deleted some): `belowWindow` is counted from it. */
+  captureFloor: number;
   /** Frames in the whole capture: `belowWindow + packets.length`. */
   captureRowCount: number;
   /** Frames the display filter selects over the whole capture, once the scan is in. */
@@ -169,17 +172,23 @@ const PHASE_LABEL: Record<ExportPhase, string> = {
 };
 
 export const TransferPanel: React.FC<TransferPanelProps> = ({
-  packets, appliedFilter, permissions, captureStats, belowWindow, captureRowCount, filteredRowCount,
+  packets, appliedFilter, permissions, captureStats, belowWindow, captureFloor, captureRowCount, filteredRowCount,
   filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
   captureId, capturedFileCount, capturing, importBlockedBy = null, pickRequest = 0, marks,
 }) => {
   const [scope, setScope] = useState<Scope>('capture');
   /**
-   * The marked frames the store holds, asked again whenever the set changes.
+   * The marked frames the store holds, asked again whenever the set changes,
+   * and once more when the window has moved past what the answer covered.
    * `marks` can name frames the store does not have (the ring expired them), so
-   * the count shown is this set's, not `marks.size`. Null until the first answer.
+   * the count shown is not `marks.size`; it is `markedExportCount`'s, this set
+   * below the window and the window's own marks above it, because frames still
+   * staged during a capture are in no answer the store can give. Null until
+   * the first answer.
    */
   const [heldMarks, setHeldMarks] = useState<MatchSet | null>(null);
+  const windowOrdinal = captureFloor + belowWindow;
+  const heldBehind = heldMarks !== null && heldMarks.frameCount < windowOrdinal;
   useEffect(() => {
     if (marks.size === 0) {
       setHeldMarks(null);
@@ -192,7 +201,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
     let stale = false;
     void captureStore.markMatches().then((held) => { if (!stale) setHeldMarks(held); });
     return () => { stale = true; };
-  }, [marks]);
+  }, [marks, heldBehind]);
   const [includeRawBytes, setIncludeRawBytes] = useState(true);
   const [compress, setCompress] = useState(false);
   const [anonymise, setAnonymise] = useState(false);
@@ -239,7 +248,8 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
   // falls back to the capture rather than disabling every format.
   const effectiveScope: Scope = scope === 'marked' && marks.size > 0 ? 'marked'
     : scope === 'filter' && hasFilter ? 'filter' : 'capture';
-  const markedCount = heldMarks === null ? null : heldMarks.count();
+  const markedCount = heldMarks === null ? null
+    : markedExportCount(heldMarks, windowOrdinal, captureFloor, packets, marks);
   const marked = marks.size === 0
     ? { ready: false, detail: 'No packets are marked.' }
     : markedCount === null

@@ -17,6 +17,7 @@ import { MemoryVolume } from '../../src/services/capture/memoryVolume';
 import { plainForStore } from '../../src/services/capture/storePacket';
 import { MatchSet } from '../../src/services/capture/matchSet';
 import { exportTotal, type CaptureRowReader } from '../../src/services/export/exportFrames';
+import { markedExportCount } from '../../src/lib/captureRowSpace';
 import { serialize, deserialize } from 'node:v8';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { Packet } from '../../src/types/packet';
@@ -148,6 +149,25 @@ console.log('\n--- 4. a frame.marked filter reads the marks in the window too --
   check('...and a new set over the same window is not answered from the old one', changed, 1);
 }
 
+console.log('\n--- 5. the Export panel offers the count the export writes ---\n');
+
+{
+  // A live capture: the store holds 1-10, the window 6-14, and 11-14 are still
+  // staged - marked there, but no answer from the store can name them. The
+  // panel used to show the store's 2 and call a marked frame "not kept".
+  const ids = new Set([2, 5, 12, 99]);
+  const window = rows(6, 14);
+  const written = await exportTotal({ window, filter: null, marked: { ids, matches: set } }, reader);
+  check('5. the export writes 2 from disk and 12 from the window', written, 3);
+  check('...and the panel offers the same', markedExportCount(set, 5, 0, window, ids), 3);
+  // A window with a gap in its ids still counts by membership, not by range.
+  const gapped = [...rows(6, 8), ...rows(12, 14)];
+  check('...a window with a gap in its ids', markedExportCount(set, 5, 0, gapped, new Set([7, 10, 13])), 2 + 2);
+  // A ring that expired ordinal 1 (id 2) leaves only id 5 on disk.
+  check('...and a ring floor drops the expired mark', markedExportCount(set, 5, 2, window, ids), 2);
+}
+
 store.close();
+
 console.log(failures === 0 ? '\nAll marked-scope checks passed.' : `\n${failures} marked-scope check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

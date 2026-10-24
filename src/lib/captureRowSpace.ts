@@ -115,6 +115,31 @@ export function matchesOnDisk(matches: MatchSet, below: number, floor = 0): numb
 }
 
 /**
+ * The marked frames "Marked packets only" writes (ADR 0067): the store's
+ * matches before the window, plus the window's own marked frames - the split
+ * `exportTotal` makes, so the panel offers the number the file gets.
+ *
+ * The store's answer alone is short during a capture: frames still staged are
+ * in the window and not yet in any answer the store can give. A window whose
+ * ids run without a gap is tested by range, one look per mark rather than one
+ * per frame, because the panel asks again on every flush.
+ */
+export function markedExportCount(
+  held: MatchSet, below: number, floor: number,
+  window: readonly { id: number }[], marks: ReadonlySet<number>,
+): number {
+  let inWindow = 0;
+  const first = window[0]?.id ?? 0;
+  const last = window[window.length - 1]?.id ?? -1;
+  if (window.length > 0 && last - first + 1 === window.length) {
+    for (const id of marks) if (id >= first && id <= last) inWindow++;
+  } else {
+    for (const p of window) if (marks.has(p.id)) inWindow++;
+  }
+  return matchesOnDisk(held, below, floor) + inWindow;
+}
+
+/**
  * @param below       The RAM window's first ordinal: capture rows beneath it.
  * @param windowRows  Rows the window supplies - filtered, when filtering.
  * @param matches     The scan's bitmap, or null to address the capture whole.
