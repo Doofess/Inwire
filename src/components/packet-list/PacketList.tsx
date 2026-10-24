@@ -1111,7 +1111,7 @@ export const PacketList: React.FC<PacketListProps> = ({
           they are unreachable by SCROLLING, and saying so is the difference
           between a known limit and a list that quietly stops. */}
       {captureRows.unaddressable > 0 && (
-        <div className="px-3 py-1 text-[11px] font-mono text-amber-600 dark:text-amber-400 border-b border-border/60">
+        <div className="px-3 py-1 text-[11px] text-amber-600 dark:text-amber-400 border-b border-border/60">
           Showing the newest {totalRows.toLocaleString()} frames.{" "}
           {captureRows.unaddressable.toLocaleString()} earlier frames are stored and
           exportable, but past what this list can scroll to.
@@ -1493,14 +1493,21 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // row; and the row's INK, which the colouring rule does
                     // guarantee reads on the fill, but which draws a rule as
                     // strong as the text it separates.
-                    className={`cursor-pointer ${
+                    className={`group cursor-pointer ${
                       isSelected
+                        // A solid accent fill that overrides the colouring
+                        // rule. It was a 6-22% tint of the accent with a 1px
+                        // ring and bold, and over a coloured row the tint all
+                        // but vanished: the ring was the only sign, and bold
+                        // changed every width in the row. The pair is
+                        // `registry.ts`'s per accent, 7:1 in High Contrast.
+                        //
                         // `--row-bg` has to follow, or the one row painted by a
                         // CLASS rather than by the inline style would draw its
                         // separators from the list's ground instead of from
                         // itself - the single exception to the rule the grid is
                         // built on, and on Day a line lighter than both.
-                        ? '[--row-bg:var(--selection)] !bg-selection !text-primary ring-1 ring-inset ring-primary font-bold'
+                        ? '[--row-bg:var(--primary)] !bg-primary !text-primary-foreground'
                         : 'hover:brightness-95 dark:hover:brightness-125'
                     }`}
                     // The matched rule's foreground applies to the whole row,
@@ -1550,11 +1557,13 @@ export const PacketList: React.FC<PacketListProps> = ({
                     {columns.direction && (
                     <td className={`px-2 ${density.cell} whitespace-nowrap text-center`}
                       title={directionTitle(packet.direction)}>
+                      {/* The fades lift on the selected row: 40% of the
+                          accent's ink on the accent is a mark nobody can read. */}
                       <span className={`inline-flex items-center ${
-                        directionOf(packet.direction) === Direction.Unknown ? 'opacity-40' : ''}`}>
+                        directionOf(packet.direction) === Direction.Unknown ? 'opacity-40 group-aria-selected:opacity-100' : ''}`}>
                         <DirectionMark direction={directionOf(packet.direction)} />
                         {signalOf(packet.direction) === DirectionSignal.InferredHost && (
-                          <span className="text-[9px] self-start opacity-60">*</span>
+                          <span className="text-[9px] self-start opacity-60 group-aria-selected:opacity-100">*</span>
                         )}
                       </span>
                     </td>
