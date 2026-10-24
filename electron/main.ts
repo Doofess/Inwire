@@ -43,6 +43,7 @@ import {
   QUIT_CONFIRM_CHANNEL, QUIT_CONFIRM_REPLY_CHANNEL,
 } from './channels';
 import { QuitConfirm } from './quitConfirm';
+import { canSend, CRASH_BUTTONS, crashPrompt, readCrashAnswer } from './rendererLife';
 import { QUIT_CONFIRM_TEXT, readQuitConfirmReply } from '../src/lib/quitConfirm';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
 import { registerSaveStream } from './saveStream';
@@ -219,7 +220,7 @@ const agent = new AgentPipeLink(process.env.INWIRE_AGENT_PIPE || undefined, capt
 const updates = new UpdateCenter({
   onChange: (snapshot) => {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(UPDATE_STATE_CHANNEL, snapshot);
+      if (!window.isDestroyed() && canSend(window.webContents)) window.webContents.send(UPDATE_STATE_CHANNEL, snapshot);
     }
   },
   // A new driver means new adapters, and the picker is showing the list from
@@ -648,7 +649,7 @@ function openExternally(raw: string): void {
 /** Tells the renderer what only main is told: maximized, and focused. */
 function sendWindowState(window: BrowserWindow): void {
   // A crashed page still has its webContents, and a send to it only logs.
-  if (window.isDestroyed() || window.webContents.isCrashed()) return;
+  if (window.isDestroyed() || !canSend(window.webContents)) return;
   window.webContents.send(WINDOW_STATE_CHANNEL, {
     maximized: window.isMaximized(),
     focused: window.isFocused(),
@@ -776,7 +777,7 @@ function guardClose(window: BrowserWindow): void {
   const contents = window.webContents;
   const confirm = new QuitConfirm({
     send: (request) => {
-      if (window.isDestroyed() || contents.isDestroyed() || contents.isCrashed()) return false;
+      if (window.isDestroyed() || !canSend(contents)) return false;
       contents.send(QUIT_CONFIRM_CHANNEL, request);
       return true;
     },
@@ -810,7 +811,43 @@ function guardClose(window: BrowserWindow): void {
   };
   ipcMain.on(QUIT_CONFIRM_REPLY_CHANNEL, onReply);
   window.once('closed', () => ipcMain.removeListener(QUIT_CONFIRM_REPLY_CHANNEL, onReply));
-  contents.on('render-process-gone', () => confirm.rendererGone());
+  // After a crash nothing reloads the page, so main asks. One box at a time,
+  // and never on top of the OS's quit box, which is already asking.
+  let crashPromptOpen = false;
+  contents.on('render-process-gone', (_event, details) => {
+    confirm.rendererGone();
+    if (confirm.pending || window.isDestroyed()) return;
+    const prompt = crashPrompt(details);
+    if (prompt === null || crashPromptOpen) return;
+    const act = (answer: 'reload' | 'quit'): void => {
+      if (answer === 'reload') {
+        if (!contents.isDestroyed()) contents.reload();
+      } else if (!window.isDestroyed()) {
+        // `close`, never `destroy`: the quit guard is on `close`.
+        window.close();
+      }
+    };
+    if (BACKGROUND_WINDOW) {
+      // A modal box would appear in front of the owner and hang the test, so a
+      // test names the answer instead. Read now, not at startup: a test sets it
+      // after the app is running.
+      const answer = readCrashAnswer(process.env.INWIRE_CRASH_ANSWER);
+      if (answer !== null) act(answer);
+      return;
+    }
+    crashPromptOpen = true;
+    void dialog.showMessageBox(window, {
+      type: 'error',
+      buttons: [...CRASH_BUTTONS],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'Inwire',
+      message: prompt.message,
+      detail: prompt.detail,
+    }).then(({ response }) => act(response === 1 ? 'quit' : 'reload'))
+      .finally(() => { crashPromptOpen = false; });
+  });
   // A reload takes the page's dialog with it; see `rendererReset`.
   contents.on('did-start-navigation', (details) => {
     if (details.isMainFrame && !details.isSameDocument) confirm.rendererReset();

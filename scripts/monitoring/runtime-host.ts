@@ -121,11 +121,13 @@ class FakeChild implements ChildLike {
 
 class FakeContents implements ContentsLike {
   destroyed = false;
+  crashed = false;
   posts: { channel: string; message: unknown; ports: unknown[] | undefined }[] = [];
   sends: { channel: string; args: unknown[] }[] = [];
   private destroyListeners: (() => void)[] = [];
   constructor(readonly id: number) {}
   isDestroyed(): boolean { return this.destroyed; }
+  isCrashed(): boolean { return this.crashed; }
   postMessage(channel: string, message: unknown, ports?: unknown[]): void { this.posts.push({ channel, message, ports }); }
   send(channel: string, ...args: unknown[]): void { this.sends.push({ channel, args }); }
   once(_event: 'destroyed', listener: () => void): unknown { this.destroyListeners.push(listener); return this; }
@@ -816,6 +818,17 @@ test('host: status is not sent to a window that is not bound, or one that is des
   second.destroyed = true;
   child.emitMessage({ type: 'status', status: status() });
   assert.equal(second.sent(MONITORING_STATUS_CHANNEL).length, 1);
+});
+
+test('host: a crashed window receives no status and no exit', async () => {
+  const r = hostRig();
+  const c1 = new FakeContents(1);
+  const child = await connect(r, c1);
+  c1.crashed = true;
+  child.emitMessage({ type: 'status', status: status() });
+  child.emitExit(1);
+  assert.equal(c1.sent(MONITORING_STATUS_CHANNEL).length, 0);
+  assert.equal(c1.sent(MONITORING_EXIT_CHANNEL).length, 0);
 });
 
 test('host: a destroyed window unbinds control without stopping intake', async () => {

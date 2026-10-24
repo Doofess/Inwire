@@ -778,6 +778,17 @@ try {
   // Cleared first: with frames buffered, the close below would ask, and a
   // dead page cannot answer, so the OS's box would wait for ever.
   await page.evaluate(() => window.inwire?.setUnsavedCapture?.(false));
+  // The outbound hosts are refused in main from here on. Playwright's route
+  // belongs to the page it was set on, and once that page crashes it holds
+  // every request of the page that replaces it: the reload below sat at
+  // `did-start-loading` for ever. A session's `onBeforeRequest` outlives the
+  // renderer, and the app sets none of its own.
+  await app.evaluate(({ session }, hosts) => {
+    session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+      callback({ cancel: hosts.some((host) => details.url.includes(host)) });
+    });
+  }, OUTBOUND_BLOCKED);
+  await page.unroute('**/*');
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
   const crashWriter = openSync(keyLogFile!, 'a');
   for (let i = 0; i < 20; i++) {
@@ -790,6 +801,48 @@ try {
   check('main sends nothing to a crashed page',
     (mainOutput.match(/Render frame was disposed/g) ?? []).length, 0);
   checkTrue('main says the renderer is gone, and why', /\[renderer\] gone: \w+/.test(mainOutput));
+
+  // Then the other half: what main asks. A background launch shows no box (it
+  // would sit in front of whoever is working), so the answer comes from the
+  // environment, read when the crash happens. Nothing above set it, which is
+  // why the page stayed dead long enough to catch an unguarded sender.
+  // Plain arrows with nothing named inside: tsx's `__name` helper does not
+  // exist in main.
+  await app.evaluate(({ BrowserWindow }) => {
+    process.env.INWIRE_CRASH_ANSWER = 'reload';
+    const contents = BrowserWindow.getAllWindows()[0].webContents;
+    (globalThis as { __loads?: number }).__loads = 0;
+    contents.on('did-finish-load', () => { (globalThis as { __loads?: number }).__loads! += 1; });
+    contents.reload();
+  });
+  // Bounded: 20 s each, polled from main.
+  const electronApp = app;
+  const pageIsBack = (loadsBefore: number) => async (): Promise<boolean> => {
+    for (let i = 0; i < 80; i++) {
+      const back = await electronApp.evaluate(({ BrowserWindow }, before) => {
+        const contents = BrowserWindow.getAllWindows()[0].webContents;
+        return !contents.isCrashed() && !contents.isLoading()
+          && ((globalThis as { __loads?: number }).__loads ?? 0) > before;
+      }, loadsBefore);
+      if (back) return true;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    // Said, so a failure here names which of the three it was.
+    console.log(`        main saw: ${JSON.stringify(await electronApp.evaluate(({ BrowserWindow }) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents;
+      return { crashed: contents.isCrashed(), loading: contents.isLoading(),
+        loads: (globalThis as { __loads?: number }).__loads ?? null };
+    }))}`);
+    return false;
+  };
+  const firstBack = await pageIsBack(0)();
+  console.log(`      reloaded by hand: ${firstBack ? 'back' : 'did not come back'}`);
+  if (firstBack) {
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
+    checkTrue('a crashed page reloads when the prompt answers Reload', await pageIsBack(1)());
+  } else {
+    checkTrue('a crashed page reloads when the prompt answers Reload', false);
+  }
 } finally {
   // Closing with frames in the buffer opens the "Quit Inwire?" confirm - the
   // page's own dialog, or the OS's box when the page does not answer within a
