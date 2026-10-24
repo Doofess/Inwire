@@ -735,7 +735,7 @@ const LOAD_HALF_LIFE = 8192;
 const NO_OFFSETS: readonly number[] = [];
 
 /** A frame's `tls.stream` field, settled in place; true when it held a placeholder. */
-function settleField(packet: Packet, resolve: (placeholder: number) => number): boolean {
+export function settleField(packet: Packet, resolve: (placeholder: number) => number): boolean {
   const value = packet.fields?.['tls.stream'];
   if (typeof value !== 'number' || value >= 0) return false;
   packet.fields!['tls.stream'] = resolve(value);
