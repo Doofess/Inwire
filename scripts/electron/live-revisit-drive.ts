@@ -67,6 +67,9 @@ function skip(why: string): never {
 const OUT_OF_CACHE = 5000;
 /** Enough frames that some are well out of the cache. */
 const WANT_FRAMES = 12_000;
+/** `--threads n`: the dissection threads setting, for a run against one core (`1`) beside the default. */
+const THREADS_AT = process.argv.indexOf('--threads');
+const THREADS = THREADS_AT >= 0 ? Number(process.argv[THREADS_AT + 1]) : null;
 
 function fieldOf(layers: ProtocolLayer[], abbrev: string): ProtocolField | undefined {
   const walk = (fields: ProtocolField[]): ProtocolField | undefined => {
@@ -145,6 +148,9 @@ try {
   const storeStats = () => page.evaluate(() => (window as unknown as { __storeStats?: Record<string, number> }).__storeStats ?? null);
   await page.waitForLoadState('domcontentloaded');
   await page.evaluate(() => localStorage.setItem('inwire.tour', JSON.stringify({ completed: true })));
+  if (THREADS !== null) {
+    await page.evaluate((threads) => localStorage.setItem('inwire.performance', JSON.stringify({ dissectionThreads: threads })), THREADS);
+  }
   await page.reload();
   await page.waitForLoadState('domcontentloaded');
   await sleep(2500);
@@ -242,6 +248,24 @@ try {
     if (ranges.length > 0) console.log(`      without a record: ${ranges.slice(0, 20).join(', ')}${ranges.length > 20 ? ', ...' : ''}`);
     const placeholders = rows.filter((r) => r.info === 'Not dissected - frame bytes are on disk').length;
     console.log(`      rows with no protocol or info (placeholders): ${placeholders}`);
+  }
+  {
+    // TCP is dissected on the shards, which annotate their own rows from their
+    // copy of the socket table and leave the merge only a side record (ADR 0053
+    // phase 6): the browser's own connections must still name their process,
+    // and no row may keep the placeholder a shard gives `tls.stream`.
+    const tcpRows = rows.filter((r) => r.frameProtocols?.includes('tcp'));
+    const named = tcpRows.filter((r) => typeof r.fields?.['inwire.process.name'] === 'string').length;
+    console.log(`      TCP rows naming their process: ${named.toLocaleString()} of ${tcpRows.length.toLocaleString()}`);
+    // Well under what one core names on the same traffic (a third to a half,
+    // measured; the rest is sockets the table never lists), and well over the
+    // none at all a shard that never got a table names.
+    checkTrue('at least a fifth of TCP rows name their process', tcpRows.length > 0 && named > tcpRows.length / 5);
+    const unsettled = rows.filter((r) => {
+      const stream = r.fields?.['tls.stream'];
+      return typeof stream === 'number' && stream < 0;
+    }).length;
+    check('no row keeps a placeholder tls.stream', unsettled, 0);
   }
 
   const tcp = new TcpStreamTracker();
