@@ -350,8 +350,8 @@ export const CaptureSchedulePanel: React.FC<CaptureSchedulePanelProps> = ({
                   label="Start"
                 />
               )}
-              <div className="grid grid-cols-[auto_1fr_1fr_1fr] items-center gap-1">
-                <span className={`${helpClass} mr-0.5`}>Start in</span>
+              <div className="grid grid-cols-3 items-center gap-1">
+                <span className={`${helpClass} col-span-3`}>Start in</span>
                 {[5, 15, 60].map((minutes) => (
                   <button
                     key={minutes}
