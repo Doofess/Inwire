@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { CircleAlert, Check, X } from 'lucide-react';
 import { FilterEngine } from '../../services/filterEngine';
+import { MICRO_LABEL } from './typography';
 
 interface FilterPresetEditorProps {
   initialName?: string;
@@ -66,7 +67,7 @@ export const FilterPresetEditor: React.FC<FilterPresetEditorProps> = ({
   return (
     <div className="rounded-md border border-primary/40 bg-muted/30 p-2.5 flex flex-col gap-2">
       <div className="flex flex-col gap-1">
-        <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground font-mono">
+        <label className={MICRO_LABEL}>
           Name
         </label>
         <input
@@ -80,7 +81,7 @@ export const FilterPresetEditor: React.FC<FilterPresetEditorProps> = ({
       </div>
 
       <div className="flex flex-col gap-1">
-        <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground font-mono">
+        <label className={MICRO_LABEL}>
           Expression
         </label>
         <input
@@ -105,7 +106,7 @@ export const FilterPresetEditor: React.FC<FilterPresetEditorProps> = ({
       </div>
 
       <div className="flex flex-col gap-1">
-        <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground font-mono">
+        <label className={MICRO_LABEL}>
           Description <span className="normal-case font-normal tracking-normal">(optional)</span>
         </label>
         <input

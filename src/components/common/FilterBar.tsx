@@ -10,6 +10,7 @@ import { dismissalAfter, suggestionsVisible } from '../../lib/filterSuggestions'
 import { recentFiltersStore } from '../../services/recentFilters';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { useEscapeLayer } from '../../hooks/useEscapeLayer';
+import { MICRO_LABEL } from './typography';
 
 /**
  * **There was a `variant`, and there is one filter field in this app.**
@@ -479,7 +480,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 
           {presetsVisible && (
             <div className="absolute left-0 right-0 top-full mt-1.5 rounded-lg border p-1.5 shadow-2xl z-50 transition-all bg-popover border-border text-popover-foreground">
-              <div className="text-[10px] font-bold text-muted-foreground px-2 py-1 uppercase tracking-wider flex items-center justify-between font-mono">
+              <div className={`${MICRO_LABEL} px-2 py-1 flex items-center justify-between`}>
                 <span>Display Filter Presets</span>
                 <span className="text-[10px] text-muted-foreground">{presetCount} presets</span>
               </div>
@@ -490,7 +491,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               <div className="max-h-64 overflow-y-auto space-y-0.5 custom-scrollbar">
                 {showRecent && (
                   <div>
-                    <div className="text-[10px] font-bold text-muted-foreground pl-2.5 pr-1 pt-2 pb-1 uppercase tracking-wider font-mono flex items-center justify-between">
+                    <div className={`${MICRO_LABEL} pl-2.5 pr-1 pt-2 pb-1 flex items-center justify-between`}>
                       <span>Recent</span>
                       <button
                         type="button"
@@ -525,7 +526,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 {filterPresetLibrary.groups.map(group => (
                   group.presets.length === 0 ? null : (
                     <div key={group.id}>
-                      <div className="text-[10px] font-bold text-muted-foreground px-2.5 pt-2 pb-1 uppercase tracking-wider font-mono">
+                      <div className={`${MICRO_LABEL} px-2.5 pt-2 pb-1`}>
                         {group.name}
                       </div>
                       {group.presets.map(p => (

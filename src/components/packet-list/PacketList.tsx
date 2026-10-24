@@ -66,6 +66,7 @@ import {
   useDebouncedPreference,
   usePreferenceSync,
 } from '../../services/preferences';
+import { MICRO_LABEL } from '../common/typography';
 
 interface PacketListProps {
   /**
@@ -435,7 +436,7 @@ export const PacketList: React.FC<PacketListProps> = ({
     // The fit must never go below what the column's own TITLE needs, or short
     // addresses ("1.1.1.1") leave a header narrower than its label and the
     // centred title overflows on both sides ("estinatio"). Read from the
-    // header itself, so its real font, bold, uppercase and tracking count, and
+    // header itself, so its real font, weight and size count, and
     // once per column: the label never changes, and this effect runs ten times
     // a second. A zero (header not laid out, or display:none) is not cached.
     const headerMin = headerMinRef.current;
@@ -1208,13 +1209,13 @@ export const PacketList: React.FC<PacketListProps> = ({
               // one `PaneHeader` and every panel edge draws. The body's rules
               // belong to a surface the colouring chain repaints per row, and
               // have to be derived from it.
-              className="text-[11px] uppercase tracking-wider"
+              className="font-sans text-[11px] font-semibold"
             >
               {columns.id && (
               <th
                 data-column="id"
                 aria-sort={sortAttr('id')}
-                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 group font-semibold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <button type="button" onClick={() => handleSort('id')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>No.</span>
@@ -1228,7 +1229,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <th
                 data-column="direction"
                 aria-sort={sortAttr('direction')}
-                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 group font-semibold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <button type="button" onClick={() => handleSort('direction')}
                   title="Which way the frame went, relative to the capturing host"
@@ -1244,7 +1245,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <th
                 data-column="relativeTime"
                 aria-sort={sortAttr('relativeTime')}
-                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 group font-semibold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <button type="button" onClick={() => handleSort('relativeTime')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Time</span>
@@ -1258,7 +1259,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <th
                 data-column="source"
                 aria-sort={sortAttr('source')}
-                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 group font-semibold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <button type="button" onClick={() => handleSort('source')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Source</span>
@@ -1272,7 +1273,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <th
                 data-column="destination"
                 aria-sort={sortAttr('destination')}
-                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 group font-semibold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <button type="button" onClick={() => handleSort('destination')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Destination</span>
@@ -1286,7 +1287,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <th
                 data-column="protocol"
                 aria-sort={sortAttr('protocol')}
-                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 group font-semibold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 <button type="button" onClick={() => handleSort('protocol')} className={`flex items-center gap-1 w-full cursor-pointer ${HEADER_TITLE}`}>
                     <span>Protocol</span>
@@ -1300,7 +1301,7 @@ export const PacketList: React.FC<PacketListProps> = ({
               <th
                 data-column="length"
                 aria-sort={sortAttr('length')}
-                className={`relative px-2 py-1 group font-bold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
+                className={`relative px-2 py-1 group font-semibold overflow-hidden ${"hover:bg-accent text-muted-foreground"}`}
               >
                 {/* Centred like every other title. It used to be pinned right
                     to match the numbers below it, because the other headers
@@ -1323,7 +1324,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                   key={c.abbrev}
                   data-column={c.abbrev}
                   title={c.abbrev}
-                  className={`relative px-2 py-1 group font-bold overflow-hidden hover:bg-accent text-muted-foreground`}
+                  className={`relative px-2 py-1 group font-semibold overflow-hidden hover:bg-accent text-muted-foreground`}
                 >
                   <div className={`flex items-center gap-1 w-full ${HEADER_TITLE}`}>
                     <span className="truncate">{c.def.column?.label ?? c.def.label}</span>
@@ -1331,7 +1332,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                 </th>
               ))}
 
-              <th data-column="info" aria-sort={sortAttr('info')} className={`px-4 py-2.5 group font-bold ${"hover:bg-accent text-muted-foreground"}`}><div className="flex items-center gap-1"><button type="button" onClick={() => handleSort('info')} className={`flex items-center gap-1 flex-1 min-w-0 cursor-pointer ${HEADER_TITLE}`}><span>Info</span>{renderSortIcon('info')}</button>{/* Only when the minimap is off - otherwise it lives in the strip above the map, which is not a column and so does not move when one is resized. It has to live SOMEWHERE, though: this menu is the only way to turn the hidden columns back on. */}{!showMinimap && columnMenuTrigger}</div></th>
+              <th data-column="info" aria-sort={sortAttr('info')} className={`px-4 py-2.5 group font-semibold ${"hover:bg-accent text-muted-foreground"}`}><div className="flex items-center gap-1"><button type="button" onClick={() => handleSort('info')} className={`flex items-center gap-1 flex-1 min-w-0 cursor-pointer ${HEADER_TITLE}`}><span>Info</span>{renderSortIcon('info')}</button>{/* Only when the minimap is off - otherwise it lives in the strip above the map, which is not a column and so does not move when one is resized. It has to live SOMEWHERE, though: this menu is the only way to turn the hidden columns back on. */}{!showMinimap && columnMenuTrigger}</div></th>
             </tr>
               </ContextMenuTrigger>
               {alignColumn && (
@@ -1708,7 +1709,7 @@ export const PacketList: React.FC<PacketListProps> = ({
           className="fixed z-50 rounded-lg border p-1 shadow-2xl transition-all bg-popover border-border text-popover-foreground min-w-[240px] font-sans text-xs"
           style={{ top: Math.min(contextMenu.y, window.innerHeight - 300), left: Math.min(contextMenu.x, window.innerWidth - 260) }}
         >
-          <div className="px-2 py-1 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b border-border font-mono">
+          <div className={`${MICRO_LABEL} px-2 py-1 border-b border-border`}>
             Packet #{contextMenu.packet.id} Options
           </div>
 

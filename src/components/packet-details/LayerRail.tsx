@@ -71,7 +71,7 @@ export const LayerRail: React.FC<LayerRailProps> = ({
       <button
         onClick={() => onSelect(null)}
         onMouseEnter={() => onHoverRange(null)}
-        className={`shrink-0 px-2.5 py-1 rounded text-[10px] font-mono uppercase tracking-wider transition-colors cursor-pointer self-center ${
+        className={`shrink-0 px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-widest transition-colors cursor-pointer self-center ${
           selectedIndex === null
             ? 'bg-primary/15 text-primary font-bold'
             : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground'

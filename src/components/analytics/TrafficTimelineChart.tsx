@@ -11,6 +11,7 @@ import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 import { useDebouncedValue } from '../../lib/useDebouncedValue';
 import { FilterEngine } from '../../services/filterEngine';
 import { timelineIndex } from '../../services/report/timeline';
+import { MICRO_LABEL } from '../common/typography';
 
 export type TimelineMetric = 'packets' | 'bytes';
 export type TimelineChart = 'area' | 'bars';
@@ -644,7 +645,7 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
       </div>
 
       {/* The window currently in view, which zoom and pan move. */}
-      <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono uppercase tracking-wider shrink-0">
+      <div className={`flex items-center justify-between ${MICRO_LABEL} shrink-0`}>
         <span>T={Math.round(visibleDomain[0])}s</span>
         <span className="font-bold">
           T={Math.round(visibleDomain[1])}s{Math.round(visibleDomain[1]) >= maxTime ? ' (NOW)' : ''}

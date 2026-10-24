@@ -84,7 +84,7 @@ export const PacketDetailsTree: React.FC<PacketDetailsTreeProps> = ({
           subject is the frame's STRUCTURE, so its header names which frame and
           stops. */}
       <PaneHeader
-        title="Packet Inspection"
+        title="Packet inspection"
         detail={`#Frame ${packet.id}`}
       >
         {hoveredField && (

@@ -22,7 +22,7 @@ import { fieldDef } from '../../services/dissect/fieldRegistry';
  * The dissected protocol tree itself, with no surrounding chrome.
  *
  * Split out of PacketDetailsTree so the same tree can be presented two ways:
- * the workspace's bottom pane wraps it in its "Packet Inspection" header, and
+ * the workspace's bottom pane wraps it in its "Packet inspection" header, and
  * the packet detail window lays it out its own way. Neither owns the tree, so
  * the two cannot drift - a bitfield row, an expert-info colour or a
  * cross-frame link behaves identically wherever the tree is shown.
