@@ -2823,6 +2823,10 @@ export default function App() {
       captureStore.prune([storedImport]);
       importCaptureIdRef.current = null;
     }
+    // The first batch cleared the marks, but a Ctrl+M on an old row while the
+    // file loaded added to them under the old capture's id - which the store
+    // dropped and the set kept. The imported capture has no marks.
+    adoptMarks(EMPTY_MARKS);
     // `null` keeps `persistedThroughId` where it was, which is right when the
     // import went nowhere; when it went to disk, everything up to `lastId` is
     // there and a later flush must not write it a second time.
