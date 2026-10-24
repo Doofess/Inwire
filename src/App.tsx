@@ -8,6 +8,8 @@ import { useTheme } from "next-themes";
 import { useSystemThemePreference } from "./lib/useSystemTheme";
 import { useMotionPreference } from "./lib/motion";
 import { TourOverlay } from "./components/tour/TourOverlay";
+import { tourSteps } from "./components/tour/tourSteps";
+import { agentBlocksStart } from "./services/agentHealth";
 import { tourStore } from "./services/tourPrefs";
 import { useNameResolutionPreference } from "./lib/nameResolution";
 import {
@@ -37,7 +39,7 @@ import { anchorSelection } from "./services/selectionAnchor";
 import { startKeyLogFollow } from "./lib/keyLogFollow";
 import { selectionLabel, toggleInterface } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
-import { startGate } from "./lib/startGate";
+import { offeredCapture, startGate } from "./lib/startGate";
 import { Welcome } from "./components/packet-list/Welcome";
 import { TitleRow } from "./components/common/TitleRow";
 import { CaptureLivePill } from "./components/common/CaptureLivePill";
@@ -944,10 +946,11 @@ export default function App() {
   // The answer echoes the filter, so one that crossed a newer question is
   // recognised as stale (`filterVerdict`).
   const captureFilterVerdict = filterVerdict(captureOptions, captureFilterCheck);
-  // Why Start must wait, or null: a filter the agent refused, or ring and stop
-  // settings it would refuse - said here, with the reason, rather than by a
-  // refusal after the click.
-  const startBlockedReason = (reopening ? 'Reopening the last capture - Start waits for it.' : null)
+  // Why Start must wait, or null: no agent to capture with, a filter the agent
+  // refused, or ring and stop settings it would refuse - said here, with the
+  // reason, rather than by a refusal after the click.
+  const startBlockedReason = agentBlocksStart(agentHealth)
+    ?? (reopening ? 'Reopening the last capture - Start waits for it.' : null)
     ?? filterBlocksStart(captureFilterVerdict) ?? ringProblem(captureOptions);
   const startBlockedRef = useRef(startBlockedReason);
   startBlockedRef.current = startBlockedReason;
@@ -1187,7 +1190,8 @@ export default function App() {
       // running nobody had started, and a Start pressed while it ran deleted
       // the capture it was still reading. Only a capture that ever received
       // a frame is offered.
-      if (meta?.captureId && meta.lastPacketMs != null) setLastCapture(meta);
+      const offer = offeredCapture(meta);
+      if (offer !== null) setLastCapture(offer);
 
       // Capture is not resumed, and nothing is said about it: a launch leaves
       // the app exactly as pressing Pause would - adapter and filters intact,
@@ -1394,22 +1398,10 @@ export default function App() {
    */
   const storedCaptureId = captureStorage.captureId;
 
-  /**
-   * Keeps the stored session's non-frame half current.
-   *
-   * The time refs are read at write time rather than being dependencies: they
-   * are refs precisely because they change per packet and must not re-run
-   * effects. `persistedPacketTick` exists only to make this run again as those
-   * refs drift - and it is throttled hard, because packet count changes ten
-   * times a second and the relative-time origin it is standing in for changes
-   * once per capture.
-   */
-  useEffect(() => {
-    // Nor while a previous capture is only offered: writing now would replace
-    // its metadata - the clock origin, the adapter table, which directory -
-    // with this empty session's, and the offer would reopen nothing.
-    if (restoringRef.current || lastCaptureRef.current !== null) return;
-    void saveSessionMeta({
+  // The stored session's non-frame half as it stands now. Built in one place
+  // because two things need it: the write below, and Clear View, which offers
+  // the capture it empties the list of (`handleClearView`).
+  const sessionMetaNow = (): SessionMeta => ({
       selectedInterfaces,
       interfaces: agentInterfaces,
       captureStartMs: captureStartRef.current === null ? null : captureStartRef.current / 1000,
@@ -1435,7 +1427,24 @@ export default function App() {
         confidence: hostIdentityRef.current.confidence,
         ...(hostIdentityRef.current.basis ? { basis: hostIdentityRef.current.basis } : {}),
       },
-    });
+  });
+
+  /**
+   * Keeps the stored session's non-frame half current.
+   *
+   * The time refs are read at write time rather than being dependencies: they
+   * are refs precisely because they change per packet and must not re-run
+   * effects. `persistedPacketTick` exists only to make this run again as those
+   * refs drift - and it is throttled hard, because packet count changes ten
+   * times a second and the relative-time origin it is standing in for changes
+   * once per capture.
+   */
+  useEffect(() => {
+    // Nor while a previous capture is only offered: writing now would replace
+    // its metadata - the clock origin, the adapter table, which directory -
+    // with this empty session's, and the offer would reopen nothing.
+    if (restoringRef.current || lastCaptureRef.current !== null) return;
+    void saveSessionMeta(sessionMetaNow());
   }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick, storedCaptureId, captureSource]);
 
 
@@ -2402,6 +2411,23 @@ export default function App() {
   };
 
   /**
+   * Settings' Clear View: empties the list, keeps the capture on disk (ADR
+   * 0012), and offers it as a launch does. The empty list is the welcome, whose
+   * Start deletes that capture - and with nothing offered `startGate` had
+   * nothing to ask about, so Clear View then Start deleted it unasked. Not while
+   * capturing: that capture goes on, into the same directory.
+   */
+  const handleClearView = () => {
+    const offer = isCapturingRef.current ? null : offeredCapture(sessionMetaNow());
+    handleClearPackets();
+    if (offer !== null) {
+      setLastCapture(offer);
+      // What a relaunch offers, too: the throttled write may be seconds behind.
+      void saveSessionMeta(offer);
+    }
+  };
+
+  /**
    * Throws the stored capture away, for good.
    *
    * The only thing in the app that deletes captured bytes from disk. Nothing
@@ -3276,7 +3302,7 @@ export default function App() {
               // Info reads.
               bufferResidentBytes={residentBytes()}
               bufferAutoPaused={bufferAutoPaused}
-              onClearPackets={handleClearPackets}
+              onClearPackets={handleClearView}
               captureStorage={captureStorage}
               onDiscardCapture={handleDiscardCapture}
               filterPresetLibrary={filterPresetLibrary}
@@ -3319,8 +3345,8 @@ export default function App() {
               {/* Upper Pane: High-Density Packet Table */}
               {showWelcome ? (
                 <div
-                  // The tour's anchor exists in both states.
-                  data-tour="list"
+                  // The tour's list anchor is inside the welcome, on its
+                  // column: this box fills the view, leaving the card no room.
                   className="flex-1 flex flex-col min-h-0 overflow-hidden"
                 >
                   <Welcome
@@ -3330,6 +3356,7 @@ export default function App() {
                     interfaceRates={interfaceRates}
                     onSamplingChange={handleInterfaceSampling}
                     gate={startGateResult}
+                    agentProblem={agentBlocksStart(agentHealth)}
                     previousCapture={lastCaptureLabel === null ? null
                       : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
                     onStart={handleStartCapture}
@@ -3729,7 +3756,7 @@ export default function App() {
           that swap in and out of it, and being listed there would make opening
           any modal unmount it part-way through a step. */}
       {tourOpen && (
-        <TourOverlay onDone={() => { setTourOpen(false); tourStore.set({ completed: true }); }} />
+        <TourOverlay steps={tourSteps(showWelcome)} onDone={() => { setTourOpen(false); tourStore.set({ completed: true }); }} />
       )}
 
       {palette !== null && (

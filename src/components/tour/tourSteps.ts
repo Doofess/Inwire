@@ -108,3 +108,25 @@ export const TOUR_STEPS: TourStep[] = [
     side: 'top',
   },
 ];
+
+/**
+ * The steps for what is on screen when the tour opens.
+ *
+ * An empty Packets view is the welcome (`Welcome.tsx`), which carries the
+ * list's anchor and replaces both detail panes - and the welcome's "Take the
+ * tour" is the tour's main way in. There the list step says what the welcome
+ * is, and the detail step goes: with no pane to measure it would be skipped
+ * after a blank pause, ending the tour on nothing.
+ */
+export function tourSteps(welcome: boolean): TourStep[] {
+  if (!welcome) return TOUR_STEPS;
+  return TOUR_STEPS.filter((s) => s.anchor !== 'detail').map((s) => s.anchor !== 'list' ? s : {
+    ...s,
+    title: 'Where your traffic will be',
+    // Two lines: at the 1024 x 720 minimum the welcome's column starts about
+    // 170px down, and that is all the room the card has above it.
+    body:
+      'Until the first packet arrives, start here: pick an adapter and press Start, '
+      + 'or open a capture file.',
+  });
+}

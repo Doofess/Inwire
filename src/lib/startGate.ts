@@ -64,3 +64,31 @@ export function startGate(input: StartGateInput): StartGate {
   }
   return { blocked, discards };
 }
+
+/**
+ * What one press of Start does, given the gate: nothing while it is blocked,
+ * ask first when it would discard something, otherwise start.
+ *
+ * Its own function so the rule a button follows can be run from a script: the
+ * welcome's button calling `onStart` straight would type-check and delete the
+ * previous capture unasked.
+ */
+export function startPress(gate: StartGate): 'none' | 'confirm' | 'start' {
+  if (gate.blocked !== null) return 'none';
+  return gate.discards !== null ? 'confirm' : 'start';
+}
+
+/**
+ * The stored capture worth offering for reopening, or null.
+ *
+ * One that ever received a frame and has a directory: anything else reopens
+ * nothing. Read at launch and after Clear View, which empties the list and
+ * keeps the capture on disk - and an empty list with no offer is a Start that
+ * deletes the capture without asking, because `startGate` has nothing to ask
+ * about.
+ */
+export function offeredCapture<M extends { captureId?: string | null; lastPacketMs: number | null }>(
+  meta: M | null,
+): M | null {
+  return meta?.captureId && meta.lastPacketMs != null ? meta : null;
+}

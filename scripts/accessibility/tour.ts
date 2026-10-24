@@ -24,7 +24,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TOUR_STEPS } from '../../src/components/tour/tourSteps';
+import { TOUR_STEPS, tourSteps } from '../../src/components/tour/tourSteps';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -100,6 +100,20 @@ check('the overlay is shown only when the tour was asked for',
   [/\{tourOpen && \(\s*<TourOverlay/.test(app), app.includes('!tour.completed &&')], [true, false]);
 check('the palette lists help.tour', /id: 'help\.tour'/.test(commands), true);
 check('App binds help.tour', /case 'help\.tour':/.test(app), true);
+
+// Taken from the welcome - its main way in - there is no list and no detail
+// pane on screen. The list step must describe what IS there, and the detail
+// step goes, rather than measuring nothing and ending the tour unannounced.
+const onWelcome = tourSteps(true);
+const listOnWelcome = onWelcome.find((s) => s.anchor === 'list');
+check('from the welcome the tour has no detail step',
+  onWelcome.map((s) => s.anchor).includes('detail'), false);
+check('...and its list step does not describe rows that are not there',
+  /each row/i.test(listOnWelcome?.body ?? 'each row'), false);
+check('...and it ends on the rail', onWelcome[onWelcome.length - 1]?.anchor, 'rail');
+check('with packets on screen it is the full tour', tourSteps(false), TOUR_STEPS);
+check('App hands the overlay the steps for what is on screen',
+  /<TourOverlay\s+steps=\{tourSteps\(showWelcome\)\}/.test(app), true);
 
 console.log();
 if (failures) {

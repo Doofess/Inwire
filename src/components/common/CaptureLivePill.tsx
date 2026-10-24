@@ -42,7 +42,10 @@ export const CaptureLivePill: React.FC<{ startedAt: number | null; onStop: () =>
     <div
       className="app-no-drag h-6 shrink-0 inline-flex items-center gap-1.5 rounded-full
         bg-destructive/10 pl-2.5 pr-0.5 text-xs text-foreground whitespace-nowrap"
-      role="status"
+      // A group, not a status: a live region whose clock changes every
+      // second is read out every second for as long as the capture runs. The
+      // label is read when focus enters, which is when someone asked.
+      role="group"
       aria-label={`Capturing for ${elapsedLabel(elapsed)}`}
     >
       <span className={LIVE_DOT} aria-hidden />

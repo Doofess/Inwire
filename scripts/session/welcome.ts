@@ -11,7 +11,8 @@
  * gate, and sampling follows the welcome's mount.
  */
 import { readFileSync } from 'node:fs';
-import { startGate, type StartGateInput } from '../../src/lib/startGate';
+import { offeredCapture, startGate, startPress, type StartGateInput } from '../../src/lib/startGate';
+import { agentBlocksStart } from '../../src/services/agentHealth';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -71,9 +72,43 @@ check('(i) Welcome calls useEscapeLayer', /useEscapeLayer\(/.test(welcome));
 // points at them rather than repeating the rail's "Choose an interface first".
 check('(j) with adapters listed and none picked, Start points up at them',
   welcome.includes("'Pick an adapter above.'")
-  && /selectedInterfaces\.length === 0 && interfaces\.length > 0/.test(welcome));
-check('the welcome keeps data-tour="list"', /data-tour="list"/.test(app)
-  && (app.match(/data-tour="list"/g) ?? []).length === 2);
+  && /gate\.blocked === 'Choose an interface first' && interfaces\.length > 0/.test(welcome));
+// On the welcome's column, not the view-filling box App wraps it in: that
+// leaves the tour's card no room and it clips under the title row.
+check('the welcome keeps data-tour="list"', (app.match(/data-tour="list"/g) ?? []).length === 1
+  && (welcome.match(/data-tour="list"/g) ?? []).length === 1);
+
+// What a press of Start does, decided beside the gate so it can be run here:
+// a Start that would discard something asks first, and the welcome's button
+// goes through it. `onClick={onStart}` would delete the previous capture unasked.
+check('(k) a blocked Start does nothing', startPress(gate({ hasSelection: false })) === 'none');
+check('(k) a Start that discards a previous capture asks', startPress(gate({ previousCapture: 'x' })) === 'confirm');
+check('(k) ...and one that discards the buffer', startPress(gate({ bufferedPackets: 3 })) === 'confirm');
+check('(k) with nothing to lose it starts', startPress(plain) === 'start');
+check('(k) the welcome\'s Start runs press, and press asks startPress',
+  /onClick=\{press\}/.test(welcome) && /const press = \(\): void => \{\s*const action = startPress\(gate\);/.test(welcome));
+
+// No agent, no capture: Start is blocked with the agent's own status, on the
+// rail and the welcome alike, rather than starting into a dead pipe.
+const stopped = { kind: 'stopped', summary: 's', detail: 'd', canStart: true } as const;
+check('(l) a connected agent does not block Start', agentBlocksStart({ kind: 'connected' }) === null);
+check('(l) a connecting agent blocks Start', agentBlocksStart({ kind: 'connecting' }) !== null);
+check('(l) a stopped agent blocks Start in its status label\'s words',
+  agentBlocksStart(stopped)?.startsWith('Agent not running') === true);
+check('(l) App leads startBlockedReason with the agent',
+  /const startBlockedReason = agentBlocksStart\(agentHealth\)/.test(app));
+check('(l) "Pick an adapter above." stands in only for the no-selection reason',
+  welcome.includes("gate.blocked === 'Choose an interface first'"));
+
+// Clear View keeps the capture on disk, so the empty list that follows must
+// offer it again: an offer is what makes Start ask.
+const meta = { selectedInterfaces: [], interfaces: [], captureStartMs: 1, lastPacketMs: 2, updatedAt: 3, captureId: 'c1' };
+check('(m) a stored capture with frames is offered', offeredCapture(meta) === meta);
+check('(m) one that never got a frame is not', offeredCapture({ ...meta, lastPacketMs: null }) === null);
+check('(m) nor one with no directory', offeredCapture({ ...meta, captureId: null }) === null);
+check('(m) Settings\' Clear View offers what it cleared',
+  /onClearPackets=\{handleClearView\}/.test(app)
+  && /const handleClearView = [\s\S]{0,400}offeredCapture\(sessionMetaNow\(\)\)[\s\S]{0,200}setLastCapture\(offer\)/.test(app));
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) FAILED`);

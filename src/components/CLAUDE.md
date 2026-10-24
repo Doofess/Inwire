@@ -521,11 +521,18 @@ with Reopen, "Open a capture file…" and "Take the tour". It replaces the list
 AND the panes, and the first packet brings them back; the panes *setting* is
 never written. **Its Start asks what the rail's Start asks** — both read
 `lib/startGate.ts`, so neither can delete the capture on disk unasked while the
-other confirms. "Open a capture file…" opens Export / Import and bumps
+other confirms; a press goes through `startPress`. No agent is a reason Start
+waits (`agentBlocksStart`, first in `startBlockedReason`), in the status label's
+words. Settings' Clear View offers the capture it cleared (`handleClearView`,
+`offeredCapture`), because an empty list with nothing offered is a Start with
+nothing to ask about. "Open a capture file…" opens Export / Import and bumps
 `pickRequest`, which the panel turns into its import picker. **The tour is
 opt-in**: the welcome's link and the palette's `help.tour`, never sprung on
-first run; the welcome carries `data-tour="list"` so the tour's anchor exists
-in both states. `scripts/session/welcome.ts`.
+first run. The welcome's column carries `data-tour="list"`, and from the
+welcome the tour is `tourSteps(true)`: the list step describes the welcome and
+the detail step, with no pane to point at, is left out.
+`scripts/session/welcome.ts`, `scripts/accessibility/tour.ts`,
+`scripts/electron/reopen-offer.ts`.
 
 #### The rail
 

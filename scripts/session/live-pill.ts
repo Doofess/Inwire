@@ -34,6 +34,11 @@ const pill = readFileSync('src/components/common/CaptureLivePill.tsx', 'utf8');
 check('the pill opts out of the drag region', pill.includes('app-no-drag'));
 check('the stop button names itself', pill.includes('aria-label="Stop capture"'));
 check('the pill has no font-mono', !pill.includes('font-mono'));
+// Its clock and rate change every second. A live region (role="status" is one,
+// polite and atomic) would have a screen reader read the whole pill out every
+// second for as long as the capture runs.
+check('the pill is not a live region',
+  !/role="(status|log|alert|timer)"/.test(pill) && !/aria-live="(polite|assertive)"/.test(pill));
 const titleRow = readFileSync('src/components/common/TitleRow.tsx', 'utf8');
 check('TitleRow renders {live}', titleRow.includes('{live}'));
 const status = readFileSync('src/components/status/SessionStatus.tsx', 'utf8');

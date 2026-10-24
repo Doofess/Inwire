@@ -167,6 +167,20 @@ export function agentStatusLabel(health: AgentHealth): string {
 }
 
 /**
+ * Why Start must wait for the agent, or null once it is connected.
+ *
+ * Start with no agent sent a command into a dead pipe, pruned the store and
+ * showed a capture running that would never receive a frame. The words are
+ * the status label's, as the rail's adapter control shows them; "Connecting"
+ * alone says nothing about what is connecting, so it gets a sentence.
+ */
+export function agentBlocksStart(health: AgentHealth): string | null {
+  if (health.kind === 'connected') return null;
+  if (health.kind === 'connecting') return 'Connecting to the agent - Start waits for it.';
+  return `${agentStatusLabel(health)}. Settings > Capture Health has the detail.`;
+}
+
+/**
  * Whether the adapter control should draw its warning badge.
  *
  * **Shape as well as colour, deliberately.** The control is an icon in the rail

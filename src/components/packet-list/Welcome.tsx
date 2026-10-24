@@ -5,7 +5,7 @@ import { MICRO_LABEL, TITLE } from '../common/typography';
 import { useEscapeLayer } from '../../hooks/useEscapeLayer';
 import { shortInterfaceLabel } from '../../services/captureInterfaces';
 import type { AgentInterface } from '../../services/agentProtocol';
-import type { StartGate } from '../../lib/startGate';
+import { startPress, type StartGate } from '../../lib/startGate';
 
 /**
  * What an empty Packets view shows instead of an empty table and two empty
@@ -30,6 +30,8 @@ export interface WelcomeProps {
   /** Subscribe or unsubscribe the agent's interface counters. */
   onSamplingChange: (on: boolean) => void;
   gate: StartGate;
+  /** Why the agent cannot capture yet (`agentBlocksStart`), or null once it is connected. */
+  agentProblem: string | null;
   previousCapture: { label: string; onReopen: () => void } | null;
   onStart: () => void;
   onClearPackets: () => void;
@@ -43,7 +45,7 @@ const QUIET_BUTTON = 'px-2.5 py-1 rounded bg-secondary hover:bg-accent text-fore
 
 export const Welcome: React.FC<WelcomeProps> = ({
   interfaces, selectedInterfaces, onToggleInterface, interfaceRates, onSamplingChange,
-  gate, previousCapture, onStart, onClearPackets, onOpenFile, onTakeTour,
+  gate, agentProblem, previousCapture, onStart, onClearPackets, onOpenFile, onTakeTour,
 }) => {
   // Held in a ref with an empty dep list, as `CaptureInterfacePanel` does: a
   // naked `[onSamplingChange]` would rebuild the subscription on every App
@@ -75,17 +77,20 @@ export const Welcome: React.FC<WelcomeProps> = ({
 
   // The gate's words are the rail's, written for a button with no list beside
   // it. Here the list is right above, so with none picked Start points at it.
-  const blockedText = gate.blocked !== null && selectedInterfaces.length === 0 && interfaces.length > 0
+  // Only that reason: another window capturing, or the agent, must still be
+  // said in its own words. With no adapters the agent's reason is already the
+  // line where they would be, so it is not said twice.
+  const blockedText = gate.blocked === 'Choose an interface first' && interfaces.length > 0
     ? 'Pick an adapter above.'
-    : gate.blocked;
+    : interfaces.length === 0 && gate.blocked === agentProblem ? null : gate.blocked;
 
   // One scale for every chart, so two adapters can be compared.
   const peakRate = Math.max(1, ...Object.values(interfaceRates).flatMap((series) => series));
 
   const press = (): void => {
-    if (gate.blocked !== null) return;
-    if (asksFirst) setConfirming(true);
-    else onStart();
+    const action = startPress(gate);
+    if (action === 'confirm') setConfirming(true);
+    else if (action === 'start') onStart();
   };
   const startFresh = (): void => {
     setConfirming(false);
@@ -97,14 +102,17 @@ export const Welcome: React.FC<WelcomeProps> = ({
   return (
     <div className="flex-1 min-h-0 overflow-y-auto bg-background">
       <div className="min-h-full flex items-center justify-center px-6 py-8">
-        <div className="w-full max-w-[34rem] space-y-6">
+        {/* The tour's list step points here while the welcome stands in for
+            the list (`tourSteps(true)`): the column, not the view-filling box
+            around it, so the card has room above. */}
+        <div data-tour="list" className="w-full max-w-[34rem] space-y-6">
           <h2 className={TITLE}>Start a capture</h2>
 
           <section aria-label="Adapters" className="space-y-2">
             <div className={MICRO_LABEL}>Adapters</div>
             {interfaces.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                No adapters yet. The list arrives when the agent connects.
+                {agentProblem ?? 'The agent reported no adapters.'}
               </p>
             ) : (
               <div className="rounded-lg border border-border divide-y divide-border overflow-hidden">
