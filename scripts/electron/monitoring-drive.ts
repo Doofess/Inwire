@@ -887,7 +887,7 @@ await scenario('11. capture independence', async () => {
   await p.getByLabel('Start capture').click();
   checkTrue('11: a stub capture runs', await until(async () => (await countsOf(p))[0] > 10, 20_000));
   await unchanged('while a capture runs');
-  await p.getByLabel('Stop capture').click();
+  await p.getByLabel('Stop capture').first().click();
   await sleep(500);
 
   await p.getByRole('button', { name: 'Settings', exact: true }).click();

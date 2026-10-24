@@ -603,7 +603,7 @@ try {
   // Seen once in five runs before this line existed. It is also the order a
   // person does it in: stop, scroll back, open something old.
   checkTrue('the capture can be stopped', await clicks('Stop capture',
-    () => page.getByLabel('Stop capture').click()));
+    () => page.getByLabel('Stop capture').first().click()));
   await sleep(300);
   // Scrolled to the top the way `disk-drive.ts` does it.
   await page.evaluate(() => {

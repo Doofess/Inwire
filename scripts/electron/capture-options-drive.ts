@@ -213,7 +213,7 @@ try {
   }
   await browser.close();
   browser = null;
-  await page.getByLabel('Stop capture').click();
+  await page.getByLabel('Stop capture').first().click();
   await sleep(4000);
 
   // --- the oracle: the capture on disk ----------------------------------------

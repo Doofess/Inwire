@@ -63,7 +63,7 @@ for (const theme of THEMES) {
   await p.keyboard.press('Escape');
   await p.getByLabel('Start capture').click();
   await sleep(4000);
-  await p.getByLabel('Stop capture').click();
+  await p.getByLabel('Stop capture').first().click();
   await sleep(1000);
   await p.locator('[role="row"]').nth(6).click();
   await sleep(1000);

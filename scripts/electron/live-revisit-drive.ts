@@ -183,7 +183,7 @@ try {
   console.log();
   await browser.close();
   browser = null;
-  await page.getByLabel('Stop capture').click();
+  await page.getByLabel('Stop capture').first().click();
   await sleep(4000);
   total = (await counts())[1];
   const stats = await storeStats();
