@@ -59,6 +59,23 @@ for (const entry of SETTINGS_INDEX) {
   judge(`settingsIndex "${entry.label}"`, entry.description);
 }
 
+// The privacy row is a disclosure, and shortening it must not make it wrong:
+// the capture's addresses go to get.geojs.io only, ipapi.co hears about this
+// connection only (the Network panel's Public identity), and the map is what
+// the switch is for - the fact a person turns it on for.
+const locate = [
+  ...[...readFileSync(join(panelDir, 'InterfaceSettingsPanel.tsx'), 'utf8')
+    .matchAll(/<SettingRow\s+label="Locate addresses"[^>]*?\sdescription="([^"]*)"/g)].map((m) => m[1]),
+  ...SETTINGS_INDEX.filter((e) => e.label === 'Locate addresses').map((e) => e.description ?? ''),
+];
+if (locate.length !== 2) fail('Locate addresses', String(locate.length), 'expected the panel row and its index mirror');
+for (const text of locate) {
+  if (!/addresses to get\.geojs\.io/.test(text)) fail('Locate addresses', text, 'does not say the addresses go to get.geojs.io');
+  if (!/this connection to ipapi\.co/.test(text)) fail('Locate addresses', text, 'does not keep ipapi.co to this connection');
+  if (/addresses[^.]*and ipapi\.co/.test(text)) fail('Locate addresses', text, 'says the addresses go to ipapi.co too');
+  if (!/\bmap\b/.test(text)) fail('Locate addresses', text, 'does not say the map needs it');
+}
+
 console.log(`${failures === 0 ? 'PASS' : 'FAIL'}  ${seen} descriptions read`);
 if (seen < 30) {
   failures++;

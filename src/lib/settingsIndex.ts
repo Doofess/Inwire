@@ -165,7 +165,7 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
   {
     section: 'interface',
     label: 'Locate addresses',
-    description: "Sends public addresses, and asks where this machine is, to get.geojs.io and ipapi.co.",
+    description: "Sends public addresses to get.geojs.io for the map, and this connection to ipapi.co.",
     keywords: ['privacy', 'geoip', 'location', 'map'],
     pref: pref(nameResolutionStore, 'geoIp'),
   },

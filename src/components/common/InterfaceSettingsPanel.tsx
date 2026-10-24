@@ -309,7 +309,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Locate addresses"
-          description="Sends public addresses, and asks where this machine is, to get.geojs.io and ipapi.co."
+          description="Sends public addresses to get.geojs.io for the map, and this connection to ipapi.co."
           htmlFor="setting-geoip"
         >
           <Switch
