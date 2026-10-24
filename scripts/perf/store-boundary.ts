@@ -28,14 +28,16 @@
  *      no boundary at all. The floor. Measured again with the store's
  *      `StreamDigest.feed` after each batch, as `CaptureHost.onAppend` does it
  *      (ADR 0055), which the ADR expects to cost about a map lookup a row.
- *   2. **The per-frame `writeSync`.** The writer writes each frame's raw bytes
- *      on its own, which is one syscall a frame; compared against the same
- *      bytes in one write per batch. This one is a **trap**, and it is left in
- *      because it is instructive: the standalone comparison says batching
- *      would recover 10-12% of the writer, and batching the writer for real
- *      made it 3% SLOWER. Copying 1,100 bytes a frame into a coalescing
- *      buffer costs more than a `writeSync` to a file the OS has cached. A
- *      microbenchmark of a part is not a measurement of the whole.
+ *   2. **The per-frame `writeSync`.** The writer used to write each frame's
+ *      raw bytes on its own, one syscall a frame; compared here against the
+ *      same bytes in one write per batch. An early attempt at batching the
+ *      writer was measured 3% slower and this file called it a trap. It was
+ *      not one on Windows in October 2026: a `writeSync` a frame was 3.4 us
+ *      against 0.34 us for copying into a reused buffer and writing once, and
+ *      the store's own profile at 60k frames a second had `writeBuffer` at a
+ *      quarter of its thread (ADR 0053 phase 6). The writer now writes a run
+ *      of frames at once (`stageBytes` in `captureWriter.ts`). `writevSync`
+ *      was no answer: libuv on Windows issues one `WriteFile` per buffer.
  *   3. **The clone.** `v8.serialize` + `v8.deserialize` over a batch, which is
  *      what a `postMessage` across a process boundary does either side of the
  *      pipe. Not `structuredClone`, which the engine can shortcut in-process.
@@ -309,7 +311,7 @@ if (!isMainThread) {
   });
   for (const f of Object.values(fflateFiles)) f.close();
 
-  console.log('\n2. the per-frame write, which the writer does one syscall at a time\n');
+  console.log('\n2. the per-frame write, which the writer did one syscall at a time\n');
   const one = NodeBlockFile.open(path.join(dir, 'one.bin'));
   const bytes = new Uint8Array(1100);
   const singleMs = await time('one writeSync a frame', () => {
@@ -323,10 +325,8 @@ if (!isMainThread) {
   one.close();
   batchedFile.close();
   console.log(`     -> the gap is ${(singleMs - batchedMs).toFixed(0)} ms, `
-    + `${((singleMs - batchedMs) / writerMs * 100).toFixed(0)}% of the writer - and it is NOT`);
-  console.log('        recoverable: batching the writer for real was measured 3% slower,');
-  console.log('        because the copy into the coalescing buffer costs more than the');
-  console.log('        syscall it saves. Left here as the trap it is.');
+    + `${((singleMs - batchedMs) / writerMs * 100).toFixed(0)}% of the writer, which the writer`);
+  console.log('        now saves by writing a run of frames at once (stageBytes).');
 
   console.log('\n3. the clone, which is what crossing a process boundary costs\n');
   await time('v8.serialize', () => {

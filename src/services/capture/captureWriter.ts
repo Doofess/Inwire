@@ -166,6 +166,14 @@ const DEFAULT_FLUSH_EVERY_CHUNKS = 8;
  */
 const MAX_MISSED_PATCH_SAMPLE = 256;
 
+/**
+ * The most bytes `stageBytes` gathers before writing them.
+ *
+ * A live batch is a few thousand frames, a few megabytes, so this is one
+ * write a batch; the bound is what the reused buffer can grow to.
+ */
+const STAGE_WRITE_MAX = 4 * 1024 * 1024;
+
 /** Raw DEFLATE, the same format `node:zlib`'s `deflateRawSync` produces. */
 const defaultDeflate = (bytes: Uint8Array): Uint8Array => deflateSync(bytes, { level: 6 });
 
@@ -340,6 +348,14 @@ export class CaptureWriter {
   private data: DataFiles;
   /** Whether that segment holds a frame yet. An empty one is not left for another. */
   private segmentUsed = false;
+  /**
+   * The run of frames `stageBytes` is gathering for one write: which file, from
+   * where, and the bytes. Empty between calls - nothing is held unwritten.
+   */
+  private pendingFile: BlockFile | null = null;
+  private pendingAt = 0;
+  private pendingLength = 0;
+  private pendingBytes = new Uint8Array(1 << 16);
   /** The number the next segment takes. */
   private nextSegment = 1;
   /** The ring file the current segment follows, when it follows one. */
@@ -613,37 +629,84 @@ export class CaptureWriter {
     this.drainReady();
   }
 
-  /** Writes the bytes and opens a slot for each, without sealing anything. */
+  /**
+   * Writes the bytes and opens a slot for each, without sealing anything.
+   *
+   * One write a run of frames, not one a frame: a `writeSync` per frame was a
+   * quarter of the store's thread at 60k frames a second, and copying into a
+   * reused buffer costs a tenth of that (`scripts/perf/store-boundary.ts`). A
+   * run ends where `follow` moves to another segment's file and at
+   * `STAGE_WRITE_MAX`, and every byte is written before this returns - also
+   * when a frame throws partway, so the ones staged before it are on disk.
+   */
   private stageBytes(frames: readonly RawFrame[]): void {
-    for (const frame of frames) {
-      this.follow(frame.ring);
-      const at = append(this.data.byt, frame.bytes);
-      this.dirty.add(this.data);
-      this.segmentUsed = true;
-      this.counters.bytesWritten += frame.bytes.length;
-      this.stagedAt.set(frame.id, this.staged.length);
-      // A row that overtook its bytes is already waiting. Claimed here rather
-      // than left in the map, so the map holds only what is genuinely early.
-      const early = this.orphanRows.get(frame.id) ?? null;
-      if (early !== null) this.orphanRows.delete(frame.id);
-      const earlyRecord = this.orphanRecords.get(frame.id) ?? null;
-      if (earlyRecord !== null) {
-        this.orphanRecords.delete(frame.id);
-        this.counters.recordsAttached += 1;
+    try {
+      for (const frame of frames) {
+        this.follow(frame.ring);
+        const at = this.place(frame.bytes);
+        this.dirty.add(this.data);
+        this.segmentUsed = true;
+        this.counters.bytesWritten += frame.bytes.length;
+        this.stagedAt.set(frame.id, this.staged.length);
+        // A row that overtook its bytes is already waiting. Claimed here rather
+        // than left in the map, so the map holds only what is genuinely early.
+        const early = this.orphanRows.get(frame.id) ?? null;
+        if (early !== null) this.orphanRows.delete(frame.id);
+        const earlyRecord = this.orphanRecords.get(frame.id) ?? null;
+        if (earlyRecord !== null) {
+          this.orphanRecords.delete(frame.id);
+          this.counters.recordsAttached += 1;
+        }
+        if (frame.id > this.highestStagedId) this.highestStagedId = frame.id;
+        this.staged.push({
+          id: frame.id,
+          tsUs: frame.tsUs,
+          packet: early,
+          record: earlyRecord,
+          bytOffset: at,
+          bytLength: frame.bytes.length,
+          segment: this.segment,
+        });
+        this.counters.framesStaged += 1;
+        if (frame.tsUs > this.newestTsUs) this.newestTsUs = frame.tsUs;
       }
-      if (frame.id > this.highestStagedId) this.highestStagedId = frame.id;
-      this.staged.push({
-        id: frame.id,
-        tsUs: frame.tsUs,
-        packet: early,
-        record: earlyRecord,
-        bytOffset: at,
-        bytLength: frame.bytes.length,
-        segment: this.segment,
-      });
-      this.counters.framesStaged += 1;
-      if (frame.tsUs > this.newestTsUs) this.newestTsUs = frame.tsUs;
+    } finally {
+      this.writePending();
     }
+  }
+
+  /** Puts a frame's bytes at the end of the pending run for the current data file, and says where. */
+  private place(bytes: Uint8Array): number {
+    const file = this.data.byt;
+    if (file !== this.pendingFile || this.pendingLength + bytes.length > STAGE_WRITE_MAX) {
+      this.writePending();
+      this.pendingFile = file;
+      this.pendingAt = file.size();
+    }
+    const at = this.pendingAt + this.pendingLength;
+    if (bytes.length > STAGE_WRITE_MAX) {
+      file.write(at, bytes);
+      this.pendingFile = null;
+      return at;
+    }
+    if (this.pendingBytes.length < this.pendingLength + bytes.length) {
+      const grown = new Uint8Array(Math.min(STAGE_WRITE_MAX,
+        Math.max(this.pendingBytes.length * 2, this.pendingLength + bytes.length)));
+      grown.set(this.pendingBytes.subarray(0, this.pendingLength));
+      this.pendingBytes = grown;
+    }
+    this.pendingBytes.set(bytes, this.pendingLength);
+    this.pendingLength += bytes.length;
+    return at;
+  }
+
+  /** Writes the run `place` gathered. */
+  private writePending(): void {
+    if (this.pendingFile !== null && this.pendingLength > 0) {
+      this.pendingFile.write(this.pendingAt, this.pendingBytes.subarray(0, this.pendingLength));
+    }
+    this.pendingFile = null;
+    this.pendingLength = 0;
   }
 
   /**

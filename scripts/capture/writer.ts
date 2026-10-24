@@ -423,6 +423,39 @@ const raw = (id: number, size = 20) => ({
 }
 
 {
+  // **A batch's bytes are one write, not one a frame.** A `writeSync` per frame
+  // was a quarter of the store's thread at 60k frames a second (ADR 0053 phase
+  // 6, `scripts/perf/store-boundary.ts`). The bytes, and where each frame says
+  // its bytes are, must be exactly what writing them one at a time produced.
+  class CountingFile extends MemoryBlockFile {
+    writes = 0;
+    override write(offset: number, from: Uint8Array): void {
+      this.writes++;
+      super.write(offset, from);
+    }
+  }
+  const byt = new CountingFile();
+  const f = { ...files(), byt };
+  const writer = new CaptureWriter(f, { deflate: (b) => new Uint8Array(deflateRawSync(b)) });
+  const batch = [];
+  for (let id = 1; id <= 50; id++) batch.push(raw(id, 20 + (id % 7)));
+  writer.appendBytes(batch);
+  check('a batch of frames is one write to frames.iwbyt', byt.writes, 1);
+  let at = 0;
+  const placed = batch.every((frame) => {
+    const back = readExact(byt, at, frame.bytes.length);
+    at += frame.bytes.length;
+    return back.every((v, i) => v === frame.bytes[i]);
+  });
+  checkTrue('...holding every frame\'s bytes, in order, end to end', placed && at === byt.size());
+  writer.appendBytes([raw(51), raw(52)]);
+  check('...and the next batch appends after it', byt.size(), at + 40);
+  writer.finish();
+  const index = new CaptureIndex(recoverIndex(f.index, f.pfx, f.sum, f.byt).records);
+  check('the chunk covers both batches', index.record(0).bytLength, at + 40);
+}
+
+{
   // `append` still does both in one call, because the import path has bytes and
   // rows at the same moment and has no reason to split them. It must stage and
   // attach BEFORE draining: draining first seals the whole batch as
