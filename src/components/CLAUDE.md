@@ -105,6 +105,15 @@ the VISIBLE list so it never offers to close something nobody can see.
 **The back step carries a `w-9` spacer mirroring it on the right**, or the
 filter would shift 18px on every view change that gained or lost one.
 
+**While a capture runs, a live pill sits left of the panes toggle**
+(`common/CaptureLivePill.tsx`): the pulsing dot, elapsed time, packets a second
+and Stop, so "is it recording?" is answered where the eye already is, not only
+in the status bar's corner. It hangs from a **zero-width anchor** and is placed
+absolutely, so it takes no width from the centre and the filter does not move
+when a capture starts; at 1024 it can overlap the filter's right edge instead.
+It subscribes to `packetCounts` itself, so App does not re-render for it, and
+samples the rate once a second (`lib/packetRate.ts`).
+
 **The detail panes' toggle is a CONTROL, not a setting** — reached for mid-task
 rather than chosen once, which is why it left `Settings → Interface`. The pane
 *arrangement* stays there and still greys out when the panes are off. It is
@@ -498,7 +507,25 @@ which panel is open, because a subscription that cannot outlive its display *by
 construction* is the stronger tie. The notify callback goes through a **ref**:
 its dep list is empty today, and the day it gains one a naked dep array would
 rebuild the subscription on every App render — a write down the pipe thirty
-times a second with no symptom on screen.
+times a second with no symptom on screen. **Sampling is counted, not switched**
+(`lib/samplingCount.ts`): the welcome draws the same sparklines, and while the
+flag was a boolean the second surface to unmount turned sampling off under the
+first. The agent hears only the 0→1 and 1→0 edges.
+
+#### The welcome
+
+**An empty Packets view with nothing capturing is a welcome**
+(`packet-list/Welcome.tsx`, `showWelcome` in `App.tsx`), not an empty table over
+two empty panes: the adapters with their sparklines, Start, the previous capture
+with Reopen, "Open a capture file…" and "Take the tour". It replaces the list
+AND the panes, and the first packet brings them back; the panes *setting* is
+never written. **Its Start asks what the rail's Start asks** — both read
+`lib/startGate.ts`, so neither can delete the capture on disk unasked while the
+other confirms. "Open a capture file…" opens Export / Import and bumps
+`pickRequest`, which the panel turns into its import picker. **The tour is
+opt-in**: the welcome's link and the palette's `help.tour`, never sprung on
+first run; the welcome carries `data-tour="list"` so the tour's anchor exists
+in both states. `scripts/session/welcome.ts`.
 
 #### The rail
 
