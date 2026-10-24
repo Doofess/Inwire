@@ -226,8 +226,8 @@ export async function runExport(request: ExportRequest, runtime: ExportRuntime =
         lastUs,
         frames: { exported: frames, inCapture, unreadable },
         drops: dropsOf(request),
-        scope: scope.filter === null ? 'capture' : 'filtered',
-        filter: scope.filter?.expression ?? '',
+        scope: scope.marked ? 'marked' : scope.filter === null ? 'capture' : 'filtered',
+        filter: scope.marked ? '' : scope.filter?.expression ?? '',
         flags: {
           anonymised: anonymiser !== null,
           rawBytes: format === 'pcap' || format === 'pcapng' || (tabular && request.includeRawBytes),

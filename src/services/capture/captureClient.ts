@@ -193,6 +193,7 @@ class CaptureClient {
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
   private readonly pendingDigest = new Map<number, (answer: StreamDigestAnswer) => void>();
   private readonly pendingStreamOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
+  private readonly pendingMarkMatches = new Map<number, (matches: MatchSet) => void>();
   /** The scan in flight. At most one - the store enforces the same. */
   private readonly pendingScan = new Map<number, {
     onProgress?: (progress: ScanProgressUpdate) => void;
@@ -342,6 +343,13 @@ class CaptureClient {
         if (settle === undefined) break;
         this.pendingStreamOrdinals.delete(message.requestId);
         settle({ ordinals: message.ordinals, nextChunk: message.nextChunk });
+        break;
+      }
+      case 'markMatches': {
+        const settle = this.pendingMarkMatches.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingMarkMatches.delete(message.requestId);
+        settle(MatchSet.fromBytes(message.frameCount, message.bits));
         break;
       }
       case 'scanProgress': {
@@ -651,6 +659,21 @@ class CaptureClient {
   }
 
   /**
+   * The stored frames the capture's marks name, as the same bitmap a scan
+   * answers with - what Export's "marked packets only" reads, and the count it
+   * shows. Marks the store does not hold (ring-expired, never stored) are not in
+   * it. **Not a scan**: it never cancels the list's filter scan, so it can be
+   * asked at any time. An empty set with no store, like `streamOrdinals`.
+   */
+  markMatches(): Promise<MatchSet> {
+    return this.request(
+      this.pendingMarkMatches as never,
+      (requestId) => ({ type: 'markMatches', requestId }),
+      new MatchSet(0).seal(),
+    );
+  }
+
+  /**
    * Runs a display filter over the whole capture on disk.
    *
    * The expression travels, not a predicate - a compiled filter is a closure.
@@ -734,6 +757,8 @@ class CaptureClient {
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);
     this.pendingStreamOrdinals.clear();
+    for (const settle of this.pendingMarkMatches.values()) settle(new MatchSet(0).seal());
+    this.pendingMarkMatches.clear();
     // `failed` rather than `cancelled`: the store went away, which is not the
     // user's doing and is worth saying.
     for (const waiting of this.pendingScan.values()) {

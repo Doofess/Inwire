@@ -48,6 +48,7 @@ import { recoverCapture, type CaptureIndex } from './captureIndex';
 import { planPrune } from './captureDirectory';
 import { serialQueue } from './serialQueue';
 import { CaptureScan, DEFAULT_SLICE_MS } from './captureScan';
+import { MatchSet } from './matchSet';
 import { compile } from '../filter/compile';
 import { deflateSync, inflateSync } from 'fflate';
 import type { FromCapture, ToCapture } from './captureProtocol';
@@ -398,6 +399,7 @@ export class CaptureHost {
         case 'streamDigest': return this.onStreamDigest(message);
         case 'streamOrdinals': return this.onStreamOrdinals(message);
         case 'marks': return this.onMarks(message);
+        case 'markMatches': return this.onMarkMatches(message);
       }
     } catch (error) {
       // The stack goes to stderr as well as the message to the app, and that
@@ -522,6 +524,34 @@ export class CaptureHost {
     } catch (error) {
       this.fail(`the capture's marks could not be written: ${describe(error)}`, false);
     }
+  }
+
+  /**
+   * The ordinals of the marked frames this capture holds. Deliberately not a
+   * `CaptureScan`: `onScan` abandons the running scan, and this must leave the
+   * list's filter alone. A mark whose frame is not addressable (the ring
+   * expired it, or it was never stored, or it is still staged) matches nothing.
+   * Always answers.
+   */
+  private onMarkMatches(message: Extract<ToCapture, { type: 'markMatches' }>): void {
+    const open = this.open;
+    const frameCount = open === null ? 0 : open.writer.index.frameCount;
+    const set = new MatchSet(frameCount);
+    if (open !== null) {
+      try {
+        for (const id of open.marks) {
+          const ordinal = open.reader.ordinalOf(id);
+          if (ordinal >= 0 && ordinal < frameCount) set.set(ordinal);
+        }
+      } catch (error) {
+        this.fail(describe(error), false);
+      }
+    }
+    set.seal();
+    this.post({
+      type: 'markMatches', requestId: message.requestId, frameCount,
+      bits: set.toBytes(), count: set.count(),
+    });
   }
 
   private onAppend(message: Extract<ToCapture, { type: 'append' }>): void {

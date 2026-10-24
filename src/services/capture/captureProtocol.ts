@@ -145,6 +145,17 @@ export type ToCapture =
    */
   | { type: 'scanCancel'; requestId: number }
   /**
+   * Which stored frames the open capture's marks name (ADR 0067). Answered with
+   * `markMatches`, even when no capture is open, because the caller holds a
+   * promise.
+   *
+   * **Not a scan**, on purpose: a second `scan` cancels the list's filter scan,
+   * and exporting the marked packets must not abandon the filter the user is
+   * looking at. It reads the index only (`ordinalOf` per mark), so it neither
+   * waits for nor disturbs a running scan.
+   */
+  | { type: 'markMatches'; requestId: number }
+  /**
    * The raw bytes of specific frames.
    *
    * Answered with a `bytes` message carrying the same `requestId`. Ids the
@@ -360,6 +371,16 @@ export type FromCapture =
       /** Why it could not run - a filter that does not compile, or no capture. */
       message: string | null;
     }
+  /**
+   * The marked frames the capture holds, in `scanDone`'s encoding: `bits` is
+   * one bit per capture ordinal, rebuilt with `MatchSet.fromBytes(frameCount,
+   * bits)`. `frameCount` is the capture's size when it was asked, because the
+   * bitmap cannot say how many ordinals its last block covers.
+   *
+   * `count` is the marks that are stored, which can be fewer than the marks
+   * there are: an id the ring has expired, or one never stored, is left out.
+   */
+  | { type: 'markMatches'; requestId: number; frameCount: number; bits: Uint8Array; count: number }
   /**
    * The capture store could not do something, and said so.
    *
