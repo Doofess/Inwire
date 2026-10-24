@@ -776,9 +776,9 @@ try {
   // "Render frame was disposed" - the key log's 25 ms poll once per write, the
   // window state once per focus change - while nothing said the page had died.
   console.log('\n--- after the renderer crashes ---\n');
-  // Cleared first: with frames buffered, the close below would ask, and a
-  // dead page cannot answer, so the OS's box would wait for ever.
-  await page.evaluate(() => window.inwire?.setUnsavedCapture?.(false));
+  // Set, not cleared: the buffer dies with the page, so the crash itself has
+  // to clear main's flag, and the check after the crash says whether it did.
+  await page.evaluate(() => window.inwire?.setUnsavedCapture?.(true));
   // The outbound hosts are refused in main from here on. Playwright's route
   // belongs to the page it was set on, and once that page crashes it holds
   // every request of the page that replaces it: the reload below sat at
@@ -802,6 +802,14 @@ try {
   check('main sends nothing to a crashed page',
     (mainOutput.match(/Render frame was disposed/g) ?? []).length, 0);
   checkTrue('main says the renderer is gone, and why', /\[renderer\] gone: \w+/.test(mainOutput));
+  // A `close` event emitted by hand runs the quit guard without closing
+  // anything: prevented means it would have asked. A string body, because the
+  // fake event's method is a named function to tsx, and `__name` is not in main.
+  check('a crash clears the unsaved capture, so Quit does not ask',
+    await app.evaluate(new Function('electron', `
+      const event = { prevented: false, preventDefault() { this.prevented = true; } };
+      electron.BrowserWindow.getAllWindows()[0].emit('close', event);
+      return event.prevented;`) as never), false);
 
   // Then the other half: what main shows. The crash above loaded the crash
   // screen into the same window, so the test drives that page the way a person

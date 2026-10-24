@@ -1,7 +1,6 @@
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import {CrashScreen} from './components/common/CrashScreen';
-import {QuitConfirmDialog} from './components/common/QuitConfirmDialog';
 import {RootProviders, prepareDocument} from './components/common/RootProviders';
 import './index.css';
 
@@ -15,9 +14,8 @@ prepareDocument();
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <RootProviders>
-      {/* Quit is the window's close, and with an unsaved capture the quit guard
-          asks through this dialog; nothing else on this page would answer it. */}
-      <QuitConfirmDialog />
+      {/* No QuitConfirmDialog: main clears its unsaved-capture flag when the
+          page dies, so the quit guard never asks this page anything. */}
       <CrashScreen />
     </RootProviders>
   </StrictMode>,

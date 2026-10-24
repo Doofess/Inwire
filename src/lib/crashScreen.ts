@@ -15,7 +15,8 @@
 export const CRASH_SCREEN_TEXT = {
   title: "Inwire's window stopped working",
   followUp:
-    'Reload brings the window back. Quit closes Inwire, and still asks first if a capture is unsaved.',
+    'Reload brings the window back. Frames already written to the capture store are kept '
+    + 'either way, and Inwire offers them when it opens again.',
   buttons: { reload: 'Reload', quit: 'Quit' },
 } as const;
 
