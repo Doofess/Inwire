@@ -51,6 +51,22 @@ either token at runtime. The one mix that survives is the map's place names,
 baked into openfreemap's glyph atlases where no CSS reaches; `.maplibregl-map`
 in `index.css` says so.
 
+**Two heading levels, both sans** (`src/components/common/typography.ts`). A
+pane, sheet or panel is named by a `TITLE`: sentence case, semibold, the
+foreground. A group inside it is named by a `MICRO_LABEL`: 10px, uppercase,
+tracked, muted. There is no third level. Both constants carry `font-sans`,
+because a label inside a mono table inherits the table's face. `PaneHeader`,
+`SECTION_CLASS` and the packet list's column headers all use them.
+
+**Mono is for data**: addresses, bytes, hex, filter expressions, field and
+layer names, paths and code. Chrome is sans, and that includes notices, menus,
+toasts, empty states, and the counts and rates in the status bar. `body`'s
+`tnum` already lines the figures up. A mixed line, such as the status bar or a
+Follow Stream summary, puts `font-mono` on the data spans and never on the
+wrapper. `scripts/themes/typography.ts` holds all of this. It checks that no
+class string sets uppercase in mono, both constants, sentence-case pane titles,
+a mono table's header row and the status bar's wrappers.
+
 ### Theming
 
 **Four themes** declared in `src/lib/themeOptions.ts` — Light, Dark, Dim and
@@ -62,8 +78,14 @@ matches. ADR 0056 says why four, against the cut that once made it two.
 
 **Dark is near black (`#101112`), and pure black is High Contrast's.** Every
 dark theme's `--card` stays under about `#222`, every pair of themes stays 5 ΔE
-apart, and High Contrast text is 7:1. The selected row mixes `--primary` into
-`--background` at a share set per theme (`SELECTION_SHARE` in the registry).
+apart, and High Contrast text is 7:1. The selected packet row is a solid
+`--primary` fill with `--primary-foreground` ink. It overrides the colouring
+rule and has no ring or bold. Every accent holds that pair at 4.5:1, and at
+7:1 in High Contrast. `--selection`, the tint other surfaces wear, mixes
+`--primary` into `--background` at a share set per theme (`SELECTION_SHARE` in
+the registry). Destructive actions wear `--destructive`. Discard is an outline
+that fills on hover (`DESTRUCTIVE_ACTION_BUTTON_CLASS`), and an inline confirm
+is solid.
 
 **The accent is one of seven swatches, never a free colour.** `src/lib/accents.ts`
 is the table - a `--primary`, foreground and ring per theme - and an accent
