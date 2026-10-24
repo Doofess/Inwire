@@ -59,15 +59,9 @@ interface MonthGridProps {
   now: number;
   /** Names the grid for a screen reader - "Start date", "Stop date". */
   label: string;
-  /**
-   * Shown but not pickable. The panel sets it when the end being picked is not
-   * "At a time": a pick used to switch that end's mode behind the user's back,
-   * at a time of day they had never seen.
-   */
-  disabled?: boolean;
 }
 
-export const MonthGrid: React.FC<MonthGridProps> = ({ start, stop, target, onPickDay, now, label, disabled = false }) => {
+export const MonthGrid: React.FC<MonthGridProps> = ({ start, stop, target, onPickDay, now, label }) => {
   const today = new Date(now);
   const startDay = start === null ? null : new Date(start);
   const stopDay = stop === null ? null : new Date(stop);
@@ -133,9 +127,10 @@ export const MonthGrid: React.FC<MonthGridProps> = ({ start, stop, target, onPic
   const monthName = new Date(view.year, view.month, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 
   return (
-    // `inert` rather than a `disabled` on 44 buttons: one attribute takes the
-    // whole grid out of the tab order, the pointer and the accessibility tree.
-    <div inert={disabled} className={disabled ? 'opacity-50' : undefined}>
+    // The panel mounts the grid only while an end is "At a time", so it is
+    // never shown unpickable: a pick used to switch that end's mode behind the
+    // user's back, at a time of day they had never seen.
+    <div>
       <div className="flex items-center justify-between">
         <button
           type="button"

@@ -372,12 +372,13 @@ console.log('\n--- what may not come back ---\n');
   checkTrue('byte hydration happens in exportFrames.ts, not in runExport',
     code('src/services/export/exportFrames.ts').includes('packetsBytes(') && !run.includes('packetsBytes('));
 
-  // **The schedule's calendar stays open, and there is one of it.** It was a
-  // single calendar behind an `editing` slot while this was a dropdown, then
-  // two behind two disclosures in the column; the owner asked for it to stay
-  // open because the column has the room. One grid that marks BOTH ends is the
-  // shape - so the check is that it renders unconditionally, once, and that no
-  // open/closed state for it has come back.
+  // **The schedule's calendar is never a disclosure, and there is one of it.**
+  // It was a single calendar behind an `editing` slot while this was a
+  // dropdown, then two behind two disclosures in the column. One grid that
+  // marks BOTH ends is the shape. It shows whenever an end is "At a time"
+  // (`calendarLive`, owner 2026-10-24; `scripts/session/schedule-panel.ts`) -
+  // the schedule decides, never an open/closed state of its own, which is
+  // what this checks has not come back.
   const sched = code('src/components/sidebar/CaptureSchedulePanel.tsx');
   check('the schedule has one calendar', (sched.match(/<MonthGrid\b/g) ?? []).length, 1);
   checkTrue('...not behind a disclosure',
@@ -441,8 +442,8 @@ console.log('\n--- what may not come back ---\n');
   // read as a genuinely idle adapter.
   const conn = code('src/hooks/useAgentConnection.ts');
   checkTrue('sampling is re-sent when the agent comes back',
-    conn.includes('interfaceStatsSubscribedRef')
-    && /if \(interfaceStatsSubscribedRef\.current\) \{[\s\S]{0,160}subscribe_interface_stats/
+    conn.includes('interfaceStatsRef')
+    && /if \(interfaceStatsRef\.current\.active\) \{[\s\S]{0,160}subscribe_interface_stats/
       .test(conn));
 
   // **Network's two-column vocabulary is gone.** `CompareHeader` wrote

@@ -156,6 +156,12 @@ export interface TitleRowProps {
    * and how wide it may get, and `App` decides what goes in it.
    */
   center?: React.ReactNode;
+  /**
+   * The live capture pill, drawn immediately left of the panes toggle. It is
+   * taken out of flow (see the zero-width anchor below), so it never changes
+   * the centre's width and the filter does not move when it appears.
+   */
+  live?: React.ReactNode;
 }
 
 /**
@@ -166,7 +172,7 @@ export interface TitleRowProps {
  */
 export const TitleRow: React.FC<TitleRowProps> = ({
   focused, maximized, panesVisible, onTogglePanes, sideBarOpen, onToggleSideBar,
-  backLabel, onBack, center,
+  backLabel, onBack, center, live,
 }) => (
   <header
     className={`h-8 shrink-0 flex items-center
@@ -333,6 +339,16 @@ export const TitleRow: React.FC<TitleRowProps> = ({
 
       {/* The counterweight. Never anything but air - see above. */}
       <div className="w-9 shrink-0" aria-hidden />
+    </div>
+
+    {/* **The live pill's anchor is ZERO width.** The pill is absolutely placed
+        and right-aligned to this anchor, so it grows leftward over the centre's
+        right padding without taking a pixel from the centre's flex width - the
+        filter is centred in the WINDOW and must not shift when a capture
+        starts or stops. The price: on a narrow window the pill can overlap the
+        filter's right edge rather than push it. */}
+    <div className="relative w-0 shrink-0 self-stretch">
+      <div className="absolute right-1 top-0 h-8 flex items-center">{live}</div>
     </div>
 
     {/* **The detail panes, on and off.** It was a switch in

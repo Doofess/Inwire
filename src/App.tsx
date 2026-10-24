@@ -8,6 +8,8 @@ import { useTheme } from "next-themes";
 import { useSystemThemePreference } from "./lib/useSystemTheme";
 import { useMotionPreference } from "./lib/motion";
 import { TourOverlay } from "./components/tour/TourOverlay";
+import { tourSteps } from "./components/tour/tourSteps";
+import { agentBlocksStart } from "./services/agentHealth";
 import { tourStore } from "./services/tourPrefs";
 import { useNameResolutionPreference } from "./lib/nameResolution";
 import {
@@ -37,7 +39,10 @@ import { anchorSelection } from "./services/selectionAnchor";
 import { startKeyLogFollow } from "./lib/keyLogFollow";
 import { selectionLabel, toggleInterface } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
+import { offeredCapture, startGate } from "./lib/startGate";
+import { Welcome } from "./components/packet-list/Welcome";
 import { TitleRow } from "./components/common/TitleRow";
+import { CaptureLivePill } from "./components/common/CaptureLivePill";
 import { StatusBar } from "./components/status/StatusBar";
 import { clearHoveredByte } from "./services/hoveredByte";
 import { resetByteRange } from "./services/byteRange";
@@ -221,10 +226,13 @@ export default function App() {
   // Writes data-motion onto <html>, and keeps it in step with the OS while the
   // setting defers to it. See lib/motion.
   useMotionPreference();
-  // The first-run walkthrough. `completed` is set by finishing it AND by
-  // skipping it - see services/tourPrefs for why skipping counts.
-  const [tour] = usePreferenceValue(tourStore);
-  usePreferenceSync(tourStore.key, tourStore.normalize, tourStore.accept);
+  // The walkthrough, shown only when asked for: the welcome's "Take the tour"
+  // and the palette's `help.tour`. It used to open by itself on first run, over
+  // three empty states the welcome has since replaced. `completed` is still
+  // written on finishing or skipping (services/tourPrefs), and nothing reads it
+  // to decide anything now.
+  const [tourOpen, setTourOpen] = useState(false);
+  const startTour = useCallback(() => setTourOpen(true), []);
   // Pushes the two outbound-lookup switches into the service that performs
   // them, so the gate lives in one place rather than at every call site.
   // Read-only here now: the two passive switches moved into
@@ -766,6 +774,11 @@ export default function App() {
   lastCaptureRef.current = lastCapture;
   /** True while `reopenLastCapture` runs, from its first read to its last row. */
   const [reopening, setReopening] = useState(false);
+  // Bumped by the welcome's "Open a capture file…"; the Export / Import panel
+  // opens its file picker when it changes. Reset when the panel goes away, so a
+  // stale count cannot open the picker the next time the panel is shown.
+  const [pickRequest, setPickRequest] = useState(0);
+  useEffect(() => { if (sideBar !== 'transfer') setPickRequest(0); }, [sideBar]);
   /** "the capture from Oct 8, 02:23", for the offer and for Start's prompt. */
   const lastCaptureLabel = useMemo(() => {
     if (lastCapture === null) return null;
@@ -933,10 +946,11 @@ export default function App() {
   // The answer echoes the filter, so one that crossed a newer question is
   // recognised as stale (`filterVerdict`).
   const captureFilterVerdict = filterVerdict(captureOptions, captureFilterCheck);
-  // Why Start must wait, or null: a filter the agent refused, or ring and stop
-  // settings it would refuse - said here, with the reason, rather than by a
-  // refusal after the click.
-  const startBlockedReason = (reopening ? 'Reopening the last capture - Start waits for it.' : null)
+  // Why Start must wait, or null: no agent to capture with, a filter the agent
+  // refused, or ring and stop settings it would refuse - said here, with the
+  // reason, rather than by a refusal after the click.
+  const startBlockedReason = agentBlocksStart(agentHealth)
+    ?? (reopening ? 'Reopening the last capture - Start waits for it.' : null)
     ?? filterBlocksStart(captureFilterVerdict) ?? ringProblem(captureOptions);
   const startBlockedRef = useRef(startBlockedReason);
   startBlockedRef.current = startBlockedReason;
@@ -1176,7 +1190,8 @@ export default function App() {
       // running nobody had started, and a Start pressed while it ran deleted
       // the capture it was still reading. Only a capture that ever received
       // a frame is offered.
-      if (meta?.captureId && meta.lastPacketMs != null) setLastCapture(meta);
+      const offer = offeredCapture(meta);
+      if (offer !== null) setLastCapture(offer);
 
       // Capture is not resumed, and nothing is said about it: a launch leaves
       // the app exactly as pressing Pause would - adapter and filters intact,
@@ -1383,22 +1398,10 @@ export default function App() {
    */
   const storedCaptureId = captureStorage.captureId;
 
-  /**
-   * Keeps the stored session's non-frame half current.
-   *
-   * The time refs are read at write time rather than being dependencies: they
-   * are refs precisely because they change per packet and must not re-run
-   * effects. `persistedPacketTick` exists only to make this run again as those
-   * refs drift - and it is throttled hard, because packet count changes ten
-   * times a second and the relative-time origin it is standing in for changes
-   * once per capture.
-   */
-  useEffect(() => {
-    // Nor while a previous capture is only offered: writing now would replace
-    // its metadata - the clock origin, the adapter table, which directory -
-    // with this empty session's, and the offer would reopen nothing.
-    if (restoringRef.current || lastCaptureRef.current !== null) return;
-    void saveSessionMeta({
+  // The stored session's non-frame half as it stands now. Built in one place
+  // because two things need it: the write below, and Clear View, which offers
+  // the capture it empties the list of (`handleClearView`).
+  const sessionMetaNow = (): SessionMeta => ({
       selectedInterfaces,
       interfaces: agentInterfaces,
       captureStartMs: captureStartRef.current === null ? null : captureStartRef.current / 1000,
@@ -1424,7 +1427,24 @@ export default function App() {
         confidence: hostIdentityRef.current.confidence,
         ...(hostIdentityRef.current.basis ? { basis: hostIdentityRef.current.basis } : {}),
       },
-    });
+  });
+
+  /**
+   * Keeps the stored session's non-frame half current.
+   *
+   * The time refs are read at write time rather than being dependencies: they
+   * are refs precisely because they change per packet and must not re-run
+   * effects. `persistedPacketTick` exists only to make this run again as those
+   * refs drift - and it is throttled hard, because packet count changes ten
+   * times a second and the relative-time origin it is standing in for changes
+   * once per capture.
+   */
+  useEffect(() => {
+    // Nor while a previous capture is only offered: writing now would replace
+    // its metadata - the clock origin, the adapter table, which directory -
+    // with this empty session's, and the offer would reopen nothing.
+    if (restoringRef.current || lastCaptureRef.current !== null) return;
+    void saveSessionMeta(sessionMetaNow());
   }, [selectedInterfaces, agentInterfaces, isCapturing, persistedPacketTick, storedCaptureId, captureSource]);
 
 
@@ -2391,6 +2411,23 @@ export default function App() {
   };
 
   /**
+   * Settings' Clear View: empties the list, keeps the capture on disk (ADR
+   * 0012), and offers it as a launch does. The empty list is the welcome, whose
+   * Start deletes that capture - and with nothing offered `startGate` had
+   * nothing to ask about, so Clear View then Start deleted it unasked. Not while
+   * capturing: that capture goes on, into the same directory.
+   */
+  const handleClearView = () => {
+    const offer = isCapturingRef.current ? null : offeredCapture(sessionMetaNow());
+    handleClearPackets();
+    if (offer !== null) {
+      setLastCapture(offer);
+      // What a relaunch offers, too: the throttled write may be seconds behind.
+      void saveSessionMeta(offer);
+    }
+  };
+
+  /**
    * Throws the stored capture away, for good.
    *
    * The only thing in the app that deletes captured bytes from disk. Nothing
@@ -2565,6 +2602,7 @@ export default function App() {
       case 'sidebar.network': openSideBarPanel('network'); return;
       case 'monitoring.open': setSheet('monitoring'); return;
       case 'settings.open': setSheet('settings'); return;
+      case 'help.tour': startTour(); return;
     }
   };
 
@@ -2787,6 +2825,21 @@ export default function App() {
    * times in the taskbar says nothing.
    */
   const captureAdapter = selectionLabel(agentInterfaces, selectedInterfaces);
+  // An empty buffer with nothing capturing shows the welcome in place of the
+  // list and both detail panes. The panes setting (`showPanes`) is not written:
+  // they come back with the first packet.
+  const showWelcome = packets.length === 0 && !isCapturing && !reopening;
+  // The same inputs the rail gets, so the welcome's Start asks what the rail's asks.
+  const startGateResult = startGate({
+    isCapturing,
+    canCapture: permissions.canCapture,
+    canClearBuffer: permissions.canClearBuffer,
+    hasSelection: captureAdapter !== null,
+    ownedElsewhere: captureOwner !== null && captureOwner !== agentClientId,
+    blockedReason: startBlockedReason,
+    bufferedPackets: packets.length,
+    previousCapture: lastCaptureLabel,
+  });
   // The window's name, for the OS alone now: the taskbar, Alt-Tab and the
   // window list. The title row's centre shows the packet counter instead - see
   // `components/common/PacketCountsReadout.tsx` - so this string has exactly one
@@ -2868,6 +2921,7 @@ export default function App() {
         onToggleSideBar={toggleSideBar}
         backLabel={backLabel}
         onBack={goBack}
+        live={isCapturing ? <CaptureLivePill startedAt={captureStartedAtRef.current} onStop={handlePauseCapture} /> : null}
         center={
           <FilterBar
             filterText={filterText}
@@ -3102,6 +3156,7 @@ export default function App() {
                 capturedFileCount={keptFiles(captureFiles).length}
                 capturing={isCapturing}
                 importBlockedBy={reopening ? 'Not while the last capture is being reopened - an import would replace it.' : null}
+                pickRequest={pickRequest}
               />
             )}
           </SideBar>
@@ -3247,7 +3302,7 @@ export default function App() {
               // Info reads.
               bufferResidentBytes={residentBytes()}
               bufferAutoPaused={bufferAutoPaused}
-              onClearPackets={handleClearPackets}
+              onClearPackets={handleClearView}
               captureStorage={captureStorage}
               onDiscardCapture={handleDiscardCapture}
               filterPresetLibrary={filterPresetLibrary}
@@ -3288,6 +3343,29 @@ export default function App() {
               className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0"
             >
               {/* Upper Pane: High-Density Packet Table */}
+              {showWelcome ? (
+                <div
+                  // The tour's list anchor is inside the welcome, on its
+                  // column: this box fills the view, leaving the card no room.
+                  className="flex-1 flex flex-col min-h-0 overflow-hidden"
+                >
+                  <Welcome
+                    interfaces={agentInterfaces}
+                    selectedInterfaces={selectedInterfaces}
+                    onToggleInterface={handleToggleInterface}
+                    interfaceRates={interfaceRates}
+                    onSamplingChange={handleInterfaceSampling}
+                    gate={startGateResult}
+                    agentProblem={agentBlocksStart(agentHealth)}
+                    previousCapture={lastCaptureLabel === null ? null
+                      : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
+                    onStart={handleStartCapture}
+                    onClearPackets={handleClearPackets}
+                    onOpenFile={() => { showSideBar('transfer'); setPickRequest((n) => n + 1); }}
+                    onTakeTour={startTour}
+                  />
+                </div>
+              ) : (
               <div
                 // The tour highlights the pane rather than a row: it runs before
                 // there are any rows. See components/tour/tourSteps.
@@ -3330,9 +3408,10 @@ export default function App() {
                   packetTheme={packetTheme}
                 />
               </div>
+              )}
 
               {/* Resize Drag Handle */}
-              {showPanes && (
+              {showPanes && !showWelcome && (
               <div
                 role="separator"
                 aria-orientation="horizontal"
@@ -3369,7 +3448,7 @@ export default function App() {
               )}
 
               {/* Lower Pane: Geometric Split of Protocol Details Tree & Hex Viewer */}
-              {showPanes && (
+              {showPanes && !showWelcome && (
               <div
                 ref={bottomPaneRef}
                 // The sizes are inherited from the root, which is where they are
@@ -3676,8 +3755,8 @@ export default function App() {
       {/* Outside the AnimatePresence above: the tour is not one of the modals
           that swap in and out of it, and being listed there would make opening
           any modal unmount it part-way through a step. */}
-      {!tour.completed && (
-        <TourOverlay onDone={() => tourStore.set({ completed: true })} />
+      {tourOpen && (
+        <TourOverlay steps={tourSteps(showWelcome)} onDone={() => { setTourOpen(false); tourStore.set({ completed: true }); }} />
       )}
 
       {palette !== null && (

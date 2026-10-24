@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { Button } from '../ui/button';
 import { Popover, PopoverAnchor, PopoverArrow, PopoverContent } from '../ui/popover';
-import { TOUR_STEPS } from './tourSteps';
+import { TOUR_STEPS, type TourStep } from './tourSteps';
 
 /**
  * The first-run walkthrough: a spotlight on one element at a time, with a card
@@ -62,8 +62,13 @@ function rectOf(anchor: string): Rect | null {
 export const TourOverlay: React.FC<{
   /** Finishing and skipping both call this. See services/tourPrefs. */
   onDone: () => void;
-}> = ({ onDone }) => {
-  const steps = TOUR_STEPS;
+  /** `tourSteps(...)` for what was on screen when the tour opened. */
+  steps?: TourStep[];
+}> = ({ onDone, steps: opened = TOUR_STEPS }) => {
+  // Fixed at open: a first packet arriving mid-tour swaps the welcome for the
+  // list, and a step list that changed length under `index` would skip a step
+  // or run off its end.
+  const [steps] = useState(opened);
 
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<Rect | null>(null);

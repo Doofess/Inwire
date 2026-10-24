@@ -100,7 +100,7 @@ try {
   await clicks('the stub adapter', () => p.getByText('Ethernet', { exact: true }).first().click());
   checkTrue('Start can be pressed', await clicks('Start capture', () => p.getByLabel('Start capture').click()));
   checkTrue('frames arrive', await until(async () => (await counted(p)) > 200));
-  checkTrue('the capture can be stopped', await clicks('Stop capture', () => p.getByLabel('Stop capture').click()));
+  checkTrue('the capture can be stopped', await clicks('Stop capture', () => p.getByLabel('Stop capture').first().click()));
   // Read once the count has settled, not at the click: Stop drains the frames
   // still in the pipeline into the list after it is pressed (under a loaded
   // gate, 280 at the click and 360 sealed). The session's metadata is written
@@ -134,6 +134,26 @@ try {
   checkTrue('...as many as were captured', await until(async () => (await counted(p)) === firstCount, 30_000),
     `captured ${firstCount}, reopened ${await counted(p)}`);
   checkTrue('...and the offer is gone', (await p.getByText(/is still on disk/).count()) === 0);
+  checkTrue('...and still no capture was started', !agent.received.slice(before).some((m) => m.includes('start_capture')));
+
+  // Clear View frees the list and keeps the capture on disk (ADR 0012). The
+  // empty list is then the welcome, and a Start from it deletes that capture,
+  // so it must be offered again - otherwise Start has nothing to ask about.
+  console.log('\n--- Clear View keeps it offered ---\n');
+  await clicks('Settings', () => p.getByRole('button', { name: 'Settings' }).first().click());
+  await clicks('Capture Health', () => p.getByRole('tab', { name: 'Capture Health' }).or(
+    p.getByRole('button', { name: 'Capture Health', exact: true })).first().click());
+  checkTrue('Clear View can be pressed', await clicks('Clear View',
+    () => p.getByRole('button', { name: 'Clear View' }).click()));
+  await p.keyboard.press('Escape');
+  checkTrue('Clear View empties the list', await until(async () => (await counted(p)) === 0));
+  checkTrue('...and offers the capture it cleared',
+    await until(async () => (await p.getByText(/is still on disk/).count()) > 0));
+  checkTrue('...so Start asks before deleting it',
+    (await p.getByLabel('Start a new capture, discarding the current one').count()) === 1);
+  checkTrue('...and Reopen brings it back again', await clicks('Reopen',
+    () => p.getByRole('button', { name: 'Reopen' }).click())
+    && await until(async () => (await counted(p)) === firstCount, 30_000), `reopened ${await counted(p)}`);
   checkTrue('...and still no capture was started', !agent.received.slice(before).some((m) => m.includes('start_capture')));
 } finally {
   await close();

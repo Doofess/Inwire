@@ -153,7 +153,7 @@ for (const theme of THEMES) {
     await shot('11-running-beside-capture');
     await p.getByRole('button', { name: 'Cancel' }).click();
     await sleep(800);
-    await p.getByLabel('Stop capture').click().catch(() => {});
+    await p.getByLabel('Stop capture').first().click().catch(() => {});
 
     await p.evaluate(() => window.inwire?.setUnsavedCapture?.(false)).catch(() => {});
     const firstPid = app.process().pid;

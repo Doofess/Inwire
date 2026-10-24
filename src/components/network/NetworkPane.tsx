@@ -273,9 +273,17 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
           measurement of exactly the connection the rest of it describes. */}
       {onOpenSpeedTest && <SpeedTestSection onOpen={onOpenSpeedTest} />}
       {onOpenMonitoring && <MonitoringSection onOpen={onOpenMonitoring} />}
+      {adapter === null && noAdapter}
 
-                          <Section title="Capture adapter">
-                {adapter === null ? noAdapter : (
+      {/* **Without the OS's answer, only what the capture can fill.** The
+          notice above says why once; it was printed under three sections, with
+          Gateway, DNS and DHCP drawn as grids of dashes beneath it. Capture
+          adapter and the addresses only the OS knows are hidden, and Gateway,
+          DNS and DHCP appear as soon as the capture observes something for
+          them. With an adapter nothing here changes. */}
+      {adapter !== null && (
+              <>
+              <Section title="Capture adapter">
                   <>
                     <Row label="Name" value={adapter.name} source={adapter.source.adapter} />
                     <Row label="Description" value={adapter.description} source={adapter.source.adapter} />
@@ -313,13 +321,8 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                       <Row label="Other adapters" value={`${adapters.length - 1} more known`} />
                     )}
                   </>
-                )}
               </Section>
 
-            {adapter === null ? (
-              <Section title="Addresses">{noAdapter}</Section>
-            ) : (
-              <>
                 <Section title="IPv4">
                   {adapter.ipv4.length === 0
                     ? <Empty>No IPv4 address.</Empty>
@@ -381,7 +384,7 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
               </>
             )}
 
-            <>
+            {(adapter !== null || facts.gatewayAddresses.length > 0 || facts.gatewayMac !== null) && (
                 <Section title="Gateway">
                   <Compare label="IPv4 gateway"
                     configured={<Value value={adapter?.gatewayV4 ?? null} sensitive hidden={hidden} />}
@@ -414,7 +417,9 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                           {resolveMacVendor(facts.gatewayMac) ?? ''}</span>)}
                     </span>} />
                 </Section>
+            )}
 
+            {(adapter !== null || facts.dnsServers.length > 0 || facts.encryptedDns.length > 0) && (
                 <Section title="DNS">
                   <Compare label="Servers"
                     // A resolver that was queried but is not configured is the
@@ -460,8 +465,9 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                     </div>
                   )}
                 </Section>
-              </>
+            )}
 
+            {(adapter !== null || facts.dhcpServer !== null) && (
             <Section title="DHCP">
                 <Compare label="Enabled"
                   configured={<Value value={adapter === null || adapter.dhcpEnabled === null
@@ -486,8 +492,8 @@ export const NetworkPane: React.FC<NetworkPaneProps> = ({
                     </span>
                   )}
                 </Row>
-                {!agentConnected && noAdapter}
               </Section>
+            )}
 
             <Section title="IPv6 router"
                 note="From Router Advertisements. Nothing on this machine records where its IPv6 configuration came from.">

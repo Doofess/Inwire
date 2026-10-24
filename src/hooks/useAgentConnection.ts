@@ -38,6 +38,7 @@ import { hostFromAdapters } from '../services/hostIdentity';
 import type { HostIdentity } from '../services/direction';
 import type { NetworkFacts } from '../services/networkFacts';
 import type { FrameBatch } from '../services/pipelineClient';
+import { createSamplingCount } from '../lib/samplingCount';
 
 /** How many of the agent's own log lines Driver Info keeps. */
 const AGENT_LOG_BUFFER_LIMIT = 1000;
@@ -132,8 +133,11 @@ export function useAgentConnection(host: AgentConnectionHost) {
   const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
   /** Whether Driver Info is open, so a reconnect knows to resubscribe. */
   const logSubscribedRef = useRef(false);
-  /** The same shape, for the interface counters the adapter panel draws. */
-  const interfaceStatsSubscribedRef = useRef(false);
+  /**
+   * The same idea for the interface counters, but counted: the adapter panel
+   * and the welcome can both be drawing them (`lib/samplingCount.ts`).
+   */
+  const interfaceStatsRef = useRef(createSamplingCount());
   /**
    * The agent's most recent rejection, surfaced in Driver Info.
    *
@@ -366,7 +370,7 @@ export function useAgentConnection(host: AgentConnectionHost) {
         // rather than as a dropped subscription. Cleared first for the same
         // reason the log is - a fresh series stitched onto a dead connection's
         // tail would be read as continuous.
-        if (interfaceStatsSubscribedRef.current) {
+        if (interfaceStatsRef.current.active) {
           setInterfaceRates({});
           pipeline.command({ type: 'subscribe_interface_stats' });
         }
@@ -589,11 +593,11 @@ export function useAgentConnection(host: AgentConnectionHost) {
    * read as a quiet adapter. `hello` re-sends it when this is set.
    */
   const setInterfaceStatsSubscribed = useCallback((on: boolean) => {
-    interfaceStatsSubscribedRef.current = on;
     if (on) {
+      if (!interfaceStatsRef.current.acquire()) return;
       setInterfaceRates({});
       pipeline.command({ type: 'subscribe_interface_stats' });
-    } else {
+    } else if (interfaceStatsRef.current.release()) {
       pipeline.command({ type: 'unsubscribe_interface_stats' });
     }
   }, []);

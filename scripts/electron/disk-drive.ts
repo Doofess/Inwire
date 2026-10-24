@@ -207,7 +207,7 @@ try {
   check('the store never complained', complaints, []);
   output.report();
 
-  await page.getByLabel('Stop capture').click().catch(() => { /* already stopped */ });
+  await page.getByLabel('Stop capture').first().click().catch(() => { /* already stopped */ });
   await sleep(3000);
   const [, captured] = await counts();
 

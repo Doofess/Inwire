@@ -55,6 +55,14 @@ interface SegmentedProps<T extends string> {
   size?: 'sm' | 'md';
   className?: string;
   disabled?: boolean;
+  /**
+   * Share the container's width between the segments instead of sizing each
+   * to its label, for a group that has to fit a narrow column - the
+   * schedule's Stop has four modes in a side bar that can be 192px wide. A
+   * label that does not fit is clipped by `min-w-0` inside its segment rather
+   * than pushing the group past its card.
+   */
+  fill?: boolean;
 }
 
 function Segmented<T extends string>({
@@ -65,6 +73,7 @@ function Segmented<T extends string>({
   size = 'md',
   className,
   disabled,
+  fill,
 }: SegmentedProps<T>) {
   // The hint for whichever segment is selected, shown under the group.
   //
@@ -89,7 +98,9 @@ function Segmented<T extends string>({
       // Horizontal so the arrow keys match the visual axis.
       orientation="horizontal"
       className={cn(
-        "inline-flex items-center gap-0.5 rounded-md border border-border bg-muted/40 p-0.5",
+        fill && "flex w-full",
+        !fill && "inline-flex",
+        "items-center gap-0.5 rounded-md border border-border bg-muted/40 p-0.5",
         disabled && "opacity-50",
         className
       )}
@@ -102,6 +113,7 @@ function Segmented<T extends string>({
           className={cn(
             "relative rounded font-medium whitespace-nowrap outline-none",
             size === 'sm' ? "px-1.5 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
+            fill ? "flex-auto min-w-0 px-1 text-center overflow-hidden text-ellipsis" : null,
             "transition-colors cursor-pointer",
             "text-muted-foreground hover:text-foreground",
             // Fill + border + foreground, all three. See the note above.
