@@ -42,6 +42,7 @@ import { compile } from '../../src/services/filter/compile';
 import { plainForStore } from '../../src/services/capture/storePacket';
 import { FieldBlock } from '../../src/services/dissect/fieldBlock';
 import { DENSE_FIELDS } from '../../src/services/dissect/denseFields';
+import { PackSender, PackedFlush, packRows, type PackedRows, type RowPack } from '../../src/services/pipeline/rowPack';
 import { serialize, deserialize } from 'node:v8';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { Packet } from '../../src/types/packet';
@@ -609,6 +610,119 @@ console.log('\n--- rows from the Worker that wrote their bytes (bytesSent) ---\n
   check('...and nothing failed', split.of('failure').length, 0);
   withBytes.store.close();
   split.store.close();
+}
+
+console.log('\n--- packed rows from the Worker (appendPacked) ---\n');
+
+{
+  // A shard's rows reach the store as the pack the shard encoded, a flush at a
+  // time, with one pack read across two messages. The rows on disk and the
+  // frames beside them must be those an `append` with bytes writes, and a row
+  // that came without bytes must never be written as an empty frame.
+  const PACK_ROWS = 400;
+  const GROUP = 700;
+  const packets = traffic(5000);
+  const outside = frame(9_999);
+  const reference = host();
+  await fill(reference, 'cap-20261024-010000-0001', [...packets, outside]);
+
+  const packed = host();
+  packed.send({ type: 'open', captureId: 'cap-20261024-010000-0002' });
+  const bare = (p: Packet): Packet => ({ ...p, rawBytes: new Uint8Array(0) });
+  const packs: RowPack[] = [];
+  for (let i = 0; i < packets.length; i += PACK_ROWS) {
+    const rows = packets.slice(i, i + PACK_ROWS).map(bare);
+    packs.push(packRows(packs.length, rows, rows.map(() => 8)));
+  }
+  // The Worker's own sender, so a pack goes once and a later message names it only by key.
+  const sender = new PackSender();
+  const sent: PackedRows[] = [];
+  // `ahead`: whether the Worker wrote these rows' bytes ahead of them on this port.
+  const post = (flush: PackedFlush, ahead: boolean) => {
+    const rows = deserialize(serialize(sender.seal(flush))) as PackedRows;
+    sent.push(rows);
+    packed.send({ type: 'appendPacked', rows, sent: new Uint8Array(rows.order.length / 2).fill(ahead ? 1 : 0) });
+  };
+  for (let i = 0; i < packets.length; i += GROUP) {
+    const group = packets.slice(i, i + GROUP);
+    packed.send({ type: 'appendBytes', frames: group.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes })) });
+    const flush = new PackedFlush();
+    for (const p of group) flush.packed(packs[Math.floor((p.id - 1) / PACK_ROWS)], (p.id - 1) % PACK_ROWS, null, null);
+    post(flush, true);
+  }
+  // A row whose bytes never came, and which brings none: held, never written as a frame.
+  const lost = new PackedFlush();
+  lost.packed(packRows(packs.length, [bare(frame(9_998))], [8]), 0, null, null);
+  post(lost, true);
+  // Outside the run: nobody wrote this frame's bytes ahead, so the row brings them.
+  const odd = new PackedFlush();
+  odd.packed(packRows(packs.length + 1, [bare(outside)], [8]), 0, outside.rawBytes, null);
+  post(odd, false);
+  packed.send({ type: 'finish' });
+  await packed.store.drain();
+
+  checkTrue('a pack was read across two messages (400 rows against groups of 700)',
+    sent[0].packs.some((p) => p.key === 1) && !sent[1].packs.some((p) => p.key === 1)
+    && Array.from(sent[1].order).some((v, at) => at % 2 === 0 && v === 1));
+  for (const h of [reference, packed]) {
+    h.send({ type: 'chunk', requestId: 1, chunk: 0 });
+    h.send({ type: 'chunk', requestId: 2, chunk: 1 });
+    h.send({ type: 'read', requestId: 3, ids: [1, 4097, 5000, 9_999] });
+    h.send({ type: 'locate', requestId: 4, id: 9_999 });
+    h.send({ type: 'locate', requestId: 5, id: 9_998 });
+    h.send({ type: 'stats' });
+  }
+  await reference.store.drain();
+  await packed.store.drain();
+  const rowsOf = (h: ReturnType<typeof host>) => h.of('rows').flatMap((m) => m.packets);
+  check('the rows on disk are the rows an append with bytes writes',
+    JSON.stringify(rowsOf(packed)), JSON.stringify(rowsOf(reference)));
+  check('...5,001 of them', rowsOf(packed).length, 5001);
+  check('a row whose bytes never came is not stored as a frame', packed.of('located')[1]?.ordinal, -1);
+  check('...and the bytes are the bytes',
+    packed.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]),
+    reference.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]));
+  checkTrue('...none of them empty', (packed.of('bytes')[0]?.frames ?? []).every(([, b]) => b.length === 8));
+  check('the row outside the run is stored, with its frame',
+    packed.of('located')[0]?.ordinal, reference.of('located')[0]?.ordinal);
+  check('...and the frames written are those an append writes',
+    packed.of('stats').at(-1)?.stats.framesWritten, reference.of('stats').at(-1)?.stats.framesWritten);
+  check('...and nothing failed', packed.of('failure').length, 0);
+  reference.store.close();
+  packed.store.close();
+}
+
+{
+  // An agent's metadata-only frame rides beside packed rows as an object with no
+  // bytes, which nobody wrote ahead of it. It must be stored as a plain `append`
+  // stores it - not taken for a row whose bytes went ahead and then counted missed
+  // when they never arrive. Which rows had their bytes sent is the Worker's to
+  // say; the store cannot tell from an empty `rawBytes`.
+  const meta: Packet = { ...frame(7), rawBytes: new Uint8Array(0) };
+  const plain = host();
+  plain.send({ type: 'open', captureId: 'cap-20261024-020000-0001' });
+  plain.send({ type: 'append', packets: [deserialize(serialize(meta)) as Packet] });
+  plain.send({ type: 'finish' });
+  const packed = host();
+  packed.send({ type: 'open', captureId: 'cap-20261024-020000-0002' });
+  const flush = new PackedFlush();
+  flush.object(meta);
+  const rows = deserialize(serialize(new PackSender().seal(flush))) as PackedRows;
+  packed.send({ type: 'appendPacked', rows, sent: new Uint8Array([0]) });
+  packed.send({ type: 'finish' });
+  for (const h of [plain, packed]) {
+    h.send({ type: 'locate', requestId: 1, id: 7 });
+    h.send({ type: 'stats' });
+  }
+  await plain.store.drain();
+  await packed.store.drain();
+  checkTrue('...a metadata-only frame beside packed rows is stored as an append stores it',
+    plain.of('located')[0]?.ordinal !== undefined && plain.of('located')[0]?.ordinal !== -1
+    && packed.of('located')[0]?.ordinal === plain.of('located')[0]?.ordinal);
+  check('...with the same frames written', packed.of('stats').at(-1)?.stats.framesWritten,
+    plain.of('stats').at(-1)?.stats.framesWritten);
+  plain.store.close();
+  packed.store.close();
 }
 
 console.log('\n--- progress ---\n');

@@ -104,6 +104,32 @@ export class PackedFlush {
   }
 }
 
+/**
+ * One receiver's send state, kept by the Worker: which packs it has been sent,
+ * and whether it must be told to forget the last capture's. Starts pending,
+ * because a new Worker's first flush may follow a receiver that held packs from
+ * the Worker before it. Lifted out of the Worker so a reset is testable.
+ */
+export class PackSender {
+  private readonly sent = new Set<number>();
+  private pending = true;
+
+  /** A new capture, or a coordinator reset: send every pack again, and say so. */
+  reset(): void {
+    this.sent.clear();
+    this.pending = true;
+  }
+
+  seal(flush: PackedFlush): PackedRows {
+    const rows = flush.seal(this.sent);
+    if (this.pending) {
+      rows.packsReset = true;
+      this.pending = false;
+    }
+    return rows;
+  }
+}
+
 interface Held {
   rows: Packet[];
   left: number;

@@ -18,7 +18,12 @@ import { markLiveGap } from '../../src/services/dissect/liveGapFields';
 import { ClientFingerprintStore, learnOrLabelFingerprint } from '../../src/services/dissect/clientFingerprints';
 import { settleField } from '../../src/services/pipeline/coordinator';
 import { applyOverlay, overlayMark, overlayOf } from '../../src/services/pipeline/rowOverlay';
+import { PcapService } from '../../src/services/pcapParser';
+import { Shard } from '../../src/services/pipeline/shard';
+import { OpWriter, type FromShard } from '../../src/services/pipeline/shardProtocol';
+import { unpackRows } from '../../src/services/pipeline/rowPack';
 import type { Packet } from '../../src/types/packet';
+import { evictionCapture } from './evictionCapture';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -115,6 +120,36 @@ check('the labelled row was given the ja4 match', labelled.fields?.['inwire.proc
   check('...and does not alias the row it was taken from',
     overlay.expert!.length === 1 && overlay.fields!['inwire.live.skipped'] === 3);
 }
+
+// The merge writes the adapter's clock onto every row. A shard told the clock
+// packs it, so that write changes nothing and costs no overlay per row - one
+// would be an object on every row to the window and the store.
+await (async () => {
+  const { frames } = await PcapService.extractFrames(new File([evictionCapture()], 'e.pcap'), 1);
+  const frame = frames[0];
+  let posted: FromShard | null = null;
+  const shard = new Shard((message) => { posted = message; }, { shards: 1, cacheFrames: 8 });
+  shard.handle({ type: 'interfaces', interfaces: [[0, { name: 'eth', label: 'Ethernet', tsPrecision: 9 }]] });
+  const writer = new OpWriter();
+  const tsUs = Number(frame.tsNanos / 1000n);
+  const none = { index: 0, pnum: 1, sinceFirst: 0, sincePrev: 0 };
+  writer.tcp({
+    id: 1, bytes: frame.rawBytes, tsUs, relativeTime: 0, timeDelta: 0, origLen: frame.origLen,
+    linktype: frame.linktype, iface: 0, facts: { nanosRemainder: 123 },
+  }, 'ip', { a: '00:00:5e:00:53:01', b: '00:00:5e:00:53:02', facts: none }, { a: '10.1.0.1', b: '10.2.0.1', facts: none }, '10.1.0.1:1024|10.2.0.1:443', 0);
+  shard.handle({ type: 'batch', epoch: 0, ops: writer.seal() });
+  const message = posted as FromShard | null;
+  const pack = message?.type === 'results' ? message.pack : null;
+  const row = pack === null ? undefined : unpackRows(pack)[0];
+  check('a shard told the adapter\'s clock packs it', row?.tsPrecision === 9
+    && row.tsNanos === BigInt(tsUs) * 1000n + 123n, `tsPrecision ${row?.tsPrecision}, tsNanos ${row?.tsNanos}`);
+  if (row !== undefined) {
+    const mark = overlayMark(row);
+    row.tsPrecision = 9;
+    row.tsNanos = BigInt(tsUs) * 1000n + 123n;
+    check('...so the merge writing the same clock leaves no overlay', overlayOf(row, mark) === null);
+  }
+})();
 
 console.log(failures === 0 ? '\nAll row-overlay checks passed.' : `\n${failures} check(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -215,7 +215,13 @@ export function* readOps(batch: OpBatch): Generator<ReadOp> {
   }
 }
 
-export interface ShardInterface { name: string; label: string }
+/**
+ * An adapter, as a shard dissects its frames. `tsPrecision` is the adapter's
+ * clock, which the merge would otherwise write onto every row it is given - an
+ * overlay per row on the way to the window and the store (`rowOverlay.ts`).
+ * A shard that knows it writes it into the row it packs instead.
+ */
+export interface ShardInterface { name: string; label: string; tsPrecision?: number }
 
 export type ToShard =
   /** The first message a shard Worker is sent. */

@@ -50,6 +50,7 @@ import type { DissectEnv } from '../dissect/dissectEnv';
 import { FrameDissector, type Dissected, type LaneTrackers } from './frameDissector';
 import { OpWriter, type FromShard, type OpBatch, type ShardResult, type ToShard, type WireFrame } from './shardProtocol';
 import { unpackRows, type RowPack } from './rowPack';
+import { overlayMark, type OverlayMark } from './rowOverlay';
 import type { InfoPatch } from '../dissect/types';
 import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 
@@ -74,8 +75,19 @@ export interface Merged {
   error?: string;
   /** A shard frame's tree, for the equality test only (`withTrees`). */
   layers?: ProtocolLayer[];
-  /** A shard frame's row as the shard packed it: which pack, and where in it. */
-  packed?: { pack: RowPack; index: number };
+  /**
+   * A shard frame's row as the shard packed it: which pack, where in it, and
+   * the covered keys as they were on unpacking. The mark is taken here, not in
+   * the Worker, because `settleField` writes `tls.stream` before the Worker
+   * sees the frame.
+   */
+  packed?: PackedRef;
+}
+
+export interface PackedRef {
+  pack: RowPack;
+  index: number;
+  mark: OverlayMark;
 }
 
 /**
@@ -142,7 +154,7 @@ interface Entry {
   result?: ShardResult;
   /** The shard's row for this frame, decoded, and the pack it came from. */
   packet?: Packet;
-  packed?: { pack: RowPack; index: number };
+  packed?: PackedRef;
   error?: string;
   tls?: number[];
 }
@@ -271,7 +283,7 @@ export class Coordinator {
         const packet = rows[result.row];
         packet.rawBytes = result.bytes ?? new Uint8Array(0);
         entry.packet = packet;
-        entry.packed = { pack, index: result.row };
+        entry.packed = { pack, index: result.row, mark: overlayMark(packet) };
       }
       entry.done = true;
       if (this.barrier !== null && this.barrier.id === result.id) {

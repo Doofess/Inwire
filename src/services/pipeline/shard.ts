@@ -66,6 +66,8 @@ export class Shard {
   private epoch = 0;
   private readonly trees: FifoMap<ProtocolLayer[]>;
   private interfaces = new Map<number, ShardInterface>();
+  /** Each adapter's clock, where the Worker knows it (`ShardInterface.tsPrecision`). */
+  private precision = new Map<number, number>();
   private readonly env: DissectEnv;
 
   constructor(
@@ -117,7 +119,11 @@ export class Shard {
         };
         return;
       case 'interfaces':
-        this.interfaces = new Map(message.interfaces);
+        // The record the dissector is handed is the single Worker's, name and
+        // label; the clock is kept beside it.
+        this.interfaces = new Map(message.interfaces.map(([id, { name, label }]) => [id, { name, label }]));
+        this.precision = new Map(message.interfaces.flatMap(([id, { tsPrecision }]) =>
+          (tsPrecision === undefined ? [] : [[id, tsPrecision] as const])));
         return;
       case 'keylog':
         keyLog.add(message.text);
@@ -210,6 +216,14 @@ export class Shard {
       this.cache(id, layers);
       packet.layers = [];
       row = packet;
+      // The clock `emitMerged` writes, by its rule, written here so it rides in
+      // the pack rather than in an overlay on every row. Where the Worker did
+      // not say, the merge still writes it and the overlay carries it.
+      const precision = frame.iface === undefined ? undefined : this.precision.get(frame.iface);
+      if (precision !== undefined) {
+        packet.tsPrecision = precision;
+        if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.facts?.nanosRemainder ?? 0);
+      }
       // A tree still cached here gains the links this frame wrote, as the
       // single Worker's cache does.
       for (const patch of d.infoPatches ?? []) this.patchTree(patch);

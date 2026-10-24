@@ -26,7 +26,7 @@ import { L3Tracker } from '../../src/services/l3Tracker';
 import { FrameClock, Sequencer } from '../../src/services/dissect/sequencer';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
 import {
-  PackReader, PackedFlush, packRows, unpackRows, type PackedRows, type RowPack,
+  PackReader, PackSender, PackedFlush, packRows, unpackRows, type PackedRows, type RowPack,
 } from '../../src/services/pipeline/rowPack';
 import type { Packet } from '../../src/types/packet';
 import { FIXTURES } from './arrival';
@@ -194,11 +194,51 @@ function reset(rows: Packet[]): void {
   check('...and a row of a pack it no longer holds is an error, not a blank row', threw);
 }
 
+/** The Worker's side of a reset: one sender per receiver, told to start again. */
+function sender(rows: Packet[]): void {
+  const lane = rows.slice(0, 20);
+  const old = pack(1, lane, lane.map(() => 60));
+  const fresh = pack(2, lane.slice(0, 5), lane.slice(0, 5).map(() => 60));
+  const sending = new PackSender();
+  const reader = new PackReader();
+
+  const first = new PackedFlush();
+  for (let i = 0; i < 10; i++) first.packed(old, i, null, null);
+  const one = cross(sending.seal(first));
+  check('the first seal says packsReset, as a new Worker must', one.packsReset === true && one.packs.length === 1);
+  reader.read(one);
+
+  const again = new PackedFlush();
+  for (let i = 10; i < 12; i++) again.packed(old, i, null, null);
+  const two = cross(sending.seal(again));
+  check('...and a later seal does not, nor does it re-send a pack', two.packsReset === undefined && two.packs.length === 0);
+  reader.read(two);
+  check('a pack with rows still unread is held', reader.held === 1);
+
+  // A new capture: the same pack key is sent again, because the receiver was told to forget.
+  sending.reset();
+  const after = new PackedFlush();
+  after.packed(old, 15, null, null);
+  for (let i = 0; i < 5; i++) after.packed(fresh, i, null, null);
+  const three = cross(sending.seal(after));
+  check('after reset() the next seal says packsReset again and re-sends a pack sent before',
+    three.packsReset === true && three.packs.length === 2);
+  const out = reader.read(three);
+  check('...and a reader fed through it yields only the new rows, holding only the re-sent pack',
+    out.length === 6 && out.every((row, i) => i === 0 || row.id === lane[i - 1].id) && reader.held === 1,
+    `rows ${out.length}, held ${reader.held}`);
+  const rest = new PackedFlush();
+  for (let i = 0; i < 20; i++) if (i !== 15) rest.packed(old, i, null, null);
+  reader.read(cross(sending.seal(rest)));
+  check('...and ends with held === 0 once the new capture reads its last row', reader.held === 0, `held ${reader.held}`);
+}
+
 async function main(): Promise<void> {
   const sample = await roundTrips();
   interleaving(sample);
   overlaysAndBytes(sample);
   reset(sample);
+  sender(sample);
   console.log(failures === 0 ? '\nAll row-pack checks passed.' : `\n${failures} check(s) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

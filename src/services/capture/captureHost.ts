@@ -58,6 +58,7 @@ import { readExact, type BlockFile } from './blockFile';
 import { StreamDigest, type StreamSummary } from '../conversation/streamDigest';
 import { decodeDigest, encodeDigest } from '../conversation/digestCodec';
 import { decodeMarks, encodeMarks } from '../marks';
+import { PackReader } from '../pipeline/rowPack';
 
 /** A capture's files - its index, its data, its segments - and the handles behind them. */
 export interface OpenVolume extends CaptureFiles {
@@ -209,6 +210,8 @@ export class CaptureHost {
   private open: OpenCapture | null = null;
   /** Said once, so a wiring error is reported without becoming a stream. */
   private orphanedAppend = false;
+  /** The packs the Worker has sent, until their last row is read; one per host, not per capture. */
+  private readonly packs = new PackReader();
   private running: RunningScan | null = null;
   private readonly queue = serialQueue((error) => this.fail(describe(error), false));
 
@@ -358,6 +361,7 @@ export class CaptureHost {
       switch (message.type) {
         case 'open': return this.onOpen(message);
         case 'append': return this.onAppend(message);
+        case 'appendPacked': return this.onAppendPacked(message);
         case 'appendBytes': return this.onAppendBytes(message, reply);
         case 'appendRecords': {
           this.open?.writer.attachRecords(message.frames);
@@ -555,13 +559,37 @@ export class CaptureHost {
   }
 
   private onAppend(message: Extract<ToCapture, { type: 'append' }>): void {
+    const rows = message.packets;
+    if (message.bytesSent) this.appendRows(rows, rows, []);
+    else this.appendRows(rows, [], rows);
+  }
+
+  /**
+   * The Worker's rows, shard rows still packed. Read before anything else, with
+   * no capture open too: the reader counts the rows left in each pack, and a
+   * message it skipped would leave one held for ever.
+   */
+  private onAppendPacked(message: Extract<ToCapture, { type: 'appendPacked' }>): void {
+    const rows = this.packs.read(message.rows);
+    const sent: Packet[] = [];
+    const carrying: Packet[] = [];
+    for (let i = 0; i < rows.length; i++) (message.sent[i] === 1 ? sent : carrying).push(rows[i]);
+    this.appendRows(rows, sent, carrying);
+  }
+
+  /**
+   * `rows` in the order they arrived, split into `sent` (their bytes went ahead
+   * on this port) and `carrying` (they bring their own). The digest takes them
+   * in arrival order, not the split's: it drops an id at or below the last.
+   */
+  private appendRows(rows: readonly Packet[], sent: readonly Packet[], carrying: readonly Packet[]): void {
     if (this.open === null) {
       // Ordering is guaranteed by the queue, so this can only mean the app
       // appended without starting - a wiring error rather than a race. It was
       // silent once and cost 500 frames; it does not get to be silent again.
       if (!this.orphanedAppend) {
         this.orphanedAppend = true;
-        this.fail(`${message.packets.length} frames arrived before a capture was opened`, false);
+        this.fail(`${rows.length} frames arrived before a capture was opened`, false);
       }
       return;
     }
@@ -569,10 +597,10 @@ export class CaptureHost {
     // and nothing staged, so an empty `rawBytes` can never be written as a
     // frame. A row whose bytes never arrived is held and then counted missed,
     // like any other (`attachRows`).
-    if (message.bytesSent) this.open.writer.attachRows(message.packets);
-    else this.open.writer.append(message.packets);
+    if (sent.length > 0) this.open.writer.attachRows(sent);
+    if (carrying.length > 0) this.open.writer.append(carrying);
     // Both paths, after the writer: an import's rows and the live Worker's.
-    for (const p of message.packets) this.feedDigest(this.open, p);
+    for (const p of rows) this.feedDigest(this.open, p);
   }
 
   /** One row into the digest, or into the queue behind a rebuild. */

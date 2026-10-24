@@ -18,6 +18,7 @@ import type { NetworkFacts } from './networkFacts';
 import type { AgentServiceFacts } from './agentLink';
 import { publishLiveLag } from './liveLag';
 import type { DissectionThreads } from './pipeline/threads';
+import { PackReader } from './pipeline/rowPack';
 import type {
   FromPipeline, PipelineInterface, PipelineStatus, ReplayFrame, ToPipeline,
 } from './pipeline/protocol';
@@ -123,6 +124,9 @@ export class PipelineClient {
     replay: () => ReplayBundle | Promise<ReplayBundle>;
   }>();
 
+  /** The packs the Worker has sent, until their last row is read (`rowPack.ts`). */
+  private readonly packReader = new PackReader();
+
   onStatus: (status: PipelineStatus) => void = () => {};
   onAgentMessage: (message: AgentMessage) => void = () => {};
   onFrames: (batch: FrameBatch) => void = () => {};
@@ -166,9 +170,22 @@ export class PipelineClient {
       case 'agent':
         this.onAgentMessage(message.message);
         break;
-      case 'frames':
-        this.onFrames(message);
+      case 'frames': {
+        let packets: Packet[];
+        try {
+          packets = this.packReader.read(message.rows);
+        } catch (error) {
+          // A pack the Worker never sent: the batch cannot be shown, and a blank
+          // row would pass for a quiet network. Say so; do not guess.
+          this.onFailure(error instanceof Error ? error.message : String(error));
+          break;
+        }
+        this.onFrames({
+          packets, icmpReplies: message.icmpReplies, infoPatches: message.infoPatches,
+          lateCount: message.lateCount, stored: message.stored,
+        });
         break;
+      }
       case 'failure':
         this.onFailure(message.message);
         break;
