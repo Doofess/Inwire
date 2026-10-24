@@ -89,7 +89,7 @@ const linkClass =
  * time, so they sat lopsided beside the Start chips and wrapped 3 then 2.
  */
 const chipClass = (on: boolean) =>
-  `w-full h-6 rounded-sm border px-1 font-mono text-[11px] text-center cursor-pointer transition-colors ${on
+  `w-full h-6 rounded-sm border px-1 text-[11px] whitespace-nowrap text-center cursor-pointer transition-colors ${on
     ? 'border-primary bg-primary/15 text-primary font-semibold'
     : 'border-border hover:border-primary'}`;
 const buttonClass =

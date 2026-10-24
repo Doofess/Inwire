@@ -407,7 +407,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
                 : 'hover:bg-accent/60 dark:hover:bg-foreground/5'}`}
             >
               <span className="block text-xs">{option.label}</span>
-              <span className="mt-0.5 block text-[10px] font-mono truncate
+              <span className="mt-0.5 block text-[10px] truncate
                 text-muted-foreground" title={option.detail}>
                 {option.detail}
               </span>
