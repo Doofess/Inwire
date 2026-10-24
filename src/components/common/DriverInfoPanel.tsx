@@ -225,9 +225,8 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
         <div className="rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2.5 text-xs">
           <div className="font-semibold text-foreground">No capture interfaces</div>
           <p className="mt-1 text-muted-foreground leading-relaxed">
-            The agent is running and answering, and it has nothing to listen on. That almost
-            always means the Npcap capture driver is missing - Windows itself does not let a
-            program read raw frames.
+            The agent is running but has no adapter to listen on. That almost always means the
+            Npcap capture driver is missing.
           </p>
           {onShowUpdates && (
             <button

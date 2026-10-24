@@ -138,7 +138,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
             stacked really is a setting. */}
         <SettingRow
           label="Pane arrangement"
-          description="Whether the protocol tree and byte view sit beside each other or above and below."
+          description="The protocol tree and the bytes side by side, or one above the other."
           disabled={!layout.panes}
         >
           <Segmented
@@ -165,7 +165,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
       <Section title="Packet list">
         <SettingRow
           label="Follow live capture"
-          description="Whether the list scrolls to keep the newest packet in view while capturing."
+          description="Keep the newest packet in view while capturing."
         >
           <Segmented
             ariaLabel="Follow live capture"
@@ -177,7 +177,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Packet list density"
-          description="Row height and text size in the list. Does not affect the detail panes."
+          description="Row height and text size in the packet list."
         >
           <Segmented
             ariaLabel="Packet list density"
@@ -189,7 +189,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Minimap"
-          description="The overview strip beside the scrollbar. It redraws on every packet, so turning it off is the single largest saving available while capturing."
+          description="An overview strip beside the scrollbar, the biggest CPU cost while capturing."
           htmlFor="setting-minimap"
         >
           <Switch id="setting-minimap" checked={minimap} onCheckedChange={setMinimap} />
@@ -199,7 +199,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
       <Section title="Performance">
         <SettingRow
           label="Dashboard refresh"
-          description="How often the Routing Map redraws while a capture runs. Relaxed is a quarter of the work; Paused holds the map at its last picture until you change this back."
+          description="How often the Routing Map updates during a capture, or pause it."
         >
           <Segmented
             ariaLabel="Dashboard refresh"
@@ -213,12 +213,11 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Buffer size"
-          description={
-            `Memory the captured frames may use before the oldest are dropped - about `
-            + `${framesForBudget(currentBufferBudget(perf.packetBufferBytes), AVERAGE_FRAME_BYTES).toLocaleString()} packets at this `
-            + `capture's average. A smaller buffer makes every calculation in the app `
-            + `proportionally cheaper. Frame data and analysis state are held separately and `
-            + `add roughly 60 MB on top of this.`
+          description="Memory kept for recent frames, with older ones read from disk as needed."
+          detail={
+            `About ${framesForBudget(currentBufferBudget(perf.packetBufferBytes), AVERAGE_FRAME_BYTES).toLocaleString()} `
+            + `packets at this capture's average. Smaller makes every calculation cheaper; frame data `
+            + `and analysis state add roughly 60 MB on top.`
           }
         >
           <Segmented
@@ -233,14 +232,12 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Multi Threaded Capture"
-          description={
-            (THREAD_CORES > 0
-              ? `How many threads dissect a live capture's TCP, which is what keeps the list live through a `
-                + `download faster than one core can read. Auto uses ${THREAD_CORES} on this machine's ${CORES} cores, `
-                + `leaving two for the rest of the app; past about ${THREAD_CORES} the thread that merges them is the limit, `
-                + `so more mostly adds memory. 1 dissects on one core, as before.`
-              : 'This machine has too few cores to spare, so Auto dissects on one, as 1 does.')
-            + ' Takes effect when the next capture starts.'
+          description="How many CPU threads decode TCP in a live capture, from the next Start."
+          detail={
+            THREAD_CORES > 0
+              ? `Auto uses ${THREAD_CORES} of this machine's ${CORES} cores, leaving two for the rest of the app; `
+                + `more than that mostly adds memory. 1 decodes on one core.`
+              : 'This machine has too few cores to spare, so Auto decodes on one, as 1 does.'
           }
         >
           <Segmented
@@ -281,7 +278,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Resolve network addresses"
-          description="Shows host names instead of IP addresses in the packet list's address columns and in the statistics tables, where the capture itself carried the name - from DNS responses, mDNS, NetBIOS and the like."
+          description="Show host names the capture itself carried, from DNS, mDNS or NetBIOS, instead of IPs."
           htmlFor="setting-resolve-network"
         >
           <Switch
@@ -293,7 +290,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Resolve transport ports"
-          description="Shows service names beside port numbers in the statistics tables - 443 as https, 53 as domain. From a table built into Inwire."
+          description="Show service names beside port numbers in statistics, such as 443 as https."
           htmlFor="setting-resolve-transport"
         >
           <Switch
@@ -312,7 +309,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Locate addresses"
-          description="Sends the public IP addresses in your capture to get.geojs.io, in batches, as they first appear - and asks it once per launch where this machine is. Also lets the Network panel's Public identity section ask ipapi.co about this connection. Without this the map has nothing to plot."
+          description="Sends public addresses, and asks where this machine is, to get.geojs.io and ipapi.co."
           htmlFor="setting-geoip"
         >
           <Switch
@@ -324,7 +321,7 @@ export const InterfaceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Reverse DNS"
-          description="Sends each public IPv4 address in your capture to cloudflare-dns.com as a PTR query, one address per request, to find host names."
+          description="Sends public IPv4 addresses to cloudflare-dns.com to look up their host names."
           htmlFor="setting-rdns"
         >
           <Switch

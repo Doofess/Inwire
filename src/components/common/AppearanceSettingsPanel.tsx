@@ -182,7 +182,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
         <div id={settingAnchorId("App theme")} className="py-2.5">
           <div className="text-xs font-semibold text-foreground">App theme</div>
           <p className="text-[11px] text-muted-foreground mt-0.5 mb-2 leading-snug">
-            The window, panels and charts. System follows Windows: Light or Dark, and High Contrast when Windows asks for it.
+            Light, Dark, Dim or High Contrast, or System to follow Windows.
           </p>
           {/* Five across: the four themes plus System, which is a mode over
               them rather than a fifth palette - see useSystemThemePreference.
@@ -233,7 +233,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
         <div id={settingAnchorId("Accent colour")} className="py-2.5">
           <div className="text-xs font-semibold text-foreground">Accent colour</div>
           <p className="text-[11px] text-muted-foreground mt-0.5 mb-2.5 leading-snug">
-            The selected row, the active rail button, focus rings and the download trace. Each one is checked for contrast in every theme.
+            The colour of the selected row, focus rings and the active rail button.
           </p>
           <AccentPicker theme={resolvedTheme ?? 'light'} />
         </div>
@@ -242,7 +242,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
       <Section title="Packet colours">
         <SettingRow
           label="Colour set"
-          description="How the packet list derives its row colours from the theme. Default is restrained and separates rows mostly by lightness; Vibrant is the same nine hues at roughly double the strength; Colourblind swaps in the Okabe-Ito set and leans on lightness harder still."
+          description="How strongly packet rows are coloured, including a colourblind-safe set."
         >
           <Segmented
             ariaLabel="Packet colour set"
@@ -284,7 +284,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
       <Section title="Map">
         <SettingRow
           label="Colour arcs by protocol"
-          description="On, each connection arc takes the hue of the protocol carrying most of its traffic, matching the protocol chart. Off, every arc is the theme's accent, and the map shows where traffic goes without also encoding what it is."
+          description="Colour each map arc by its main protocol, as the protocol chart does."
           htmlFor="setting-arc-protocol-colors"
         >
           <Switch
@@ -296,7 +296,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
 
         <SettingRow
           label="Basemap skin"
-          description="Colourful draws a fixed globe - green land, blue sea - that stays the same under every theme. Theme-synced builds the map out of the app's own tokens instead, so it recedes into the panel around it and changes when the theme does."
+          description="A fixed colourful globe, or a map drawn in the current theme's colours."
         >
           <Segmented
             ariaLabel="Basemap skin"

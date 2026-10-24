@@ -189,8 +189,8 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
         <div>
           <div className="text-xs font-semibold text-foreground">Display filters</div>
           <p className="text-[11px] text-muted-foreground mt-0.5">
-            Grouped exactly as they appear in the Presets dropdown. Drag a filter to reorder it or
-            move it between groups.
+            Grouped as in the filter field&apos;s presets. Drag a filter to reorder it or move it to
+            another group.
           </p>
         </div>
         <span className="text-[10px] text-muted-foreground shrink-0 pt-0.5">

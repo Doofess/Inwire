@@ -42,7 +42,7 @@ export const AccessibilitySettingsPanel: React.FC = () => {
       <Section title="Motion">
         <SettingRow
           label="Animations"
-          description="Pulsing map markers, alert indicators, map camera movement and panel transitions."
+          description="Pulsing markers, map camera moves and panel transitions."
         >
           <Segmented
             ariaLabel="Animations"
@@ -56,11 +56,7 @@ export const AccessibilitySettingsPanel: React.FC = () => {
       <Section title="Getting started">
         <SettingRow
           label="Tutorial"
-          description={
-            tour.completed
-              ? 'The walkthrough that highlights the path from installing the driver to reading your first packet. You have already been through it.'
-              : 'The walkthrough that highlights the path from installing the driver to reading your first packet. It runs the next time this page loads.'
-          }
+          description="The walkthrough from installing the driver to reading your first packet."
         >
           {/* The reason skipping the tour is allowed to retire it for good: it
               is never a dead end while this button exists. Closing Settings is
