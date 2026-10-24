@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Check, CircleAlert, Download, FileCode, FileSpreadsheet, FileText,
   Image as ImageIcon, LoaderCircle, RefreshCw, X,
@@ -106,6 +106,11 @@ export interface TransferPanelProps {
   capturing: boolean;
   /** Why an import cannot start for a reason the app knows, beside a running export. */
   importBlockedBy?: string | null;
+  /**
+   * A request to open the import file picker, from outside the panel (the
+   * welcome's "Open a capture file…"). Each increase asks once; 0 is no request.
+   */
+  pickRequest?: number;
 }
 
 type Scope = 'capture' | 'filter';
@@ -162,7 +167,7 @@ const PHASE_LABEL: Record<ExportPhase, string> = {
 export const TransferPanel: React.FC<TransferPanelProps> = ({
   packets, appliedFilter, permissions, captureStats, belowWindow, captureRowCount, filteredRowCount,
   filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
-  captureId, capturedFileCount, capturing, importBlockedBy = null,
+  captureId, capturedFileCount, capturing, importBlockedBy = null, pickRequest = 0,
 }) => {
   const [scope, setScope] = useState<Scope>('capture');
   const [includeRawBytes, setIncludeRawBytes] = useState(true);
@@ -181,6 +186,12 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
    */
   const [rejected, setRejected] = useState<{ filename: string; failure: ImportFailure } | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  // The same token the retry button bumps, so `ImportPanel`'s one effect opens
+  // the picker for both. Runs on mount too: the welcome shows the panel and asks
+  // in one batch, so the panel can arrive with the request already made.
+  useEffect(() => {
+    if (pickRequest > 0) setRetryToken((n) => n + 1);
+  }, [pickRequest]);
   const onKeyDown = useRovingFocus('vertical');
   /** What the last "As captured" save came to, said under its row. */
   const [captured, setCaptured] = useState<SaveOutcome | null>(null);

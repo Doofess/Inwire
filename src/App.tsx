@@ -37,6 +37,8 @@ import { anchorSelection } from "./services/selectionAnchor";
 import { startKeyLogFollow } from "./lib/keyLogFollow";
 import { selectionLabel, toggleInterface } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
+import { startGate } from "./lib/startGate";
+import { Welcome } from "./components/packet-list/Welcome";
 import { TitleRow } from "./components/common/TitleRow";
 import { CaptureLivePill } from "./components/common/CaptureLivePill";
 import { StatusBar } from "./components/status/StatusBar";
@@ -770,6 +772,11 @@ export default function App() {
   lastCaptureRef.current = lastCapture;
   /** True while `reopenLastCapture` runs, from its first read to its last row. */
   const [reopening, setReopening] = useState(false);
+  // Bumped by the welcome's "Open a capture file…"; the Export / Import panel
+  // opens its file picker when it changes. Reset when the panel goes away, so a
+  // stale count cannot open the picker the next time the panel is shown.
+  const [pickRequest, setPickRequest] = useState(0);
+  useEffect(() => { if (sideBar !== 'transfer') setPickRequest(0); }, [sideBar]);
   /** "the capture from Oct 8, 02:23", for the offer and for Start's prompt. */
   const lastCaptureLabel = useMemo(() => {
     if (lastCapture === null) return null;
@@ -2792,6 +2799,21 @@ export default function App() {
    * times in the taskbar says nothing.
    */
   const captureAdapter = selectionLabel(agentInterfaces, selectedInterfaces);
+  // An empty buffer with nothing capturing shows the welcome in place of the
+  // list and both detail panes. The panes setting (`showPanes`) is not written:
+  // they come back with the first packet.
+  const showWelcome = packets.length === 0 && !isCapturing && !reopening;
+  // The same inputs the rail gets, so the welcome's Start asks what the rail's asks.
+  const startGateResult = startGate({
+    isCapturing,
+    canCapture: permissions.canCapture,
+    canClearBuffer: permissions.canClearBuffer,
+    hasSelection: captureAdapter !== null,
+    ownedElsewhere: captureOwner !== null && captureOwner !== agentClientId,
+    blockedReason: startBlockedReason,
+    bufferedPackets: packets.length,
+    previousCapture: lastCaptureLabel,
+  });
   // The window's name, for the OS alone now: the taskbar, Alt-Tab and the
   // window list. The title row's centre shows the packet counter instead - see
   // `components/common/PacketCountsReadout.tsx` - so this string has exactly one
@@ -3108,6 +3130,7 @@ export default function App() {
                 capturedFileCount={keptFiles(captureFiles).length}
                 capturing={isCapturing}
                 importBlockedBy={reopening ? 'Not while the last capture is being reopened - an import would replace it.' : null}
+                pickRequest={pickRequest}
               />
             )}
           </SideBar>
@@ -3294,6 +3317,28 @@ export default function App() {
               className="flex-1 flex flex-col border-r border-border overflow-hidden min-w-0"
             >
               {/* Upper Pane: High-Density Packet Table */}
+              {showWelcome ? (
+                <div
+                  // The tour's anchor exists in both states.
+                  data-tour="list"
+                  className="flex-1 flex flex-col min-h-0 overflow-hidden"
+                >
+                  <Welcome
+                    interfaces={agentInterfaces}
+                    selectedInterfaces={selectedInterfaces}
+                    onToggleInterface={handleToggleInterface}
+                    interfaceRates={interfaceRates}
+                    onSamplingChange={handleInterfaceSampling}
+                    gate={startGateResult}
+                    previousCapture={lastCaptureLabel === null ? null
+                      : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
+                    onStart={handleStartCapture}
+                    onClearPackets={handleClearPackets}
+                    onOpenFile={() => { showSideBar('transfer'); setPickRequest((n) => n + 1); }}
+                    onTakeTour={startTour}
+                  />
+                </div>
+              ) : (
               <div
                 // The tour highlights the pane rather than a row: it runs before
                 // there are any rows. See components/tour/tourSteps.
@@ -3336,9 +3381,10 @@ export default function App() {
                   packetTheme={packetTheme}
                 />
               </div>
+              )}
 
               {/* Resize Drag Handle */}
-              {showPanes && (
+              {showPanes && !showWelcome && (
               <div
                 role="separator"
                 aria-orientation="horizontal"
@@ -3375,7 +3421,7 @@ export default function App() {
               )}
 
               {/* Lower Pane: Geometric Split of Protocol Details Tree & Hex Viewer */}
-              {showPanes && (
+              {showPanes && !showWelcome && (
               <div
                 ref={bottomPaneRef}
                 // The sizes are inherited from the root, which is where they are

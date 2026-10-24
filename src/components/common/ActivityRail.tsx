@@ -18,6 +18,7 @@ import type { AgentHealth } from '../../services/agentHealth';
 import { agentNeedsAttention, agentStatusLabel } from '../../services/agentHealth';
 import { isScheduleEmpty, type CaptureSchedule } from '../../services/captureSchedule';
 import { selectionLabel } from '../../services/captureInterfaces';
+import { startGate } from '../../lib/startGate';
 import type { Capabilities } from '../../types/packet';
 import { APP_VIEWS, type AppView } from '../../services/viewPrefs';
 import { titleWithKeys } from '../../lib/commands';
@@ -517,12 +518,21 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
    */
   // A previous capture offered on disk is discarded by Start just the same,
   // and nobody can see it in the list - which is why it has to be asked.
-  const discardsOffered = bufferedPackets === 0 && previousCapture != null;
-  const restartDiscards = !isCapturing && (bufferedPackets > 0 || discardsOffered);
-  const startBlocked = !permissions.canCapture || selected === null || captureOwnedElsewhere
-    || startBlockedReason !== null;
-  const captureBlocked = captureOwnedElsewhere
-    || (!isCapturing && (startBlocked || (restartDiscards && !permissions.canClearBuffer)));
+  // The decision is `startGate`'s, shared with the welcome on an empty Packets
+  // view, which has a Start of its own and must ask the same question.
+  const gate = startGate({
+    isCapturing,
+    canCapture: permissions.canCapture,
+    canClearBuffer: permissions.canClearBuffer,
+    hasSelection: selected !== null,
+    ownedElsewhere: captureOwnedElsewhere === true,
+    blockedReason: startBlockedReason,
+    bufferedPackets,
+    previousCapture,
+  });
+  const discardsOffered = gate.discards === 'previous';
+  const restartDiscards = gate.discards !== null;
+  const captureBlocked = captureOwnedElsewhere || (!isCapturing && gate.blocked !== null);
 
   /**
    * Whether the "this discards what you captured" prompt is showing.
@@ -639,8 +649,8 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
                   // allows, and every other branch below is a case where the
                   // rail has to ASK something, which the key refuses to do.
                   ? `${titleWithKeys('capture.stop', 'Stop capture')}. A stopped capture cannot be resumed.`
-                  : startBlocked
-                    ? startBlockedReason ?? 'Choose an interface first'
+                  : gate.blocked !== null
+                    ? gate.blocked
                     : discardsOffered
                       ? `Start a new capture - deletes ${previousCapture} from disk`
                       : restartDiscards
