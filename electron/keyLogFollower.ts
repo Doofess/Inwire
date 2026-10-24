@@ -94,12 +94,17 @@ export class KeyLogFollower {
    */
   attach(contents: WebContents): KeyLogFollowStatus {
     this.target = contents;
-    contents.once('destroyed', () => {
+    const detach = (): void => {
       if (this.target === contents) {
         this.target = null;
         this.stopWatching();
       }
-    });
+    };
+    contents.once('destroyed', detach);
+    // A crashed page keeps its webContents but receives nothing: every send
+    // from the poll was a logged "Render frame was disposed". The page that
+    // replaces it attaches again, from the top.
+    contents.once('render-process-gone', detach);
     this.restart();
     return this.status();
   }

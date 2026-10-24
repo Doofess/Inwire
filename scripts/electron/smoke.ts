@@ -155,6 +155,8 @@ let keyLogFile: string | null = null;
 const keyLogLine = (random: string) =>
   `CLIENT_TRAFFIC_SECRET_0 ${random.repeat(32)} ${'ee'.repeat(32)}`;
 let app: Awaited<ReturnType<typeof launchApp>> | null = null;
+/** Everything main wrote to stdout and stderr. */
+let mainOutput = '';
 /**
  * Hoisted out of the try, because the cleanup below has to talk to it.
  *
@@ -220,6 +222,9 @@ try {
     env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: SMOKE_PIPE },
   });
 
+  // Main's own output, for the crashed-renderer section at the end.
+  app.process().stdout?.on('data', (chunk) => { mainOutput += String(chunk); });
+  app.process().stderr?.on('data', (chunk) => { mainOutput += String(chunk); });
   const page = await app.firstWindow();
   mainWindow = page;
   /**
@@ -764,6 +769,27 @@ try {
   } else {
     console.log('      no console errors');
   }
+
+  // Last, because the page does not come back. A renderer that crashed leaves
+  // its window and webContents alive, and every send to it made Electron log
+  // "Render frame was disposed" - the key log's 25 ms poll once per write, the
+  // window state once per focus change - while nothing said the page had died.
+  console.log('\n--- after the renderer crashes ---\n');
+  // Cleared first: with frames buffered, the close below would ask, and a
+  // dead page cannot answer, so the OS's box would wait for ever.
+  await page.evaluate(() => window.inwire?.setUnsavedCapture?.(false));
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
+  const crashWriter = openSync(keyLogFile!, 'a');
+  for (let i = 0; i < 20; i++) {
+    writeSync(crashWriter, `${keyLogLine((i + 16).toString(16))}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 2 * 25));
+  }
+  closeSync(crashWriter);
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].emit('blur'); });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  check('main sends nothing to a crashed page',
+    (mainOutput.match(/Render frame was disposed/g) ?? []).length, 0);
+  checkTrue('main says the renderer is gone, and why', /\[renderer\] gone: \w+/.test(mainOutput));
 } finally {
   // Closing with frames in the buffer opens the "Quit Inwire?" confirm - the
   // page's own dialog, or the OS's box when the page does not answer within a

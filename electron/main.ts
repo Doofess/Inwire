@@ -647,7 +647,8 @@ function openExternally(raw: string): void {
 
 /** Tells the renderer what only main is told: maximized, and focused. */
 function sendWindowState(window: BrowserWindow): void {
-  if (window.isDestroyed()) return;
+  // A crashed page still has its webContents, and a send to it only logs.
+  if (window.isDestroyed() || window.webContents.isCrashed()) return;
   window.webContents.send(WINDOW_STATE_CHANNEL, {
     maximized: window.isMaximized(),
     focused: window.isFocused(),
@@ -713,6 +714,11 @@ async function createWindow(): Promise<BrowserWindow> {
   window.on('focus', announce);
   window.on('blur', announce);
   window.webContents.once('did-finish-load', () => sendWindowState(window));
+  // Said out loud: nothing reloads a crashed page, and without this line the
+  // only trace of one was Electron's complaints about sends to it.
+  window.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[renderer] gone: ${details.reason} (exit code ${details.exitCode})`);
+  });
 
   if (BACKGROUND_WINDOW) {
     // A test launch: shown without activation and parked outside every

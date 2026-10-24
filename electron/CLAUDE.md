@@ -15,6 +15,7 @@ Rules for the main process, the preload and the utility-process hosts; loaded wh
 - The close path never calls `window.destroy()`; the quit guard is on the `close` event and destroying skips the unsaved-frames confirm.
 - `backgroundColor` is fixed at construction, before a renderer can report a theme. `window-state.json` caches the resolved ground (`electron/windowColors.ts` is the table); `localStorage` stays the source of truth.
 - `maximize`, `unmaximize`, `focus` and `blur` are forwarded to the renderer over `WINDOW_STATE_CHANNEL`; `setTitle` is driven from the renderer.
+- A crashed renderer keeps its window and webContents, and nothing reloads it. `isDestroyed()` is not enough before a send: check `isCrashed()` too, or stop on `render-process-gone`, or Electron logs "Render frame was disposed" per send. Main logs the crash as `[renderer] gone:` (`scripts/electron/smoke.ts`).
 - Snap Layouts and Alt+Space are accepted losses (`docs/verification.md`); do not re-check them.
 - Scripted launches set `INWIRE_BACKGROUND_WINDOW=1`: shown with `showInactive()` parked at -20000,-20000, out of the taskbar. A hidden window gets two animation frames a second and stalls every rAF wait. `scripts/electron/background-launch.ts` fails any script that calls `_electron.launch` itself.
 
