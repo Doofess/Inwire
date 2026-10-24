@@ -45,6 +45,7 @@ import { keyLog } from '../../src/services/tls/keyLog';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
 import { Coordinator, WatchedTcpOrder, type CoordFrame, type Merged, type ShardRoute } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
+import { unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
 import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
 import { NO_HOST, type HostIdentity } from '../../src/services/direction';
 import type { InfoPatch } from '../../src/services/dissect/types';
@@ -311,6 +312,59 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
   }
 }
 
+/**
+ * A row as the window would compare it: without the bytes and the tree, which
+ * travel beside a pack, and with a key that is undefined on one side and absent
+ * on the other the same (JSON drops it), a timestamp's bigint as a string.
+ * `tls.stream` is left out: the merge numbers it after the shard packed the
+ * row, so `tlsSettled` holds it instead.
+ */
+function rowJson(packet: Packet): string {
+  const { rawBytes: _bytes, layers: _layers, fields, ...row } = packet;
+  const { 'tls.stream': _tls, ...rest } = fields ?? {};
+  return JSON.stringify({ ...row, fields: fields === undefined ? undefined : rest },
+    (_, v) => (typeof v === 'bigint' ? `${v}n` : v));
+}
+
+/**
+ * The pack holds the shard's `tls.stream` placeholder (negative); the merge
+ * replaces it with the real number, which `Merged.packed` is not told of
+ * (the row overlay carries it). Anything else must be unchanged.
+ */
+function tlsSettled(packed: Packet, merged: Packet): boolean {
+  const was = packed.fields?.['tls.stream'];
+  const now = merged.fields?.['tls.stream'];
+  return was === now || (typeof was === 'number' && was < 0 && typeof now === 'number');
+}
+
+/**
+ * Every row a shard sent is still in its pack, at the index the merge kept,
+ * and decodes to the row the merge ran on: what the flush forwards instead of
+ * the object is the object.
+ */
+function packedRows(capture: Capture, run: Run): void {
+  let shardRows = 0;
+  let unpacked = 0;
+  let firstWrong = '';
+  const decoded = new Map<RowPack, Packet[]>();
+  for (const m of run.merged) {
+    if (m.lane === 0 || m.error !== undefined || m.packet === undefined) continue;
+    shardRows++;
+    if (m.packed === undefined) {
+      firstWrong ||= `frame ${m.id}: no pack`;
+      continue;
+    }
+    let rows = decoded.get(m.packed.pack);
+    if (rows === undefined) decoded.set(m.packed.pack, rows = unpackRows(m.packed.pack));
+    const got = rows[m.packed.index];
+    if (got !== undefined && rowJson(got) === rowJson(m.packet) && tlsSettled(got, m.packet)) unpacked++;
+    else firstWrong ||= `frame ${m.id}: index ${m.packed.index} of pack ${m.packed.pack.key} differs`;
+  }
+  check(`${capture.name}: every row a 7-shard run took from a shard is in its pack, and the pack decodes to it`,
+    shardRows === unpacked, firstWrong);
+  console.log(`        ${unpacked.toLocaleString()} of ${shardRows.toLocaleString()} shard rows, in ${decoded.size.toLocaleString()} packs`);
+}
+
 /** Every frame of a sharded run rebuilt from its record: the tree it drew at arrival. */
 function revisits(capture: Capture): void {
   keyLog.clear();
@@ -342,6 +396,7 @@ function revisits(capture: Capture): void {
     }
     check(`${capture.name}: every frame a 7-shard arrival recorded is rebuilt from its record as it arrived`,
       wrong === null, wrong ?? '');
+    packedRows(capture, run);
     console.log(`        ${rebuilt.toLocaleString()} rebuilt, ${missed.toLocaleString()} fell back to a replay`
       + `${firstMiss ? ` (first: ${firstMiss})` : ''}`);
   } finally {

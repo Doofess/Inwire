@@ -49,6 +49,7 @@ import { settleDeferredAnswers } from '../dissect/frameRecord';
 import type { DissectEnv } from '../dissect/dissectEnv';
 import { FrameDissector, type Dissected, type LaneTrackers } from './frameDissector';
 import { OpWriter, type FromShard, type OpBatch, type ShardResult, type ToShard, type WireFrame } from './shardProtocol';
+import { unpackRows, type RowPack } from './rowPack';
 import type { InfoPatch } from '../dissect/types';
 import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 
@@ -73,6 +74,8 @@ export interface Merged {
   error?: string;
   /** A shard frame's tree, for the equality test only (`withTrees`). */
   layers?: ProtocolLayer[];
+  /** A shard frame's row as the shard packed it: which pack, and where in it. */
+  packed?: { pack: RowPack; index: number };
 }
 
 /**
@@ -137,6 +140,9 @@ interface Entry {
   done: boolean;
   d?: Dissected;
   result?: ShardResult;
+  /** The shard's row for this frame, decoded, and the pack it came from. */
+  packet?: Packet;
+  packed?: { pack: RowPack; index: number };
   error?: string;
   tls?: number[];
 }
@@ -182,6 +188,8 @@ export class Coordinator {
   /** Placeholder to real `tls.stream`, per shard lane. */
   private tlsMaps: Map<number, number>[];
   private nextTls = 0;
+  /** The next pack's key; never reset, so no two packs of one coordinator share one. */
+  private nextPackKey = 0;
   /** Which shard lane holds a recent frame's tree, for `detail`. */
   private readonly treeLane: IdRing;
   private idleWaiters: (() => void)[] = [];
@@ -246,10 +254,25 @@ export class Coordinator {
     if (message.epoch !== this.epoch) return;
     this.inFlight[shard] = Math.max(0, this.inFlight[shard] - 1);
     let barrierCleared = false;
+    // Decoded once for the whole message. The key is the coordinator's to give:
+    // a shard does not know its own index, and it must not repeat across epochs.
+    let rows: Packet[] | null = null;
+    let pack: RowPack | null = null;
+    if (message.pack !== null) {
+      pack = message.pack;
+      pack.key = this.nextPackKey++;
+      rows = unpackRows(pack);
+    }
     for (const result of message.results) {
       const entry = this.entries.get(result.id);
       if (entry === undefined) continue;
       entry.result = result;
+      if (result.row !== undefined && rows !== null && pack !== null) {
+        const packet = rows[result.row];
+        packet.rawBytes = result.bytes ?? new Uint8Array(0);
+        entry.packet = packet;
+        entry.packed = { pack, index: result.row };
+      }
       entry.done = true;
       if (this.barrier !== null && this.barrier.id === result.id) {
         this.settleBarrier(result.barrier);
@@ -666,14 +689,16 @@ export class Coordinator {
       if (d.icmpMatchedRequestFrameId !== undefined) merged.icmpMatchedRequestFrameId = d.icmpMatchedRequestFrameId;
       if (d.infoPatches) merged.infoPatches = d.infoPatches;
       if (settleField(d.packet, resolve)) settleTreeTls(d.packet.layers, resolve);
-    } else if (result?.packet !== undefined) {
-      merged.packet = result.packet;
+    } else if (result !== undefined && entry.packet !== undefined) {
+      const packet = entry.packet;
+      merged.packet = packet;
+      if (entry.packed !== undefined) merged.packed = entry.packed;
       merged.record = result.record === undefined
         ? undefined : settleDeferredAnswers(result.record, result.deferredAt ?? NO_OFFSETS, resolve);
       merged.derived = result.derived ?? null;
       if (result.icmpMatchedRequestFrameId !== undefined) merged.icmpMatchedRequestFrameId = result.icmpMatchedRequestFrameId;
       if (result.infoPatches) merged.infoPatches = result.infoPatches;
-      settleField(result.packet, resolve);
+      settleField(packet, resolve);
       if (result.layers) {
         settleTreeTls(result.layers, resolve);
         merged.layers = result.layers;

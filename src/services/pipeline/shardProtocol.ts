@@ -15,7 +15,8 @@
 import type { ConversationFacts } from '../dissect/sequencer';
 import type { BarrierHint, BarrierReport } from '../dissect/shardNumbering';
 import type { InfoPatch } from '../dissect/types';
-import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
+import type { ProtocolField, ProtocolLayer } from '../../types/packet';
+import type { RowPack } from './rowPack';
 
 /** A frame, as a lane dissects it. */
 export interface WireFrame {
@@ -244,8 +245,10 @@ export type ToShard =
 /** What one frame's dissection on a shard produced. */
 export interface ShardResult {
   id: number;
-  /** With an empty tree: the tree stays in the shard's cache. Absent when it failed. */
-  packet?: Packet;
+  /** This frame's index in the batch's pack. Absent when it failed to dissect. */
+  row?: number;
+  /** The frame's bytes, which travel beside the pack rather than in its row. */
+  bytes?: Uint8Array;
   record?: Uint8Array;
   derived?: Uint8Array | null;
   deferredAt?: readonly number[];
@@ -262,6 +265,10 @@ export interface ShardResult {
 }
 
 export type FromShard =
-  | { type: 'results'; epoch: number; results: ShardResult[] }
+  | {
+    type: 'results'; epoch: number; results: ShardResult[];
+    /** Every result's row, encoded once; null when no frame of the batch dissected. */
+    pack: RowPack | null;
+  }
   | { type: 'detail'; requestId: number; layers: ProtocolLayer[] | null }
   | { type: 'failure'; message: string };
