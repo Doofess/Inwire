@@ -38,6 +38,7 @@ import { startKeyLogFollow } from "./lib/keyLogFollow";
 import { selectionLabel, toggleInterface } from "./services/captureInterfaces";
 import { ActivityRail } from "./components/common/ActivityRail";
 import { TitleRow } from "./components/common/TitleRow";
+import { CaptureLivePill } from "./components/common/CaptureLivePill";
 import { StatusBar } from "./components/status/StatusBar";
 import { clearHoveredByte } from "./services/hoveredByte";
 import { resetByteRange } from "./services/byteRange";
@@ -2872,6 +2873,7 @@ export default function App() {
         onToggleSideBar={toggleSideBar}
         backLabel={backLabel}
         onBack={goBack}
+        live={isCapturing ? <CaptureLivePill startedAt={captureStartedAtRef.current} onStop={handlePauseCapture} /> : null}
         center={
           <FilterBar
             filterText={filterText}

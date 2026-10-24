@@ -30,7 +30,7 @@ import {
  */
 
 /** The dot that says a capture is live. Its own element so the pulse is one node. */
-const LIVE_DOT = 'w-1.5 h-1.5 rounded-full bg-destructive shrink-0 animate-pulse';
+export const LIVE_DOT = 'w-1.5 h-1.5 rounded-full bg-destructive shrink-0 animate-pulse';
 const GLYPH = 'w-3 h-3 shrink-0';
 
 /**
@@ -42,7 +42,7 @@ const GLYPH = 'w-3 h-3 shrink-0';
  * rather than counting its own ticks, so a throttled background tab resumes
  * with the right number instead of the number of ticks it was awake for.
  */
-function useElapsed(startedAt: number | null): number {
+export function useElapsed(startedAt: number | null): number {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
