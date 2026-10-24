@@ -1814,8 +1814,10 @@ export const PacketList: React.FC<PacketListProps> = ({
             )}
           </tbody>
           </ContextMenuTrigger>
+          {/* w-72: "Previous marked packet" beside Ctrl+Shift+B is the widest
+              row, and at w-60 the label wrapped onto two lines. */}
           {menuTarget && (
-            <ContextMenuContent className="w-60 text-xs">
+            <ContextMenuContent className="w-72 text-xs">
               <ContextMenuItem onSelect={() => onToggleMark(menuTarget.id)}>
                 {marks.has(menuTarget.id) ? 'Unmark packet' : 'Mark packet'}
                 <ContextMenuShortcut>{chordText('mark.toggle')}</ContextMenuShortcut>
