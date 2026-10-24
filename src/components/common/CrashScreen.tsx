@@ -21,8 +21,10 @@ import { WindowControls } from './WindowControls';
  * buttons carrying their own `.app-no-drag`; without them a crashed window
  * would be one Alt+F4 from stuck.
  *
- * **Quit is the window's close**, so the quit guard still asks about an unsaved
- * capture; it never destroys. **Reload navigates to the app shell** with
+ * **Quit is the window's close**, never a destroy, and it does not ask: main
+ * clears its unsaved-capture flag when the page dies, because the frames it
+ * stood for died with it and what reached the store is kept either way.
+ * **Reload navigates to the app shell** with
  * `location.replace`, so the crash screen is not a history entry to go back to
  * and no new IPC exists for it. The exit code is deliberately absent; it is in
  * main's log line.

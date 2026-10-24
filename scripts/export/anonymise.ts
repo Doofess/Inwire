@@ -15,6 +15,7 @@
  * every pair of addresses, the anonymised pair must agree on exactly as many
  * leading bits as the real pair did.
  */
+import { createHash } from 'node:crypto';
 import { Anonymiser, anonymiseCapture, parseIpv4, parseIpv6 } from '../../src/services/anonymise';
 import { FieldBlockWriter } from '../../src/services/dissect/fieldSplit';
 import { fieldValue } from '../../src/services/dissect/fieldAccess';
@@ -110,6 +111,38 @@ function sharedPrefix(a: Uint8Array, b: Uint8Array): number {
     sharedPrefix(parseIpv6(mapped.get('2001:db8:1:1::1')!)!, parseIpv6(mapped.get('2001:db8:1:1::2')!)!) >= 64, true);
   checkTrue('...and the address really changed',
     mapped.get('2001:db8:1:1::1') !== '2001:db8:1:1::1');
+}
+
+// --- every bit is its own coin ---------------------------------------------------
+
+{
+  // The published construction fills each step's AES block with the pad's
+  // remaining bits, so step i and step i+1 encrypt the SAME block whenever
+  // address bit i equals pad bit i - about half the time - and the flips come
+  // in runs. Measured before the fix: one IPv4 address in about 15,000 came
+  // out unchanged, and `export/anonymise-wire.ts` caught a real address in a
+  // real export once in a few hundred runs. With every block distinct, each
+  // flip is a fair coin of its own, and a pseudonym within three bits of its
+  // address is a one-in-780,000 event: 2,000 keys by 8 addresses expects 0.02
+  // of them, and the old construction gave about 35. The keys are hashed from a
+  // counter, so the run is the same every time and cannot flake.
+  const addresses = ['10.0.0.1', '10.0.0.2', '172.16.5.9', '8.8.8.8', '1.2.3.4', '203.0.113.7', '100.64.1.1', '192.0.2.200'];
+  let near = 0;
+  let unchanged = 0;
+  for (let k = 0; k < 2000; k++) {
+    const a = new Anonymiser(new Uint8Array(createHash('sha256').update(`anonymise key ${k}`).digest()));
+    for (const x of addresses) {
+      const y = a.ipv4Address(x);
+      if (y === x) unchanged++;
+      const rx = parseIpv4(x)!;
+      const ry = parseIpv4(y)!;
+      let distance = 0;
+      for (let i = 0; i < 4; i++) for (let v = rx[i] ^ ry[i]; v !== 0; v &= v - 1) distance++;
+      if (distance <= 3) near++;
+    }
+  }
+  check('no address is its own pseudonym, over 16,000 keyed mappings', unchanged, 0);
+  check('...and no pseudonym is within three bits of its address', near, 0);
 }
 
 // --- addresses that are not anybody's --------------------------------------------

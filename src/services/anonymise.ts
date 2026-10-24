@@ -17,7 +17,8 @@
  *     with an unrelated random one would leave a file in which no two hosts
  *     appear related, which is not a network any more. This is Xu, Fan,
  *     Ammar and Moon's Crypto-PAn construction, over the AES this app already
- *     ships for QUIC.
+ *     ships for QUIC, with one change to its block that `PrefixPreserving`
+ *     explains.
  *   * **MACs keep their OUI.** The first three bytes name the manufacturer,
  *     which is how a capture tells you the printer from the phone from the
  *     access point; the last three identify the unit. So the vendor half is
@@ -63,6 +64,20 @@ import { formatMac, formatIpv4Address, formatIpv6Address } from './addressFormat
  * two addresses agreeing on the first n bits produce the same n pad bits and
  * therefore agree on the first n bits of the output, and neither the pad nor
  * the output says anything about the bits that follow.
+ *
+ * **One departure from the paper, and it closes a leak.** The paper's block for
+ * bit i is the address's first i bits followed by the pad's remaining bits. So
+ * the blocks for bits i and i+1 differ only in bit i - the pad's in one, the
+ * address's in the other - and whenever those agree, which is half the time,
+ * both steps encrypt the same block and flip the same way. The 32 flips of an
+ * IPv4 address come in runs rather than as 32 coins, and an address comes out
+ * as itself about once in 15,000: measured, and caught by
+ * `scripts/export/anonymise-wire.ts` as a real address left in a real export.
+ * Here the block is the first i bits, then a 1, then zeros - a padding that
+ * says where the prefix ends, so no two steps share a block - XORed with the
+ * pad. Each flip is its own coin, and an address survives once in 2^32.
+ * Prefix preservation and injectivity are untouched: bit i's flip still
+ * depends on the first i bits and nothing else.
  */
 class PrefixPreserving {
   private readonly roundKeys: Uint8Array;
@@ -71,28 +86,28 @@ class PrefixPreserving {
 
   constructor(key: Uint8Array) {
     this.roundKeys = expandKey128(key.subarray(0, 16));
-    // The pad is the key's second half encrypted under its first, exactly as
-    // the paper specifies - it must be independent of the address being
-    // anonymised, and it must not be all zeros.
+    // The pad is the key's second half encrypted under its first, as the
+    // paper derives it - independent of the address being anonymised.
     this.pad = encryptBlock128(this.roundKeys, key.subarray(16, 32));
   }
 
-  /** Anonymises `bits` bits of a big-endian address, in place on a copy. */
+  /** Anonymises `bits` bits (at most 128) of a big-endian address, in place on a copy. */
   map(address: Uint8Array, bits: number): Uint8Array {
     const out = new Uint8Array(address.length);
     out.set(address);
     const block = new Uint8Array(16);
 
     for (let i = 0; i < bits; i++) {
-      // The block is the first i bits of the *real* address followed by the
-      // pad's remaining bits. Using the real address here rather than the
-      // anonymised one is what keeps the map injective.
-      block.set(this.pad);
+      // The first i bits of the *real* address, then a 1, then zeros, XORed
+      // with the pad: distinct for every (i, prefix), which the paper's
+      // pad-filled block is not (see above). Using the real address rather
+      // than the anonymised one is what keeps the map injective.
+      block.fill(0);
       for (let b = 0; b < i; b++) {
-        const bit = (address[b >> 3] >> (7 - (b & 7))) & 1;
-        const mask = 1 << (7 - (b & 7));
-        if (bit) block[b >> 3] |= mask; else block[b >> 3] &= ~mask;
+        if ((address[b >> 3] >> (7 - (b & 7))) & 1) block[b >> 3] |= 1 << (7 - (b & 7));
       }
+      block[i >> 3] |= 1 << (7 - (i & 7));
+      for (let b = 0; b < 16; b++) block[b] ^= this.pad[b];
       const cipher = encryptBlock128(this.roundKeys, block);
       const padBit = (cipher[0] >> 7) & 1;
       if (padBit) out[i >> 3] ^= 1 << (7 - (i & 7));

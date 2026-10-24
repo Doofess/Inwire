@@ -51,7 +51,8 @@ console.log('\n--- may main send ---\n');
 console.log('\n--- what the crash screen says ---\n');
 
 {
-  const FOLLOW = 'Reload brings the window back. Quit closes Inwire, and still asks first if a capture is unsaved.';
+  const FOLLOW = 'Reload brings the window back. Frames already written to the capture store are kept '
+    + 'either way, and Inwire offers them when it opens again.';
   check('the follow-up', CRASH_SCREEN_TEXT.followUp, FOLLOW);
   check('the headline', CRASH_SCREEN_TEXT.title, "Inwire's window stopped working");
   check('crashed', crashReasonSentence('crashed'), 'The page crashed.');

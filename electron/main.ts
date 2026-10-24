@@ -875,6 +875,11 @@ function guardClose(window: BrowserWindow): void {
       .finally(() => { crashPromptOpen = false; });
   };
   contents.on('render-process-gone', (_event, details) => {
+    // The frames the flag stood for were in the page that just died; what
+    // reached the store is kept and offered when the app opens again, whether
+    // the reader quits or reloads. A confirm now would guard nothing, so the
+    // crash screen's Quit closes without one.
+    unsavedCapture = false;
     confirm.rendererGone();
     if (confirm.pending || window.isDestroyed()) return;
     const response = crashResponse(details, contents.getURL());
