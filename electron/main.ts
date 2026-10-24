@@ -43,7 +43,10 @@ import {
   QUIT_CONFIRM_CHANNEL, QUIT_CONFIRM_REPLY_CHANNEL,
 } from './channels';
 import { QuitConfirm } from './quitConfirm';
-import { canSend, CRASH_BUTTONS, crashPrompt, readCrashAnswer } from './rendererLife';
+import { canSend, crashResponse, readCrashAnswer } from './rendererLife';
+import {
+  CRASH_SCREEN_PATH, CRASH_SCREEN_TEXT, crashNativeDetail, crashScreenSearch,
+} from '../src/lib/crashScreen';
 import { QUIT_CONFIRM_TEXT, readQuitConfirmReply } from '../src/lib/quitConfirm';
 import { saveGeneratedFile, type SaveFileRequest } from './saveFile';
 import { registerSaveStream } from './saveStream';
@@ -714,7 +717,9 @@ async function createWindow(): Promise<BrowserWindow> {
   // opaque colour it was handed.
   window.on('focus', announce);
   window.on('blur', announce);
-  window.webContents.once('did-finish-load', () => sendWindowState(window));
+  // `on`, not `once`: the crash screen and the app after a Reload are each a
+  // new document, and each needs to be told whether the window is maximized.
+  window.webContents.on('did-finish-load', () => sendWindowState(window));
   // Said out loud: nothing reloads a crashed page, and without this line the
   // only trace of one was Electron's complaints about sends to it.
   window.webContents.on('render-process-gone', (_event, details) => {
@@ -735,10 +740,24 @@ async function createWindow(): Promise<BrowserWindow> {
     window.once('ready-to-show', () => window.show());
   }
 
-  if (DEV_SERVER_URL) await window.loadURL(DEV_SERVER_URL);
-  else await window.loadURL(`${APP_ORIGIN}/index.html`);
+  await window.loadURL(appUrl());
 
   return window;
+}
+
+/** The app's shell: the dev server in `npm run dev`, the built page otherwise. */
+function appUrl(): string {
+  return DEV_SERVER_URL || `${APP_ORIGIN}/index.html`;
+}
+
+/**
+ * The page loaded into the window after its renderer dies, with Electron's
+ * reason in the query. The dev server's root is `/`, so the path is joined
+ * rather than appended to a URL that may already end in a slash.
+ */
+function crashScreenUrl(reason: string): string {
+  const base = DEV_SERVER_URL ? DEV_SERVER_URL.replace(/\/+$/, '') : APP_ORIGIN;
+  return `${base}${CRASH_SCREEN_PATH}${crashScreenSearch(reason)}`;
 }
 
 /**
@@ -811,22 +830,29 @@ function guardClose(window: BrowserWindow): void {
   };
   ipcMain.on(QUIT_CONFIRM_REPLY_CHANNEL, onReply);
   window.once('closed', () => ipcMain.removeListener(QUIT_CONFIRM_REPLY_CHANNEL, onReply));
-  // After a crash nothing reloads the page, so main asks. One box at a time,
-  // and never on top of the OS's quit box, which is already asking.
+  // After a crash nothing reloads the page, so main loads the crash screen into
+  // the same window: the renderer that draws dialogs is the thing that died.
+  // The OS's box is only the fallback, for the crash screen itself dying or not
+  // loading (`crashResponse`). One at a time, and never on top of the OS's quit
+  // box, which is already asking.
   let crashPromptOpen = false;
-  contents.on('render-process-gone', (_event, details) => {
-    confirm.rendererGone();
-    if (confirm.pending || window.isDestroyed()) return;
-    const prompt = crashPrompt(details);
-    if (prompt === null || crashPromptOpen) return;
-    const act = (answer: 'reload' | 'quit'): void => {
-      if (answer === 'reload') {
-        if (!contents.isDestroyed()) contents.reload();
-      } else if (!window.isDestroyed()) {
-        // `close`, never `destroy`: the quit guard is on `close`.
-        window.close();
+  const act = (answer: 'reload' | 'quit'): void => {
+    if (answer === 'reload') {
+      // `loadURL(appUrl)`, not `reload()`: after a crash that failed to show
+      // the screen, or on the screen itself, `reload()` would reload the wrong
+      // page.
+      if (!contents.isDestroyed()) {
+        void contents.loadURL(appUrl()).catch((error: unknown) => {
+          console.error('[renderer] could not reload the app:', error);
+        });
       }
-    };
+    } else if (!window.isDestroyed()) {
+      // `close`, never `destroy`: the quit guard is on `close`.
+      window.close();
+    }
+  };
+  const askNatively = (reason: string): void => {
+    if (crashPromptOpen || window.isDestroyed()) return;
     if (BACKGROUND_WINDOW) {
       // A modal box would appear in front of the owner and hang the test, so a
       // test names the answer instead. Read now, not at startup: a test sets it
@@ -838,15 +864,30 @@ function guardClose(window: BrowserWindow): void {
     crashPromptOpen = true;
     void dialog.showMessageBox(window, {
       type: 'error',
-      buttons: [...CRASH_BUTTONS],
+      buttons: [CRASH_SCREEN_TEXT.buttons.reload, CRASH_SCREEN_TEXT.buttons.quit],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
       title: 'Inwire',
-      message: prompt.message,
-      detail: prompt.detail,
+      message: CRASH_SCREEN_TEXT.title,
+      detail: crashNativeDetail(reason),
     }).then(({ response }) => act(response === 1 ? 'quit' : 'reload'))
       .finally(() => { crashPromptOpen = false; });
+  };
+  contents.on('render-process-gone', (_event, details) => {
+    confirm.rendererGone();
+    if (confirm.pending || window.isDestroyed()) return;
+    const response = crashResponse(details, contents.getURL());
+    if (response === 'none') return;
+    if (response === 'native') {
+      askNatively(details.reason);
+      return;
+    }
+    // Not modal and takes no focus, so a background launch shows it too.
+    void contents.loadURL(crashScreenUrl(details.reason)).catch((error: unknown) => {
+      console.error('[renderer] could not load the crash screen:', error);
+      askNatively(details.reason);
+    });
   });
   // A reload takes the page's dialog with it; see `rendererReset`.
   contents.on('did-start-navigation', (details) => {

@@ -1,9 +1,8 @@
 import React from 'react';
-import { motion } from 'motion/react';
 import { TriangleAlert } from 'lucide-react';
 
-import { modalPanelMotion } from '../../lib/modalMotion';
 import { QUIT_CONFIRM_TEXT, readQuitConfirmRequest } from '../../lib/quitConfirm';
+import { AlertButton, AlertCard } from './AlertCard';
 
 /**
  * "Quit Inwire?", drawn by the app rather than by the OS.
@@ -110,45 +109,28 @@ export function QuitConfirmDialog(): React.ReactElement {
       className="m-auto w-[calc(100%-2rem)] max-w-md overflow-visible border-0 bg-transparent p-0 text-card-foreground backdrop:bg-black/70"
     >
       {open !== null && (
-        <motion.div
-          {...modalPanelMotion}
-          className="rounded-xl border border-border bg-card shadow-2xl"
+        <AlertCard
+          icon={<TriangleAlert aria-hidden className="size-6 shrink-0 text-warning" />}
+          title={QUIT_CONFIRM_TEXT.title}
+          titleId="quit-confirm-title"
+          message={QUIT_CONFIRM_TEXT.message}
+          messageId="quit-confirm-message"
+          detail={QUIT_CONFIRM_TEXT.detail}
         >
-          <div className="flex items-start gap-3 px-5 pt-4 pb-3">
-            <TriangleAlert aria-hidden className="size-6 shrink-0 text-warning" />
-            <div className="min-w-0 space-y-1.5">
-              <h2 id="quit-confirm-title" className="text-base font-bold text-balance">
-                {QUIT_CONFIRM_TEXT.title}
-              </h2>
-              <p id="quit-confirm-message" className="text-sm text-foreground/90 text-pretty">
-                {QUIT_CONFIRM_TEXT.message}
-              </p>
-              <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
-                {QUIT_CONFIRM_TEXT.detail}
-              </p>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2 border-t border-border px-5 py-3">
-            <button
-              type="button"
-              onClick={() => answer(true)}
-              className="rounded-md bg-secondary px-4 py-1.5 text-xs font-medium text-foreground transition-[background-color,scale] hover:bg-accent active:scale-95"
-            >
-              {QUIT_CONFIRM_TEXT.quit}
-            </button>
-            <button
-              ref={keepRef}
-              type="button"
-              // Focused on open by the effect above; `autoFocus` says so to
-              // anything reading the markup, and Enter keeps.
-              autoFocus
-              onClick={() => answer(false)}
-              className="rounded-md bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground transition-[background-color,scale] hover:bg-primary/90 active:scale-95"
-            >
-              {QUIT_CONFIRM_TEXT.keep}
-            </button>
-          </div>
-        </motion.div>
+          <AlertButton variant="secondary" onClick={() => answer(true)}>
+            {QUIT_CONFIRM_TEXT.quit}
+          </AlertButton>
+          <AlertButton
+            ref={keepRef}
+            variant="primary"
+            // Focused on open by the effect above; `autoFocus` says so to
+            // anything reading the markup, and Enter keeps.
+            autoFocus
+            onClick={() => answer(false)}
+          >
+            {QUIT_CONFIRM_TEXT.keep}
+          </AlertButton>
+        </AlertCard>
       )}
     </dialog>
   );

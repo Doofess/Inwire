@@ -106,6 +106,16 @@ export default defineConfig(() => {
           [name, path.resolve(__dirname, 'src/lib/unbundledOptional.ts')])),
       },
     },
+    build: {
+      rollupOptions: {
+        // Two pages: the app, and the crash screen main loads into the window
+        // when the renderer dies (`src/crash.tsx`). `index` stays the main one.
+        input: {
+          index: path.resolve(__dirname, 'index.html'),
+          crash: path.resolve(__dirname, 'crash.html'),
+        },
+      },
+    },
     optimizeDeps: {
       // maplibre-gl ships its own web worker as a separate asset; esbuild's
       // dependency pre-bundler doesn't resolve that worker's URL correctly,

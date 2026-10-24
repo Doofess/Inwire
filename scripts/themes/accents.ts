@@ -114,13 +114,18 @@ checkTrue('no accent rule touches --accent, which is the hover fill', !/--accent
 
 // --- the stamp ---------------------------------------------------------------
 
-const main = fs.readFileSync(path.join(root, 'src/main.tsx'), 'utf8');
-checkTrue('main.tsx stamps the accent on <html> at module scope, before render',
-  /^stampAccentColor\(\);/m.test(main)
-  && /dataset\.accentColor\s*=\s*accentColorStore\.get\(\)/.test(main)
-  && main.indexOf('stampAccentColor();') < main.indexOf('createRoot('));
+const providers = fs.readFileSync(path.join(root, 'src/components/common/RootProviders.tsx'), 'utf8');
+checkTrue('RootProviders stamps the accent on <html> from prepareDocument',
+  /^\s*stampAccentColor\(\);/m.test(providers)
+  && /dataset\.accentColor\s*=\s*accentColorStore\.get\(\)/.test(providers));
 checkTrue('...and re-stamps when the setting changes',
-  /accentColorStore\.subscribe\(stampAccentColor\)/.test(main));
+  /accentColorStore\.subscribe\(stampAccentColor\)/.test(providers));
+for (const entryFile of ['src/main.tsx', 'src/crash.tsx']) {
+  const entry = fs.readFileSync(path.join(root, entryFile), 'utf8');
+  checkTrue(`${entryFile} prepares the document at module scope, before render`,
+    entry.indexOf('\nprepareDocument();') > -1
+    && entry.indexOf('\nprepareDocument();') < entry.indexOf('createRoot('));
+}
 
 // --- what canvas, chart and map colours read --------------------------------------
 

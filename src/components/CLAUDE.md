@@ -656,6 +656,8 @@ with one capture-phase listener on `window` that calls
 works because the dialog is mounted **before `<App/>`** in `main.tsx`. Move it
 inside App and Escape navigates the view behind the confirm.
 
+**There are two entries that mount React**: `main.tsx` (the app) and `crash.tsx`, the page main loads into the window when the renderer dies (`electron/CLAUDE.md`). The crash page imports nothing of `App`; both call `prepareDocument()` and wrap their tree in `RootProviders` (`common/RootProviders.tsx`), so theme, accent and platform stamps cannot drift. `CrashScreen` and `QuitConfirmDialog` share their card through `common/AlertCard.tsx`.
+
 Live agent batches are parsed and dissected in `src/workers/pipeline.worker.ts`,
 which owns the ordering window and trackers. React receives batched summaries
 and bytes. File import currently runs the same parser on the renderer thread;

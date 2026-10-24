@@ -43,6 +43,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startStubAgent, type StubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
+import { CRASH_SCREEN_TEXT, crashReasonSentence } from '../../src/lib/crashScreen';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -802,21 +803,23 @@ try {
     (mainOutput.match(/Render frame was disposed/g) ?? []).length, 0);
   checkTrue('main says the renderer is gone, and why', /\[renderer\] gone: \w+/.test(mainOutput));
 
-  // Then the other half: what main asks. A background launch shows no box (it
-  // would sit in front of whoever is working), so the answer comes from the
-  // environment, read when the crash happens. Nothing above set it, which is
-  // why the page stayed dead long enough to catch an unguarded sender.
-  // Plain arrows with nothing named inside: tsx's `__name` helper does not
-  // exist in main.
+  // Then the other half: what main shows. The crash above loaded the crash
+  // screen into the same window, so the test drives that page the way a person
+  // would instead of naming an answer in the environment (that variable is now
+  // read only by the OS-box fallback, which no test reaches). Plain arrows with
+  // nothing named inside: tsx's `__name` helper does not exist in main.
   await app.evaluate(({ BrowserWindow }) => {
-    process.env.INWIRE_CRASH_ANSWER = 'reload';
     const contents = BrowserWindow.getAllWindows()[0].webContents;
     (globalThis as { __loads?: number }).__loads = 0;
     contents.on('did-finish-load', () => { (globalThis as { __loads?: number }).__loads! += 1; });
-    contents.reload();
   });
   // Bounded: 20 s each, polled from main.
   const electronApp = app;
+  const mainSaw = () => electronApp.evaluate(({ BrowserWindow }) => {
+    const contents = BrowserWindow.getAllWindows()[0].webContents;
+    return { url: contents.getURL(), crashed: contents.isCrashed(), loading: contents.isLoading(),
+      loads: (globalThis as { __loads?: number }).__loads ?? null };
+  });
   const pageIsBack = (loadsBefore: number) => async (): Promise<boolean> => {
     for (let i = 0; i < 80; i++) {
       const back = await electronApp.evaluate(({ BrowserWindow }, before) => {
@@ -828,21 +831,65 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     // Said, so a failure here names which of the three it was.
-    console.log(`        main saw: ${JSON.stringify(await electronApp.evaluate(({ BrowserWindow }) => {
-      const contents = BrowserWindow.getAllWindows()[0].webContents;
-      return { crashed: contents.isCrashed(), loading: contents.isLoading(),
-        loads: (globalThis as { __loads?: number }).__loads ?? null };
-    }))}`);
+    console.log(`        main saw: ${JSON.stringify(await mainSaw())}`);
     return false;
   };
-  const firstBack = await pageIsBack(0)();
-  console.log(`      reloaded by hand: ${firstBack ? 'back' : 'did not come back'}`);
-  if (firstBack) {
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
-    checkTrue('a crashed page reloads when the prompt answers Reload', await pageIsBack(1)());
-  } else {
-    checkTrue('a crashed page reloads when the prompt answers Reload', false);
+  const onCrashScreen = async (): Promise<boolean> => {
+    for (let i = 0; i < 80; i++) {
+      const saw = await mainSaw();
+      if (/\/crash\.html/.test(saw.url) && !saw.crashed && !saw.loading) return true;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    console.log(`        main saw: ${JSON.stringify(await mainSaw())}`);
+    return false;
+  };
+
+  checkTrue('a crashed renderer is replaced by the crash screen', await onCrashScreen());
+  // Driven from main, not through `page`: Playwright marks its Page for ever
+  // dead once the target crashes ("Target crashed"), and it does not follow the
+  // new document that replaces it. `executeJavaScript` reads and presses the
+  // real crash page the same way a person's click would.
+  const inCrashPage = <T>(source: string): Promise<T> => electronApp.evaluate(
+    ({ BrowserWindow }, code) => BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(code),
+    source,
+  ) as Promise<T>;
+  // did-finish-load fires before React has mounted, so wait for the card.
+  let cardText = '';
+  for (let i = 0; i < 80 && cardText === ''; i++) {
+    cardText = await inCrashPage<string>(`document.querySelector('[aria-labelledby="crash-screen-title"]')?.textContent ?? ''`);
+    if (cardText === '') await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  checkTrue('the card carries the title and the reason in words',
+    cardText.includes(CRASH_SCREEN_TEXT.title)
+    && cardText.includes(crashReasonSentence(/\[renderer\] gone: (\S+)/.exec(mainOutput)?.[1] ?? '')));
+  checkTrue('...and no exit code, which stays in main\'s log', !/\d|exit code/i.test(cardText));
+  check('the crash screen has Minimize, Maximize and Close', await inCrashPage<number>(
+    `['Minimize', 'Maximize', 'Close'].filter((n) => document.querySelector('button[aria-label="' + n + '"]')).length`), 3);
+  check('Reload is the focused button, so Enter presses it',
+    await inCrashPage<string>(`document.activeElement?.textContent ?? ''`), 'Reload');
+  const loadsBefore = (await mainSaw()).loads ?? 0;
+  await inCrashPage<void>(
+    `[...document.querySelectorAll('button')].find((b) => b.textContent === 'Reload').click()`);
+  checkTrue('Reload brings the app back', await pageIsBack(loadsBefore)());
+  const reloaded = await mainSaw();
+  checkTrue('...at the app, not the crash screen', !/crash\.html/.test(reloaded.url));
+  checkTrue('...and the shell has drawn', await inCrashPage<boolean>(
+    `Boolean(document.querySelector('[aria-label="Toggle side bar"]'))`));
+
+  // The OS's box is the fallback for the crash screen itself dying, and a
+  // background launch answers it from the environment (a modal box would hang
+  // the run). Crashing the crash screen is the only road to that branch.
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer();
+  });
+  checkTrue('a second crash shows the crash screen again', await onCrashScreen());
+  const loadsOnScreen = (await mainSaw()).loads ?? 0;
+  await app.evaluate(({ BrowserWindow }) => {
+    process.env.INWIRE_CRASH_ANSWER = 'reload';
+    BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer();
+  });
+  checkTrue('a crash of the crash screen falls back to the box, and Reload answers it',
+    await pageIsBack(loadsOnScreen)() && !/crash\.html/.test((await mainSaw()).url));
 } finally {
   // Closing with frames in the buffer opens the "Quit Inwire?" confirm - the
   // page's own dialog, or the OS's box when the page does not answer within a
