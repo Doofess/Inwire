@@ -3383,6 +3383,7 @@ export default function App() {
               surface would join this list rather than sit beside it. */}
           {sheet === 'settings' ? (
             <SettingsPane
+              onStartTour={() => { setSheet(null); startTour(); }}
               agentHealth={agentHealth}
               onStartAgentService={startAgentService}
               agentError={agentError}

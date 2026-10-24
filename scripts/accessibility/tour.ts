@@ -115,6 +115,14 @@ check('with packets on screen it is the full tour', tourSteps(false), TOUR_STEPS
 check('App hands the overlay the steps for what is on screen',
   /<TourOverlay\s+steps=\{tourSteps\(showWelcome\)\}/.test(app), true);
 
+// Settings' Tutorial row starts the tour, the same way the welcome's link and
+// the palette do. It used to clear `tourStore.completed` and say "Queued for
+// next load", which since the tour went opt-in queued nothing at all.
+const a11y = readFileSync(join(root, 'src', 'components', 'common', 'AccessibilitySettingsPanel.tsx'), 'utf8');
+check('the Tutorial button starts the tour', /onClick=\{onStartTour\}/.test(a11y), true);
+check('...and no longer queues it for a load that never starts it', /Queued for next load|tourStore\.set/.test(a11y), false);
+check('App hands Settings its startTour', /onStartTour=\{[^}]*startTour/.test(app), true);
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);

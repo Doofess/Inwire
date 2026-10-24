@@ -3,7 +3,6 @@ import { Button } from '../ui/button';
 import { Segmented } from '../ui/segmented';
 import { motionStore, type MotionSetting } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
-import { tourStore } from '../../services/tourPrefs';
 import { Section, SettingRow } from './settingsLayout';
 
 /**
@@ -33,9 +32,8 @@ const MOTION_OPTIONS = [
   { value: 'never' as MotionSetting, label: 'Never' },
 ];
 
-export const AccessibilitySettingsPanel: React.FC = () => {
+export const AccessibilitySettingsPanel: React.FC<{ onStartTour: () => void }> = ({ onStartTour }) => {
   const [motion, setMotion] = usePreferenceValue(motionStore);
-  const [tour] = usePreferenceValue(tourStore);
 
   return (
     <div>
@@ -58,17 +56,13 @@ export const AccessibilitySettingsPanel: React.FC = () => {
           label="Tutorial"
           description="The walkthrough from installing the driver to reading your first packet."
         >
-          {/* The reason skipping the tour is allowed to retire it for good: it
-              is never a dead end while this button exists. Closing Settings is
-              deliberate - the tour points at the header and the panes, and it
-              cannot highlight anything behind an open modal. */}
-          <Button
-            variant="outline"
-            size="xs"
-            onClick={() => tourStore.set({ completed: false })}
-            disabled={!tour.completed}
-          >
-            {tour.completed ? 'Replay tutorial' : 'Queued for next load'}
+          {/* Starts the tour now, as the welcome's link and the palette do.
+              It used to clear the tour's "completed" flag and say "Queued for
+              next load", which queued nothing once the tour stopped starting
+              by itself. Settings closes first: the tour points at the header
+              and the panes, and it cannot highlight anything behind the sheet. */}
+          <Button variant="outline" size="xs" onClick={onStartTour}>
+            Take the tour
           </Button>
         </SettingRow>
       </Section>

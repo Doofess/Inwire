@@ -133,6 +133,8 @@ interface SettingsPaneProps {
   onSubscribeAgentLog: () => void;
   onUnsubscribeAgentLog: () => void;
   onClearAgentLog: () => void;
+  /** Closes Settings and starts the tour, which cannot point at anything behind the sheet. */
+  onStartTour: () => void;
 
   /* --- Network was here, and is its own sheet off the rail now ------------ */
 }
@@ -163,6 +165,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   onSubscribeAgentLog,
   onUnsubscribeAgentLog,
   onClearAgentLog,
+  onStartTour,
 }) => {
   const [section, setSection] = useState<SettingsSection>('appearance');
   const [query, setQuery] = useState('');
@@ -329,7 +332,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
             {section === 'appearance' && <AppearanceSettingsPanel />}
 
             {section === 'interface' && <InterfaceSettingsPanel />}
-            {section === 'accessibility' && <AccessibilitySettingsPanel />}
+            {section === 'accessibility' && <AccessibilitySettingsPanel onStartTour={onStartTour} />}
 
             {section === 'filters' && (
               <DisplayFiltersPanel
