@@ -33,6 +33,14 @@ interface PacketListMinimapProps {
    */
   leadingRows?: number;
   selectedPacket: Packet | null;
+  /**
+   * The marked frame ids (ADR 0067), drawn as ticks in the marked fill over the
+   * colour bands. An overlay, not a colour: the bands are an average over the
+   * rows a pixel covers and are cached in `bandsRef`, so a mark folded into
+   * them would be diluted to nothing at scale and would invalidate the index
+   * on every toggle.
+   */
+  marks?: ReadonlySet<number>;
   colorEngine: ColorRulesEngine;
   /** Colors for the bands, which are packet data. The selection marker
    *  deliberately does NOT use this - see `accent` below. */
@@ -184,6 +192,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   packets,
   leadingRows = 0,
   selectedPacket,
+  marks,
   colorEngine,
   packetTheme,
   themeKey,
@@ -234,6 +243,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   const bandsRef = useRef<{ bands: MinimapBands; engine: unknown; theme: unknown; key: unknown } | null>(null);
 
   const accent = useThemeToken('--primary', '#f97316');
+  const markedFill = useThemeToken('--marked', '#d1d5db');
 
   // Same reasoning as the packet list's column widths: dragging this divider
   // fires on every mousemove, so the write is debounced and flushed on
@@ -409,6 +419,27 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
     // Redrawn after every pass rather than once at the end: the slices below
     // repaint rows, and a row repainted over the marker would erase it.
     const paintMarker = () => {
+      // The marks first, so the selection's line lies over a tick it shares a row with.
+      if (marks !== undefined && marks.size > 0) {
+        ctx.fillStyle = markedFill;
+        // The buffer is id-ordered, so each mark is found by bisection; a mark
+        // on a frame this buffer no longer holds has no row and is skipped.
+        for (const id of marks) {
+          let lo = 0;
+          let hi = paintedPackets.length - 1;
+          let idx = -1;
+          while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            const at = paintedPackets[mid].id;
+            if (at === id) { idx = mid; break; }
+            if (at < id) lo = mid + 1;
+            else hi = mid - 1;
+          }
+          if (idx === -1) continue;
+          const y = ((idx + leadingRows) / total) * size.height;
+          ctx.fillRect(0, Math.max(0, y - 1), size.width, 2);
+        }
+      }
       if (!selectedPacket) return;
       // From the end: the selection is almost always recent, and a forward
       // scan of the whole buffer is the one full pass left in this effect.
@@ -475,7 +506,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
       if (raf !== 0) cancelAnimationFrame(raf);
       setFilling(false);
     };
-  }, [paintedPackets, leadingRows, colorEngine, packetTheme, themeKey, size, selectedPacket, accent]);
+  }, [paintedPackets, leadingRows, colorEngine, packetTheme, themeKey, size, selectedPacket, accent, marks, markedFill]);
 
   const scrollToClientY = useCallback((clientY: number) => {
     const wrapper = wrapperRef.current;

@@ -179,6 +179,23 @@ buffer, no agent, or Start blocked - so the key is advertised only on plain
 Start and on Stop. `Ctrl+/` matches `e.key === '/'` with no Shift, so on a
 layout where `/` needs Shift it does not fire; accepted.
 
+**Marks** (ADR 0067): `App` holds `marks` (a `Set` of frame ids) and `marksRef`.
+`adoptMarks` only sets local state, for Start, Clear View, Reopen, Import and
+Discard; `changeMarks` adopts and then sends `setMarks` with the capture id, so
+a late reply cannot land on the next capture. Clear View keeps the stored file
+unless a capture is running, so Reopen restores the marks. `Ctrl+M` toggles the
+selected frame, `Ctrl+Shift+N` / `Ctrl+Shift+B` go to the next / previous mark
+(`services/markNav.ts`, buffer-held frames in the shown list only), and Unmark
+all has no chord. The row menu carries all four, the last three once anything
+is marked, so none exists only in the palette. The three chords are not in `CHORDS_BEFORE_INPUT_GUARD`, so
+none works from a text field. A row's look is selected, then marked
+(`--marked`), then the rule colour; a marked row skips the inline `--row-bg`
+style, which would beat the class. The minimap overlays 2px ticks in `--marked`.
+The list scrolls a selection made from outside it (Ctrl+G, Next/Prev) into view.
+A filter naming `frame.marked` is re-decided when the set changes
+(`filterIncrementally`'s context, `useCaptureFilter`'s `marksKey`).
+`scripts/session/marks-nav.ts`, `scripts/electron/marks-drive.ts`.
+
 **A tooltip's "(Ctrl+X)" comes from `titleWithKeys(id, title?)`**, never from
 text in a component. `scripts/commands/registry.ts` fails on a `(Ctrl+` spelled
 in any file under `src/components/` outside a comment.

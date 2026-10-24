@@ -34,6 +34,7 @@ import { hasBytes, packetBytes } from '../../services/packetBytes';
 import { fieldValue } from '../../services/dissect/fieldAccess';
 import { minimapStore, packetListStore } from '../../services/interfacePrefs';
 import { formatTimeColumn } from '../../lib/formatTimeColumn';
+import { chordText } from '../../lib/commands';
 import { ColumnOptionsMenu } from './ColumnOptionsMenu';
 import {
   COLUMN_ALIGNS,
@@ -160,9 +161,11 @@ interface PacketListProps {
   onFieldFilter: (expression: string, apply: boolean) => void;
   /** What the filter bar holds now, which the row menu's "…and Selected" joins onto. */
   currentFilter: string;
-  /** Frame ids marked in this capture. Task 5 wires the real set. */
+  /** Frame ids marked in this capture (`App` owns the set, ADR 0067). */
   marks: ReadonlySet<number>;
   onToggleMark: (id: number) => void;
+  /** Next, previous and Unmark all: App's own handler, the one the keys and the palette run. */
+  onMarkCommand: (id: 'mark.next' | 'mark.prev' | 'mark.clearAll') => void;
   /**
    * Frames the buffer has dropped since this capture began, or 0.
    *
@@ -335,6 +338,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   currentFilter,
   marks,
   onToggleMark,
+  onMarkCommand,
   droppedBuffer = 0,
   colorEngine,
   packetTheme,
@@ -977,6 +981,39 @@ export const PacketList: React.FC<PacketListProps> = ({
   };
 
   /**
+   * Brings the selected row into view when something other than this list's own
+   * keys or a click on it moved the selection: Go to packet, a link in the
+   * tree, and Next / Previous marked packet (ADR 0067). Those only set the
+   * selection, and a selection nobody can see reads as a jump that did nothing.
+   *
+   * A move this list made itself leaves the row in view, so this finds nothing
+   * to do for it. A row outside the view is centred, and following the live
+   * tail stops under `reading`, as `moveSelection` stops it for any move that
+   * is not to the newest row. The first selection seen is skipped: a restored
+   * one is where the list opened, not a jump.
+   */
+  const scrolledToIdRef = useRef<number | null>(selectedPacket?.id ?? null);
+  const selectedId = selectedPacket?.id ?? null;
+  useEffect(() => {
+    if (selectedId === null || scrolledToIdRef.current === selectedId) return;
+    scrolledToIdRef.current = selectedId;
+    const el = tableContainerRef.current;
+    const index = rowSource.indexOfId(selectedId);
+    if (!el || index < 0) return;
+    const headerHeight = headerRef.current?.offsetHeight ?? 0;
+    const rowTop = index * rowHeight;
+    const rowBottom = headerHeight + (index + 1) * rowHeight;
+    if (rowTop >= el.scrollTop && rowBottom <= el.scrollTop + el.clientHeight) return;
+    if (followRef.current === 'reading') shouldAutoScrollRef.current = index === totalRows - 1;
+    userScrollArmedRef.current = false;
+    el.scrollTop = Math.max(0, rowTop - (el.clientHeight - rowHeight) / 2);
+    setScrollTop(el.scrollTop);
+    // Only a change of the selection is a jump to follow; the row source moving
+    // under the same selection (a flush, a scan) must not pull the list back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
+  /**
    * The list's keyboard contract.
    *
    * Until this existed the packet list could not be reached from a keyboard at
@@ -1530,6 +1567,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                 }
                 const packet = row.packet;
                 const isSelected = selectedPacket?.id === packet.id;
+                const isMarked = marks.has(packet.id);
                 const style = colorEngine.getPacketStyle(packet, packetTheme);
 
                 return (
@@ -1584,14 +1622,24 @@ export const PacketList: React.FC<PacketListProps> = ({
                         // itself - the single exception to the rule the grid is
                         // built on, and on Day a line lighter than both.
                         ? '[--row-bg:var(--primary)] !bg-primary !text-primary-foreground'
-                        : 'hover:brightness-95 dark:hover:brightness-125'
+                        : isMarked
+                          // Inverted against the ground (ADR 0067): it beats the
+                          // colouring rule, and selection above beats it, so the
+                          // row a person is on never looks merely marked. Same
+                          // `--row-bg` rule as the selected row, and no hover
+                          // brightness: it does nothing to white or near-black.
+                          ? '[--row-bg:var(--marked)] !bg-[var(--marked)] !text-[var(--marked-foreground)]'
+                          : 'hover:brightness-95 dark:hover:brightness-125'
                     }`}
                     // The matched rule's foreground applies to the whole row,
                     // including the Protocol and Length cells - that is how
                     // The reference analyzer's coloring reads at a glance. Individual cells
                     // below inherit rather than setting their own color.
+                    // Not for a marked row either: an inline `--row-bg` would beat
+                    // the class's, and the separators would be stepped from the
+                    // rule's colour instead of from the fill the row wears.
                     style={
-                      !isSelected
+                      !isSelected && !isMarked
                         ? {
                             backgroundColor: style.background,
                             color: style.color,
@@ -1770,8 +1818,26 @@ export const PacketList: React.FC<PacketListProps> = ({
             <ContextMenuContent className="w-60 text-xs">
               <ContextMenuItem onSelect={() => onToggleMark(menuTarget.id)}>
                 {marks.has(menuTarget.id) ? 'Unmark packet' : 'Mark packet'}
-                <ContextMenuShortcut>Ctrl+M</ContextMenuShortcut>
+                <ContextMenuShortcut>{chordText('mark.toggle')}</ContextMenuShortcut>
               </ContextMenuItem>
+              {/* The on-screen home of the other three mark commands, which
+                  must not exist only in the palette. Offered only once
+                  something is marked, which is also their `when`. */}
+              {marks.size > 0 && (
+                <>
+                  <ContextMenuItem onSelect={() => onMarkCommand('mark.next')}>
+                    Next marked packet
+                    <ContextMenuShortcut>{chordText('mark.next')}</ContextMenuShortcut>
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => onMarkCommand('mark.prev')}>
+                    Previous marked packet
+                    <ContextMenuShortcut>{chordText('mark.prev')}</ContextMenuShortcut>
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => onMarkCommand('mark.clearAll')}>
+                    Unmark all packets
+                  </ContextMenuItem>
+                </>
+              )}
 
               <ContextMenuSeparator />
 
@@ -1841,6 +1907,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         packets={sortedPackets}
         leadingRows={addressingCapture ? captureRows.leadingRows : 0}
         selectedPacket={selectedPacket}
+        marks={marks}
         colorEngine={colorEngine}
         packetTheme={packetTheme}
         themeKey={themeKey}

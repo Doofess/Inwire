@@ -18,7 +18,7 @@ import { APP_VIEWS } from '../services/viewPrefs';
  * route to the window, never a second window.
  */
 
-export type CommandGroup = 'View' | 'Capture' | 'Filter' | 'Navigate' | 'Window';
+export type CommandGroup = 'View' | 'Capture' | 'Filter' | 'Navigate' | 'Marks' | 'Window';
 
 /** A key with Ctrl and maybe Shift. `key` is lower-case: `'k'`, `'/'`, `'1'`. */
 export interface KeyChord {
@@ -35,6 +35,10 @@ export interface CommandContext {
   packetCount: number;
   filterApplied: boolean;
   sideBarOpen: boolean;
+  /** A packet is selected, which is what Mark acts on. */
+  hasSelection: boolean;
+  /** How many frames are marked in this capture, held or not. */
+  markCount: number;
 }
 
 export interface CommandSpec {
@@ -81,6 +85,26 @@ export const COMMANDS: readonly CommandSpec[] = [
     when: (c) => c.packetCount > 0,
   },
   {
+    id: 'mark.toggle', title: 'Mark or unmark packet', group: 'Marks',
+    keys: { key: 'm', ctrl: true }, keywords: ['flag', 'bookmark', 'pin'],
+    when: (c) => c.hasSelection,
+  },
+  {
+    id: 'mark.next', title: 'Next marked packet', group: 'Marks',
+    keys: { key: 'n', ctrl: true, shift: true }, keywords: ['flag', 'bookmark', 'jump'],
+    when: (c) => c.markCount > 0,
+  },
+  {
+    id: 'mark.prev', title: 'Previous marked packet', group: 'Marks',
+    keys: { key: 'b', ctrl: true, shift: true }, keywords: ['flag', 'bookmark', 'jump'],
+    when: (c) => c.markCount > 0,
+  },
+  {
+    id: 'mark.clearAll', title: 'Unmark all packets', group: 'Marks',
+    keywords: ['flag', 'bookmark', 'clear', 'remove'],
+    when: (c) => c.markCount > 0,
+  },
+  {
     id: 'filter.focus', title: 'Focus display filter', group: 'Filter',
     keys: { key: '/', ctrl: true }, keywords: ['search', 'expression'],
   },
@@ -123,6 +147,16 @@ export function formatChord(chord: KeyChord): string {
   if (chord.shift) parts.push('Shift');
   parts.push(chord.key.length === 1 ? chord.key.toUpperCase() : chord.key);
   return parts.join('+');
+}
+
+/**
+ * A command's chord as the menus print it (`Ctrl+M`), or '' for one with none.
+ * For a shortcut hint that sits beside a label rather than inside a tooltip,
+ * which is where `titleWithKeys` goes.
+ */
+export function chordText(id: string): string {
+  const keys = BY_ID.get(id)?.keys;
+  return keys ? formatChord(keys) : '';
 }
 
 /**

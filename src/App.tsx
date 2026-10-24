@@ -101,6 +101,8 @@ import { LinkedDetailsTree, LinkedHexViewer } from "./components/packet-details/
 import { PacketDetailPane } from "./components/packet-details/PacketDetailPane";
 import { StreamFollowerPane } from "./components/stream-follower/StreamFollowerPane";
 import { findPacketIndexById, frameJumpRefusal } from "./components/packet-details/packetDetailModel";
+import { toggleMark, type Marks } from "./services/marks";
+import { filterNamesMarked, markTarget, withMarkedRow } from "./services/markNav";
 import { StatisticsPane } from "./components/statistics/StatisticsPane";
 import { SettingsPane } from "./components/common/SettingsPane";
 import { SpeedTestSheet } from "./components/speedtest/SpeedTestSheet";
@@ -193,10 +195,9 @@ const CAPTURE_FILTER_CHECK_DELAY_MS = 400;
 
 const DISPLAY_FILTER_KEY = "inwire.displayFilter";
 const SELECTED_PACKET_KEY = "inwire.selectedPacketId";
-// Placeholders until the marks task lands: the row menu has the item, nothing
-// is ever marked. Module-level so the list's props stay stable.
-const NO_MARKS: ReadonlySet<number> = new Set();
-const noMarkToggle = (_id: number): void => {};
+// The marks of a capture with none: one shared set, so the list's props stay
+// stable until the first mark.
+const EMPTY_MARKS: Marks = new Set<number>();
 // Preferences this build no longer reads are cleared here rather than left to
 // sit in storage looking like live configuration. The list, and the reasoning,
 // live in services/preferences.
@@ -1230,6 +1231,8 @@ export default function App() {
       // wrote them.
       const stored = meta.captureId ? await captureStore.reopen(meta.captureId) : null;
       captureIdRef.current = stored?.captureId ?? null;
+      // The capture's own marks, from its own file. Nothing is sent back.
+      adoptMarks(stored !== null && stored.marks.length > 0 ? new Set(stored.marks) : EMPTY_MARKS);
       if (stored === null || stored.frameCount === 0) {
         setNavNotice('The last capture could not be reopened.');
       }
@@ -1759,8 +1762,47 @@ export default function App() {
   // fetched on selection (docs/decisions/0007). `selectedPacket` stays the
   // buffer's own object everywhere else - the list, the filters, the accent -
   // so nothing downstream has to know a hydrated copy exists.
-  const { packet: selectedPacketDetail, state: selectedDetailState } =
+  const { packet: hydratedPacket, state: selectedDetailState } =
     usePacketDetail(selectedPacket, packets);
+
+  /**
+   * The frames the user marked in the open capture (ADR 0067).
+   *
+   * The renderer holds the live set and the store keeps its copy beside the
+   * capture, so a mark survives Reopen and a filter scan over disk rows can
+   * read it. It belongs to ONE capture: every way a capture changes -
+   * Start, Clear View, Reopen, an import - sets it afresh through `adoptMarks`,
+   * so a mark can never carry into the next capture. Only `changeMarks` writes
+   * to the store; adopting a capture's own set sends nothing back.
+   */
+  const [marks, setMarks] = useState<Marks>(EMPTY_MARKS);
+  const marksRef = useRef<Marks>(EMPTY_MARKS);
+  const adoptMarks = useCallback((next: Marks) => {
+    marksRef.current = next;
+    setMarks(next);
+  }, []);
+  /**
+   * The user's edit to the set. Read through the ref so two edits in one
+   * event (a key repeat) compose instead of both starting from the same render.
+   * The store is told in the same tick, ahead of any scan the new set causes:
+   * its port is ordered, and the scan is requested by an effect after render.
+   * The capture id is sent with it, so a message that outlives a Clear View
+   * or a Reopen is ignored by the store rather than marking the next capture.
+   */
+  const changeMarks = useCallback((next: Marks) => {
+    adoptMarks(next);
+    const captureId = captureIdRef.current;
+    if (captureId !== null) captureStore.setMarks(captureId, [...next]);
+  }, [adoptMarks]);
+
+  // The tree's `frame.marked` row: the dissector writes False for every frame
+  // because a mark is made after the frame was stored, so the panes get the
+  // selected frame with that one row read from the set. The same object when
+  // it is not marked, so nothing downstream is woken for it.
+  const selectedPacketDetail = useMemo(
+    () => withMarkedRow(hydratedPacket, hydratedPacket !== null && marks.has(hydratedPacket.id)),
+    [hydratedPacket, marks],
+  );
 
   /**
    * A refusal to go somewhere, shown briefly and then gone.
@@ -1858,15 +1900,21 @@ export default function App() {
 
   // Display Filter Evaluation. The incremental part - and why it is worth
   // having - lives in services/incrementalFilter.ts.
+  // The set is a dependency only for a filter that names `frame.marked`: marking
+  // a frame under `tcp` changes nothing the list shows, and must not re-run it.
+  const marksInFilter = filterNamesMarked(appliedFilter) ? marks : null;
   const filteredPackets = useMemo(() => {
-    const { result, cache } = filterIncrementally(packets, appliedFilter, filterCacheRef.current, PATCH_LOG);
+    const { result, cache } = filterIncrementally(
+      packets, appliedFilter, filterCacheRef.current, PATCH_LOG,
+      marksInFilter !== null ? { marked: marksInFilter } : undefined,
+    );
     // Writing a ref during render is only safe because this is idempotent: a
     // StrictMode double-invoke re-enters with cache.source === packets, finds
     // the prefix intact with nothing appended, and returns the very same array.
     // Keep that property if either side of this is ever changed.
     filterCacheRef.current = cache;
     return result;
-  }, [packets, appliedFilter]);
+  }, [packets, appliedFilter, marksInFilter]);
 
   /**
    * Where the RAM window sits in the capture, and the filter run over the rest.
@@ -1893,8 +1941,39 @@ export default function App() {
   // in memory - which is up to ~700k frames - is answered completely by
   // `filteredPackets` above, and a scan would be a pass over frames this
   // process is already holding.
-  const captureFilter = useCaptureFilter(appliedFilter, belowWindow > captureFloor);
+  const captureFilter = useCaptureFilter(appliedFilter, belowWindow > captureFloor, marksInFilter);
   const filterUncovered = uncoveredRows(captureFilter.state, belowWindow);
+
+  /**
+   * Ctrl+M, Ctrl+Shift+N / Ctrl+Shift+B and Unmark all - the keys and the
+   * palette run the same code, bound by id.
+   *
+   * Next and Previous walk the marks the LIST could show: held, at or above the
+   * ring's floor, and passing the current filter (`markTarget`). A mark the
+   * ring expired or the filter hides is skipped rather than jumped to, and the
+   * walk wraps as Wireshark's does. The jump is `goToFrame`, the path Ctrl+G
+   * takes, so a frame outside the buffer says why instead of doing nothing.
+   */
+  const handleMarkCommand = (id: 'mark.toggle' | 'mark.next' | 'mark.prev' | 'mark.clearAll'): void => {
+    switch (id) {
+      case 'mark.toggle':
+        if (selectedPacket !== null) changeMarks(toggleMark(marksRef.current, selectedPacket.id));
+        return;
+      case 'mark.clearAll':
+        if (marksRef.current.size > 0) changeMarks(EMPTY_MARKS);
+        return;
+      case 'mark.next':
+      case 'mark.prev': {
+        const target = markTarget(
+          marksRef.current, selectedPacket?.id ?? null, id === 'mark.next' ? 1 : -1,
+          filteredPackets, captureFloorId,
+        );
+        if (target === null) setNavNotice('None of the marked packets is in the list.');
+        else goToFrame(target);
+        return;
+      }
+    }
+  };
 
   /**
    * The two numbers the filter bar states, over the CAPTURE rather than the
@@ -2254,6 +2333,7 @@ export default function App() {
     onToggleSideBar: toggleSideBar,
     onOpenPalette: openPalette,
     onFocusFilter: () => { filterInputRef.current?.focus(); filterInputRef.current?.select(); },
+    onMarkCommand: handleMarkCommand,
     filteredPacketsRef,
     selectedPacketRef,
     isCapturingRef,
@@ -2327,6 +2407,9 @@ export default function App() {
     await cancelExportForChange('a new capture started');
     // The offered capture is about to be pruned; the rail's prompt asked.
     setLastCapture(null);
+    // The new capture starts with no marks. The store's is a new directory and
+    // so is empty; this is the renderer's copy of the one just replaced.
+    adoptMarks(EMPTY_MARKS);
     setBufferAutoPaused(false);
     clearCaptureStats();
     await clearSession();
@@ -2412,6 +2495,13 @@ export default function App() {
     // (docs/decisions/0012-stored-captures-persist.md).
     setSelectedPacket(null);
     resetByteRange();
+    // The marks go with the view, and stay with the capture: Clear View keeps
+    // it on disk to be reopened, and the store's file is what brings them back
+    // (nothing is sent here). A capture that is still running keeps its
+    // directory while the numbering restarts at 1, so there the stored set
+    // must go too, or a new frame 1 would be born marked.
+    adoptMarks(EMPTY_MARKS);
+    if (isCapturingRef.current && captureIdRef.current !== null) captureStore.setMarks(captureIdRef.current, []);
   };
 
   /**
@@ -2460,8 +2550,9 @@ export default function App() {
       captureStore.discard(captureIdRef.current);
       captureIdRef.current = null;
     }
+    adoptMarks(EMPTY_MARKS);
     setCaptureStorage(freshCaptureStorageState());
-  }, []);
+  }, [adoptMarks]);
 
   // The dashboard's callbacks are memoized, and the three below are the ones
   // that matter: they are handed to the analytics widgets, which is the part of
@@ -2575,8 +2666,11 @@ export default function App() {
     packetCount: packets.length,
     filterApplied: appliedFilter.trim() !== '',
     sideBarOpen,
+    hasSelection: selectedPacket !== null,
+    markCount: marks.size,
   }), [isCapturing, selectedInterfaces.length, packets.length, permissions.canCapture,
-    startBlockedReason, lastCapture, captureOwner, agentClientId, appliedFilter, sideBarOpen]);
+    startBlockedReason, lastCapture, captureOwner, agentClientId, appliedFilter, sideBarOpen,
+    selectedPacket, marks]);
 
   const presetExpressions = useMemo(
     () => allPresets(filterPresetLibrary).map((p) => p.filter).filter((f) => f.trim() !== ''),
@@ -2600,6 +2694,10 @@ export default function App() {
       case 'filter.focus': filterInputRef.current?.focus(); filterInputRef.current?.select(); return;
       case 'filter.clear': setFilterText(''); applyFilter(''); return;
       case 'sidebar.toggle': toggleSideBar(); return;
+      case 'mark.toggle':
+      case 'mark.next':
+      case 'mark.prev':
+      case 'mark.clearAll': handleMarkCommand(id); return;
       case 'sidebar.interfaces': openSideBarPanel('interfaces'); return;
       case 'sidebar.schedule': openSideBarPanel('schedule'); return;
       case 'sidebar.transfer': openSideBarPanel('transfer'); return;
@@ -2676,6 +2774,8 @@ export default function App() {
       importCaptureIdRef.current = newCaptureId();
       // The offered capture is pruned when this one is stored, as Start's is.
       setLastCapture(null);
+      // An import is a new capture with no marks of its own.
+      adoptMarks(EMPTY_MARKS);
       // The Worker's budget, so an import keeps what a live capture would.
       importDerivedRef.current = new DerivedStore(derivedBudgetRef.current);
       captureStore.begin(importCaptureIdRef.current);
@@ -3137,6 +3237,8 @@ export default function App() {
                 // and the scope control inside it is the one place that
                 // narrows it.
                 packets={packets}
+                // Export's "marked packets only" reads the same set.
+                marks={marks}
                 appliedFilter={appliedFilter}
                 permissions={permissions}
                 captureStats={captureStats}
@@ -3406,9 +3508,9 @@ export default function App() {
                   onFollowStream={handleFollowStream}
                   onFieldFilter={handleFieldFilter}
                   currentFilter={filterText}
-                  // Task 5 wires marks
-                  marks={NO_MARKS}
-                  onToggleMark={noMarkToggle}
+                  marks={marks}
+                  onToggleMark={(id) => changeMarks(toggleMark(marksRef.current, id))}
+                  onMarkCommand={handleMarkCommand}
                   // So a filter that finds nothing can say whether it searched
                   // the capture or only what is left of it.
                   droppedBuffer={droppedBuffer}

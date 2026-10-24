@@ -70,6 +70,15 @@
   --popover-foreground: #1b1f24;
   --primary: #0b6bcb;
   --primary-foreground: #ffffff;
+  /* A marked packet row (ADR 0067) is drawn inverted: a dark fill with light
+     text here, a light fill with dark text in the three dark themes, so a mark
+     is the opposite of the ground whatever a colouring rule would have painted.
+     It is the one row fill that is not a rule's and not the accent's; selection
+     still beats it. `themePalettes.ts` repeats the pair for canvas, and
+     `scripts/themes/registry.ts` asks for its contrast and its distance from
+     the selected row's fill. */
+  --marked: #2a2f37;
+  --marked-foreground: #f4f6f8;
   /* The speed test's two directions (ADR 0054): download in the accent, upload
      in purple, as every speed test draws them. Download repeats `--primary`'s
      hex rather than `var()`-ing it so the registry can measure it, and is held
@@ -810,6 +819,8 @@ html {
   --speed-download: #38bdf8;
   --speed-upload: #c084fc;
   --primary-foreground: #000000;
+  --marked: #dcdfe4;
+  --marked-foreground: #101112;
   --secondary: #1d1e1f;
   --secondary-foreground: #e4e4e4;
   --muted: #1d1e1f;
@@ -865,6 +876,8 @@ html {
   --speed-download: #4a9ee8;
   --speed-upload: #c084fc;
   --primary-foreground: #000000;
+  --marked: #cfd6df;
+  --marked-foreground: #1c2026;
   --secondary: #272d35;
   --secondary-foreground: #d1d7e0;
   --muted: #272d35;
@@ -917,6 +930,8 @@ html {
   --speed-download: #4db2ff;
   --speed-upload: #d8b4fe;
   --primary-foreground: #000000;
+  --marked: #ffffff;
+  --marked-foreground: #000000;
   --secondary: #111111;
   --secondary-foreground: #ffffff;
   --muted: #111111;

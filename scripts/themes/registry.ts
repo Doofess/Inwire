@@ -169,7 +169,10 @@ const REQUIRED_TOKENS = tokensIn(':root');
 //
 // `--selection` and `--handle-hover` made it 35 (ADR 0056): both are a share
 // that differs per theme, so both are declared in every block.
-check('the :root baseline declares 35 tokens', REQUIRED_TOKENS.length, 35);
+//
+// `--marked` and `--marked-foreground` made it 37 (ADR 0067): a marked row's
+// inverted fill and ink, which no theme can inherit from another.
+check('the :root baseline declares 37 tokens', REQUIRED_TOKENS.length, 37);
 
 for (const t of THEME_OPTIONS) {
   if (!t.mode) continue;
@@ -548,6 +551,38 @@ for (const theme of realThemes) {
   checkTrue('...with no ring and no bold', branch !== '' && !/ring-1|font-bold/.test(branch));
 }
 
+// A marked row is inverted against the ground and overrides the colouring rule
+// (ADR 0067), so its ink is held to the theme's floor like the selected row's,
+// and the two fills must not be mistaken for one another: a marked row that
+// looked selected would hide which of the two the person had done.
+const MIN_MARKED_DELTA_E = 5;
+{
+  const list = fs.readFileSync('src/components/packet-list/PacketList.tsx', 'utf8');
+  const branch = /isMarked\s*(?:\/\/[^\n]*\n\s*)*\?\s*'([^']*)'/.exec(list)?.[1] ?? '';
+  checkTrue('a marked packet row is the --marked fill with --marked-foreground ink, over the rule colour',
+    /!bg-\[var\(--marked\)\]/.test(branch) && /!text-\[var\(--marked-foreground\)\]/.test(branch)
+      && /--row-bg:var\(--marked\)/.test(branch));
+  const row = list.slice(list.indexOf('className={`group cursor-pointer'));
+  checkTrue('...and selection is tested before it, so a selected marked row stays the accent fill',
+    row.indexOf('isSelected') !== -1 && row.indexOf('isSelected') < row.indexOf('isMarked'));
+}
+for (const theme of realThemes) {
+  const floor = theme === 'contrast' ? 7 : 4.5;
+  const fill = hexIn(theme, '--marked');
+  const ink = hexIn(theme, '--marked-foreground');
+  const ratio = contrastRatio(ink, fill);
+  checkTrue(`${theme}: --marked-foreground on --marked is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
+  const palette = PALETTE_BY_THEME[theme].marked;
+  check(`${theme}: the palette's marked pair matches its theme block`,
+    [palette.background.toLowerCase(), palette.foreground.toLowerCase()], [fill.toLowerCase(), ink.toLowerCase()]);
+  // Inverted: light on dark in Day, dark on light in the three dark themes.
+  const ground = hexIn(theme, '--background');
+  checkTrue(`${theme}: the marked fill is the opposite of the ground`,
+    (contrastRatio(fill, ground) >= 3));
+  const tint = deltaE76(fill, selectionHex(theme, hexIn(theme, '--primary')));
+  checkTrue(`${theme}: the marked fill is not the selection tint (${tint.toFixed(1)} deltaE)`, tint >= MIN_MARKED_DELTA_E);
+}
+
 for (const fg of ['--foreground', '--muted-foreground', '--primary']) {
   for (const bg of ['--background', '--card', '--secondary']) {
     const ratio = contrastRatio(hexIn('contrast', fg), hexIn('contrast', bg));
@@ -585,6 +620,11 @@ for (const theme of realThemes) {
     }
     const sel = contrastRatio(primary, selectionHex(theme, primary));
     checkTrue(`${at}: the selection tint's text is ${floor}:1 (${sel.toFixed(2)})`, sel >= floor);
+    // The selected row is the solid accent, so that is the fill a marked row
+    // must not be mistaken for, whichever accent the person chose.
+    const fromMarked = deltaE76(primary, hexIn(theme, '--marked'));
+    checkTrue(`${at}: the selected row's fill is not the marked fill (${fromMarked.toFixed(1)} deltaE)`,
+      fromMarked >= MIN_MARKED_DELTA_E);
 
     const railFill = mixHex(primary, chrome, activeAlpha);
     const glyph = contrastRatio(hexIn(theme, '--foreground'), railFill);

@@ -2,6 +2,9 @@ import { Packet } from '../types/packet';
 import { FilterEngine } from './filterEngine';
 import { prefixShift } from './packetPrefix';
 import type { PatchSource } from './patchLog';
+import type { FilterContext } from './filter/compile';
+import type { Marks } from './marks';
+import { filterNamesMarked } from './markNav';
 
 /**
  * Applying a display filter to a growing packet buffer without re-deciding
@@ -27,6 +30,13 @@ export interface FilterCache {
   result: Packet[];
   /** Where the patch log stood when this was built (`patchLog.ts`). */
   patchPosition?: number;
+  /**
+   * The marks this result was decided against, kept only for a filter that
+   * names `frame.marked` (ADR 0067). A packet's verdict then depends on the
+   * set, which changes without the packet changing, so a different set is a
+   * different answer and the cache is not reused.
+   */
+  marks?: Marks;
 }
 
 /**
@@ -105,7 +115,7 @@ function indexById(list: readonly Packet[], id: number): number {
  */
 function refreshPatched(
   result: Packet[], fresh: boolean, packets: Packet[], decidedBelowId: number,
-  filter: string, patches: PatchSource, position: number,
+  filter: string, patches: PatchSource, position: number, context?: FilterContext,
 ): Packet[] | null {
   const ids = patches.since(position);
   if (ids === null) return null;
@@ -124,7 +134,7 @@ function refreshPatched(
     const packet = packets[at];
     const inResult = indexById(out, id);
     if (inResult >= 0 && out[inResult] === packet) continue;
-    matcher ??= FilterEngine.compileFilter(filter);
+    matcher ??= FilterEngine.compileFilter(filter, context);
     const matches = matcher(packet);
     if (inResult >= 0 && matches) {
       if (!owned) { out = out.slice(); owned = true; }
@@ -165,11 +175,20 @@ export function filterIncrementally(
   filter: string,
   cache: FilterCache | null,
   patches?: PatchSource,
+  context?: FilterContext,
 ): { result: Packet[]; cache: FilterCache | null } {
   const trimmed = filter.trim();
   // An empty filter is the identity, and must hand back the very same array so
   // that consumers memoizing on its reference are not woken for nothing.
   if (!trimmed) return { result: packets, cache: null };
+
+  // A filter that reads the marks is only as current as the set it was decided
+  // against. Unmarking a frame changes no packet, so nothing below would
+  // notice: this is the one place that does, and it costs one full pass, once,
+  // per change of the set. A filter that does not name them never pays it.
+  const marked = context?.marked;
+  const usesMarks = filterNamesMarked(trimmed);
+  if (usesMarks && cache !== null && cache.marks !== marked) cache = null;
 
   // A cache built without the log, or with it while this call has none,
   // cannot know which of its packets were replaced since: start again.
@@ -180,14 +199,18 @@ export function filterIncrementally(
   const position = patches?.position();
   const built = (result: Packet[]): { result: Packet[]; cache: FilterCache } => ({
     result,
-    cache: { filter: trimmed, source: packets, result, ...(position !== undefined ? { patchPosition: position } : {}) },
+    cache: {
+      filter: trimmed, source: packets, result,
+      ...(position !== undefined ? { patchPosition: position } : {}),
+      ...(usesMarks && marked !== undefined ? { marks: marked } : {}),
+    },
   });
   /** Frames below this id were decided before this call; the rest just now. */
   const decidedBelow = (decided: number) =>
     decided < packets.length ? packets[decided].id : packets[packets.length - 1].id + 1;
   const refreshed = (result: Packet[], fresh: boolean, decided: number): Packet[] | null =>
     !logged ? result
-      : refreshPatched(result, fresh, packets, decidedBelow(decided), trimmed, patches!, cache!.patchPosition!);
+      : refreshPatched(result, fresh, packets, decidedBelow(decided), trimmed, patches!, cache!.patchPosition!, context);
 
   // A trim. Everything from `shift` on was already decided and is still in
   // order, so the answer is the old result minus what fell off the front, plus
@@ -202,7 +225,7 @@ export function filterIncrementally(
       const decided = cache.source.length - shift;
       const grown = packets.length === decided
         ? kept
-        : kept.concat(FilterEngine.filterPackets(packets.slice(decided), trimmed));
+        : kept.concat(FilterEngine.filterPackets(packets.slice(decided), trimmed, context));
       const result = refreshed(grown, grown !== cache.result, decided);
       if (result !== null) return built(result);
     }
@@ -226,11 +249,11 @@ export function filterIncrementally(
     const grown =
       packets.length === cache.source.length
         ? cache.result
-        : cache.result.concat(FilterEngine.filterPackets(packets.slice(cache.source.length), trimmed));
+        : cache.result.concat(FilterEngine.filterPackets(packets.slice(cache.source.length), trimmed, context));
     result = refreshed(grown, grown !== cache.result, cache.source.length)
-      ?? FilterEngine.filterPackets(packets, trimmed);
+      ?? FilterEngine.filterPackets(packets, trimmed, context);
   } else {
-    result = FilterEngine.filterPackets(packets, trimmed);
+    result = FilterEngine.filterPackets(packets, trimmed, context);
   }
 
   return built(result);

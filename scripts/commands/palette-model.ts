@@ -21,7 +21,7 @@ function check(name: string, actual: unknown, expected: unknown): void {
 }
 function checkTrue(name: string, ok: boolean): void { check(name, ok, true); }
 
-const capturing: CommandContext = { capturing: true, canStartCapture: false, packetCount: 40, filterApplied: false, sideBarOpen: false };
+const capturing: CommandContext = { capturing: true, canStartCapture: false, packetCount: 40, filterApplied: false, sideBarOpen: false, hasSelection: false, markCount: 0 };
 const empty = { recent: [], presets: [] };
 
 const ids = (rows: PaletteRow[]): string[] => rows.map((r) => (r.kind === 'command' ? r.id : r.kind));

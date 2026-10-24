@@ -76,8 +76,13 @@ const OFF: CaptureFilterState = { status: 'off' };
  *                  already hold - the in-memory filter is then the whole
  *                  answer and a scan would be a pass over frames the caller
  *                  has in hand.
+ * @param marksKey  The marks the filter reads, or null when it names none
+ *                  (ADR 0067). The store answers `frame.marked` from the set it
+ *                  was last sent, so a new set is a new question and the scan
+ *                  runs again - after `setMarks`, which the caller sent first on
+ *                  the same port, so the store has the new set when it scans.
  */
-export function useCaptureFilter(filter: string, enabled: boolean): CaptureFilterScan {
+export function useCaptureFilter(filter: string, enabled: boolean, marksKey: unknown = null): CaptureFilterScan {
   const [state, setState] = useState<CaptureFilterState>(OFF);
   const [generation, setGeneration] = useState(0);
 
@@ -123,7 +128,7 @@ export function useCaptureFilter(filter: string, enabled: boolean): CaptureFilte
       live = false;
       handle.cancel();
     };
-  }, [filter, enabled, generation]);
+  }, [filter, enabled, generation, marksKey]);
 
   return { state, rescan };
 }
