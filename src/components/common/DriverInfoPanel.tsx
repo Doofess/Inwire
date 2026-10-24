@@ -261,7 +261,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             {droppedBuffer > 0 && (
               <>
                 <dt className="text-muted-foreground">Trimmed from the buffer</dt>
-                <dd className="font-mono">
+                <dd className="">
                   {droppedBuffer.toLocaleString()}
                   <span className="text-muted-foreground"> (still on disk)</span>
                 </dd>
@@ -270,7 +270,7 @@ export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
             {linkChanges.length > 0 && (
               <>
                 <dt className="text-muted-foreground">Network changed</dt>
-                <dd className="font-mono text-amber-600 dark:text-amber-400">
+                <dd className="text-amber-600 dark:text-amber-400">
                   {linkChanges.length}&times;
                   <span className="text-muted-foreground">
                     {' '}(last: {describeLink(linkChanges[linkChanges.length - 1].before) || 'unknown'}

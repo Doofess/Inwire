@@ -223,7 +223,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   if (!hasBytes(packet)) {
     const gone = bytesState === 'unavailable';
     return (
-      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
+      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground text-xs">
         <div className="flex flex-col items-center gap-1.5 max-w-xs">
           {gone
             ? <DatabaseX className="w-6 h-6 text-muted-foreground/70 mb-1" />

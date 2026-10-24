@@ -82,7 +82,7 @@ export const PacketCountsReadout: React.FC = () => {
     // on screen to satisfy a test. `scripts/session/packet-counts.ts` asserts
     // that this attribute is here AND that every driver queries it, so the two
     // cannot drift apart again in silence.
-    <div className="min-w-0 flex items-center gap-2 font-mono">
+    <div className="min-w-0 flex items-center gap-2">
       {/* 11px, matching the title this replaced - the row is 32px and these
           numbers are read at a glance rather than studied. The card version was
           20px because a card is a place you look ON PURPOSE; this one has to

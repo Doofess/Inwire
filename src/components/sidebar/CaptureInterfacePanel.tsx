@@ -305,7 +305,7 @@ export const CaptureInterfacePanel: React.FC<CaptureInterfacePanelProps> = ({
                   {shortInterfaceLabel(iface.label)}
                 </span>
                 {latest !== null && (
-                  <span className="shrink-0 text-[10px] font-mono tabular-nums
+                  <span className="shrink-0 text-[10px] tabular-nums
                     text-muted-foreground group-data-[state=checked]:text-primary">
                     {latest.toLocaleString()} p/s
                   </span>

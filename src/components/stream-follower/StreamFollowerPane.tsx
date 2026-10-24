@@ -525,15 +525,17 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
                   Follow {target.kind.toUpperCase()} Stream
                   {target.streamId !== undefined ? ` #${target.streamId}` : ''}
                 </span>
-                <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80 font-mono">
+                <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80">
                   {loading !== null
                     ? `reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()}`
                     : `${frames.length.toLocaleString()} ${frames.length === 1 ? 'frame' : 'frames'}`}
                 </span>
               </div>
-              <p className="text-xs text-muted-foreground font-mono">
-                {client.address} <span className="text-muted-foreground">⇄</span> {server.address}
-                :{portLabel(server.port, target.kind, true)}
+              <p className="text-xs text-muted-foreground">
+                <span className="font-mono">
+                  {client.address} <span className="text-muted-foreground">⇄</span> {server.address}
+                  :{portLabel(server.port, target.kind, true)}
+                </span>
               </p>
             </div>
           </div>
@@ -762,7 +764,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             Frame Detail - and it still lands on the frame the stream was opened
             from, because `App` restores that on the way. */}
         <div className="px-4 py-2.5 border-t border-border flex items-center text-xs">
-          <span className="text-muted-foreground font-mono">
+          <span className="text-muted-foreground">
             {frames.length.toLocaleString()} {frames.length === 1 ? 'packet' : 'packets'} · {(totals.toServer + totals.toClient).toLocaleString()} {totals.toServer + totals.toClient === 1 ? 'byte' : 'bytes'} exchanged
           </span>
         </div>

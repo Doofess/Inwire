@@ -21,6 +21,7 @@ import {
 import { portLabel } from '../../services/portServices';
 import { copyText } from '../ui/CopyButton';
 import { StatTable, bitrate, bytes, count, seconds, type StatColumn } from './StatTable';
+import { MICRO_LABEL } from '../common/typography';
 import { GraphsTab } from './GraphsTab';
 import {
   ContextMenu, ContextMenuTrigger, ContextMenuContent,
@@ -292,7 +293,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     }`;
 
   const kindClass = (id: ConversationKind) =>
-    `px-2 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer ${
+    `px-2 py-0.5 rounded text-[11px] transition-colors cursor-pointer ${
       kind === id ? 'bg-accent text-primary font-bold' : 'text-muted-foreground hover:text-foreground'
     }`;
 
@@ -326,10 +327,10 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
               {/* The TCP level answers from the digest, so the buffer's
                   limits are not its limits: it says its own scope instead. */}
               {scopeNote !== null && (
-                <p className="mt-0.5 text-[11px] text-muted-foreground font-mono">{scopeNote}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">{scopeNote}</p>
               )}
               {scopeNote === null && droppedBuffer > 0 && packets.length > 0 && (
-                <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400 font-mono">
+                <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">
                   Frames {packets[0].id.toLocaleString()}–
                   {packets[packets.length - 1].id.toLocaleString()} only:{' '}
                   {count(droppedBuffer)} earlier frames have left the buffer and are
@@ -502,7 +503,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
               {/* Only the categories this capture actually raised. A strip of
                   eight zeroes says less than a strip of the three things that
                   happened. */}
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-[11px] font-mono">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-[11px]">
                 {CATEGORY_ORDER.filter((c) => expertCounts[c] > 0).map((c) => (
                   <span key={c} className="flex items-center gap-1.5" title={CATEGORY_HINTS[c]}>
                     <span className={`font-semibold ${CATEGORY_TEXT[c]}`}>{CATEGORY_LABELS[c]}</span>
@@ -598,7 +599,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
                 </div>
               </ContextMenuTrigger>
               {menuRow && (
-                <ContextMenuContent className="w-60 font-mono text-xs">
+                <ContextMenuContent className="w-60 text-xs">
                   <ContextMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground truncate">
                     {menuRow.title}
                   </ContextMenuLabel>
@@ -740,7 +741,7 @@ const HierarchyTable: React.FC<{
     <div className="overflow-x-auto">
       <table className="w-full text-left border-collapse font-mono text-[11px]">
         <thead className="sticky top-0 z-10 bg-card">
-          <tr className="border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground">
+          <tr className={`border-b border-border ${MICRO_LABEL}`}>
             <th className="px-2 py-1.5 font-bold">Protocol</th>
             <th className="px-2 py-1.5 font-bold text-right">Packets</th>
             <th className="px-2 py-1.5 font-bold text-right">% of capture</th>

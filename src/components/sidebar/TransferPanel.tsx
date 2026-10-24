@@ -596,7 +596,7 @@ const JobStatus: React.FC<{ job: ExportJobState }> = ({ job }) => {
             </button>
           </div>
           {known && (
-            <div className="text-[10px] leading-tight font-mono text-muted-foreground">
+            <div className="text-[10px] leading-tight text-muted-foreground">
               {COUNT.format(job.done)} / {COUNT.format(job.total)} frames
             </div>
           )}

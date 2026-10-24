@@ -196,7 +196,7 @@ function LiveDial({ state, live }: { state: SpeedState; live: 'download' | 'uplo
         readout={live ? null : { value: ping === null ? '–' : fmtMsValue(ping), unit: 'ms' }}
       />
       {/* A fixed-height line, so the boxes below do not jump when it fills. */}
-      <p className="flex h-4 items-center gap-4 font-mono text-xs tabular-nums text-muted-foreground">
+      <p className="flex h-4 items-center gap-4 text-xs tabular-nums text-muted-foreground">
         {state.downloadMbps !== null && <span><span className="text-speed-download">↓</span> {formatMbps(state.downloadMbps)} Mb/s</span>}
         {state.uploadMbps !== null && <span><span className="text-speed-upload">↑</span> {formatMbps(state.uploadMbps)} Mb/s</span>}
       </p>
@@ -297,7 +297,7 @@ function Failed({ error }: { error: NonNullable<SpeedState['error']> }) {
       <p className="text-[13px] font-semibold text-foreground">{title}</p>
       <p className="max-w-[26rem] text-xs leading-relaxed text-muted-foreground">{body}</p>
       {!error.rateLimited && http === null && (
-        <p className="font-mono text-[11px] text-muted-foreground/80">{error.message}</p>
+        <p className="text-[11px] text-muted-foreground/80">{error.message}</p>
       )}
       <EmptyStateButton icon={RotateCcw} primary onClick={startSpeedTest}>Try again</EmptyStateButton>
     </div>

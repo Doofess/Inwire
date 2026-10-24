@@ -193,7 +193,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
             move it between groups.
           </p>
         </div>
-        <span className="text-[10px] text-muted-foreground font-mono shrink-0 pt-0.5">
+        <span className="text-[10px] text-muted-foreground shrink-0 pt-0.5">
           {presetCount} filter{presetCount === 1 ? '' : 's'} / {library.groups.length} group
           {library.groups.length === 1 ? '' : 's'}
         </span>
@@ -264,7 +264,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                   </span>
                 )}
 
-                <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                <span className="text-[10px] text-muted-foreground shrink-0">
                   {group.presets.length}
                 </span>
 

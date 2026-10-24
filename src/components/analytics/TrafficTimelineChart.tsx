@@ -620,12 +620,12 @@ export const TrafficTimelineChart: React.FC<TrafficTimelineProps> = ({
 
         {hoveredBucket && (
           <div className="absolute top-1 left-1 text-xs px-2 py-1 rounded border pointer-events-none shadow-xl bg-popover border-border text-popover-foreground">
-            <div className="font-mono text-[10px] text-primary font-bold">T = {hoveredBucket.timeLabel}</div>
-            <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
+            <div className="text-[10px] text-primary font-bold">T = {hoveredBucket.timeLabel}</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">
               <span>{hoveredBucket.packetCount} pkts</span> - <span>{hoveredBucket.kbps.toFixed(1)} Kbps</span>
             </div>
             {overlayMatcher && (
-              <div className="text-[10px] font-mono mt-0.5 text-danger-muted">
+              <div className="text-[10px] mt-0.5 text-danger-muted">
                 {hoveredBucket.matchCount} matching
                 {hoveredBucket.packetCount > 0 && (
                   <span className="text-muted-foreground">

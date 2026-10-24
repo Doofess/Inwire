@@ -178,7 +178,7 @@ const WhenRow: React.FC<{
       aria-label={`${label} date, ${describeDay(value, now)}${picking ? ', set on the calendar below' : ''}`}
       title={picking ? 'The calendar below sets this date' : 'Set this date on the calendar below'}
       onClick={onPick}
-      className={`flex-1 min-w-0 h-6 flex items-center gap-1.5 rounded-sm px-1.5 font-mono text-xs cursor-pointer
+      className={`flex-1 min-w-0 h-6 flex items-center gap-1.5 rounded-sm px-1.5 text-xs cursor-pointer
         border transition-colors ${picking
           ? 'border-transparent bg-primary/15 text-foreground'
           : 'border-border hover:border-primary'}`}

@@ -61,7 +61,7 @@ export function PlaceholderRow({ row, columnCount, rowIndex, height }: Placehold
             <span className="h-[3px] flex-1 rounded-full bg-current animate-pulse" />
           </div>
         ) : (
-          <div className="px-2 font-mono text-[11px] text-amber-600 dark:text-amber-400 truncate">
+          <div className="px-2 text-[11px] text-amber-600 dark:text-amber-400 truncate">
             Frame {(row.ordinal + 1).toLocaleString()} is not readable from the capture store.
           </div>
         )}

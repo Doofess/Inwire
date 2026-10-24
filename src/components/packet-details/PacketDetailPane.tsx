@@ -557,7 +557,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
       >
         <span className="font-bold text-foreground text-xs">
           Raw bytes
-          <span className="ml-2 font-normal text-muted-foreground text-[11px] font-mono">
+          <span className="ml-2 font-normal text-muted-foreground text-[11px]">
             {hasBytes(packet)
               ? `${packet.rawBytes.length.toLocaleString()} captured`
               : detailState === 'unavailable' ? 'not stored' : 'reading…'}
@@ -691,7 +691,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
               <>
                 <button
                   onClick={() => setNarrowFactsOpen(open => !open)}
-                  className="shrink-0 flex items-center gap-2 px-5 py-1.5 border-b border-border bg-secondary/30 text-[10px] font-mono text-muted-foreground hover:bg-accent/40 cursor-pointer"
+                  className="shrink-0 flex items-center gap-2 px-5 py-1.5 border-b border-border bg-secondary/30 text-[10px] text-muted-foreground hover:bg-accent/40 cursor-pointer"
                   aria-expanded={narrowFactsOpen}
                 >
                   <ChevronRight

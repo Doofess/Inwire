@@ -266,7 +266,7 @@ export const AppearanceSettingsPanel: React.FC = () => {
               return (
                 <span
                   key={id}
-                  className="rounded px-2 py-1 text-[10px] font-mono"
+                  className="rounded px-2 py-1 text-[10px]"
                   style={{ background: colors.background, color: colors.color }}
                 >
                   {label}

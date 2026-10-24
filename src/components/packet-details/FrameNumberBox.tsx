@@ -72,12 +72,12 @@ export const FrameNumberBox: React.FC<FrameNumberBoxProps> = ({ packets, onShowF
       </div>
 
       {lookup.kind === 'invalid' && (
-        <p className="mt-1.5 text-[10px] font-mono leading-snug text-amber-600 dark:text-amber-400">
+        <p className="mt-1.5 text-[10px] leading-snug text-amber-600 dark:text-amber-400">
           "{lookup.text}" is not a frame number.
         </p>
       )}
       {lookup.kind === 'outOfRange' && (
-        <p className="mt-1.5 text-[10px] font-mono leading-snug text-amber-600 dark:text-amber-400">
+        <p className="mt-1.5 text-[10px] leading-snug text-amber-600 dark:text-amber-400">
           {lookup.first !== null && lookup.last !== null
             ? `Buffer holds ${lookup.first.toLocaleString()}–${lookup.last.toLocaleString()}.`
             : 'The buffer is empty.'}

@@ -74,7 +74,7 @@ export function EmptyStateButton({
 export function Kbd({ children }: { children: React.ReactNode }) {
   return (
     <kbd className="mx-0.5 inline-block min-w-[1.25rem] rounded border border-border bg-secondary px-1 py-px
-      text-center font-mono text-[10px] leading-4 text-foreground">
+      text-center text-[10px] leading-4 text-foreground">
       {children}
     </kbd>
   );

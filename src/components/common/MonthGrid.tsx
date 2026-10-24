@@ -165,7 +165,7 @@ export const MonthGrid: React.FC<MonthGridProps> = ({ start, stop, target, onPic
         ref={gridRef}
         role="grid"
         aria-label={label}
-        className="grid grid-cols-7 gap-y-0.5 font-mono"
+        className="grid grid-cols-7 gap-y-0.5"
         onKeyDown={onKeyDown}
       >
         {monthGrid(view.year, view.month).map((day) => {

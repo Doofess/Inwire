@@ -2046,7 +2046,7 @@ export const GeoMap: React.FC<GeoMapProps> = ({
             <h4 className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
               Locations
             </h4>
-            <span className="text-[10px] font-mono text-muted-foreground">
+            <span className="text-[10px] text-muted-foreground">
               {geoStats.places.length}
               {geoStats.unresolved > 0 ? ` (+${geoStats.unresolved} unresolved)` : ''}
             </span>

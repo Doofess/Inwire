@@ -193,16 +193,16 @@ export const DecryptionSettingsPanel: React.FC = () => {
 
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
         <dt className="text-muted-foreground">Connections covered</dt>
-        <dd className="font-mono flex items-center gap-1.5">
+        <dd className="flex items-center gap-1.5">
           <Key className="w-3.5 h-3.5 text-muted-foreground" />
           {stats.connections.toLocaleString()}
         </dd>
         <dt className="text-muted-foreground">Secrets</dt>
-        <dd className="font-mono" data-keylog-secrets={stats.secrets}>{stats.secrets.toLocaleString()}</dd>
+        <dd className="" data-keylog-secrets={stats.secrets}>{stats.secrets.toLocaleString()}</dd>
         {stats.ignored > 0 && (
           <>
             <dt className="text-muted-foreground">Lines ignored</dt>
-            <dd className="font-mono">{stats.ignored.toLocaleString()}</dd>
+            <dd className="">{stats.ignored.toLocaleString()}</dd>
           </>
         )}
       </dl>

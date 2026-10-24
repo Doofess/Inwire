@@ -327,7 +327,7 @@ export const ProtocolTreeView: React.FC<ProtocolTreeViewProps> = ({
     <ContextMenu>
       <ContextMenuTrigger asChild>{tree}</ContextMenuTrigger>
       {menuTarget && (
-        <ContextMenuContent className="w-56 font-mono text-xs">
+        <ContextMenuContent className="w-56 text-xs">
           {/* The row's filter name, not its display label: that is the thing
               every item below acts on, and it is the one piece of the row that
               is not already on screen. */}

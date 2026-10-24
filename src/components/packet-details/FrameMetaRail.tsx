@@ -234,7 +234,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
                 {summary.analysisFlags.map(flag => (
                   <span
                     key={flag}
-                    className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30"
+                    className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30"
                   >
                     {flag}
                   </span>
@@ -247,7 +247,7 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
                 for a row the filter is hiding. */}
             {hiddenByFilter && (
               <div
-                className="flex items-start gap-1.5 text-[10px] font-mono leading-snug text-muted-foreground"
+                className="flex items-start gap-1.5 text-[10px] leading-snug text-muted-foreground"
                 title="This frame does not match the active display filter, so it is not in the list behind this window."
               >
                 <EyeOff className="w-3 h-3 shrink-0 mt-0.5" />

@@ -89,10 +89,10 @@ check('no class string sets uppercase in the mono face', hits.length === 0,
 // --- The two levels ----------------------------------------------------------
 
 const typography = readFileSync('src/components/common/typography.ts', 'utf8');
-check("TITLE is 'text-xs font-semibold text-foreground'",
-  typography.includes("export const TITLE = 'text-xs font-semibold text-foreground';"));
-check("MICRO_LABEL is 'text-[10px] font-bold uppercase tracking-widest text-muted-foreground'",
-  typography.includes("export const MICRO_LABEL = 'text-[10px] font-bold uppercase tracking-widest text-muted-foreground';"));
+check("TITLE is 'font-sans text-xs font-semibold text-foreground'",
+  typography.includes("export const TITLE = 'font-sans text-xs font-semibold text-foreground';"));
+check("MICRO_LABEL is 'font-sans text-[10px] font-bold uppercase tracking-widest text-muted-foreground'",
+  typography.includes("export const MICRO_LABEL = 'font-sans text-[10px] font-bold uppercase tracking-widest text-muted-foreground';"));
 
 const paneHeader = readFileSync('src/components/common/PaneHeader.tsx', 'utf8');
 check('PaneHeader uses TITLE and no font-mono',
@@ -112,8 +112,40 @@ for (const path of walk('src')) {
 }
 check('PaneHeader titles are sentence case', titleCase.length === 0, titleCase.join('\n        '));
 
+// A header row inherits its table's face, so the per-string check above cannot
+// see an uppercase header under a mono table. The first row after each one
+// must name the sans face itself.
+const inheritedMono: string[] = [];
+for (const path of walk('src')) {
+  const source = readFileSync(path, 'utf8');
+  for (const table of source.matchAll(/<table className="([^"]*)"/g)) {
+    if (!has(table[1], 'font-mono')) continue;
+    const row = /<tr\b[\s\S]*?\bclassName=(?:"([^"]*)"|\{`([^`]*)`\})/.exec(source.slice(table.index!))?.slice(1).join('') ?? '';
+    if (!has(row, 'font-sans') && !row.includes('${MICRO_LABEL}')) {
+      inheritedMono.push(`${path.replace(/\\/g, '/')}:${source.slice(0, table.index).split('\n').length}`);
+    }
+  }
+}
+check('a mono table\'s header row is set in the sans face', inheritedMono.length === 0, inheritedMono.join('\n        '));
+
 const settingsLayout = readFileSync('src/components/common/settingsLayout.tsx', 'utf8');
 check('SECTION_CLASS is MICRO_LABEL', /export const SECTION_CLASS = MICRO_LABEL;/.test(settingsLayout));
+
+// --- Chrome is sans: the wrappers that held counts and labels ----------------
+
+// The outermost element's class list: the first `className="..."` after the
+// opening of the component's returned JSX.
+const wrapperClasses = (source: string, anchor: RegExp): string => {
+  const at = source.search(anchor);
+  const match = /className="([^"]*)"/.exec(source.slice(at));
+  return at === -1 || !match ? 'font-mono' : match[1];
+};
+const statusBar = readFileSync('src/components/status/StatusBar.tsx', 'utf8');
+const countsReadout = readFileSync('src/components/common/PacketCountsReadout.tsx', 'utf8');
+check('the status bar and PacketCountsReadout set no font-mono on their wrappers',
+  !has(wrapperClasses(statusBar, /<footer/), 'font-mono')
+    && !has(wrapperClasses(countsReadout, /<div className="min-w-0 flex items-center gap-2/), 'font-mono'),
+  'the wrapper is chrome; put font-mono on the spans that hold packet data');
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) FAILED`);
