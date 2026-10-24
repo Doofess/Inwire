@@ -528,7 +528,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
                 <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80 font-mono">
                   {loading !== null
                     ? `reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()}`
-                    : `${frames.length.toLocaleString()} frames`}
+                    : `${frames.length.toLocaleString()} ${frames.length === 1 ? 'frame' : 'frames'}`}
                 </span>
               </div>
               <p className="text-xs text-muted-foreground font-mono">
@@ -576,7 +576,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             rules', ADR 0055 §2), so a key to rose and sky over it would name
             two colours it does not use. */}
         {tab !== 'ladder' && (
-          <div className="px-4 py-2 border-b text-xs flex items-center justify-between bg-secondary/50 border-border text-foreground/80">
+          <div className="px-4 py-2 border-b text-xs flex items-center bg-secondary/50 border-border text-foreground/80">
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-1.5">
                 <span className="w-3 h-3 rounded-full bg-rose-500" />
@@ -587,7 +587,6 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
                 <span className="font-semibold text-sky-400">Server Traffic ({totals.toClient} bytes)</span>
               </div>
             </div>
-            <span className="text-[11px] font-mono text-muted-foreground">Stream Follower Engine</span>
           </div>
         )}
 
@@ -764,7 +763,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             from, because `App` restores that on the way. */}
         <div className="px-4 py-2.5 border-t border-border flex items-center text-xs">
           <span className="text-muted-foreground font-mono">
-            Total {frames.length.toLocaleString()} Packets ({totals.toServer + totals.toClient} bytes exchanged)
+            {frames.length.toLocaleString()} {frames.length === 1 ? 'packet' : 'packets'} · {(totals.toServer + totals.toClient).toLocaleString()} {totals.toServer + totals.toClient === 1 ? 'byte' : 'bytes'} exchanged
           </span>
         </div>
       </>

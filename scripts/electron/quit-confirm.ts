@@ -119,7 +119,7 @@ function harness(options: { rendererAlive?: boolean } = {}) {
   const first = h.sent[0].id;
   h.confirm.replied({ id: first, answer: 'shown' });
   h.confirm.replied({ id: first, answer: 'keep' });
-  check('Keep capturing keeps the window', h.quits === 0 && !h.confirm.pending);
+  check('Cancel keeps the window', h.quits === 0 && !h.confirm.pending);
   h.confirm.requested();
   const second = h.sent[1].id;
   check('the next close asks again, as a new confirm', second !== first && h.sent[1].open);
@@ -158,7 +158,7 @@ function harness(options: { rendererAlive?: boolean } = {}) {
   h.confirm.requested();
   h.advance(RENDERER_ACK_MS);
   await h.native(false);
-  check('Keep capturing in the OS\'s box keeps the window', h.quits === 0 && !h.confirm.pending);
+  check('Cancel in the OS\'s box keeps the window', h.quits === 0 && !h.confirm.pending);
   h.confirm.requested();
   check('...and the next close goes back to the renderer first',
     h.sent.at(-1)!.open && h.nativeShown === 1);
@@ -283,15 +283,16 @@ function harness(options: { rendererAlive?: boolean } = {}) {
   const dialog = readFileSync('src/components/common/QuitConfirmDialog.tsx', 'utf8');
   check('the OS\'s box takes its words from the shared text',
     main.includes('QUIT_CONFIRM_TEXT.title') && main.includes('QUIT_CONFIRM_TEXT.detail'));
-  check('...with Keep capturing as default and cancel',
+  check('...with Cancel as default and cancel',
     /buttons: \[QUIT_CONFIRM_TEXT\.quit, QUIT_CONFIRM_TEXT\.keep\]/.test(main)
     && main.includes('defaultId: 1') && main.includes('cancelId: 1'));
   check('the app\'s dialog takes its words from the same text',
     dialog.includes('QUIT_CONFIRM_TEXT.title') && dialog.includes('QUIT_CONFIRM_TEXT.keep'));
-  check('...and focuses Keep capturing, so Enter keeps',
+  check('...and focuses Cancel, so Enter keeps',
     /autoFocus/.test(dialog));
   check('the wording is what it was', QUIT_CONFIRM_TEXT.title === 'Quit Inwire?'
-    && QUIT_CONFIRM_TEXT.message === 'Quit while a capture is in the buffer?');
+    && QUIT_CONFIRM_TEXT.message === 'A capture is still in the buffer.'
+    && QUIT_CONFIRM_TEXT.keep === 'Cancel');
 }
 
 console.log(failures === 0 ? '\nAll quit-confirm checks passed.' : `\n${failures} check(s) FAILED`);

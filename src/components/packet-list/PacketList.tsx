@@ -372,6 +372,8 @@ export const PacketList: React.FC<PacketListProps> = ({
    */
   const widthByTextRef = useRef(new Map<string, number>());
   const textMeasureRef = useRef<CanvasRenderingContext2D | null>(null);
+  /** Width each address column's header needs (label, gap, sort icon, padding); see the fit effect. */
+  const headerMinRef = useRef<{ source?: number; destination?: number }>({});
 
   useEffect(() => {
     const state = autoSizeRef.current;
@@ -430,6 +432,27 @@ export const PacketList: React.FC<PacketListProps> = ({
     }
     state.lastMeasuredId = lastId;
 
+    // The fit must never go below what the column's own TITLE needs, or short
+    // addresses ("1.1.1.1") leave a header narrower than its label and the
+    // centred title overflows on both sides ("estinatio"). Read from the
+    // header itself, so its real font, bold, uppercase and tracking count, and
+    // once per column: the label never changes, and this effect runs ten times
+    // a second. A zero (header not laid out, or display:none) is not cached.
+    const headerMin = headerMinRef.current;
+    for (const column of ['source', 'destination'] as const) {
+      if (headerMin[column]) continue;
+      const th = tableContainerRef.current?.querySelector(`th[data-column="${column}"]`);
+      const button = th?.querySelector('button');
+      const label = button?.querySelector('span');
+      const icon = button?.querySelector('svg');
+      if (!th || !button || !label || !icon) continue;
+      const thStyle = getComputedStyle(th);
+      const gap = parseFloat(getComputedStyle(button).columnGap) || 0;
+      const needed = label.scrollWidth + gap + icon.getBoundingClientRect().width
+        + parseFloat(thStyle.paddingLeft) + parseFloat(thStyle.paddingRight);
+      if (needed > 0) headerMin[column] = Math.ceil(needed);
+    }
+
     const CELL_PADDING = 18; // px-2 either side, plus a little breathing room
     setColumnWidths(prev => {
       const next = { ...prev };
@@ -438,7 +461,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         if (userSizedColumnsRef.current.has(column)) continue;
         const fitted = Math.min(
           MAX_COLUMN_WIDTH,
-          Math.max(MIN_COLUMN_WIDTH, Math.ceil(state[column] + CELL_PADDING))
+          Math.max(MIN_COLUMN_WIDTH, headerMin[column] ?? 0, Math.ceil(state[column] + CELL_PADDING))
         );
         if (fitted !== prev[column]) {
           next[column] = fitted;
@@ -1044,7 +1067,13 @@ export const PacketList: React.FC<PacketListProps> = ({
   // ragged - a centred title also sits over both a left-aligned and a
   // right-aligned column without looking attached to the wrong one.
   const cellAlign = (column: AlignableColumn) => COLUMN_ALIGN_CLASS[listPrefs.align[column]];
-  const HEADER_TITLE = 'justify-center';
+  //
+  // A header dragged narrower than its title truncates from the END with an
+  // ellipsis. Without `min-w-0` and a truncating label, a centred flex row
+  // overflows equally on both sides and clips the START of the word. The
+  // arbitrary variant reaches the title span so no cell has to remember it;
+  // the sort icon is an svg, which `shrink-0` keeps whole.
+  const HEADER_TITLE = 'justify-center min-w-0 [&>span:first-child]:truncate [&>svg]:shrink-0';
 
   const columnMenuTrigger = (
     <ColumnOptionsMenu

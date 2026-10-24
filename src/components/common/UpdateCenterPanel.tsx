@@ -202,6 +202,7 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
 
   const snapshot = withAgentRow(raw, agentVersion, agentOutdated);
   const busy = isBusy(snapshot);
+  const listedComponents = snapshot.components.filter((component) => component.state.kind !== 'planned');
 
   /**
    * The two halves, combined once for the whole panel.
@@ -275,12 +276,14 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
       )}
 
       <Section title="Components">
-        {snapshot.components.length === 0 ? (
+        {/* A planned component is a feature that does not exist yet; listing
+            it as "Not installed" offers the reader something they cannot have. */}
+        {listedComponents.length === 0 ? (
           <p className="text-[11px] text-muted-foreground py-2 leading-snug">
             Nothing to show yet.
           </p>
         ) : (
-          snapshot.components.map((component) => (
+          listedComponents.map((component) => (
             <Row
               key={component.id}
               component={component}
@@ -295,17 +298,21 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
       </Section>
 
       <Section title="Checking">
-        <SettingRow
-          label="Check automatically on launch"
-          description="Asks the update feed once, shortly after Inwire starts. Off by default: an update check is an outbound request, and this app is the one that would show it to you."
-          htmlFor="setting-auto-update"
-        >
-          <Switch
-            id="setting-auto-update"
-            checked={prefs.automatic}
-            onCheckedChange={(automatic) => patchPrefs({ automatic, asked: true })}
-          />
-        </SettingRow>
+        {/* While the one-time prompt above is showing it asks this same
+            question, so the switch waits until it has been answered. */}
+        {!shouldPrompt(prefs) && (
+          <SettingRow
+            label="Check automatically on launch"
+            description="Asks the update feed once, shortly after Inwire starts. Off by default: an update check is an outbound request, and this app is the one that would show it to you."
+            htmlFor="setting-auto-update"
+          >
+            <Switch
+              id="setting-auto-update"
+              checked={prefs.automatic}
+              onCheckedChange={(automatic) => patchPrefs({ automatic, asked: true })}
+            />
+          </SettingRow>
+        )}
 
         <div className="flex items-center justify-between gap-4 py-2.5">
           <p className="text-[11px] text-muted-foreground leading-snug">

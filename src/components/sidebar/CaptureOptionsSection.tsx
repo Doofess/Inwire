@@ -145,33 +145,42 @@ export const CaptureOptionsSection: React.FC<CaptureOptionsSectionProps> = ({
       </div>
 
       <div className="space-y-1">
-        <label className={`flex items-center gap-2 text-xs ${locked ? 'opacity-50' : 'cursor-pointer'}`}>
-          <input
-            type="checkbox"
-            className="accent-primary"
-            checked={options.limitBytes}
-            disabled={locked}
-            onChange={(e) => onChange({ limitBytes: e.target.checked })}
-            onKeyDown={keepKeys}
-          />
-          <span>Keep only the first</span>
-          <input
-            aria-label="Bytes kept of each packet"
-            inputMode="numeric"
-            className={`${FIELD} w-16 text-center`}
-            value={draft}
-            disabled={locked || !options.limitBytes}
-            aria-invalid={!draftValid}
-            onChange={(e) => {
-              const digits = e.target.value.replace(/\D/g, '').slice(0, 6);
-              setDraft(digits);
-              const n = Number(digits);
-              if (digits !== '' && n >= MIN_SNAPLEN && n <= MAX_SNAPLEN) onChange({ snaplen: n });
-            }}
-            onBlur={() => setDraft(String(options.snaplen))}
-            onKeyDown={keepKeys}
-          />
-          <span>bytes</span>
+        {/* Two lines on purpose: the checkbox and its phrase, then the number
+            and its unit beneath, indented to the phrase. Side by side the
+            label wrapped mid-phrase into three or four lines at the side bar's
+            170px floor. Still one label, so the ids and the aria wiring are
+            unchanged. */}
+        <label className={`flex flex-col gap-1 text-xs ${locked ? 'opacity-50' : 'cursor-pointer'}`}>
+          <span className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="accent-primary"
+              checked={options.limitBytes}
+              disabled={locked}
+              onChange={(e) => onChange({ limitBytes: e.target.checked })}
+              onKeyDown={keepKeys}
+            />
+            <span>Keep only the first</span>
+          </span>
+          <span className="flex items-center gap-2 pl-5">
+            <input
+              aria-label="Bytes kept of each packet"
+              inputMode="numeric"
+              className={`${FIELD} w-16 text-center`}
+              value={draft}
+              disabled={locked || !options.limitBytes}
+              aria-invalid={!draftValid}
+              onChange={(e) => {
+                const digits = e.target.value.replace(/\D/g, '').slice(0, 6);
+                setDraft(digits);
+                const n = Number(digits);
+                if (digits !== '' && n >= MIN_SNAPLEN && n <= MAX_SNAPLEN) onChange({ snaplen: n });
+              }}
+              onBlur={() => setDraft(String(options.snaplen))}
+              onKeyDown={keepKeys}
+            />
+            <span>bytes</span>
+          </span>
         </label>
         <p className={`${NOTE} text-muted-foreground`}>
           {options.limitBytes
