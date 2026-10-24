@@ -27,6 +27,32 @@ export interface StreamFrameSource {
 /** Ordinals per `readRowsFor`, so a page of rows crosses the port at a time. */
 const ROW_PAGE = 256;
 
+/** Streams whose frames the pane keeps, most recently used last. */
+export const KEPT_STREAMS = 2;
+
+/**
+ * Frames one kept stream may hold. A stream past it is read again when it is
+ * opened again rather than held: a million-frame stream is hundreds of
+ * megabytes of rows in the renderer, kept for a convenience a page-by-page
+ * read already makes cheap.
+ */
+export const KEPT_FRAMES_MAX = 500_000;
+
+/** A kept stream's frames, marked most recently used; undefined when not kept. */
+export function recallFrames(kept: Map<number, Packet[]>, streamId: number): Packet[] | undefined {
+  const frames = kept.get(streamId);
+  if (frames !== undefined) { kept.delete(streamId); kept.set(streamId, frames); }
+  return frames;
+}
+
+/** Keeps a stream's frames, dropping the least recently used past `KEPT_STREAMS`. */
+export function keepFrames(kept: Map<number, Packet[]>, streamId: number, frames: Packet[]): void {
+  kept.delete(streamId);
+  if (frames.length > KEPT_FRAMES_MAX) return;
+  kept.set(streamId, frames);
+  while (kept.size > KEPT_STREAMS) kept.delete(kept.keys().next().value as number);
+}
+
 /**
  * Whether a page of progress should reach the views.
  *
@@ -65,6 +91,9 @@ export async function loadStreamFrames(
   onProgress?: (loaded: number, soFar: readonly Packet[]) => void, signal?: { cancelled: boolean },
 ): Promise<Packet[]> {
   const frames: Packet[] = [];
+  // From chunk 0: the store begins at the stream's first chunk itself (it
+  // holds the index; this side has none), so the first page is not spent on
+  // chunks before it.
   let chunk: number | null = 0;
   while (chunk !== null && !signal?.cancelled) {
     const page = await source.streamOrdinals(summary.streamId, summary.firstId, summary.lastId, chunk);

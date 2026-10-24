@@ -205,8 +205,22 @@ messages; `captureWriter.ts` stages bytes/rows/records; `captureReader.ts` reads
 through short reads and writes rather than interpret them as a torn capture.
 
 A `cap-YYYYMMDD-HHMMSS-xxxx` directory holds an index plus prefix, summary,
-raw-byte and frame-record files (`.iwidx`, `.iwpfx`, `.iwsum`, `.iwbyt`, `.iwrec`).
+raw-byte and frame-record files (`.iwidx`, `.iwpfx`, `.iwsum`, `.iwbyt`, `.iwrec`),
+and the stream digest's snapshot, `streams.iwdig`.
 Segmented captures add `seg-NNNNNN` directories, each with four data files.
+
+The stream digest (ADR 0055) is the store's, because the store is the one
+place every row passes whether or not it is still in RAM. `captureHost.ts`
+folds each appended row into a summary per TCP stream - its RFC 793 states as
+seen from this vantage point, totals per direction and an outcome - and the
+renderer polls `streamDigest(since)` once a second through `useStreamDigest`,
+only while Statistics or Follow Stream is the view - the conversation list's
+TCP level, and the ladder, which reads a stream's frames back through its
+summary rather than from the buffer.
+The snapshot is a cache written at finish and close; a capture opened without a
+matching one is folded again from its rows, sliced through the store's queue,
+and the conversation list says so while it runs. Nothing in the pipeline
+Worker or main touches it.
 The agent's original pcapng files are separate, in each capture directory's `pcapng` subdirectory.
 
 The index writes version 3, reads versions 1–3 and continues existing captures

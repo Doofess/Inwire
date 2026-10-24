@@ -3,7 +3,7 @@
  *
  * Polled rather than pushed: the store answers `changedSince(version)`, so a
  * quiet capture costs one empty message a second, and nothing is sent while
- * the Conversations tab is not showing the TCP level.
+ * neither view that reads it - Statistics, Follow Stream - is showing.
  *
  * The answer's `captureId` is the capture the version belongs to. A version
  * means nothing across captures, so when it changes everything held here is
@@ -27,6 +27,7 @@ const POLL_MS = 1000;
 export function useStreamDigest(enabled: boolean) {
   const [summaries, setSummaries] = useState<Map<number, StreamSummary>>(() => new Map());
   const [rebuilding, setRebuilding] = useState<{ done: number; total: number } | null>(null);
+  const [partial, setPartial] = useState(false);
   const [captureId, setCaptureId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -49,6 +50,7 @@ export function useStreamDigest(enabled: boolean) {
           // a partial one: ask it again from zero, now.
           version = 0;
           setRebuilding(answer.rebuilding);
+          setPartial(answer.partial);
           timer = window.setTimeout(poll, 0);
           return;
         }
@@ -65,6 +67,7 @@ export function useStreamDigest(enabled: boolean) {
         });
       }
       setRebuilding(answer.rebuilding);
+      setPartial(answer.partial);
       timer = window.setTimeout(poll, POLL_MS);
     };
     void poll();
@@ -78,8 +81,9 @@ export function useStreamDigest(enabled: boolean) {
       setSummaries(new Map());
       setCaptureId(null);
       setRebuilding(null);
+      setPartial(false);
     };
   }, [enabled]);
 
-  return { summaries, rebuilding, captureId };
+  return { summaries, rebuilding, partial, captureId };
 }

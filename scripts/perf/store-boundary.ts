@@ -103,6 +103,106 @@ function frame(id: number): Packet {
   } as unknown as Packet;
 }
 
+/**
+ * ## The stream digest's snapshot at Stop (ADR 0055, final review I3)
+ *
+ *   npx tsx scripts/perf/store-boundary.ts --digest-snapshot
+ *
+ * Not part of the four measurements above: it runs alone, because it builds
+ * digests of up to 500,000 streams and wants a big heap. Re-launches itself
+ * with `--expose-gc --max-old-space-size=8192` when it has neither.
+ *
+ * What Stop pays inside its barrier: `snapshot()` plus `encodeDigest` over a
+ * digest of N streams. Three shapes, the ones the review named: 100k and 300k
+ * streams that opened, exchanged data and closed (8 rows each), and 500k that
+ * were a SYN answered by an RST (2 rows each). Per shape: milliseconds,
+ * output bytes, and the heap the call left behind without a collection
+ * (`heapUsed + arrayBuffers`, a floor under the true peak, which is the
+ * number that reached the heap guard). A shape that throws prints the throw.
+ *
+ * Recorded 2026-10-24, before and after the chunked codec (format 1 -> 2);
+ * the table is in the commit message and `docs/history.md`'s I3 entry.
+ */
+async function measureDigestSnapshot(): Promise<void> {
+  if (typeof globalThis.gc !== 'function') {
+    const { spawnSync } = await import('node:child_process');
+    const child = spawnSync(process.execPath,
+      ['--expose-gc', '--max-old-space-size=8192', ...process.execArgv, ...process.argv.slice(1)],
+      { stdio: 'inherit' });
+    process.exit(child.status ?? 1);
+  }
+  const { StreamDigest } = await import('../../src/services/conversation/streamDigest');
+  const { decodeDigest, encodeDigest } = await import('../../src/services/conversation/digestCodec');
+  const { inflateRawSync } = await import('node:zlib');
+  // What the store's utilityProcess injects (`electron/store/entry.ts`); the
+  // host's own default is fflate, which is 5x slower and not what ships.
+  const deflate = (b: Uint8Array): Uint8Array => deflateRawSync(b, { level: 1 });
+  const inflate = (b: Uint8Array): Uint8Array => inflateRawSync(b);
+  const mb = (n: number) => `${(n / 1048576).toFixed(0)} MB`;
+  const used = () => { const m = process.memoryUsage(); return m.heapUsed + m.arrayBuffers; };
+
+  let nextId = 1;
+  const tcp = (stream: number, fromClient: boolean, flags: string, seq: number, ack: number, len: number): Packet => {
+    const id = nextId++;
+    return {
+      id, relativeTime: id / 1000, length: 60 + len, protocol: 'TCP', streamId: stream,
+      source: fromClient ? `10.${(stream >> 16) & 255}.${(stream >> 8) & 255}.${stream & 255}` : '93.184.216.34',
+      destination: fromClient ? '93.184.216.34' : `10.${(stream >> 16) & 255}.${(stream >> 8) & 255}.${stream & 255}`,
+      sourcePort: fromClient ? 50000 : 443, destPort: fromClient ? 443 : 50000,
+      frameProtocols: ['eth', 'ip', 'tcp'],
+      fields: {
+        'tcp.flags.syn': flags.includes('S') ? 1 : 0, 'tcp.flags.ack': flags.includes('A') ? 1 : 0,
+        'tcp.flags.fin': flags.includes('F') ? 1 : 0, 'tcp.flags.reset': flags.includes('R') ? 1 : 0,
+        'tcp.seq': seq, 'tcp.ack': ack, 'tcp.len': len,
+      },
+    } as unknown as Packet;
+  };
+  const closed = (d: InstanceType<typeof StreamDigest>, s: number): void => {
+    for (const r of [
+      tcp(s, true, 'S', 0, 0, 0), tcp(s, false, 'SA', 0, 1, 0), tcp(s, true, 'A', 1, 1, 0),
+      tcp(s, true, 'A', 1, 1, 100), tcp(s, false, 'A', 1, 101, 1000),
+      tcp(s, true, 'FA', 101, 1001, 0), tcp(s, false, 'FA', 1001, 102, 0), tcp(s, true, 'A', 102, 1002, 0),
+    ]) d.feed(r);
+  };
+  const refused = (d: InstanceType<typeof StreamDigest>, s: number): void => {
+    d.feed(tcp(s, true, 'S', 0, 0, 0));
+    d.feed(tcp(s, false, 'RA', 0, 1, 0));
+  };
+
+  console.log('\nstream digest snapshot at Stop: snapshot() + encodeDigest, native deflate level 1\n');
+  console.log('  shape                      streams   encode ms   bytes     heap left   decode+restore ms');
+  for (const [name, count, fold] of [
+    ['closed', 100_000, closed], ['closed', 300_000, closed], ['SYN + RST', 500_000, refused],
+  ] as const) {
+    nextId = 1;
+    let digest: InstanceType<typeof StreamDigest> | null = new StreamDigest();
+    for (let s = 1; s <= count; s++) fold(digest, s);
+    globalThis.gc!();
+    const base = used();
+    const at = process.hrtime.bigint();
+    let bytes: Uint8Array | null = null;
+    let threw: string | null = null;
+    try { bytes = encodeDigest(digest.snapshot(), deflate); } catch (e) { threw = (e as Error).message; }
+    const ms = Number(process.hrtime.bigint() - at) / 1e6;
+    const left = used() - base;
+    const label = `${name}`.padEnd(24);
+    if (bytes === null) {
+      console.log(`  ${label} ${String(count).padStart(8)}   THREW: ${threw} (after ${ms.toFixed(0)} ms, heap ${mb(left)})`);
+    } else {
+      digest = null;
+      globalThis.gc!();
+      const back = process.hrtime.bigint();
+      const decoded = decodeDigest(bytes, inflate);
+      const decodedMs = Number(process.hrtime.bigint() - back) / 1e6;
+      const restored = decoded === null ? null : StreamDigest.restore(decoded);
+      const backMs = Number(process.hrtime.bigint() - back) / 1e6;
+      console.log(`  ${label} ${String(count).padStart(8)}   ${ms.toFixed(0).padStart(9)}   ${mb(bytes.length).padStart(7)}   ${mb(left).padStart(9)}   ${backMs.toFixed(0)} (decode ${decodedMs.toFixed(0)})${restored?.size === count ? '' : '  (RESTORE FAILED)'}`);
+    }
+    digest = null;
+    globalThis.gc!();
+  }
+}
+
 const TOTAL = 100_000;
 /** What one flush hands over: ten a second at the rates that hurt. */
 const BATCH = 300;
@@ -130,6 +230,9 @@ if (!isMainThread) {
     for (const p of message.packets!) n += p.rawBytes!.length + p.id;
     parentPort!.postMessage({ ack: true, n });
   });
+} else if (process.argv.includes('--digest-snapshot')) {
+  await measureDigestSnapshot();
+  process.exit(0);
 } else {
   const dir = mkdtempSync(path.join(tmpdir(), 'inwire-boundary-'));
   const per = (ms: number) => `${(ms * 1000 / TOTAL).toFixed(2)} us a frame`;

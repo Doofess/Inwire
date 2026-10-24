@@ -5,6 +5,7 @@ import {
   Copy,
   Check,
   Download,
+  PanelRightOpen,
   TriangleAlert,
 } from 'lucide-react';
 import { saveGeneratedBlob } from '../../lib/saveFile';
@@ -14,14 +15,15 @@ import {
 } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
-import { loadStreamFrames, progressGate } from '../../services/conversation/streamFrames';
+import { keepFrames, loadStreamFrames, progressGate, recallFrames } from '../../services/conversation/streamFrames';
 import { captureStore } from '../../services/capture/captureClient';
 import type { ColorRulesEngine } from '../../services/colorRules';
 import type { PacketTheme } from '../../services/packetThemes';
 import { portLabel } from '../../services/portServices';
 import { virtualWindow } from '../../lib/virtualWindow';
 import { Segmented } from '../ui/segmented';
-import { LadderView } from '../ladder/LadderView';
+import { LadderView, type ScrollRequest } from '../ladder/LadderView';
+import { TcpStateMap } from '../ladder/TcpStateMap';
 import { copyText } from '../ui/CopyButton';
 
 /**
@@ -240,8 +242,9 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
    *
    * Pages are published to the views as they arrive, so the ladder is usable
    * from its first page; a cancelled read publishes nothing more. The frames
-   * are kept for the life of the pane by stream id, so switching tabs or
-   * coming back to a stream costs nothing.
+   * are kept by stream id, the last two streams and none over
+   * `KEPT_FRAMES_MAX`, so switching tabs or going back to the stream just
+   * left costs nothing and the pane's memory stays bounded.
    */
   const [stream, setStream] = useState<LoadedStream | null>(null);
   const cache = useRef(new Map<number, Packet[]>());
@@ -255,6 +258,18 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   // The arrow under the pointer. The ladder reports it and draws it lit; the
   // state map, docked beside it, reads the same id to light the transition.
   const [hoverFrameId, setHoverFrameId] = useState<number | null>(null);
+
+  // The frame a click on the state map asked the ladder to show. A fresh
+  // object per click, so the same state clicked twice is two requests, and
+  // never cleared: a frame still on its way from disk is brought in by the
+  // page that brings it, which a request withdrawn after one render would miss.
+  const [scrollTo, setScrollTo] = useState<ScrollRequest | null>(null);
+  const pickState = useCallback((frameId: number) => setScrollTo({ frameId }), []);
+
+  // Whether the state map is docked beside the ladder where the pane is
+  // narrower than 1180px. Above that it is always docked and this is not
+  // consulted; the classes below carry the width rule, not this state.
+  const [mapOpen, setMapOpen] = useState(true);
 
   // A new capture drops everything kept per stream - the frames, the cache,
   // the opened bands, the hovered frame - because all of it is keyed by ids
@@ -271,13 +286,14 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     setStream(null);
     setExpanded(NONE_EXPANDED);
     setHoverFrameId(null);
+    setScrollTo(null);
   }, [captureId]);
 
   const summaryId = summary?.streamId;
   useEffect(() => {
     if (summary === null) return;
     const { streamId } = summary;
-    const cached = cache.current.get(streamId);
+    const cached = recallFrames(cache.current, streamId);
     if (cached !== undefined) {
       setStream({ streamId, frames: cached, loading: null });
       return;
@@ -294,7 +310,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
       setStream({ streamId, frames: soFar.slice(), loading: { loaded, total } });
     }, signal).then((frames) => {
       if (signal.cancelled) return;
-      cache.current.set(streamId, frames);
+      keepFrames(cache.current, streamId, frames);
       setStream({ streamId, frames, loading: null });
     }).catch((error: unknown) => {
       // The read failed: the pane falls back to the buffer's frames, as it
@@ -595,25 +611,64 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             so a stream opens on whatever the buffer holds, immediately. */}
 
         {tab === 'ladder' ? (
-          <LadderView
-            frames={frames}
-            loading={loading}
-            client={client}
-            server={server}
-            // The summary goes with the frames it describes, and only those:
-            // over the buffer's frames its first id would read as a ring floor
-            // and its steps would land on rows the buffer happens to hold.
-            summary={loaded !== null ? summary : null}
-            colorEngine={colorEngine}
-            packetTheme={packetTheme}
-            selectedId={selectedId}
-            onSelectFrame={onSelectFrame}
-            highlightFrameId={hoverFrameId}
-            onHoverFrame={setHoverFrameId}
-            expanded={expanded}
-            onToggleBand={toggleBand}
-            onOpenBand={openBand}
-          />
+          /*
+           * The ladder and, docked beside it, the state map (ADR 0055 §1).
+           * A container query rather than a media query decides the dock: the
+           * pane's width is what matters, and with the side bar open a 1600px
+           * window can hand this pane less than a 1024px one. At 1180px and
+           * up the map is always there; below, it can be put away for the
+           * ladder's sake, and a slim strip brings it back.
+           */
+          <div className="flex-1 min-h-0 flex @container">
+            <LadderView
+              frames={frames}
+              loading={loading}
+              client={client}
+              server={server}
+              // The summary goes with the frames it describes, and only those:
+              // over the buffer's frames its first id would read as a ring floor
+              // and its steps would land on rows the buffer happens to hold.
+              summary={loaded !== null ? summary : null}
+              colorEngine={colorEngine}
+              packetTheme={packetTheme}
+              selectedId={selectedId}
+              onSelectFrame={onSelectFrame}
+              highlightFrameId={hoverFrameId}
+              onHoverFrame={setHoverFrameId}
+              scrollTo={scrollTo}
+              expanded={expanded}
+              onToggleBand={toggleBand}
+              onOpenBand={openBand}
+            />
+            {loaded !== null && summary !== null && (
+              <>
+                <aside
+                  className={`${mapOpen ? 'flex' : 'hidden @min-[1180px]:flex'} w-[19.5rem] shrink-0 min-h-0 flex-col
+                    overflow-y-auto custom-scrollbar border-l border-border bg-card`}
+                  aria-label="TCP state map"
+                >
+                  <TcpStateMap
+                    summary={summary}
+                    hoverFrameId={hoverFrameId}
+                    onPickState={pickState}
+                    onCollapse={() => setMapOpen(false)}
+                  />
+                </aside>
+                {!mapOpen && (
+                  <button
+                    type="button"
+                    onClick={() => setMapOpen(true)}
+                    aria-label="Show the state map"
+                    title="Show the state map"
+                    className="@min-[1180px]:hidden w-7 shrink-0 flex items-start justify-center pt-2 border-l border-border
+                      text-muted-foreground hover:text-foreground hover:bg-accent active:opacity-70"
+                  >
+                    <PanelRightOpen className="w-4 h-4" />
+                  </button>
+                )}
+              </>
+            )}
+          </div>
         ) : (
         /*
          * The dialogue, virtualised.

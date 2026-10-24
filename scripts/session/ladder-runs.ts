@@ -34,11 +34,12 @@ import { fieldValue } from '../../src/services/dissect/fieldAccess';
 import { segmentOf, type StreamStep, type StreamSummary } from '../../src/services/conversation/streamDigest';
 import { TcpStateMachine, type TcpOutcome } from '../../src/services/conversation/tcpStates';
 import {
-  loadStreamFrames, progressGate, type StreamFrameSource,
+  keepFrames, KEPT_FRAMES_MAX, loadStreamFrames, progressGate, recallFrames, type StreamFrameSource,
 } from '../../src/services/conversation/streamFrames';
+import { rechoosesWindow, revealStep } from '../../src/components/ladder/ladderFollow';
 import { summaryIsTarget, type StreamTarget } from '../../src/services/followStream';
 import { foldRuns, itemTime, type LadderItem } from '../../src/components/ladder/ladderRuns';
-import { layoutLadder, type LadderLayout } from '../../src/components/ladder/ladderLayout';
+import { layoutLadder, MIN_ROW_GAP, revealScroll, rowMeta, type LadderLayout } from '../../src/components/ladder/ladderLayout';
 import {
   lanePills, markLadder, MARK_ROW, ROW_ABOVE, ROW_BELOW,
 } from '../../src/components/ladder/ladderMarks';
@@ -72,6 +73,7 @@ function row(
   const fields: Record<string, number | string> = {
     'tcp.flags.syn': flags.includes('S') ? 1 : 0, 'tcp.flags.ack': flags.includes('A') ? 1 : 0,
     'tcp.flags.fin': flags.includes('F') ? 1 : 0, 'tcp.flags.reset': flags.includes('R') ? 1 : 0,
+    'tcp.flags.push': flags.includes('P') ? 1 : 0,
     ...(seq !== undefined ? { 'tcp.seq': seq } : {}), ...(ack !== undefined ? { 'tcp.ack': ack } : {}),
     'tcp.len': len ?? 0,
     ...(rule !== undefined ? { 'test.rule': rule } : {}),
@@ -179,6 +181,81 @@ function data(n: number, fromClient = true, rule = 'data'): Packet[] {
   checkTrue('...so every frame is drawn', items.every((i) => i.kind === 'frame'));
   check('...each from the lane that sent it',
     items.slice(0, 4).map((i) => i.from), ['client', 'server', 'client', 'server']);
+}
+
+// --- Acknowledgements ride along (ADR 0055 §1, owner 2026-10-24) -------------------------
+//
+// A receiver acknowledges every second segment. Broken on every change of
+// direction, a bulk transfer folds into runs of two and the band the ADR
+// describes cannot occur. A pure ACK from the other lane rides in the data's
+// band, counted apart, in the data's rule.
+
+/** As `shape`, with the riders: `band(100+50)` is a hundred data frames and fifty ACKs. */
+function riders(items: readonly LadderItem[]): string[] {
+  return items.map((i) => (i.kind === 'frame' ? 'frame' : `band(${i.count}+${i.acks})`));
+}
+/** A bulk transfer from the server, the client acknowledging every second segment. */
+function bulk(segments: number, ackRule = 'ack'): Packet[] {
+  const out: Packet[] = [];
+  for (let i = 0; i < segments; i++) {
+    out.push(row(false, 'A', { len: 1000, rule: 'data' }));
+    if (i % 2 === 1) out.push(row(true, 'A', { rule: ackRule }));
+  }
+  return out;
+}
+
+// --- Acknowledgements ride along in the band they acknowledge ---------------------
+{
+  nextId = 1;
+  const frames = [...handshake(), row(true, 'PA', { len: 200, rule: 'req' }), ...bulk(100), row(false, 'FA')];
+  const items = foldRuns(frames, CLIENT, ruleKeyOf, NONE);
+  check('a bulk transfer ACKed every second segment folds into one band',
+    riders(items), ['frame', 'frame', 'frame', 'frame', 'band(100+50)', 'frame']);
+  const band = items[4];
+  if (band.kind === 'band') {
+    check('...that goes the data\'s way', band.from, 'server');
+    check('...counts only the data frames\' bytes', band.bytes, 100 * 1060);
+    check('...takes the data\'s rule, never the ACKs\'', band.ruleKey, 'data');
+    check('...and spans from the first data frame to the last ACK',
+      [band.first.id, band.last.id], [frames[4].id, frames[frames.length - 2].id]);
+  }
+  const opened = foldRuns(frames, CLIENT, ruleKeyOf, new Set([frames[4].id]));
+  check('opened, every frame comes back', opened.length, frames.length);
+  check('...each ACK in the lane that sent it',
+    opened.slice(4, 8).map((i) => i.from), ['server', 'server', 'client', 'server']);
+}
+
+// --- What does not ride along -------------------------------------------------------
+{
+  nextId = 1;
+  const withData = [...handshake(), ...bulk(10)];
+  withData.splice(8, 0, row(true, 'PA', { len: 50, rule: 'data' }));
+  withData.push(row(false, 'FA'));
+  check('a frame with payload from the other side still breaks the band',
+    riders(foldRuns(withData, CLIENT, ruleKeyOf, NONE)).filter((s) => s !== 'frame').length > 1, true);
+
+  nextId = 1;
+  const dup = [...handshake(), ...bulk(20)];
+  dup[10].analysisFlags = ['duplicate_ack'];
+  dup.push(row(false, 'FA'));
+  checkTrue('a duplicate ACK stands alone',
+    foldRuns(dup, CLIENT, ruleKeyOf, NONE).some((i) => i.kind === 'frame' && i.packet === dup[10]));
+
+  nextId = 1;
+  const pingPong = [row(true, 'S'), ...Array.from({ length: 20 }, (_, i) => row(i % 2 === 0, 'A')), row(true, 'FA')];
+  check('pure ACKs both ways do not fold into one another',
+    foldRuns(pingPong, CLIENT, ruleKeyOf, NONE).length, pingPong.length);
+
+  // One segment and its ACK are two frames; folded, they read "1 frames ·
+  // 1 ACK" and hide both behind a click. A band is a run of data.
+  nextId = 1;
+  const single = [...handshake(), ...bulk(1), row(true, 'A', { rule: 'ack' }), row(false, 'FA')];
+  check('one data frame and its ACK are drawn as frames, not a band',
+    riders(foldRuns(single, CLIENT, ruleKeyOf, NONE)), single.map(() => 'frame'));
+  nextId = 1;
+  const pair = [...handshake(), ...bulk(2), row(false, 'FA')];
+  check('two data frames and an ACK are a band', riders(foldRuns(pair, CLIENT, ruleKeyOf, NONE)),
+    ['frame', 'frame', 'frame', 'band(2+1)', 'frame']);
 }
 
 // --- An opened band comes back as frames ------------------------------------------------
@@ -435,6 +512,13 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('...over the joined mark, because a ring that deleted a handshake did not make it unseen',
     summary.joinedMidStream && !kinds(marked).includes('joined'));
 
+  // A rebuilt digest folds from the floor, so the stream's first frame IS the
+  // first one held and the comparison above cannot see the cut: the store says so.
+  const expired = summaryWith(frames, { firstId: frames[0].id, joinedMidStream: true, startExpired: true });
+  const expiredMarks = markLadder(layout, frames, expired, true);
+  check('a start the ring removed before a rebuild: the ring-floor mark, not joined', kinds(expiredMarks), ['ring-floor']);
+  check('...worded as the ring cut is', expiredMarks.marks[0].text, 'Frames before #501 were removed by the ring');
+
   const later = markLadder(laidOut(frames, 480, { from: frames[1].relativeTime, to: frames[2].relativeTime }), frames, summary, true);
   check('with the stream\'s start above the window, nothing is said about it', later.marks, []);
   check('...and no room is taken', later.topRoom, 0);
@@ -453,20 +537,48 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   check('...and nothing moved, because the gap had the room', ys(marked), [0, 240, 480]);
 }
 
+// Revealing a row in the ladder's own scroller. Nudging a burst apart can push
+// rows below the viewport, so a frame inside the time window is not
+// necessarily on screen: a state picked on the map at a 700px window landed
+// on the bottom edge with its chips and number cut off.
+{
+  // A 400px viewport scrolled to 100 shows 100..500.
+  check('a row already in view leaves the scroll alone', revealScroll(100, 400, 200, 240), 100);
+  check('a row below scrolls just far enough to show it whole', revealScroll(100, 400, 480, 520), 120);
+  check('a row above scrolls up to its top', revealScroll(100, 400, 60, 100), 60);
+  check('a row taller than the viewport shows its top', revealScroll(0, 20, 50, 90), 50);
+}
+
+// The line under an arrow keeps to the lanes. At the 1024 minimum with the side
+// bar and the map open the lanes are under 200px apart, and the crowded note
+// ran over both of them and into the next row's.
+{
+  // 6px a character at 10px, so 5.4 at the line's 9px.
+  check('a wide ladder says a crowded row is not to scale',
+    rowMeta('#442-#443', 1506, true, 600, 6), '#442-#443 · 1506 B · ordered, not to scale');
+  check('a narrow one drops the note rather than overrun the lanes',
+    rowMeta('#442-#443', 1506, true, 190, 6), '#442-#443 · 1506 B');
+  check('a row that is to scale never carries it', rowMeta('#415', 66, false, 600, 6), '#415 · 66 B');
+}
+
 // A lost segment in a burst, where the rows are already at the minimum gap.
 {
+  // A row reaches ROW_ABOVE over its line and ROW_BELOW under it; two rows
+  // closer than that overprint one's number on the next's chip.
+  checkTrue('the minimum row gap clears a row\'s own extent', MIN_ROW_GAP >= ROW_ABOVE + ROW_BELOW);
+  const G = MIN_ROW_GAP;
   nextId = 1;
   const frames = Array.from({ length: 5 }, (_, i) => row(i % 2 === 0, 'A', { len: 10 }));
   frames[2].analysisFlags = ['lost_segment'];
   const layout = laidOut(frames, 60);
-  check('the layout under test is nudged to the minimum gap', layout.arrows.map((a) => a.y), [0, 26, 52, 78, 104]);
+  check('the layout under test is nudged to the minimum gap', layout.arrows.map((a) => a.y), [0, G, 2 * G, 3 * G, 4 * G]);
   const marked = markLadder(layout, frames, summaryWith(frames), true);
-  const least = 26 + ROW_BELOW + MARK_ROW + ROW_ABOVE;
+  const least = G + ROW_BELOW + MARK_ROW + ROW_ABOVE;
   check('the flagged row moves down to clear a marker row under the one above', ys(marked)[2], least);
-  check('...and every row below it moves by the same amount', ys(marked), [0, 26, least, least + 26, least + 52]);
-  check('...the rows above it do not', ys(marked).slice(0, 2), [0, 26]);
+  check('...and every row below it moves by the same amount', ys(marked), [0, G, least, least + G, least + 2 * G]);
+  check('...the rows above it do not', ys(marked).slice(0, 2), [0, G]);
   check('...the mark sits in the row opened', marked.marks[0].y, least - ROW_ABOVE - MARK_ROW / 2);
-  check('...and the drawing grows to hold the last row', marked.contentHeight, least + 52);
+  check('...and the drawing grows to hold the last row', marked.contentHeight, least + 2 * G);
   checkTrue('...with the moved arrows copied and the rest by reference',
     marked.arrows[0] === layout.arrows[0] && marked.arrows[2] !== layout.arrows[2]);
 }
@@ -611,6 +723,17 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the chip is painted by getPacketStyle', view.includes('colorEngine.getPacketStyle(packet, packetTheme)'));
   checkTrue('the fold is keyed by getMatchedRuleName', view.includes('colorEngine.getMatchedRuleName(p)'));
   checkTrue('and the one highlight is --primary', view.includes("'var(--primary)'"));
+
+  // The state map beside it keeps the same discipline: its text is the
+  // theme's currentColor through a text-* class, its path is --primary, and
+  // no fill or stroke is a literal - so Day and Night are one drawing.
+  checkTrue('the state map\'s source is under test', files.includes(`${dir}/TcpStateMap.tsx`));
+  const map = readFileSync(join(root, `${dir}/TcpStateMap.tsx`), 'utf8');
+  check('the state map paints no fill or stroke literal', map.match(/(?:fill|stroke)=["']#[0-9a-fA-F]/)?.[0] ?? null, null);
+  checkTrue('...its text is currentColor', !/<text[^>]*fill=(?!"currentColor")/.test(map.replace(/\n\s*/g, ' ')));
+  checkTrue('...its taken path is --primary', map.includes("'var(--primary)'"));
+  checkTrue('...its current state is the rail\'s active fill, the accent at 20%', /fillOpacity=\{current \? 0\.2 : 1\}/.test(map));
+  checkTrue('...and its caption is the ADR\'s', map.includes('States are inferred from one vantage point. Dashed: implied, not seen.'));
 }
 
 // --- Whether a page of progress reaches the views ------------------------------------------------
@@ -649,7 +772,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   // A new capture drops everything the pane keeps per stream, because every
   // one of those is keyed by a frame id and ids start again from one.
   checkTrue('the digest hook returns the capture it is answering for',
-    /return \{ summaries, rebuilding, captureId \}/.test(hook));
+    /return \{ summaries, rebuilding, partial, captureId \}/.test(hook));
   const reset = pane.match(/const seenCapture = useRef\(captureId\);[\s\S]*?\}, \[captureId\]\);/)?.[0] ?? '';
   checkTrue('the pane has an effect keyed on the capture id', reset.length > 0);
   for (const call of ['cache.current.clear()', 'setStream(null)', 'setExpanded(NONE_EXPANDED)']) {
@@ -662,7 +785,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the load is cancelled and begun again when the capture changes',
     pane.includes('}, [captureId, summaryId]);'));
   checkTrue('the digest hook keeps nothing across a disable',
-    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*\};/.test(hook));
+    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*setPartial\(false\);\s*\};/.test(hook));
 
   // A page of a stream that was left is never published, and the summary goes
   // only with the frames it describes.
@@ -675,12 +798,81 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
 
   // A band closed over the selected frame stays closed until the selection
   // moves; a selected row that a later fold puts into a band opens it.
+  // Keyed per source: the selection and the highlight by their id, the state
+  // map by its request, so a second click on one state reopens a band the
+  // user closed between.
   checkTrue('the ladder opens a band for an id once, not once per fold',
-    view.includes('const autoOpened = useRef') && view.includes('if (id === autoOpened.current[source]) return;'));
+    view.includes('const autoOpened = useRef') && view.includes('if (key === autoOpened.current[source]) return;')
+    && view.includes('[scrollToFrameId, scrollTo]'));
   checkTrue('...remembering only an id it opened a band for',
     view.includes("if (holder === 'row') { autoOpened.current[source] = undefined; return; }"));
   // The ladder draws nothing by direction, so the direction legend is the dialogue's alone.
   checkTrue('the direction legend is not shown over the ladder', /\{tab !== 'ladder' && \([\s\S]*?Client Traffic/.test(pane));
+}
+
+// --- Window and reveal decisions (final review I4, I5) --------------------------------------------
+{
+  nextId = 1;
+  check('a different stream always chooses the window again',
+    [rechoosesWindow('stream', false), rechoosesWindow('stream', true)], [true, true]);
+  check('a page chooses it again while the user has not touched it',
+    rechoosesWindow('page', false), true);
+  check('...and not after a zoom, pan, minimap drag or state click',
+    rechoosesWindow('page', true), false);
+
+  check('a reveal waits while its row is not placed',
+    revealStep(42, null, 100, 400), { pending: 42, scrollTop: 100 });
+  check('...and is answered once the row is placed, scrolling just far enough',
+    revealStep(42, { top: 480, bottom: 520 }, 100, 400), { pending: null, scrollTop: 120 });
+  check('...answered even when the row was already in view (nothing to scroll)',
+    revealStep(42, { top: 200, bottom: 240 }, 100, 400), { pending: null, scrollTop: 100 });
+  check('no request, no scroll', revealStep(null, { top: 480, bottom: 520 }, 100, 400), { pending: null, scrollTop: 100 });
+
+  const view = readFileSync(join(root, 'src/components/ladder/LadderView.tsx'), 'utf8');
+  checkTrue('every user move of the window goes through takeWindow (wheel, pan buttons, minimap)',
+    !/\bonWindow=\{setWindow\}/.test(view) && !/onClick=\{\(\) => setWindow/.test(view)
+    && view.includes('onWindow={takeWindow}') && /takeWindow\(\(current\) => event\.shiftKey/.test(view));
+  checkTrue('a state click marks the window taken',
+    /scrolledRef\.current = scrollTo;[\s\S]{0,300}actedRef\.current = true;/.test(view));
+  checkTrue('choosing the window again clears the answered state-map request',
+    /scrolledRef\.current = null;\s*setWindow\(initialWindow/.test(view));
+  checkTrue('pages go through the user-acted guard, a new stream resets it',
+    view.includes("rechoose('page')") && view.includes("if (trigger === 'stream') actedRef.current = false;"));
+  checkTrue('a reveal re-runs its layout effect on request, not on the next unrelated render',
+    /\}, \[marked, plotTop, revealTick\]\);/.test(view) && view.includes('setRevealTick((t) => t + 1)')
+    && !view.includes('revealRef.current = selectedId') && !view.includes('revealRef.current = scrollTo.frameId'));
+}
+
+// --- Frames kept by the pane, and the reader's chunk (final review I4) --------------------------
+{
+  const f = (n: number) => Array.from({ length: n }, () => ({}) as Packet);
+  const kept = new Map<number, Packet[]>();
+  keepFrames(kept, 1, f(1)); keepFrames(kept, 2, f(1));
+  recallFrames(kept, 1);
+  keepFrames(kept, 3, f(1));
+  check('only the last two streams are kept, the one recalled surviving', [...kept.keys()], [1, 3]);
+  check('a recall of a stream not kept finds nothing', recallFrames(kept, 2), undefined);
+  keepFrames(kept, 4, f(KEPT_FRAMES_MAX + 1));
+  check('a stream over the frame cap is not kept (and costs nobody else their place)', [...kept.keys()], [1, 3]);
+  keepFrames(kept, 3, f(KEPT_FRAMES_MAX + 1));
+  check('...and a kept stream that grew past it is dropped', [...kept.keys()], [1]);
+
+  const reader = readFileSync(join(root, 'src/services/capture/captureReader.ts'), 'utf8');
+  checkTrue('readRowsFor decodes through the one-chunk cache (scripts/capture/stream-reader.ts counts it)',
+    /readRowsFor[\s\S]*?this\.rowsOfChunk\(chunk\)/.test(reader));
+}
+
+// --- A band's label names its riders ---------------------------------------------------------
+{
+  nextId = 1;
+  const frames = [...handshake(), row(true, 'PA', { len: 200, rule: 'req' }), ...bulk(100), row(false, 'FA')];
+  const band = laidOut(frames, 2000).arrows.find((a) => a.item.kind === 'band');
+  check('a data band says how many ACKs rode along, apart from its frames and bytes',
+    band?.info.replace(/ · [0-9.]+ s$/, ''), '100 frames · 103.5 KB · 50 ACKs');
+  check('...and is as thick as its data, not its ACKs', band?.length, 1060);
+  nextId = 1;
+  const plain = laidOut([...handshake(), ...data(50), row(true, 'FA')], 2000).arrows.find((a) => a.item.kind === 'band');
+  checkTrue('a band with no riders does not mention ACKs', plain !== undefined && !plain.info.includes('ACK'));
 }
 
 console.log();

@@ -17,7 +17,8 @@
  *   away (`onCaptureStoreExit`) must answer every pending digest request with
  *   its fallback, or the hook's poll hangs for the life of the window.
  */
-import { digestConversation, outcomeText } from '../../src/services/conversation/digestRows';
+import { readFileSync } from 'node:fs';
+import { conversationRows, digestConversation, outcomeText, tcpScopeNote } from '../../src/services/conversation/digestRows';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
 import type { ToCapture, FromCapture } from '../../src/services/capture/captureProtocol';
 
@@ -96,7 +97,56 @@ check('a joined open stream', outcomeText({ outcome: 'open', joinedMidStream: tr
 check('a clean close', outcomeText({ outcome: 'closed cleanly', joinedMidStream: false }), 'closed cleanly');
 check('a joined stream that was reset', outcomeText({ outcome: 'reset by server', joinedMidStream: true }),
   'reset by server · joined mid-stream');
+check('a joined stream whose start the ring removed does not claim it was never seen',
+  outcomeText({ outcome: 'open', joinedMidStream: true, startExpired: true }), 'open · start removed by the ring');
+check('...and the flag alone changes nothing on a stream that was seen', outcomeText({ outcome: 'open', joinedMidStream: false }), 'open');
 check('the row itself is enough', outcomeText(digestConversation(summary())), 'closed cleanly');
+
+console.log('\n--- the conversation table, TCP from the digest ---\n');
+
+{
+  const digest = new Map([[3, summary()], [4, summary({ streamId: 4 })]]);
+  check('TCP reads the digest, one row per stream', conversationRows('tcp', digest)?.map((r) => r.streamId), [3, 4]);
+  check('...and an empty digest leaves TCP to the buffer', conversationRows('tcp', new Map()), null);
+  check('UDP has no digest and reads the buffer', conversationRows('udp', digest), null);
+  check('so do the address levels', [conversationRows('ipv4', digest), conversationRows('eth', digest)], [null, null]);
+
+  // The ADR: the pane says which scope it is showing.
+  check('a digest answers for the whole capture', tcpScopeNote(digest, null), 'Whole capture');
+  check('a rebuild says how far it has got', tcpScopeNote(digest, { done: 3, total: 12 }),
+    'Rebuilding the stream digest: 3 of 12 chunks');
+  check('...even before its first summary', tcpScopeNote(new Map(), { done: 0, total: 12 }),
+    'Rebuilding the stream digest: 0 of 12 chunks');
+  check('a rebuild that dropped rows says the answer is not the whole capture', tcpScopeNote(digest, null, true),
+    'Not the whole capture: the stream digest missed some frames while rebuilding. Reopen the capture to rebuild it');
+  check('...but a rebuild still running reports its progress first', tcpScopeNote(digest, { done: 1, total: 2 }, true),
+    'Rebuilding the stream digest: 1 of 2 chunks');
+  check('...and partial with nothing to show makes no claim', tcpScopeNote(new Map(), null, true), null);
+  check('no digest, no claim: the buffer\'s own note stands', tcpScopeNote(new Map(), null), null);
+}
+
+// Following a conversation lands on the stream. The pane's
+// `onReturnToPackets` is `setView('packets')`, and called after
+// `onFollowStream` it wins the batch: the follow items went to Packets.
+{
+  const pane = readFileSync('src/components/statistics/StatisticsPane.tsx', 'utf8');
+  // Each call, up to the end of the handler it sits in.
+  const follows: string[] = [];
+  for (let at = pane.indexOf('onFollowStream?.('); at >= 0; at = pane.indexOf('onFollowStream?.(', at + 1)) {
+    follows.push(pane.slice(at, pane.indexOf('}', pane.indexOf(';', at))));
+  }
+  check('the pane follows streams from the row and the menu', follows.length >= 3, true);
+  check('...and no follow then returns to Packets', follows.filter((f) => f.includes('onReturnToPackets')).length, 0);
+
+  // The level buttons are how the TCP level is reached. At a 1024 window with
+  // the side bar open the tab row is wider than the pane, and the pane clips:
+  // TCP and UDP sat past its edge where nothing could scroll to them. The row
+  // wraps instead, and a tab's label never breaks inside itself.
+  const tabRow = pane.slice(pane.indexOf('<div', pane.indexOf("setTab('hierarchy')") - 200), pane.indexOf("setTab('hierarchy')"));
+  check('the tab row wraps rather than clipping the level buttons', /\bflex-wrap\b/.test(tabRow), true);
+  const tabClass = pane.slice(pane.indexOf('const tabClass'), pane.indexOf('const kindClass'));
+  check('...and a tab label stays on one line', /\bwhitespace-nowrap\b/.test(tabClass), true);
+}
 
 console.log('\n--- the client, with no store at all ---\n');
 
@@ -106,7 +156,7 @@ const { captureStore } = await import('../../src/services/capture/captureClient'
 
 check('streamDigest falls back to nothing, at the version it was asked from',
   await captureStore.streamDigest(42),
-  { captureId: null, version: 42, summaries: [], rebuilding: null });
+  { captureId: null, version: 42, summaries: [], rebuilding: null, partial: false });
 check('streamOrdinals falls back to nothing, with no next page',
   await captureStore.streamOrdinals(3, 12, 40, 0),
   { ordinals: [], nextChunk: null });
@@ -147,7 +197,7 @@ answer = (message) => {
   if (message.type === 'streamDigest') {
     return {
       type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd',
-      version: 5, summaries: [changed], rebuilding: { done: 3, total: 9 },
+      version: 5, summaries: [changed], rebuilding: { done: 3, total: 9 }, partial: true,
     };
   }
   if (message.type === 'streamOrdinals') {
@@ -162,8 +212,8 @@ answer = (message) => {
   check('streamDigest sends the protocol\'s request',
     sent && { type: sent.type, since: sent.since }, { type: 'streamDigest', since: 0 });
   check('...and settles on the store\'s answer',
-    { captureId: digest.captureId, version: digest.version, rebuilding: digest.rebuilding },
-    { captureId: 'cap-20261009-120000-abcd', version: 5, rebuilding: { done: 3, total: 9 } });
+    { captureId: digest.captureId, version: digest.version, rebuilding: digest.rebuilding, partial: digest.partial },
+    { captureId: 'cap-20261009-120000-abcd', version: 5, rebuilding: { done: 3, total: 9 }, partial: true });
   check('...with the summaries it sent', digest.summaries.map((s) => [s.streamId, s.version]), [[3, 5]]);
 }
 
@@ -180,10 +230,10 @@ answer = (message) => {
   // A `since` the store has nothing past: the answer is empty and the version
   // is whatever the store says, which the hook takes as its next `since`.
   answer = (message) => message.type === 'streamDigest'
-    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], rebuilding: null }
+    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], rebuilding: null, partial: false }
     : null;
   check('an empty answer settles too', await captureStore.streamDigest(5),
-    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], rebuilding: null });
+    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], rebuilding: null, partial: false });
 }
 
 console.log('\n--- the store goes away with requests in flight ---\n');
@@ -199,12 +249,12 @@ console.log('\n--- the store goes away with requests in flight ---\n');
   check('the exit callback was registered', onExit !== null, true);
   onExit!('the capture store stopped');
   check('a pending streamDigest settles with its fallback', await digest,
-    { captureId: null, version: 0, summaries: [], rebuilding: null });
+    { captureId: null, version: 0, summaries: [], rebuilding: null, partial: false });
   check('a pending streamOrdinals settles with its fallback', await page, { ordinals: [], nextChunk: null });
   check('the store is reported gone', captureStore.snapshot.error, 'the capture store stopped');
   check('and nothing is asked of it again',
     [await captureStore.streamDigest(1), received.filter((m) => m.type === 'streamDigest').length],
-    [{ captureId: null, version: 1, summaries: [], rebuilding: null }, 3]);
+    [{ captureId: null, version: 1, summaries: [], rebuilding: null, partial: false }, 3]);
 }
 
 port1.close();

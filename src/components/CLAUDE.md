@@ -295,6 +295,49 @@ packet table's own header row is `bg-card` (`HEADER_CHROME` in `PacketList.tsx`)
 and not `--secondary`, which is the chrome's colour rather than a content
 surface's.
 
+**Follow Stream's ladder paints with the packet list's colour rules**
+(ADR 0055): each chip is `colorEngine.getPacketStyle` in the active packet
+theme, so a reset, a retransmission or a zero window reads the same on the
+ladder as in the list, and there is no second palette to keep in step. A quiet
+run - consecutive frames under one rule, one direction, at least two of them
+carrying data - folds into a band (`ladderRuns.ts`). Pure ACKs from the other
+lane ride along in it, counted apart and never breaking or colouring it,
+because a receiver acknowledges every second segment. A frame with SYN, FIN, RST, an analysis flag or an
+expert category never folds, because it is the one somebody opened the stream
+to find. A frame named from outside (the selection, a hover, the state map)
+opens the band hiding it once per id - per click for the map - not once per
+fold, so a band the user closes stays closed. Rows are nudged apart to `MIN_ROW_GAP`, so
+the drawing can be taller than the box: bringing a frame into the time window
+is not the same as showing it, and `revealScroll` scrolls the box once the
+layout has placed the row. `scripts/session/ladder-runs.ts`.
+
+**The RFC 793 state map is docked beside the ladder**, not a tab, because it
+is read *against* the frames: hovering an arrow lights the transition it
+caused, and clicking a state scrolls the ladder to the frame that entered it.
+A click is a `ScrollRequest` object, so a second click on one state is a new
+request. The dock is a container query on the pane, `@min-[1180px]`, because
+with the side bar open a 1600px window can hand the pane less than a 1024px
+one: at and above it the map is always there; below it the map can be put
+away for a slim strip, and is open by default because hiding it at the minimum
+window hides the feature. Where the lanes are narrow the row's line under the
+arrow drops "ordered, not to scale" before it overruns them (`rowMeta`). A
+state node takes focus from the keyboard and draws its own `--ring` rect, and
+carries `outline-none`, because the browser's outline on an SVG `<g>` painted
+a black box over the map on a mouse click. `scripts/session/state-map.ts`
+holds the geometry: no label covers most of its own edge, which is why
+UNKNOWN to LISTEN is drawn bare.
+
+**Statistics → Conversations → TCP is the whole capture**, from the same
+digest, with an Outcome column; the other levels still count the buffer and
+keep their "frames X-Y only" note, and the TCP level says "Whole capture", that
+the digest is rebuilding, or that a rebuild missed frames and is not the whole
+capture. **A TCP or UDP row click opens the stream on the
+ladder**; filtering moved to a trailing button on the row, and IP and Ethernet
+rows still filter on click, because an IP row is many streams. Follow Stream
+and Show conversation in the row menu must never call `onReturnToPackets`: it
+ran in the same batch and `setView('packets')` won, so both items landed on
+Packets (`scripts/session/digest-rows.ts` reads the handlers).
+
 **`GraphsTab` renders outside `StatisticsPane`'s scroller**, and that is easy to
 undo by accident: every other tab is a table and wants `overflow-y-auto`, but
 `TrafficTimelineChart` measures its own container, so a parent that grows to fit

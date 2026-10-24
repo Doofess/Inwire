@@ -1023,6 +1023,37 @@ instead of in Settings.
       it in **Follow Stream** and relaunch: it opens on **Packets**, because the
       conversation it named lived in a buffer that is being rebuilt.
 
+### A stream told as its states
+
+ADR 0055: the ladder, the docked state map, and the conversation list over the
+whole capture. `scripts/electron/stream-states-shots.ts` photographs most of
+this against a synthetic capture; what it cannot judge is here.
+
+- [ ] **The ladder's chips are the list's colours.** Open a stream with a reset
+      in it, in Light, Dark and High Contrast, at 100%, 125% and 150% scaling:
+      the RST chip is the list's red row, every chip's text is readable on its
+      fill, and the line under each arrow stays between the two lanes.
+- [ ] **The map and the ladder answer each other.** Hover an arrow: the
+      transition it caused lights on the map. Click a state: the ladder scrolls
+      until that frame's row is whole on screen, at a 1024x700 window with the
+      side bar open as well as at full size. Click a mouse on a state node:
+      no box is drawn. Tab to one: a ring is.
+- [ ] **Below 1180px the map can be put away.** Narrow the window (or open the
+      side bar) until the collapse button shows; collapse, and the ladder takes
+      the width and a slim strip brings the map back. At 1180px and up there is
+      no button.
+- [ ] **Conversations → TCP is the whole capture.** With more frames than the
+      buffer holds, the TCP level counts streams the buffer no longer has, says
+      "Whole capture", and each row has an outcome; sorting by Outcome groups
+      them. Clicking a row opens that stream on the ladder; the filter button on
+      the row's end filters instead. The IP level still filters on click.
+- [ ] **The digest rebuilds.** Close the app, delete `streams.iwdig` from a
+      stored capture's folder under `%LOCALAPPDATA%\Inwire\captures`, reopen the
+      capture and go to Conversations → TCP: the note reads "Rebuilding the
+      stream digest: N of M chunks" until it finishes, then "Whole capture", and
+      the outcomes match what they were. Close and reopen: no rebuild, because
+      the close wrote the snapshot again.
+
 ### The inspection panes are the app's accent, not the frame's
 
 The packet list still paints rows by colour rule; the panes that describe one

@@ -26,6 +26,13 @@ interface SegmentedOption<T extends string> {
   label: string;
   /** Optional supporting line, shown under the group rather than in the chip. */
   hint?: string;
+  /**
+   * Something to report behind this segment, as a sentence: drawn as the
+   * rail's dot, read out to assistive tech. The state map marks the other
+   * side's tab with it when a hovered frame moved that side too, so a hover
+   * that lights nothing on the chosen side is never silent.
+   */
+  mark?: string;
 }
 
 interface SegmentedProps<T extends string> {
@@ -93,7 +100,7 @@ function Segmented<T extends string>({
           value={option.value}
           title={option.hint}
           className={cn(
-            "rounded font-medium whitespace-nowrap outline-none",
+            "relative rounded font-medium whitespace-nowrap outline-none",
             size === 'sm' ? "px-1.5 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]",
             "transition-colors cursor-pointer",
             "text-muted-foreground hover:text-foreground",
@@ -104,6 +111,12 @@ function Segmented<T extends string>({
           )}
         >
           {option.label}
+          {option.mark !== undefined && (
+            <>
+              <span aria-hidden className="absolute right-0.5 top-0.5 w-1.5 h-1.5 rounded-full bg-primary" />
+              <span className="sr-only">, {option.mark}</span>
+            </>
+          )}
         </RadioGroupPrimitive.Item>
       ))}
     </RadioGroupPrimitive.Root>

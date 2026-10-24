@@ -107,8 +107,13 @@ export interface LadderLayout {
  * exists to show - at the cost of the vertical position no longer being exactly
  * proportional to time in a burst. `crowded` marks the ones this happened to,
  * so the view can say the spacing there is order rather than duration.
+ *
+ * A row reaches 16px above its line (the chip) and 13 below it (the number),
+ * `ROW_ABOVE` and `ROW_BELOW` in `ladderMarks.ts`, so 29 is where one row's
+ * number meets the next row's chip; the extra pixel is air. It was 26, which
+ * overprinted the number's descenders on the chip below in every burst.
  */
-const MIN_ROW_GAP = 26;
+export const MIN_ROW_GAP = 30;
 
 /** TCP flag fields, in the order the reference analyzer prints them. */
 const FLAG_FIELDS: [string, string][] = [
@@ -128,9 +133,13 @@ function flagsOf(packet: Packet): string {
   return set.join(', ');
 }
 
-/** What a band's label says: how many frames, how many bytes, how long. */
-function bandInfo(count: number, bytes: number, time: number, endTime: number): string {
-  return `${count.toLocaleString()} frames · ${formatBytes(bytes)} · ${(endTime - time).toFixed(3)} s`;
+/**
+ * What a band's label says: how many frames, how many bytes, how many ACKs
+ * rode along, how long. The frames and bytes are the data's alone.
+ */
+function bandInfo(count: number, bytes: number, acks: number, time: number, endTime: number): string {
+  const riders = acks > 0 ? ` · ${acks.toLocaleString()} ACK${acks === 1 ? '' : 's'}` : '';
+  return `${count.toLocaleString()} frames · ${formatBytes(bytes)}${riders} · ${(endTime - time).toFixed(3)} s`;
 }
 
 /**
@@ -234,12 +243,13 @@ export function layoutLadder(
     } else {
       // A band's frames carry no flag and no finding, or they would not be in
       // one, so its row has neither. Its thickness is its mean frame length,
-      // which is what makes a band of ACKs and a band of data differ.
+      // which is what makes a band of ACKs and a band of data differ; the ACKs
+      // that rode along in a data band are left out of it.
       arrows.push({
         item, from: item.from, y, time,
         length: item.bytes / item.count,
         flags: '',
-        info: bandInfo(item.count, item.bytes, item.time, item.endTime),
+        info: bandInfo(item.count, item.bytes, item.acks, item.time, item.endTime),
         category: null,
         crowded,
       });
@@ -331,6 +341,33 @@ export function panWindow(
   if (from < extent.from) from = extent.from;
   if (from + span > extent.to) from = extent.to - span;
   return { from, to: from + span };
+}
+
+/**
+ * The scroll that shows a row from `top` to `bottom`, moving as little as it
+ * can - or not at all when the row is already in view.
+ *
+ * The window is time, but the drawing can be taller than the viewport: nudging
+ * a burst apart pushes rows below it, so a frame inside the window can still be
+ * off screen. A row taller than the viewport shows its top, where its chip is.
+ */
+export function revealScroll(scrollTop: number, viewport: number, top: number, bottom: number): number {
+  if (top < scrollTop || bottom - top > viewport) return top;
+  if (bottom > scrollTop + viewport) return bottom - viewport;
+  return scrollTop;
+}
+
+/**
+ * The line under an arrow: its frame number and size, and on a crowded row a
+ * note that its place is not to scale. The note goes first when the line would
+ * overrun the lanes, because the number is what the row is found by.
+ * `charWidth` is the chips' 10px advance; the line is set at 9px.
+ */
+export function rowMeta(number: string, bytes: number, crowded: boolean, span: number, charWidth: number): string {
+  const base = `${number} · ${Math.round(bytes)} B`;
+  if (!crowded) return base;
+  const full = `${base} · ordered, not to scale`;
+  return full.length * charWidth * 0.9 <= span ? full : base;
 }
 
 /**

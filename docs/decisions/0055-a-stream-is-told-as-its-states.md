@@ -1,7 +1,8 @@
 # 0055 — A stream is told as its states, from a digest the store keeps
 
-**Status:** accepted 2026-10-09; nothing landed yet. Stage 1 (TCP) is planned in
-`docs/superpowers/plans/2026-10-09-stream-states-stage1.md`. The owner asked for
+**Status:** accepted 2026-10-09; Stage 1 (TCP) landed 2026-10-24: the store's
+digest and `streams.iwdig`, the ladder, the docked state map and the
+conversation list's TCP level. UDP and the other protocols are not started. The owner asked for
 a Conversations pane that shows "the networking that's going on" in a stream,
 pointing at the RFC 793 state diagram, and the same idea for UDP and for any
 other protocol that has a stream.
@@ -45,8 +46,12 @@ state map** is docked beside it.
 - **The two are linked both ways.** Hovering an arrow lights the transition it
   caused, and clicking a state scrolls the ladder to the frame that entered it.
 - **Long quiet runs fold into one band**, for example "data ×12,400 · 18 MB ·
-  3.2 s". A band breaks on a SYN, FIN or RST, on any `tcp.analysis` flag, on a
-  gap, and on a change of matched colour rule. Clicking a band expands it.
+  6,200 ACKs · 3.2 s". A band breaks on a SYN, FIN or RST, on any `tcp.analysis`
+  flag, on a gap, and on a change of matched colour rule. Pure ACKs from the
+  other side (no payload, no flag but ACK) ride along in the band they
+  acknowledge and are counted apart from its data. Without that, a receiver
+  that acknowledges every second segment cuts a bulk transfer into runs of two
+  (owner, 2026-10-24). Clicking a band expands it.
 
 **2. Colour comes from the colour rules and nowhere else.** An arrow's label is
 a chip painted exactly like that frame's row in the packet list:
@@ -54,7 +59,8 @@ a chip painted exactly like that frame's row in the packet list:
 shown by the lane and the arrowhead. The rose/sky pair and `CATEGORY_STROKE`
 are deleted. An expert finding becomes a small marker on the arrow. A band
 takes exactly one rule's colour because a change of rule breaks it, so its
-colour is never an average.
+colour is never an average. A riding ACK's own rule neither breaks the band nor
+colours it: the band belongs to its data, in the data's rule.
 
 **3. The list.** The conversation table gains an **outcome** column, and
 clicking a row opens the stream view. Filtering moves to the context menu and
