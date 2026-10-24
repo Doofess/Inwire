@@ -1914,6 +1914,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         leadingRows={addressingCapture ? captureRows.leadingRows : 0}
         selectedPacket={selectedPacket}
         marks={marks}
+        idOrdered={!effectiveSortField || (effectiveSortField === 'id' && sortOrder === 'asc')}
         colorEngine={colorEngine}
         packetTheme={packetTheme}
         themeKey={themeKey}
