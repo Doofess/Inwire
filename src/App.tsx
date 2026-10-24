@@ -221,10 +221,13 @@ export default function App() {
   // Writes data-motion onto <html>, and keeps it in step with the OS while the
   // setting defers to it. See lib/motion.
   useMotionPreference();
-  // The first-run walkthrough. `completed` is set by finishing it AND by
-  // skipping it - see services/tourPrefs for why skipping counts.
-  const [tour] = usePreferenceValue(tourStore);
-  usePreferenceSync(tourStore.key, tourStore.normalize, tourStore.accept);
+  // The walkthrough, shown only when asked for: the welcome's "Take the tour"
+  // and the palette's `help.tour`. It used to open by itself on first run, over
+  // three empty states the welcome has since replaced. `completed` is still
+  // written on finishing or skipping (services/tourPrefs), and nothing reads it
+  // to decide anything now.
+  const [tourOpen, setTourOpen] = useState(false);
+  const startTour = useCallback(() => setTourOpen(true), []);
   // Pushes the two outbound-lookup switches into the service that performs
   // them, so the gate lives in one place rather than at every call site.
   // Read-only here now: the two passive switches moved into
@@ -2565,6 +2568,7 @@ export default function App() {
       case 'sidebar.network': openSideBarPanel('network'); return;
       case 'monitoring.open': setSheet('monitoring'); return;
       case 'settings.open': setSheet('settings'); return;
+      case 'help.tour': startTour(); return;
     }
   };
 
@@ -3676,8 +3680,8 @@ export default function App() {
       {/* Outside the AnimatePresence above: the tour is not one of the modals
           that swap in and out of it, and being listed there would make opening
           any modal unmount it part-way through a step. */}
-      {!tour.completed && (
-        <TourOverlay onDone={() => tourStore.set({ completed: true })} />
+      {tourOpen && (
+        <TourOverlay onDone={() => { setTourOpen(false); tourStore.set({ completed: true }); }} />
       )}
 
       {palette !== null && (

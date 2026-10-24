@@ -99,6 +99,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { id: 'sidebar.network', title: 'Network', group: 'Window', keywords: ['dns', 'public ip', 'speed'] },
   { id: 'monitoring.open', title: 'Open monitoring', group: 'Window', keywords: ['netflow', 'flow', 'exporter', 'collector'] },
   { id: 'settings.open', title: 'Open settings', group: 'Window', keywords: ['preferences', 'options', 'theme'] },
+  { id: 'help.tour', title: 'Take the tour', group: 'Window', keywords: ['help', 'walkthrough', 'getting started'] },
   {
     id: 'palette.open', title: 'Open command palette', group: 'Window',
     keys: { key: 'k', ctrl: true },

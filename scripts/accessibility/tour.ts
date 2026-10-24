@@ -91,6 +91,16 @@ check('no step is listed twice', wanted.length, new Set(wanted).size);
 check('every step says something',
   TOUR_STEPS.filter((s) => !s.title.trim() || s.body.trim().length < 20).map((s) => s.anchor), []);
 
+// The tour is asked for, never sprung. It used to open on first run over three
+// empty states; the welcome is the front door now, and the tour is its
+// "Take the tour" link and the palette's `help.tour`.
+const app = readFileSync(join(root, 'src', 'App.tsx'), 'utf8');
+const commands = readFileSync(join(root, 'src', 'lib', 'commands.ts'), 'utf8');
+check('the overlay is shown only when the tour was asked for',
+  [/\{tourOpen && \(\s*<TourOverlay/.test(app), app.includes('!tour.completed &&')], [true, false]);
+check('the palette lists help.tour', /id: 'help\.tour'/.test(commands), true);
+check('App binds help.tour', /case 'help\.tour':/.test(app), true);
+
 console.log();
 if (failures) {
   console.log(`${failures} check(s) FAILED`);
