@@ -337,6 +337,7 @@ export const CaptureSchedulePanel: React.FC<CaptureSchedulePanelProps> = ({
                 options={START_MODES}
                 ariaLabel="How the capture starts"
                 size="md"
+                fill
               />
               {startMode === 'manual' ? (
                 <p className={helpClass}>Starts when you press Start.</p>
@@ -399,6 +400,7 @@ export const CaptureSchedulePanel: React.FC<CaptureSchedulePanelProps> = ({
             options={STOP_MODES}
             ariaLabel="How the capture stops"
             size="md"
+            fill
           />
 
           {stopMode === 'manual' && <p className={helpClass}>Runs until you press Stop.</p>}
@@ -531,15 +533,16 @@ export const CaptureSchedulePanel: React.FC<CaptureSchedulePanelProps> = ({
         </div>
       </Section>
 
-      {/* **Always open**, which is the owner's call and the column's room. The
-          heading stays "Calendar" whichever end it sets - a heading that
-          changed with the target moved text out from under the reader's eye -
-          and the note names the end. */}
+      {/* **Shown only while an end is "At a time"** (owner, 2026-10-24). It was
+          always open and greyed out under a note saying how to wake it, which on
+          the default Manual/Manual schedule spent a third of the column on a
+          control that did nothing. The heading stays "Calendar" whichever end it
+          sets - a heading that changed with the target moved text out from
+          under the reader's eye - and the note names the end. */}
+      {calendarLive && (
       <Section
         title="Calendar"
-        note={calendarLive
-          ? <>Sets the <span className="font-semibold text-primary">{calendarTarget}</span> date</>
-          : 'Set Start or Stop to "At a time" to pick a day'}
+        note={<>Sets the <span className="font-semibold text-primary">{calendarTarget}</span> date</>}
       >
         <div className="px-3 py-2">
           <MonthGrid
@@ -549,10 +552,10 @@ export const CaptureSchedulePanel: React.FC<CaptureSchedulePanelProps> = ({
             onPickDay={pickDay}
             now={now}
             label={calendarTarget === 'start' ? 'Start date' : 'Stop date'}
-            disabled={!calendarLive}
           />
         </div>
       </Section>
+      )}
     </div>
   );
 };
