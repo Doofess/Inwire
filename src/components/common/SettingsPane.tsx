@@ -76,15 +76,17 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   // configures nothing. It is a report about the machine, and a report worth
   // one press is worth its own door. What is left here is the pair that does
   // belong: what the capture driver is doing, and which version of it you have.
-  // **'Capture Health', not 'Driver Info'.** The panel was Status, Version,
+  // **'Diagnostics', not 'Driver Info' and no longer 'Capture Health'**, which
+  // named one of its three parts (the agent's status, what was lost, the log)
+  // and read as a score. The panel was Status, Version,
   // Capture and Listening-on rows - four facts the status bar reports
   // permanently, one of them through a SECOND label table that could disagree
   // with the first. All four are deleted, and what is left is the app's only
   // full account of frames it lost: four drop stages, the buffer trim, and the
   // network transitions that explain a gap. The id stays `driver` because it is
   // a stored preference key, not a label.
-  { id: 'driver', label: 'Capture Health', icon: Activity },
-  // Last, directly after Capture Health, because the two answer halves of one
+  { id: 'driver', label: 'Diagnostics', icon: Activity },
+  // Last, directly after Diagnostics, because the two answer halves of one
   // question. That tab says what the capture is losing; this says which version
   // of the driver you have and where a newer one comes from - and the banner
   // for "there is no driver" points from one to the other.
@@ -131,6 +133,8 @@ interface SettingsPaneProps {
   onSubscribeAgentLog: () => void;
   onUnsubscribeAgentLog: () => void;
   onClearAgentLog: () => void;
+  /** Closes Settings and starts the tour, which cannot point at anything behind the sheet. */
+  onStartTour: () => void;
 
   /* --- Network was here, and is its own sheet off the rail now ------------ */
 }
@@ -161,6 +165,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   onSubscribeAgentLog,
   onUnsubscribeAgentLog,
   onClearAgentLog,
+  onStartTour,
 }) => {
   const [section, setSection] = useState<SettingsSection>('appearance');
   const [query, setQuery] = useState('');
@@ -327,7 +332,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
             {section === 'appearance' && <AppearanceSettingsPanel />}
 
             {section === 'interface' && <InterfaceSettingsPanel />}
-            {section === 'accessibility' && <AccessibilitySettingsPanel />}
+            {section === 'accessibility' && <AccessibilitySettingsPanel onStartTour={onStartTour} />}
 
             {section === 'filters' && (
               <DisplayFiltersPanel

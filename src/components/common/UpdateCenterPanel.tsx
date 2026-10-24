@@ -242,7 +242,7 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
               onClick={onShowDriverInfo}
               className="mt-2 text-xs font-medium text-primary hover:underline cursor-pointer"
             >
-              Capture Health has the rest of the detail
+              Diagnostics has the rest of the detail
             </button>
           )}
         </div>
@@ -303,7 +303,7 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
         {!shouldPrompt(prefs) && (
           <SettingRow
             label="Check automatically on launch"
-            description="Asks the update feed once, shortly after Inwire starts. Off by default: an update check is an outbound request, and this app is the one that would show it to you."
+            description="Checks for updates once after Inwire starts, which is a request out of this machine."
             htmlFor="setting-auto-update"
           >
             <Switch

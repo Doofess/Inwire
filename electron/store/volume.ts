@@ -27,6 +27,10 @@ const FILES = {
   // index and never in a segment. A cache - absent or stale, the store folds
   // it again from the rows - so a capture from before it opens it empty.
   digest: 'streams.iwdig',
+  // The packet marks (ADR 0067): one per capture, beside the index. Unlike the
+  // digest this is a source, not a cache; absent, it is opened (and so
+  // created) empty, which reads as no marks.
+  marks: 'marks.iwmrk',
 } as const;
 
 type OpenData = DataFiles & { close(): void };
@@ -109,15 +113,18 @@ export function captureVolume(directory: string): CaptureVolume {
       const dir = path.join(directory, captureId);
       const index = NodeBlockFile.open(path.join(dir, FILES.index));
       const digest = NodeBlockFile.open(path.join(dir, FILES.digest));
+      const marks = NodeBlockFile.open(path.join(dir, FILES.marks));
       const data = openData(dir);
       const segments = segmentsOf(dir);
       return {
         index, pfx: data.pfx, sum: data.sum, byt: data.byt, rec: data.rec,
         digest,
+        marks,
         segments,
         close() {
           try { index.close(); } catch { /* already gone */ }
           try { digest.close(); } catch { /* already gone */ }
+          try { marks.close(); } catch { /* already gone */ }
           data.close();
           segments.closeAll();
         },

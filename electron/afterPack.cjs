@@ -153,7 +153,7 @@ exports.default = async function afterPack(context) {
    * failure mode is silent: Chromium probes these lazily, so a build that
    * needed them would fall back to a degraded renderer rather than fail. The
    * check is in `docs/verification.md` - pack, run the packed exe, confirm the
-   * map draws and Capture Health still reports a GPU tier.
+   * map draws and Diagnostics still reports a GPU tier.
    */
   let gpuFreed = 0;
   const gpuRemoved = [];

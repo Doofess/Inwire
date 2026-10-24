@@ -95,6 +95,7 @@ import { matchesOnDisk } from '../../lib/captureRowSpace';
 import { CHUNK_FRAMES } from '../capture/chunkCodec';
 import { packetsBytes, type ByteSource } from '../packetBytes';
 import type { MatchSet } from '../capture/matchSet';
+import type { Marks } from '../marks';
 import type { RowBlock } from '../capture/captureClient';
 import type { Packet } from '../../types/packet';
 
@@ -129,6 +130,25 @@ export interface FrameScope {
    * filter's answer is the failure this module exists to end.
    */
   filter: { expression: string; matches: MatchSet | null } | null;
+  /**
+   * Only the marked packets (ADR 0067), instead of the filter's; when both are
+   * given this wins, because the panel offers one scope at a time.
+   *
+   * `ids` is the renderer's mark set, which answers for the window's frames;
+   * `matches` is the store's `markMatches` bitmap over the disk, which answers
+   * for the rest. Both are needed because the store knows only the frames it
+   * has stored - the newest, still staged, are in the window alone - and the
+   * window knows only itself. Null `matches` is allowed on the same terms as
+   * `filter.matches`: only when there is no disk below the window.
+   */
+  marked?: { ids: ReadonlySet<number>; matches: MatchSet | null } | null;
+  /**
+   * The capture's marks, for a `filter` that names `frame.marked`. The store's
+   * scan reads its own copy for the disk half; the window half is filtered
+   * here and is handed this one, or every marked frame in memory would fail
+   * `frame.marked == 1`.
+   */
+  marks?: Marks;
 }
 
 /**
@@ -215,11 +235,33 @@ export function linkTypeTable(
   return table;
 }
 
-function noScanYet(): Error {
+function noScanYet(scope: FrameScope): Error {
+  if (scope.marked) {
+    return new Error('the marked packets on disk have not been looked up yet; wait a moment and export again');
+  }
   return new Error(
     'the display filter has not finished scanning the capture on disk; '
     + 'wait for the scan (or rescan) before exporting what it selects',
   );
+}
+
+/** The disk bitmap the scope selects by: the marks' if marked, else the filter's, else null. */
+function diskMatches(scope: FrameScope): MatchSet | null {
+  return scope.marked ? scope.marked.matches : scope.filter?.matches ?? null;
+}
+
+/** True when the scope narrows the capture at all. */
+function isNarrowed(scope: FrameScope): boolean {
+  return Boolean(scope.marked) || scope.filter !== null;
+}
+
+/** The window's frames the scope keeps. */
+function windowRows(scope: FrameScope): readonly Packet[] {
+  if (scope.marked) {
+    const { ids } = scope.marked;
+    return scope.window.filter((p) => ids.has(p.id));
+  }
+  return scope.filter === null ? scope.window : windowMatches(scope.window, scope.filter.expression, scope.marks);
 }
 
 /**
@@ -232,20 +274,25 @@ function noScanYet(): Error {
  * window that has changed, and no entry keeps an old window - up to gigabytes
  * of frames - alive once nothing else holds it.
  */
-const windowFilterCache = new WeakMap<readonly Packet[], Map<string, Packet[]>>();
+const windowFilterCache = new WeakMap<readonly Packet[], Map<string, { marks: Marks | undefined; rows: Packet[] }>>();
 
-function windowMatches(window: readonly Packet[], expression: string): Packet[] {
+/**
+ * The cached answer is also tied to the mark set it was computed with: a set
+ * is replaced, never edited, so identity is enough, and a toggle between
+ * `exportTotal` and `exportFrames` recomputes rather than counting one set and
+ * writing another.
+ */
+function windowMatches(window: readonly Packet[], expression: string, marks: Marks | undefined): Packet[] {
   let byExpression = windowFilterCache.get(window);
   if (byExpression === undefined) {
     byExpression = new Map();
     windowFilterCache.set(window, byExpression);
   }
-  let result = byExpression.get(expression);
-  if (result === undefined) {
-    result = FilterEngine.filterPackets(window as Packet[], expression);
-    byExpression.set(expression, result);
-  }
-  return result;
+  const cached = byExpression.get(expression);
+  if (cached !== undefined && cached.marks === marks) return cached.rows;
+  const rows = FilterEngine.filterPackets(window as Packet[], expression, marks === undefined ? undefined : { marked: marks });
+  byExpression.set(expression, { marks, rows });
+  return rows;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
@@ -295,7 +342,7 @@ export async function windowOrdinal(
 
 /** Where the scope's disk half ends: it reads `[floor, limit)`. See `matchesOnDisk`. */
 function diskLimit(scope: FrameScope, below: number): number {
-  const matches = scope.filter?.matches;
+  const matches = diskMatches(scope);
   // A scan covers the frames that existed when it started. One that stopped
   // short of `below` is refused before this is asked (`ScanBehindError`), so
   // the clip only ever trims matches past the window, which the window half
@@ -310,9 +357,12 @@ function diskLimit(scope: FrameScope, below: number): number {
  * and a file cannot say anything at all.
  */
 export class ScanBehindError extends Error {
-  constructor(readonly uncovered: number) {
-    super(`${uncovered.toLocaleString('en-US')} frames on disk arrived after the display filter's scan, `
-      + 'so it cannot say whether they match; rescan the capture and export again');
+  constructor(readonly uncovered: number, marked = false) {
+    super(marked
+      ? `${uncovered.toLocaleString('en-US')} frames on disk arrived after the marked packets were looked up, `
+        + 'so it cannot say whether they are marked; export again'
+      : `${uncovered.toLocaleString('en-US')} frames on disk arrived after the display filter's scan, `
+        + 'so it cannot say whether they match; rescan the capture and export again');
     this.name = 'ScanBehindError';
   }
 }
@@ -368,12 +418,14 @@ export function guardedReader(reader: CaptureRowReader, identity: () => unknown)
 }
 
 function totalFor(scope: FrameScope, below: number, floor: number): number {
-  if (scope.filter === null) return Math.max(0, below - floor) + scope.window.length;
-  const { expression, matches } = scope.filter;
-  if (matches === null && below > floor) throw noScanYet();
-  if (matches !== null && matches.frameCount < below) throw new ScanBehindError(below - matches.frameCount);
+  if (!isNarrowed(scope)) return Math.max(0, below - floor) + scope.window.length;
+  const matches = diskMatches(scope);
+  if (matches === null && below > floor) throw noScanYet(scope);
+  if (matches !== null && matches.frameCount < below) {
+    throw new ScanBehindError(below - matches.frameCount, Boolean(scope.marked));
+  }
   const fromDisk = matches === null ? 0 : matchesOnDisk(matches, below, floor);
-  return fromDisk + windowMatches(scope.window, expression).length;
+  return fromDisk + windowRows(scope).length;
 }
 
 /**
@@ -413,7 +465,7 @@ export async function* exportFrames(
   // frames it passes into a gap, counted like any unreadable span.
   const floor = reader.captureFloor?.() ?? 0;
   const total = totalFor(scope, below, floor);
-  const matches = scope.filter?.matches ?? null;
+  const matches = diskMatches(scope);
   const limit = diskLimit(scope, below);
   let done = 0;
   let unreadable = 0;
@@ -526,9 +578,7 @@ export async function* exportFrames(
   }
 
   // ---- the window half ---------------------------------------------------
-  const window = scope.filter === null
-    ? scope.window
-    : windowMatches(scope.window, scope.filter.expression);
+  const window = windowRows(scope);
   for (let i = 0; i < window.length; i += pageSize) {
     options.signal?.throwIfAborted();
     // A window frame already carries what it was dissected with, linkType

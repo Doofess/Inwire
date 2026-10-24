@@ -73,25 +73,20 @@ export const DecryptionSettingsPanel: React.FC = () => {
       <div>
         <h3 className="text-sm font-semibold text-foreground mb-1">TLS decryption</h3>
         <p className="text-xs text-muted-foreground leading-relaxed">
-          A key log holds the session secrets for connections a browser made, keyed on the client
-          random each ClientHello sends in the clear. With one loaded, this app reads the HTTP
-          inside TLS 1.2 and TLS 1.3 the way it reads anything else - the same is true of a pcapng
-          file that carries its own secrets, which needs nothing loaded here at all.
+          With a browser&apos;s TLS key log, Inwire reads the HTTP inside TLS 1.2 and 1.3
+          connections. A pcapng file that carries its own secrets needs nothing here.
         </p>
       </div>
 
       <div className="rounded-lg border border-border bg-muted/30 p-3">
         <div className="text-xs font-semibold text-foreground mb-1.5">How to produce one</div>
         <p className="text-[11px] text-muted-foreground leading-relaxed">
-          Set <code className="font-mono text-foreground">SSLKEYLOGFILE</code> to a path before
-          starting Chrome, Edge or Firefox, and every connection that browser makes appends its
-          secrets there. It has to be set before the browser starts - a running one has already
-          decided not to write them.
+          Set <code className="font-mono text-foreground">SSLKEYLOGFILE</code> to a file path, then
+          start Chrome, Edge or Firefox. A browser that was already running will not write to it.
         </p>
         <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
-          The file opens every connection in it, permanently and for anybody who has it. Treat it
-          as the traffic itself: it is held in memory here, never written to the stored session,
-          and only leaves this machine if you deliberately attach it to an export.
+          Anyone with this file can decrypt every connection in it. Inwire keeps it in memory, never
+          saves it with a capture, and sends it nowhere unless you attach it to an export.
         </p>
       </div>
 
@@ -210,11 +205,9 @@ export const DecryptionSettingsPanel: React.FC = () => {
       {message && <p className="text-[11px] text-muted-foreground leading-relaxed">{message}</p>}
 
       <p className="text-[11px] text-muted-foreground leading-relaxed">
-        A key log applies to frames dissected after it is loaded. Frames already in the buffer keep
-        what they showed when they arrived; re-import the file, or reload a stored session, to read
-        them with the secrets in hand. Follow the file rather than loading it once for a live
-        capture - the browser writes a connection's secrets as the connection starts, after any
-        one-off load has already been read.
+        A key log decrypts packets that arrive after it loads. For a live capture, follow the file:
+        the browser adds secrets as each connection starts. To decrypt packets you already have,
+        import the file again or reopen the capture.
       </p>
     </div>
   );

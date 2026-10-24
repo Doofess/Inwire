@@ -80,7 +80,7 @@ body:
       label: Agent log
       description: >
         Only if the problem involves capture starting, stopping or dropping
-        frames. `Settings → Capture Health` shows the agent's own log.
+        frames. `Settings → Diagnostics` shows the agent's own log.
       render: text
     validations:
       required: false

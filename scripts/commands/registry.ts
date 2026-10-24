@@ -38,6 +38,7 @@ const key = (k: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; 
 
 const ctx: CommandContext = {
   capturing: false, canStartCapture: true, packetCount: 10, filterApplied: false, sideBarOpen: false,
+  hasSelection: false, markCount: 0,
 };
 
 // --- identity -------------------------------------------------------------

@@ -18,8 +18,8 @@ import { cn } from "@/src/lib/utils"
  *
  * Only the parts something actually uses. The column menu needed the radio
  * items; the packet detail tree's "Apply as Filter" needed plain items, a
- * separator and submenus, so those are here now. The rest of Radix's surface -
- * checkbox items, shortcuts - stays out until something wants it, rather than
+ * separator and submenus, and the packet list's row menu a key hint, so those
+ * are here now. The rest of Radix's surface - checkbox items - stays out until something wants it, rather than
  * sitting unused the way `DropdownMenuCheckboxItem` did before the column menu
  * found it.
  *
@@ -185,7 +185,19 @@ function ContextMenuRadioItem({
   )
 }
 
+/** The key hint at an item's right edge. Text only: it binds nothing. */
+function ContextMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="context-menu-shortcut"
+      className={cn("ml-auto pl-4 text-xs tracking-widest text-muted-foreground", className)}
+      {...props}
+    />
+  )
+}
+
 export {
+  ContextMenuShortcut,
   ContextMenu,
   ContextMenuTrigger,
   ContextMenuContent,

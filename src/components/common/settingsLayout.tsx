@@ -29,6 +29,12 @@ export const SECTION_CLASS = MICRO_LABEL;
 interface SettingRowProps {
   label: string;
   description?: string;
+  /**
+   * What did not fit the one line: shown on hover over the description. Only
+   * for a detail somebody needs to choose (how many packets a size holds), never
+   * a reason or history - `scripts/settings/settings-copy.ts` holds the line.
+   */
+  detail?: string;
   /** Set when the control is a single focusable element that can own the label. */
   htmlFor?: string;
   /**
@@ -67,6 +73,7 @@ function TrackedSettingRow({ entry, ...props }: SettingRowProps & { entry: Setti
 function SettingRowShell({
   label,
   description,
+  detail,
   htmlFor,
   children,
   disabled,
@@ -103,7 +110,12 @@ function SettingRowShell({
           )}
         </div>
         {description && (
-          <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">{description}</p>
+          <p
+            title={detail}
+            className={`text-[11px] text-muted-foreground mt-0.5 leading-snug ${detail ? 'cursor-help underline decoration-dotted decoration-muted-foreground/50 underline-offset-2' : ''}`}
+          >
+            {description}
+          </p>
         )}
       </div>
       <div className="shrink-0 pt-0.5">{children}</div>

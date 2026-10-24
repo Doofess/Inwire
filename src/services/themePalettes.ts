@@ -65,6 +65,13 @@ export interface ThemePalette {
    * lighter of the two, so it is the stricter test.
    */
   surface: { background: string; card: string; foreground: string; border: string };
+  /**
+   * A marked packet row's fill and ink (ADR 0067): inverted against the ground,
+   * so a mark reads over any colouring rule. Mirrors `--marked` and
+   * `--marked-foreground` for the canvas minimap, which has no cascade to read
+   * them from; `scripts/themes/registry.ts` asserts the two copies agree.
+   */
+  marked: { background: string; foreground: string };
 }
 
 const PALETTES: Record<string, ThemePalette> = {
@@ -84,6 +91,7 @@ const PALETTES: Record<string, ThemePalette> = {
       neutral: '#5b6470',
     },
     surface: { background: '#f6f7f9', card: '#ffffff', foreground: '#1b1f24', border: '#e1e5ea' },
+    marked: { background: '#2a2f37', foreground: '#f4f6f8' },
   },
 
   /**
@@ -107,6 +115,7 @@ const PALETTES: Record<string, ThemePalette> = {
       neutral: '#a1a1a1',
     },
     surface: { background: '#101112', card: '#141516', foreground: '#e4e4e4', border: '#2e2f30' },
+    marked: { background: '#dcdfe4', foreground: '#101112' },
   },
 
   /**
@@ -123,6 +132,7 @@ const PALETTES: Record<string, ThemePalette> = {
       neutral: '#9aa4b0',
     },
     surface: { background: '#1c2026', card: '#20252b', foreground: '#d1d7e0', border: '#353c46' },
+    marked: { background: '#cfd6df', foreground: '#1c2026' },
   },
 
   /**
@@ -138,6 +148,7 @@ const PALETTES: Record<string, ThemePalette> = {
       neutral: '#c4c7cc',
     },
     surface: { background: '#000000', card: '#050505', foreground: '#ffffff', border: '#8a8f98' },
+    marked: { background: '#ffffff', foreground: '#000000' },
   },
 };
 

@@ -56,7 +56,7 @@ export interface DropCounts {
 }
 
 /** Which frames the export holds. */
-export type ExportScope = 'capture' | 'filtered';
+export type ExportScope = 'capture' | 'filtered' | 'marked';
 
 export interface CaptureMeta {
   app: string;
@@ -198,7 +198,9 @@ export function metaEntries(meta: CaptureMeta): MetaEntry[] {
     ['Duration', meta.firstUs === null || meta.lastUs === null
       ? NOT_AVAILABLE
       : `${SECONDS.format((meta.lastUs - meta.firstUs) / 1e6)} s`],
-    ['Scope', meta.scope === 'filtered' ? 'frames matching the display filter' : 'the whole capture'],
+    ['Scope', meta.scope === 'filtered'
+      ? 'frames matching the display filter'
+      : meta.scope === 'marked' ? 'marked packets only' : 'the whole capture'],
   ];
   if (meta.scope === 'filtered') entries.push(['Display filter', meta.filter]);
   entries.push(

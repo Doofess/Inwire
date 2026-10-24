@@ -13,6 +13,7 @@ import { FilterEngine } from '../../services/filterEngine';
 import { keyLog } from '../../services/tls/keyLog';
 import { captureStore } from '../../services/capture/captureClient';
 import { saveCaptured, type SaveOutcome } from '../../lib/saveFile';
+import { markedExportCount } from '../../lib/captureRowSpace';
 import {
   beginExportJob, cancelExportJob, dismissExportJob, type ExportFormat, type ExportJobState, type ExportPhase,
 } from '../../services/export/exportJob';
@@ -22,6 +23,8 @@ import type { AgentInterface, CaptureDropStats } from '../../services/agentProto
 import type { Capabilities, Packet } from '../../types/packet';
 import type { ImportFailure } from '../../services/exportSchema';
 import type { CaptureSource } from '../../services/export/captureMeta';
+import type { Marks } from '../../services/marks';
+import type { MatchSet } from '../../services/capture/matchSet';
 import type { CaptureFileFacts } from '../../services/captureFileFacts';
 import type { ImportBatchSink } from '../../services/tabularImport';
 
@@ -83,6 +86,8 @@ export interface TransferPanelProps {
   captureStats?: CaptureDropStats | null;
   /** Capture ordinals below the window (`useWindowOrdinal`). */
   belowWindow: number;
+  /** The capture's first ordinal still held (0 unless a ring deleted some): `belowWindow` is counted from it. */
+  captureFloor: number;
   /** Frames in the whole capture: `belowWindow + packets.length`. */
   captureRowCount: number;
   /** Frames the display filter selects over the whole capture, once the scan is in. */
@@ -111,9 +116,11 @@ export interface TransferPanelProps {
    * welcome's "Open a capture file…"). Each increase asks once; 0 is no request.
    */
   pickRequest?: number;
+  /** The packets the user marked (ADR 0067); a new set each time one is toggled. */
+  marks: Marks;
 }
 
-type Scope = 'capture' | 'filter';
+type Scope = 'capture' | 'filter' | 'marked';
 
 const ROW = 'w-full text-left px-3 py-2 cursor-pointer transition-colors '
   + 'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring '
@@ -165,11 +172,36 @@ const PHASE_LABEL: Record<ExportPhase, string> = {
 };
 
 export const TransferPanel: React.FC<TransferPanelProps> = ({
-  packets, appliedFilter, permissions, captureStats, belowWindow, captureRowCount, filteredRowCount,
+  packets, appliedFilter, permissions, captureStats, belowWindow, captureFloor, captureRowCount, filteredRowCount,
   filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
-  captureId, capturedFileCount, capturing, importBlockedBy = null, pickRequest = 0,
+  captureId, capturedFileCount, capturing, importBlockedBy = null, pickRequest = 0, marks,
 }) => {
   const [scope, setScope] = useState<Scope>('capture');
+  /**
+   * The marked frames the store holds, asked again whenever the set changes,
+   * and once more when the window has moved past what the answer covered.
+   * `marks` can name frames the store does not have (the ring expired them), so
+   * the count shown is not `marks.size`; it is `markedExportCount`'s, this set
+   * below the window and the window's own marks above it, because frames still
+   * staged during a capture are in no answer the store can give. Null until
+   * the first answer.
+   */
+  const [heldMarks, setHeldMarks] = useState<MatchSet | null>(null);
+  const windowOrdinal = captureFloor + belowWindow;
+  const heldBehind = heldMarks !== null && heldMarks.frameCount < windowOrdinal;
+  useEffect(() => {
+    if (marks.size === 0) {
+      setHeldMarks(null);
+      // Nothing left to narrow by: choose the capture again rather than
+      // leaving a hidden choice that every format would then be refused by.
+      setScope((s) => (s === 'marked' ? 'capture' : s));
+      return;
+    }
+    // A toggle during the round trip makes this answer about an older set.
+    let stale = false;
+    void captureStore.markMatches().then((held) => { if (!stale) setHeldMarks(held); });
+    return () => { stale = true; };
+  }, [marks, heldBehind]);
   const [includeRawBytes, setIncludeRawBytes] = useState(true);
   const [compress, setCompress] = useState(false);
   const [anonymise, setAnonymise] = useState(false);
@@ -214,10 +246,22 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
   const filtered = filterAvailability(hasFilter, belowWindow, filterScan, filterUncovered, filteredRowCount);
   // A filter cleared after choosing it leaves nothing to narrow by: the scope
   // falls back to the capture rather than disabling every format.
-  const effectiveScope: Scope = scope === 'filter' && hasFilter ? 'filter' : 'capture';
+  const effectiveScope: Scope = scope === 'marked' && marks.size > 0 ? 'marked'
+    : scope === 'filter' && hasFilter ? 'filter' : 'capture';
+  const markedCount = heldMarks === null ? null
+    : markedExportCount(heldMarks, windowOrdinal, captureFloor, packets, marks);
+  const marked = marks.size === 0
+    ? { ready: false, detail: 'No packets are marked.' }
+    : markedCount === null
+      ? { ready: false, detail: 'counting' }
+      : markedCount === 0
+        ? { ready: false, detail: 'None of the marked packets are kept.' }
+        : { ready: true, detail: `${COUNT.format(markedCount)} frames` };
   const busy = job.status === 'running';
   const canExport = captureRowCount > 0 && filterValid && !busy
-    && (effectiveScope === 'capture' || filtered.ready);
+    && (effectiveScope === 'capture'
+      || (effectiveScope === 'filter' && filtered.ready)
+      || (effectiveScope === 'marked' && marked.ready));
 
   /**
    * Hands the job to `runExport`, fetched now rather than at startup.
@@ -233,6 +277,9 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
     if (handle === null) return;
     try {
       const { runExport } = await import('../../services/export/runExport');
+      // Asked again at the press: a live capture has stored frames since the
+      // answer the row shows, and the file is the capture as of this moment.
+      const markedMatches = effectiveScope === 'marked' ? await captureStore.markMatches() : null;
       const result = await runExport({
         format,
         scope: {
@@ -240,6 +287,8 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
           filter: effectiveScope === 'filter'
             ? { expression: appliedFilter, matches: filterScan.status === 'ready' ? filterScan.matches : null }
             : null,
+          marked: markedMatches === null ? null : { ids: marks, matches: markedMatches },
+          marks,
         },
         reader: captureStore,
         // Every read fails if the store is re-opened under the export. The
@@ -267,7 +316,8 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
         os: window.inwire?.osDescription ?? null,
         // The count this panel shows, so an Excel export too large for a
         // workbook is refused before the save dialog rather than after it.
-        expectedFrames: effectiveScope === 'filter' ? filteredRowCount : captureRowCount,
+        expectedFrames: effectiveScope === 'filter' ? filteredRowCount
+          : effectiveScope === 'marked' ? markedCount ?? 0 : captureRowCount,
       }, { signal: handle.signal, onProgress: handle.progress });
       handle.settle(result);
     } catch (err) {
@@ -403,6 +453,12 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
             label: 'What the display filter selects',
             detail: filtered.detail,
             unavailable: !filtered.ready,
+          },
+          {
+            id: 'marked' as const,
+            label: 'Marked packets only',
+            detail: marked.detail,
+            unavailable: !marked.ready,
           },
         ]).map((option) => {
           const active = effectiveScope === option.id;

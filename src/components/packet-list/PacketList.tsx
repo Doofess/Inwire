@@ -21,7 +21,6 @@ import {
   ArrowDown,
   MessageSquare,
   ArrowRightLeft,
-  Funnel,
   FunnelX,
   SearchX,
   Radar,
@@ -35,6 +34,7 @@ import { hasBytes, packetBytes } from '../../services/packetBytes';
 import { fieldValue } from '../../services/dissect/fieldAccess';
 import { minimapStore, packetListStore } from '../../services/interfacePrefs';
 import { formatTimeColumn } from '../../lib/formatTimeColumn';
+import { chordText } from '../../lib/commands';
 import { ColumnOptionsMenu } from './ColumnOptionsMenu';
 import {
   COLUMN_ALIGNS,
@@ -55,18 +55,24 @@ import { targetForPacket, type StreamTarget } from '../../services/followStream'
 import {
   ContextMenu,
   ContextMenuContent,
+  ContextMenuItem,
   ContextMenuLabel,
   ContextMenuRadioGroup,
   ContextMenuRadioItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '../ui/context-menu';
+import { COMBINE_LABELS, combineFilter, rowFilterTerms, type FilterCombine } from '../../services/filter/fromField';
 import { usePreferenceStore, usePreferenceValue } from '../../services/preferenceStore';
 import {
   loadPreference,
   useDebouncedPreference,
   usePreferenceSync,
 } from '../../services/preferences';
-import { MICRO_LABEL } from '../common/typography';
 
 interface PacketListProps {
   /**
@@ -147,7 +153,19 @@ interface PacketListProps {
   /** Double-clicking a row opens the Frame Detail view on that frame. */
   onInspectPacket?: (packet: Packet) => void;
   onFollowStream: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
-  onQuickFilter: (filter: string) => void;
+  /**
+   * "Apply as Filter" / "Prepare as Filter" from the row menu: the same
+   * handler the protocol tree gets. Prepare leaves the expression in the bar
+   * unapplied.
+   */
+  onFieldFilter: (expression: string, apply: boolean) => void;
+  /** What the filter bar holds now, which the row menu's "…and Selected" joins onto. */
+  currentFilter: string;
+  /** Frame ids marked in this capture (`App` owns the set, ADR 0067). */
+  marks: ReadonlySet<number>;
+  onToggleMark: (id: number) => void;
+  /** Next, previous and Unmark all: App's own handler, the one the keys and the palette run. */
+  onMarkCommand: (id: 'mark.next' | 'mark.prev' | 'mark.clearAll') => void;
   /**
    * Frames the buffer has dropped since this capture began, or 0.
    *
@@ -316,7 +334,11 @@ export const PacketList: React.FC<PacketListProps> = ({
   onSelectPacket,
   onInspectPacket,
   onFollowStream,
-  onQuickFilter,
+  onFieldFilter,
+  currentFilter,
+  marks,
+  onToggleMark,
+  onMarkCommand,
   droppedBuffer = 0,
   colorEngine,
   packetTheme,
@@ -338,7 +360,8 @@ export const PacketList: React.FC<PacketListProps> = ({
     SORT_STORAGE_KEY,
     React.useMemo(() => ({ field: sortField, order: sortOrder }), [sortField, sortOrder]),
   );
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; packet: Packet } | null>(null);
+  /** The row the last right-click landed on, for the row menu. Null off a row. */
+  const [menuTarget, setMenuTarget] = useState<Packet | null>(null);
   /** Which header cell the last right-click landed in. See the header's ContextMenu. */
   const [alignColumn, setAlignColumn] = useState<AlignableColumn | null>(null);
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
@@ -958,6 +981,40 @@ export const PacketList: React.FC<PacketListProps> = ({
   };
 
   /**
+   * Brings the selected row into view when something other than this list's own
+   * keys or a click on it moved the selection: Go to packet, a link in the
+   * tree, and Next / Previous marked packet (ADR 0067). Those only set the
+   * selection, and a selection nobody can see reads as a jump that did nothing.
+   *
+   * A move this list made itself leaves the row in view, so this finds nothing
+   * to do for it - except a click on a row the edge half hides, which the row
+   * records as seen before it selects. A row outside the view is centred, and following the live
+   * tail stops under `reading`, as `moveSelection` stops it for any move that
+   * is not to the newest row. The first selection seen is skipped: a restored
+   * one is where the list opened, not a jump.
+   */
+  const scrolledToIdRef = useRef<number | null>(selectedPacket?.id ?? null);
+  const selectedId = selectedPacket?.id ?? null;
+  useEffect(() => {
+    if (selectedId === null || scrolledToIdRef.current === selectedId) return;
+    scrolledToIdRef.current = selectedId;
+    const el = tableContainerRef.current;
+    const index = rowSource.indexOfId(selectedId);
+    if (!el || index < 0) return;
+    const headerHeight = headerRef.current?.offsetHeight ?? 0;
+    const rowTop = index * rowHeight;
+    const rowBottom = headerHeight + (index + 1) * rowHeight;
+    if (rowTop >= el.scrollTop && rowBottom <= el.scrollTop + el.clientHeight) return;
+    if (followRef.current === 'reading') shouldAutoScrollRef.current = index === totalRows - 1;
+    userScrollArmedRef.current = false;
+    el.scrollTop = Math.max(0, rowTop - (el.clientHeight - rowHeight) / 2);
+    setScrollTop(el.scrollTop);
+    // Only a change of the selection is a jump to follow; the row source moving
+    // under the same selection (a flush, a scan) must not pull the list back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
+  /**
    * The list's keyboard contract.
    *
    * Until this existed the packet list could not be reached from a keyboard at
@@ -988,8 +1045,19 @@ export const PacketList: React.FC<PacketListProps> = ({
         // pointer.
         if (e.shiftKey && selectedPacket) {
           e.preventDefault();
-          const rect = (e.target as HTMLElement).getBoundingClientRect();
-          setContextMenu({ x: rect.left + 16, y: rect.top + 16, packet: selectedPacket });
+          // The row menu is a Radix context menu, which opens only from a
+          // `contextmenu` event, so the keyboard gesture sends the event the
+          // pointer would have: at the selected row, when it is rendered.
+          const row = document.getElementById(`packet-row-${selectedPacket.id}`);
+          if (row) {
+            const rect = row.getBoundingClientRect();
+            row.dispatchEvent(new MouseEvent('contextmenu', {
+              bubbles: true,
+              cancelable: true,
+              clientX: rect.left + 16,
+              clientY: rect.top + rect.height / 2,
+            }));
+          }
         }
         break;
       default:
@@ -997,17 +1065,54 @@ export const PacketList: React.FC<PacketListProps> = ({
     }
   };
 
-  // Context Menu handlers
-  const handleContextMenu = (e: React.MouseEvent, packet: Packet) => {
-    e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, packet });
-  };
+  // The row menu. Radix closes it on an outside click and on Escape, so the
+  // window-level click listener the hand-rolled menu needed is gone. The body's
+  // capture handler has already cleared the target when this runs.
+  const handleContextMenu = (packet: Packet) => setMenuTarget(packet);
 
-  useEffect(() => {
-    const closeMenu = () => setContextMenu(null);
-    window.addEventListener('click', closeMenu);
-    return () => window.removeEventListener('click', closeMenu);
-  }, []);
+  const streamTarget = menuTarget ? targetForPacket(menuTarget) : null;
+  const rowTerms = menuTarget ? rowFilterTerms(menuTarget) : null;
+
+  /**
+   * "Apply as Filter" / "Prepare as Filter" for the right-clicked row: source,
+   * destination or protocol, each with the same four ways of joining the bar as
+   * the protocol tree. An item whose term is null is disabled, not hidden, so
+   * the menu keeps one shape from row to row.
+   */
+  const rowFilterMenu = (apply: boolean) => {
+    if (!menuTarget || !rowTerms) return null;
+    const entries: { label: string; term: string | null }[] = [
+      { label: `Source (${menuTarget.source})`, term: rowTerms.source },
+      { label: `Destination (${menuTarget.destination})`, term: rowTerms.destination },
+      { label: `Protocol (${menuTarget.protocolLabel ?? menuTarget.protocol})`, term: rowTerms.protocol },
+    ];
+    return (
+      <ContextMenuSub>
+        <ContextMenuSubTrigger>
+          {apply ? 'Apply as Filter' : 'Prepare as Filter'}
+        </ContextMenuSubTrigger>
+        <ContextMenuSubContent className="w-56 text-xs">
+          {entries.map(({ label, term }) => (
+            <ContextMenuSub key={label}>
+              <ContextMenuSubTrigger disabled={!term}>
+                <span className="truncate">{label}</span>
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                {(Object.keys(COMBINE_LABELS) as FilterCombine[]).map(how => (
+                  <ContextMenuItem
+                    key={how}
+                    onSelect={() => term && onFieldFilter(combineFilter(currentFilter, term, how), apply)}
+                  >
+                    {COMBINE_LABELS[how]}
+                  </ContextMenuItem>
+                ))}
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+          ))}
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+    );
+  };
 
   /**
    * The sort state, for assistive tech.
@@ -1359,8 +1464,17 @@ export const PacketList: React.FC<PacketListProps> = ({
             </ContextMenu>
           </thead>
 
-          {/* Table Body */}
-          <tbody className={density.body}>
+          {/* Table Body. One row menu for the whole body rather than one per
+              row: the rows are virtualised, so the row that was right-clicked
+              is recorded on `contextmenu` (`menuTarget`), the way the protocol
+              tree does it. It wraps the body and not the scroller because the
+              header inside the scroller has a menu of its own, and two
+              triggers on one ancestry chain would both open. The capture
+              handler clears the target first, so a click on a spacer or the
+              empty state opens nothing. */}
+          <ContextMenu>
+          <ContextMenuTrigger asChild>
+          <tbody className={density.body} onContextMenuCapture={() => setMenuTarget(null)}>
             {totalRows === 0 ? (
               <tr>
                 <td colSpan={visibleColumnCount} className="p-0">
@@ -1454,6 +1568,7 @@ export const PacketList: React.FC<PacketListProps> = ({
                 }
                 const packet = row.packet;
                 const isSelected = selectedPacket?.id === packet.id;
+                const isMarked = marks.has(packet.id);
                 const style = colorEngine.getPacketStyle(packet, packetTheme);
 
                 return (
@@ -1471,12 +1586,15 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // spacer rows are all it can see of the rest. 1-based, and
                     // offset by the header row.
                     aria-rowindex={startIndex + i + 2}
-                    onClick={() => onSelectPacket(packet)}
+                    // Seen before it is selected: a click is not a jump, and
+                    // centring a half-shown row moved the list under the
+                    // pointer, so a double-click opened a different frame.
+                    onClick={() => { scrolledToIdRef.current = packet.id; onSelectPacket(packet); }}
                     // Double click also fires the single-click select first,
                     // which is what we want: the row ends up selected behind
                     // the window that opens over it.
                     onDoubleClick={() => onInspectPacket?.(packet)}
-                    onContextMenu={e => handleContextMenu(e, packet)}
+                    onContextMenu={() => handleContextMenu(packet)}
                     // A vertical rule between every body cell, drawn by
                     // `.packet-grid` - no `divide-x` here any more. The columns
                     // had no rule at all below the header once, so where one
@@ -1508,14 +1626,24 @@ export const PacketList: React.FC<PacketListProps> = ({
                         // itself - the single exception to the rule the grid is
                         // built on, and on Day a line lighter than both.
                         ? '[--row-bg:var(--primary)] !bg-primary !text-primary-foreground'
-                        : 'hover:brightness-95 dark:hover:brightness-125'
+                        : isMarked
+                          // Inverted against the ground (ADR 0067): it beats the
+                          // colouring rule, and selection above beats it, so the
+                          // row a person is on never looks merely marked. Same
+                          // `--row-bg` rule as the selected row, and no hover
+                          // brightness: it does nothing to white or near-black.
+                          ? '[--row-bg:var(--marked)] !bg-[var(--marked)] !text-[var(--marked-foreground)]'
+                          : 'hover:brightness-95 dark:hover:brightness-125'
                     }`}
                     // The matched rule's foreground applies to the whole row,
                     // including the Protocol and Length cells - that is how
                     // The reference analyzer's coloring reads at a glance. Individual cells
                     // below inherit rather than setting their own color.
+                    // Not for a marked row either: an inline `--row-bg` would beat
+                    // the class's, and the separators would be stepped from the
+                    // rule's colour instead of from the fill the row wears.
                     style={
-                      !isSelected
+                      !isSelected && !isMarked
                         ? {
                             backgroundColor: style.background,
                             color: style.color,
@@ -1689,6 +1817,94 @@ export const PacketList: React.FC<PacketListProps> = ({
               </>
             )}
           </tbody>
+          </ContextMenuTrigger>
+          {/* w-72: "Previous marked packet" beside Ctrl+Shift+B is the widest
+              row, and at w-60 the label wrapped onto two lines. */}
+          {menuTarget && (
+            <ContextMenuContent className="w-72 text-xs">
+              <ContextMenuItem onSelect={() => onToggleMark(menuTarget.id)}>
+                {marks.has(menuTarget.id) ? 'Unmark packet' : 'Mark packet'}
+                <ContextMenuShortcut>{chordText('mark.toggle')}</ContextMenuShortcut>
+              </ContextMenuItem>
+              {/* The on-screen home of the other three mark commands, which
+                  must not exist only in the palette. Offered only once
+                  something is marked, which is also their `when`. */}
+              {marks.size > 0 && (
+                <>
+                  <ContextMenuItem onSelect={() => onMarkCommand('mark.next')}>
+                    Next marked packet
+                    <ContextMenuShortcut>{chordText('mark.next')}</ContextMenuShortcut>
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => onMarkCommand('mark.prev')}>
+                    Previous marked packet
+                    <ContextMenuShortcut>{chordText('mark.prev')}</ContextMenuShortcut>
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => onMarkCommand('mark.clearAll')}>
+                    Unmark all packets
+                  </ContextMenuItem>
+                </>
+              )}
+
+              <ContextMenuSeparator />
+
+              {/* Offered for UDP as well as TCP now: a stream is selected by
+                  its five-tuple rather than by the TCP tracker's index, so a
+                  DNS exchange or a QUIC connection - which have no index - can
+                  be followed too. */}
+              {streamTarget && (
+                <ContextMenuItem onSelect={() => onFollowStream(streamTarget)}>
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>
+                    Follow {streamTarget.kind.toUpperCase()} Stream
+                    {streamTarget.streamId !== undefined ? ` (#${streamTarget.streamId})` : ''}
+                  </span>
+                </ContextMenuItem>
+              )}
+
+              {/* The same conversation, asked a different question. Following
+                  it is about what was said; showing it is about the shape - a
+                  request answered four seconds later, a side that went quiet,
+                  a burst of retransmissions. Two doors onto one window. */}
+              {streamTarget && (
+                <ContextMenuItem onSelect={() => onFollowStream(streamTarget, 'ladder')}>
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                  <span>Show conversation</span>
+                </ContextMenuItem>
+              )}
+
+              {streamTarget && <ContextMenuSeparator />}
+
+              {rowFilterMenu(true)}
+              {rowFilterMenu(false)}
+
+              <ContextMenuSeparator />
+
+              <ContextMenuItem
+                onSelect={() => {
+                  // Synchronous while the frame still carries its bytes, which
+                  // is the common case and the one that matters here: a
+                  // clipboard write is only reliably permitted inside the
+                  // gesture that triggered it, and awaiting first can put it
+                  // outside on some browsers. A frame whose bytes the buffer
+                  // has dropped takes the slow path and accepts that risk,
+                  // because the alternative is copying an empty string
+                  // (docs/decisions/0013).
+                  const target = menuTarget;
+                  if (hasBytes(target)) {
+                    void copyText(packetHexDump(target));
+                    return;
+                  }
+                  void packetBytes(target).then((rawBytes) => {
+                    void copyText(packetHexDump({ ...target, rawBytes }));
+                  });
+                }}
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy Raw Hex Stream</span>
+              </ContextMenuItem>
+            </ContextMenuContent>
+          )}
+          </ContextMenu>
         </table>
       </div>
 
@@ -1697,6 +1913,8 @@ export const PacketList: React.FC<PacketListProps> = ({
         packets={sortedPackets}
         leadingRows={addressingCapture ? captureRows.leadingRows : 0}
         selectedPacket={selectedPacket}
+        marks={marks}
+        idOrdered={!effectiveSortField || (effectiveSortField === 'id' && sortOrder === 'asc')}
         colorEngine={colorEngine}
         packetTheme={packetTheme}
         themeKey={themeKey}
@@ -1712,106 +1930,6 @@ export const PacketList: React.FC<PacketListProps> = ({
       )}
       </div>
 
-      {/* Right Click Context Menu */}
-      {contextMenu && (
-        <div
-          className="fixed z-50 rounded-lg border p-1 shadow-2xl transition-all bg-popover border-border text-popover-foreground min-w-[240px] font-sans text-xs"
-          style={{ top: Math.min(contextMenu.y, window.innerHeight - 300), left: Math.min(contextMenu.x, window.innerWidth - 260) }}
-        >
-          <div className={`${MICRO_LABEL} px-2 py-1 border-b border-border`}>
-            Packet #{contextMenu.packet.id} Options
-          </div>
-
-          {/* Offered for UDP as well as TCP now: a stream is selected by its
-              five-tuple rather than by the TCP tracker's index, so a DNS
-              exchange or a QUIC connection - which have no index - can be
-              followed too. */}
-          {(() => {
-            const target = targetForPacket(contextMenu.packet);
-            if (!target) return null;
-            return (
-              <button
-                onClick={() => onFollowStream(target)}
-                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-              >
-                <MessageSquare className="w-3.5 h-3.5 text-foreground" />
-                <span>
-                  Follow {target.kind.toUpperCase()} Stream
-                  {target.streamId !== undefined ? ` (#${target.streamId})` : ''}
-                </span>
-              </button>
-            );
-          })()}
-
-          {/* The same conversation, asked a different question. Following it
-              is about what was said; showing it is about the shape - a request
-              answered four seconds later, a side that went quiet, a burst of
-              retransmissions. Two doors onto one window. */}
-          {(() => {
-            const target = targetForPacket(contextMenu.packet);
-            if (!target) return null;
-            return (
-              <button
-                onClick={() => onFollowStream(target, 'ladder')}
-                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-              >
-                <ArrowRightLeft className="w-3.5 h-3.5 text-foreground" />
-                <span>Show conversation</span>
-              </button>
-            );
-          })()}
-
-          <button
-            onClick={() => onQuickFilter(`ip.src == "${contextMenu.packet.source}"`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Funnel className="w-3.5 h-3.5" />
-            <span>Filter by Source ({contextMenu.packet.source})</span>
-          </button>
-
-          <button
-            onClick={() => onQuickFilter(`ip.dst == "${contextMenu.packet.destination}"`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Funnel className="w-3.5 h-3.5" />
-            <span>Filter by Destination ({contextMenu.packet.destination})</span>
-          </button>
-
-          <button
-            onClick={() => onQuickFilter(`proto == ${contextMenu.packet.protocol.toLowerCase()}`)}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Funnel className="w-3.5 h-3.5" />
-            <span>Filter by Protocol ({contextMenu.packet.protocol})</span>
-          </button>
-
-          <div className="my-1 border-t border-border" />
-
-          <button
-            onClick={() => {
-              // Synchronous while the frame still carries its bytes, which is
-              // the common case and the one that matters here: a clipboard
-              // write is only reliably permitted inside the gesture that
-              // triggered it, and awaiting first can put it outside on some
-              // browsers. A frame whose bytes the buffer has dropped takes the
-              // slow path and accepts that risk, because the alternative is
-              // copying an empty string (docs/decisions/0013).
-              const target = contextMenu.packet;
-              if (hasBytes(target)) {
-                void copyText(packetHexDump(target));
-                return;
-              }
-              void packetBytes(target).then((rawBytes) => {
-                void copyText(packetHexDump({ ...target, rawBytes }));
-              });
-            }}
-            className="w-full text-left px-2.5 py-1.5 rounded hover:bg-primary/10 hover:text-primary transition-colors flex items-center gap-2 cursor-pointer"
-          >
-            <Copy className="w-3.5 h-3.5 text-foreground" />
-            <span>Copy Raw Hex Stream</span>
-          </button>
-        </div>
-      )}
     </div>
   );
 };

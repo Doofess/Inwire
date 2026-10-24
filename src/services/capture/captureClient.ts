@@ -110,6 +110,8 @@ export interface StoredCapture {
   chunkCount: number;
   /** The highest stored id, so `packetGenerator` resumes past it. */
   lastId: number;
+  /** The frame ids the user marked, ascending: the capture's own (ADR 0067). */
+  marks: number[];
 }
 
 /**
@@ -191,6 +193,7 @@ class CaptureClient {
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
   private readonly pendingDigest = new Map<number, (answer: StreamDigestAnswer) => void>();
   private readonly pendingStreamOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
+  private readonly pendingMarkMatches = new Map<number, (matches: MatchSet) => void>();
   /** The scan in flight. At most one - the store enforces the same. */
   private readonly pendingScan = new Map<number, {
     onProgress?: (progress: ScanProgressUpdate) => void;
@@ -267,6 +270,7 @@ class CaptureClient {
             frameCount: message.frameCount,
             chunkCount: message.chunkCount,
             lastId: message.lastId,
+            marks: message.marks,
           });
         }
         break;
@@ -339,6 +343,13 @@ class CaptureClient {
         if (settle === undefined) break;
         this.pendingStreamOrdinals.delete(message.requestId);
         settle({ ordinals: message.ordinals, nextChunk: message.nextChunk });
+        break;
+      }
+      case 'markMatches': {
+        const settle = this.pendingMarkMatches.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingMarkMatches.delete(message.requestId);
+        settle(MatchSet.fromBytes(message.frameCount, message.bits));
         break;
       }
       case 'scanProgress': {
@@ -534,6 +545,17 @@ class CaptureClient {
   }
 
   /**
+   * Replaces the capture's marked frame ids and has the store keep them
+   * (ADR 0067). One-way, and the store ignores it when `captureId` is not the
+   * capture it has open - so a call that outlives a Clear View or a Reopen
+   * cannot mark the next capture. The renderer holds the live set; this is its
+   * copy on disk, and what a filter scan over disk rows reads.
+   */
+  setMarks(captureId: string, ids: number[]): void {
+    this.send({ type: 'marks', captureId, ids });
+  }
+
+  /**
    * One chunk's rows, for a restore.
    *
    * Without `rawBytes`: a restored frame is inside the stored range, so
@@ -637,6 +659,21 @@ class CaptureClient {
   }
 
   /**
+   * The stored frames the capture's marks name, as the same bitmap a scan
+   * answers with - what Export's "marked packets only" reads, and the count it
+   * shows. Marks the store does not hold (ring-expired, never stored) are not in
+   * it. **Not a scan**: it never cancels the list's filter scan, so it can be
+   * asked at any time. An empty set with no store, like `streamOrdinals`.
+   */
+  markMatches(): Promise<MatchSet> {
+    return this.request(
+      this.pendingMarkMatches as never,
+      (requestId) => ({ type: 'markMatches', requestId }),
+      new MatchSet(0).seal(),
+    );
+  }
+
+  /**
    * Runs a display filter over the whole capture on disk.
    *
    * The expression travels, not a predicate - a compiled filter is a closure.
@@ -720,6 +757,8 @@ class CaptureClient {
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);
     this.pendingStreamOrdinals.clear();
+    for (const settle of this.pendingMarkMatches.values()) settle(new MatchSet(0).seal());
+    this.pendingMarkMatches.clear();
     // `failed` rather than `cancelled`: the store went away, which is not the
     // user's doing and is worth saying.
     for (const waiting of this.pendingScan.values()) {

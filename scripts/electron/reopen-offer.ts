@@ -141,8 +141,8 @@ try {
   // so it must be offered again - otherwise Start has nothing to ask about.
   console.log('\n--- Clear View keeps it offered ---\n');
   await clicks('Settings', () => p.getByRole('button', { name: 'Settings' }).first().click());
-  await clicks('Capture Health', () => p.getByRole('tab', { name: 'Capture Health' }).or(
-    p.getByRole('button', { name: 'Capture Health', exact: true })).first().click());
+  await clicks('Diagnostics', () => p.getByRole('tab', { name: 'Diagnostics' }).or(
+    p.getByRole('button', { name: 'Diagnostics', exact: true })).first().click());
   checkTrue('Clear View can be pressed', await clicks('Clear View',
     () => p.getByRole('button', { name: 'Clear View' }).click()));
   await p.keyboard.press('Escape');

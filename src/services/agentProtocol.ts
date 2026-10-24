@@ -709,7 +709,7 @@ export type AgentCommand =
   | { type: 'refresh_adapters' };
   // `restart_agent` is not here. Both agents still understand it, and the app
   // stopped sending it on 2026-09-26, when Restart Driver was removed from
-  // Capture Health at the owner's request.
+  // Diagnostics at the owner's request.
 
 export function encodeAgentCommand(command: AgentCommand): string {
   return JSON.stringify(command);

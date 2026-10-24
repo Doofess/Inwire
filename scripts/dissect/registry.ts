@@ -244,6 +244,9 @@ const ENGINE_ALIASES = new Set([
   // engine because no dissector writes them into the bag.
   'frame.number', 'frame.len', 'frame.cap_len', 'frame.time_relative', 'frame.time_delta',
   'frame.time_epoch', 'frame.protocols', 'frame.interface_name',
+  // The user's mark on the frame (ADR 0067): a fact about the capture, read
+  // from the filter's context, never from the bag. Registered `treeOnly` too.
+  'frame.marked',
 ]);
 check('...and no longer hand-lists a dissector field',
   [...FIELD_ABBREVS]

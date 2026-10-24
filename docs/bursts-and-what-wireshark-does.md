@@ -81,7 +81,7 @@ its own comment: *"on some systems, libpcap doesn't bother filling in
 it."*
 
 So in Wireshark's status bar you cannot tell a kernel drop from a tool drop.
-Inwire reports four stages separately, per second, and the Capture Health tab
+Inwire reports four stages separately, per second, and the Diagnostics tab
 shows each one named.
 
 **`null` is not zero.** Wireshark carries a `drops_known` flag and omits the

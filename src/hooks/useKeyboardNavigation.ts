@@ -56,6 +56,12 @@ export interface KeyboardNavigationOptions {
   onOpenPalette: (prefix: '' | '>' | ':') => void;
   /** Ctrl+/ - Wireshark's key for the display filter. */
   onFocusFilter: () => void;
+  /**
+   * Ctrl+M, Ctrl+Shift+N and Ctrl+Shift+B - `mark.toggle`, `mark.next` and
+   * `mark.prev`. App binds them by id, as it does the palette's commands, so
+   * the key and the palette entry run the same code.
+   */
+  onMarkCommand: (id: 'mark.toggle' | 'mark.next' | 'mark.prev') => void;
   filteredPacketsRef: RefObject<Packet[]>;
   selectedPacketRef: RefObject<Packet | null>;
   isCapturingRef: RefObject<boolean>;
@@ -87,6 +93,7 @@ export function useKeyboardNavigation({
   onToggleSideBar,
   onOpenPalette,
   onFocusFilter,
+  onMarkCommand,
   filteredPacketsRef,
   selectedPacketRef,
   isCapturingRef,
@@ -113,8 +120,8 @@ export function useKeyboardNavigation({
   const toggleSideBarRef = useRef(onToggleSideBar);
   toggleSideBarRef.current = onToggleSideBar;
   // The palette and the filter field, held the same way and for the same reason.
-  const commandRef = useRef({ onOpenPalette, onFocusFilter });
-  commandRef.current = { onOpenPalette, onFocusFilter };
+  const commandRef = useRef({ onOpenPalette, onFocusFilter, onMarkCommand });
+  commandRef.current = { onOpenPalette, onFocusFilter, onMarkCommand };
 
   useEffect(() => {
     /* **There is no detail-window gate any more.** This used to bail out
@@ -195,6 +202,15 @@ export function useKeyboardNavigation({
         case 'sidebar.toggle':
           e.preventDefault();
           toggleSideBarRef.current();
+          return;
+        // Marks. After the input guard on purpose: Ctrl+M typed into the
+        // filter field is the field's, and the keys are meant for the list.
+        // Ctrl+Shift+B is not Ctrl+B: `matchChord` compares Shift exactly.
+        case 'mark.toggle':
+        case 'mark.next':
+        case 'mark.prev':
+          e.preventDefault();
+          commandRef.current.onMarkCommand(route);
           return;
       }
 
