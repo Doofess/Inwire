@@ -70,7 +70,7 @@ times out. So this one stays here.
       should read `webgpu pruned removed=dxcompiler.dll,dxil.dll freed=27.3MB`.
 - [ ] Turn on location lookup and open the **Routing Map**. The globe draws, pins
       appear, arcs draw between them.
-- [ ] **Settings -> Capture Health** reports a GPU rather than a software
+- [ ] **Settings -> Diagnostics** reports a GPU rather than a software
       renderer. `src/components/analytics/renderTier.ts` is what classifies it,
       and `Microsoft Basic Render Driver`, `SwiftShader` or `llvmpipe` in that
       string is the failure this check exists for.
@@ -383,7 +383,7 @@ cannot see what two cards look like where they meet.
       reconnected agent is not sampling, so the chart may freeze. Report it if
       it reproduces rather than treating it as a surprise.
 - [ ] **Network reaches out only when asked.** Open the Network panel and scroll
-      past every section with the status bar visible: it must read `no lookups`
+      past every section with the status bar visible: it must read `Lookups off`
       the whole way down. Only pressing **Show public identity** may change
       that. This is the privacy catch the stacking created — `PublicIdentity`
       used to be mounted only when its nav item was chosen, and the nav is gone.
@@ -854,7 +854,7 @@ performance fix could have broken a behaviour:
       re-runs a whole-capture scan.
 - [ ] The **outbound indicator** sits between the byte readout and the counter,
       and it is words rather than a glyph. With geo-IP and reverse DNS both off
-      it reads `no lookups`; turn either on in Settings → Interface and it names
+      it reads `Lookups off`; turn either on in Settings → Interface and it names
       them — `geo-IP`, `rDNS`, or both — at full strength rather than muted. It
       must read the same in greyscale, which is the check: the state is the
       text, never the colour. This is the one item that is deliberately visible
@@ -1188,9 +1188,9 @@ be run here now. None has been run against that install yet.
 - [ ] An Npcap install still cycles the link and re-enumerates adapters. It
       goes through paths the lifetime change touched.
 
-### Capture Health says what nothing else does
+### Diagnostics says what nothing else does
 
-- [ ] The tab is named **Capture Health**, and it carries no Status row, no
+- [ ] The tab is named **Diagnostics**, and it carries no Status row, no
       Version pill, no Capture row and no "Listening on" list. All four are in
       the status bar permanently.
 - [ ] It carries **no "Frames lost" block** — no Received, no drop stages, no
@@ -1252,7 +1252,7 @@ knows not to repeat them; the rest need a person.
       name), and running it for the first time found a stale locator.
 - [x] `npx tsx scripts/electron/import-drive.ts` — 400,000 frames through the
       combined `append` path, scrolling back to frame 1.
-- [ ] **Capture, then look at Settings → Capture Health.** Nothing reads
+- [ ] **Capture, then look at Settings → Diagnostics.** Nothing reads
       "Not dissected". That row is the placeholder a slot gets when no row ever
       arrived, and on a healthy machine it should never be reached.
 - [ ] **Two windows, one capturing.** The second window's reads still answer -
@@ -1541,7 +1541,7 @@ in a loop is enough to make it talk.
 1. **Both adapters deliver.** Pick two in the Interfaces panel, Start, and watch
    the Frame layer's interface row change between frames. The packet list should
    carry both adapters' traffic interleaved by time.
-2. **The counters are per adapter and the sequence is not.** Capture Health
+2. **The counters are per adapter and the sequence is not.** Diagnostics
    shows a received count per interface; they must sum to the capture's frame
    count, because the sequence number is one counter across every adapter and
    `received` is one per adapter (`CaptureCounters`' own split in `agent.py`).
@@ -1583,7 +1583,7 @@ were.
 Both are new to the Rust agent and both are subscriptions, so the way they fail
 is a panel that stays empty with nothing erroring.
 
-- **Capture Health's log view** should show the backlog immediately on opening
+- **Diagnostics's log view** should show the backlog immediately on opening
   and then new lines as they happen - starting a capture writes one. Because the
   Rust agent writes the Python agent's own format to the same file, the backlog
   after a swap should still contain lines from before it.
@@ -1698,7 +1698,7 @@ tests only the window, and the window is what exports always covered.
       - *Capture file comments* holds the metadata lines: Application, Source
         (the adapter names), First/Last frame, Frames exported and in capture,
         and the three drop lines.
-      - A drop counter that Capture Health showed as unavailable reads **not
+      - A drop counter that Diagnostics showed as unavailable reads **not
         available** in the comment, and the interface table's dropped count
         reads *Unknown*. **A `0` there is the bug this export was rewritten to
         end**: it tells the reader the capture is complete, and nobody measured

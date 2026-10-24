@@ -177,7 +177,7 @@ export function agentStatusLabel(health: AgentHealth): string {
 export function agentBlocksStart(health: AgentHealth): string | null {
   if (health.kind === 'connected') return null;
   if (health.kind === 'connecting') return 'Connecting to the agent - Start waits for it.';
-  return `${agentStatusLabel(health)}. Settings > Capture Health has the detail.`;
+  return `${agentStatusLabel(health)}. Settings > Diagnostics has the detail.`;
 }
 
 /**

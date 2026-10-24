@@ -96,7 +96,7 @@ const labels = SETTINGS_INDEX.map((e) => e.label);
 check('labels are unique', labels.length, new Set(labels).size);
 check(
   'the non-row entries are there: theme, accent and the three tabs',
-  ['App theme', 'Accent colour', 'Display Filters', 'Decryption', 'Capture Health']
+  ['App theme', 'Accent colour', 'Display Filters', 'Decryption', 'Diagnostics']
     .filter((l) => settingByLabel(l) === undefined),
   [],
 );
@@ -146,9 +146,9 @@ check(
 );
 check('a word prefix in the label finds it: "dens" finds Packet list density', first('dens'), 'Packet list density');
 check(
-  'a label hit outranks a keyword hit: "performance" lists a label-less keyword match, "buffer" ranks Buffer size above Capture Health',
+  'a label hit outranks a keyword hit: "performance" lists a label-less keyword match, "buffer" ranks Buffer size above Diagnostics',
   searchSettings('buffer').map((e) => e.label).slice(0, 2),
-  ['Buffer size', 'Capture Health'],
+  ['Buffer size', 'Diagnostics'],
 );
 check(
   'a multi-word query needs every word to start a word: "reverse dns" finds Reverse DNS, "reverse dz" nothing',

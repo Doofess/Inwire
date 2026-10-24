@@ -504,7 +504,7 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   const scheduleSet = !isScheduleEmpty(schedule);
 
   const adapterTitle = attention && 'summary' in agentHealth
-    ? `${agentHealth.summary}. Settings > Capture Health has the detail.`
+    ? `${agentHealth.summary}. Settings > Diagnostics has the detail.`
     : selected === null
       ? 'Choose which adapters to capture from'
       : selectedFull;

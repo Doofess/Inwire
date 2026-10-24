@@ -891,7 +891,7 @@ await scenario('11. capture independence', async () => {
   await sleep(500);
 
   await p.getByRole('button', { name: 'Settings', exact: true }).click();
-  await p.getByRole('button', { name: 'Capture Health' }).first().click();
+  await p.getByRole('button', { name: 'Diagnostics' }).first().click();
   await p.getByRole('button', { name: 'Clear View' }).click();
   checkTrue('11: Clear View empties the list', await until(async () => (await countsOf(p))[0] === 0, 15_000), json(await countsOf(p)));
   await p.keyboard.press('Escape');

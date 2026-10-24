@@ -1,5 +1,6 @@
 import React from 'react';
 import { StatusItem } from './StatusItem';
+import { outboundLabel } from './outboundLabel';
 
 /**
  * Whether this app is making requests of its own.
@@ -19,8 +20,8 @@ import { StatusItem } from './StatusItem';
  * lookup was on and a shield when none was, which is two pictures for a fact
  * that is three short words - and a glyph in a strip where every other item
  * spells out what it means made the one item about *this app's* behaviour the
- * one item you had to hover to read. So the state is the TEXT: `no lookups`
- * against `geo-IP`, `rDNS` or both. That also keeps the bar's rule that a state
+ * one item you had to hover to read. So the state is the TEXT: `Lookups off`
+ * against `Lookups: geo-IP`, `rDNS` or both (`outboundLabel`). That also keeps the bar's rule that a state
  * is never carried by hue alone, now that there is no glyph to put the warning
  * colour on - the two states differ in what they say, not in what colour they
  * say it in. See `StatusItem`'s `TONE`.
@@ -34,7 +35,7 @@ import { StatusItem } from './StatusItem';
  *
  * The basemap tiles have no switch of their own: the Routing Map renders only
  * once `geoIp` is on (`GeoMap.tsx`), so the tiles ride that consent and the
- * `geo-IP` label already covers them. The quiet label still says "no lookups"
+ * `geo-IP` label already covers them. The quiet label says "Lookups off"
  * rather than "offline", because the speed test and update checks are main's
  * and this item cannot speak for them.
  */
@@ -60,7 +61,7 @@ export const OutboundStatus: React.FC<OutboundStatusProps> = ({
           + 'the exception and load whenever that view is shown.)'
         }
       >
-        no lookups
+        {outboundLabel(false, false)}
       </StatusItem>
     );
   }
@@ -74,7 +75,7 @@ export const OutboundStatus: React.FC<OutboundStatusProps> = ({
         + 'makes requests that will appear in your own capture.'
       }
     >
-      {on.join(' · ')}
+      {outboundLabel(geoIp, reverseDns)}
     </StatusItem>
   );
 };

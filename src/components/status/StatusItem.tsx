@@ -47,7 +47,7 @@ export type StatusTone = 'normal' | 'attention' | 'accent';
  * Shape plus colour, never colour alone - so an attention state has to differ
  * in something other than its hue. A glyph that differs in OUTLINE is one way
  * and the left group takes it; WORDS that differ are the other, which is what
- * `OutboundStatus` does now that it carries no glyph at all: `no lookups`
+ * `OutboundStatus` does now that it carries no glyph at all: `Lookups off`
  * against `geo-IP · rDNS` reads the same in greyscale.
  */
 const TONE: Record<StatusTone, string> = {

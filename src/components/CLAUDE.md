@@ -454,7 +454,7 @@ than squeeze. **Its second section is monitoring**
 `monitoringSummary` and Open monitoring, which opens the monitoring sheet. Its
 organising idea is the pairing — the OS says how the machine was told to behave,
 the capture shows what actually happened — so it has to sit *beside* the frames
-it is comparing against rather than on top of them. Capture Health stays a
+it is comparing against rather than on top of them. Diagnostics stays a
 Settings tab and is the other read-only report about this machine.
 
 **The persisted state is `inwire.sideBar`** — one key holding `panel`, `open`
@@ -631,7 +631,7 @@ whole directory because the easy way to break one is to skip the shared cell:
   tree's one-byte fields. Carrying the value makes that conflation impossible
   rather than merely avoided: only code that already had the bytes in hand can
   publish one.
-- **The outbound indicator carries no glyph** and says `no lookups` or names
+- **The outbound indicator carries no glyph** and says `Lookups off` or names
   them (`geo-IP`, `rDNS` or both). The state is the text, because the one item
   about *this app's own* behaviour should not be the one you hover to read. The
   warning colour is deliberately not on it: `--warning` on `--secondary` is

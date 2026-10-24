@@ -242,7 +242,7 @@ export const UpdateCenterPanel: React.FC<UpdateCenterPanelProps> = ({
               onClick={onShowDriverInfo}
               className="mt-2 text-xs font-medium text-primary hover:underline cursor-pointer"
             >
-              Capture Health has the rest of the detail
+              Diagnostics has the rest of the detail
             </button>
           )}
         </div>

@@ -209,9 +209,11 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
   },
   {
     section: 'driver',
-    label: 'Capture Health',
+    label: 'Diagnostics',
     description: "Frames the capture lost, at each stage, and the network changes that explain a gap.",
-    keywords: ['drops', 'dropped', 'driver', 'npcap', 'agent', 'buffer', 'log'],
+    // The section's old name stays findable: it was "Capture Health" until the
+    // UX audit's copy pass, and somebody who learned it should still land here.
+    keywords: ['drops', 'dropped', 'driver', 'npcap', 'agent', 'buffer', 'log', 'capture health'],
   },
 
   // --- Updates -----------------------------------------------------------------------

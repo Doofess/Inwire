@@ -95,7 +95,7 @@ export const TOUR_STEPS: TourStep[] = [
       + 'one frame opened up, capture statistics, a map of where your traffic '
       + 'went, and the conversation behind whichever frame you are following. '
       + 'At the bottom: export and import, and settings - where you will find '
-      + 'Capture Health, which accounts for every frame the capture lost and '
+      + 'Diagnostics, which accounts for every frame the capture lost and '
       + 'is the first place to look if the counts do not add up.',
     side: 'right',
   },
