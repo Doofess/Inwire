@@ -30,6 +30,8 @@ interface StoredCapture {
   files: CaptureFiles;
   /** The stream digest's snapshot: the capture's, beside the index, never a segment's. */
   digest: MemoryBlockFile;
+  /** The packet marks (ADR 0067): the capture's, beside the index, never a segment's. */
+  marks: MemoryBlockFile;
   segments: Map<number, DataFiles>;
 }
 
@@ -37,6 +39,7 @@ function emptyCapture(): StoredCapture {
   return {
     files: { index: new MemoryBlockFile(), ...emptyData() },
     digest: new MemoryBlockFile(),
+    marks: new MemoryBlockFile(),
     segments: new Map(),
   };
 }
@@ -72,6 +75,7 @@ export class MemoryVolume implements CaptureVolume {
     return {
       ...capture.files,
       digest: capture.digest,
+      marks: capture.marks,
       segments: segmentFiles,
       close: () => {
         if (closed) return;

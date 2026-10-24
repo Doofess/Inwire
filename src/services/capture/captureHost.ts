@@ -56,6 +56,7 @@ import { recordRefs } from '../dissect/recordHeader';
 import { readExact, type BlockFile } from './blockFile';
 import { StreamDigest, type StreamSummary } from '../conversation/streamDigest';
 import { decodeDigest, encodeDigest } from '../conversation/digestCodec';
+import { decodeMarks, encodeMarks } from '../marks';
 
 /** A capture's files - its index, its data, its segments - and the handles behind them. */
 export interface OpenVolume extends CaptureFiles {
@@ -65,6 +66,13 @@ export interface OpenVolume extends CaptureFiles {
    * without one - or with one that does not match - is folded again.
    */
   digest: BlockFile;
+  /**
+   * `marks.iwmrk`, the capture's packet marks (ADR 0067). One per capture,
+   * beside the index. **A source, not a cache**: nothing else records which
+   * frames the user marked, so it is written whole on every `marks` message
+   * rather than at close, and it goes with the directory.
+   */
+  marks: BlockFile;
   /** Closes every handle, the segments' included. */
   close(): void;
 }
@@ -109,6 +117,13 @@ interface OpenCapture {
    * written as a snapshot, or the next open would trust it.
    */
   digestPartial: boolean;
+  /**
+   * The frame ids the user marked (ADR 0067). Replaced, never edited, so a
+   * scan that compiled with the set it saw keeps one consistent answer while a
+   * newer set arrives; the next scan takes the new one. May hold ids the ring
+   * has expired: they match no row and the file keeps them.
+   */
+  marks: ReadonlySet<number>;
 }
 
 interface DigestRebuild {
@@ -382,6 +397,7 @@ export class CaptureHost {
         case 'stats': return this.reportStats();
         case 'streamDigest': return this.onStreamDigest(message);
         case 'streamOrdinals': return this.onStreamOrdinals(message);
+        case 'marks': return this.onMarks(message);
       }
     } catch (error) {
       // The stack goes to stderr as well as the message to the app, and that
@@ -432,6 +448,7 @@ export class CaptureHost {
     // capture ever used, even when a ring has taken all of them.
     const lastId = writer.index.chunkCount === 0 ? 0 : writer.index.record(writer.index.chunkCount - 1).lastId;
     const restored = this.restoreDigest(volume.digest, lastId);
+    const marksFrom = this.readMarks(volume.marks);
     const open: OpenCapture = {
       id: message.captureId, volume, writer, reader, floorChunk: writer.index.floorChunk,
       digest: restored ?? new StreamDigest(),
@@ -442,6 +459,7 @@ export class CaptureHost {
           ? writer.index.record(writer.index.floorChunk).lastId : null,
       },
       digestPartial: false,
+      marks: new Set(marksFrom),
     };
     this.open = open;
     if (open.rebuild !== null) {
@@ -468,8 +486,42 @@ export class CaptureHost {
       floorId: floorIdOf(writer.index),
       storedRange: range,
       lastId,
+      marks: [...marksFrom],
       ...(message.requestId === undefined ? {} : { requestId: message.requestId }),
     });
+  }
+
+  /**
+   * The ids in `marks.iwmrk`, ascending, or none when it is missing, torn or
+   * not ours. Never fails the open: a capture without its marks is a capture,
+   * and the next `marks` message writes the file whole again.
+   */
+  private readMarks(file: BlockFile): number[] {
+    try {
+      const size = file.size();
+      if (size === 0) return [];
+      return decodeMarks(readExact(file, 0, size)) ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Replaces the open capture's marks and writes the file, whole. An empty set
+   * empties the file rather than leaving the last one, because a stale file
+   * would bring back marks the user cleared. Not answered (see the message);
+   * a write that fails is reported, and the marks stay in memory until close.
+   */
+  private onMarks(message: Extract<ToCapture, { type: 'marks' }>): void {
+    const open = this.open;
+    if (open === null || open.id !== message.captureId) return;
+    open.marks = new Set(message.ids);
+    try {
+      open.volume.marks.truncate(0);
+      if (open.marks.size > 0) open.volume.marks.write(0, encodeMarks(open.marks));
+    } catch (error) {
+      this.fail(`the capture's marks could not be written: ${describe(error)}`, false);
+    }
   }
 
   private onAppend(message: Extract<ToCapture, { type: 'append' }>): void {
@@ -774,7 +826,9 @@ export class CaptureHost {
 
     let predicate;
     try {
-      predicate = compile(message.filter);
+      // The marks as they stand now: `frame.marked` is answered here, over
+      // disk rows, from the set the store holds (ADR 0067).
+      predicate = compile(message.filter, { marked: this.open.marks });
     } catch (error) {
       this.endScan(message.requestId, 0, null, false, describe(error));
       return;

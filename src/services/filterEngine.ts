@@ -15,7 +15,7 @@
  */
 
 import { Packet } from '../types/packet';
-import { compile, unknownNames, FilterSyntaxError } from './filter/compile';
+import { compile, unknownNames, FilterSyntaxError, type FilterContext } from './filter/compile';
 import { parseFilter } from './filter/parser';
 import { knownFieldNames, protocolNames } from './filter/fields';
 import { columnFields } from './dissect/fieldRegistry';
@@ -45,13 +45,13 @@ export class FilterEngine {
    * made the shipped "DCERPC" rule paint any frame whose Info contained those
    * letters, so the strict path does not have it.
    */
-  public static filterPackets(packets: Packet[], filterString: string): Packet[] {
+  public static filterPackets(packets: Packet[], filterString: string, context?: FilterContext): Packet[] {
     const trimmed = filterString.trim();
     if (!trimmed) return packets;
 
     let matcher: (p: Packet) => boolean;
     try {
-      matcher = isFreeText(trimmed) ? freeTextMatcher(trimmed) : compile(trimmed);
+      matcher = isFreeText(trimmed) ? freeTextMatcher(trimmed) : compile(trimmed, context);
     } catch {
       matcher = freeTextMatcher(trimmed);
     }
@@ -124,8 +124,8 @@ export class FilterEngine {
    * build does not produce compiles to "never matches" rather than throwing,
    * so one unimplemented protocol in a rule does not disable the rule.
    */
-  public static compileFilter(filterStr: string): (p: Packet) => boolean {
-    return compile(filterStr.trim());
+  public static compileFilter(filterStr: string, context?: FilterContext): (p: Packet) => boolean {
+    return compile(filterStr.trim(), context);
   }
 
   /**

@@ -32,8 +32,9 @@ import { Packet } from '../../types/packet';
 import { cidrMatcher } from '../addressFormat';
 import { CompareOp, FieldRef, Literal, Node, SetEntry, parseFilter } from './parser';
 import { FilterSyntaxError } from './lexer';
-import { FieldResolution, isUndissected, layerPresence, resolveField, Scalar } from './fields';
+import { FieldResolution, FilterContext, isUndissected, layerPresence, resolveField, Scalar } from './fields';
 
+export type { FilterContext };
 export type Predicate = (p: Packet) => boolean;
 
 const ALWAYS_FALSE: Predicate = () => false;
@@ -108,7 +109,18 @@ function readSlice(p: Packet, f: FieldRef): number | null {
   return value >>> 0;
 }
 
-function buildReader(f: FieldRef): { read: (p: Packet) => Scalar[]; res: FieldResolution | null } {
+/**
+ * The resolution's reader with the context bound, when it reads one.
+ *
+ * Bound to the context OBJECT, so the reader sees whatever `context.marked` is
+ * when it runs. Every other reader is returned as it is.
+ */
+function bindContext(res: FieldResolution, context: FilterContext | undefined): (p: Packet) => Scalar[] {
+  const read = res.read;
+  return res.contextual === true ? (p) => read(p, context) : read as (p: Packet) => Scalar[];
+}
+
+function buildReader(f: FieldRef, context: FilterContext | undefined): { read: (p: Packet) => Scalar[]; res: FieldResolution | null } {
   if (f.slice) {
     return {
       read: (p) => {
@@ -119,11 +131,11 @@ function buildReader(f: FieldRef): { read: (p: Packet) => Scalar[]; res: FieldRe
     };
   }
   const res = resolveField(f.name);
-  return { read: res.read, res };
+  return { read: bindContext(res, context), res };
 }
 
-function buildCompare(f: FieldRef, op: CompareOp, v: Literal): Predicate {
-  const { read, res } = buildReader(f);
+function buildCompare(f: FieldRef, op: CompareOp, v: Literal, context: FilterContext | undefined): Predicate {
+  const { read, res } = buildReader(f, context);
   const ci = res?.ci ?? false;
 
   if (op === 'matches') {
@@ -175,8 +187,8 @@ function buildCompare(f: FieldRef, op: CompareOp, v: Literal): Predicate {
   return (p) => read(p).some((value) => matchesOne(value, op));
 }
 
-function buildMember(f: FieldRef, entries: SetEntry[], negated: boolean): Predicate {
-  const { read, res } = buildReader(f);
+function buildMember(f: FieldRef, entries: SetEntry[], negated: boolean, context: FilterContext | undefined): Predicate {
+  const { read, res } = buildReader(f, context);
   const ci = res?.ci ?? false;
 
   const ranges: { from: number; to: number }[] = [];
@@ -215,8 +227,8 @@ function buildMember(f: FieldRef, entries: SetEntry[], negated: boolean): Predic
   };
 }
 
-function buildBitmask(f: FieldRef, mask: Literal): Predicate {
-  const { read } = buildReader(f);
+function buildBitmask(f: FieldRef, mask: Literal, context: FilterContext | undefined): Predicate {
+  const { read } = buildReader(f, context);
   const m = parseNumericLiteral(mask.text);
   if (m === null) throw new FilterSyntaxError(`Expected a numeric mask, found "${mask.text}"`, mask.pos);
   return (p) => read(p).some((value) => typeof value === 'number' && (value & m) !== 0);
@@ -225,9 +237,9 @@ function buildBitmask(f: FieldRef, mask: Literal): Predicate {
 /** The analysis verdicts the reference also files as `tcp.analysis.retransmission`. */
 const RETRANSMISSION_KINDS = new Set(['retransmission', 'fast_retransmission', 'spurious_retransmission']);
 
-function buildPresent(f: FieldRef): Predicate {
+function buildPresent(f: FieldRef, context: FilterContext | undefined): Predicate {
   if (f.slice) {
-    const { read } = buildReader(f);
+    const { read } = buildReader(f, context);
     return (p) => read(p).length > 0;
   }
 
@@ -236,7 +248,7 @@ function buildPresent(f: FieldRef): Predicate {
   // registered fields with a value (`bytes_in_flight`), so both are checked.
   if (f.name.startsWith('tcp.analysis.')) {
     const which = f.name.slice('tcp.analysis.'.length);
-    const { read } = buildReader(f);
+    const { read } = buildReader(f, context);
     if (which === 'flags') return (p) => (p.analysisFlags?.length ?? 0) > 0;
     // The reference sets the generic verdict on a fast and a spurious
     // retransmission too, so `tcp.analysis.retransmission` - the filter
@@ -256,37 +268,44 @@ function buildPresent(f: FieldRef): Predicate {
   // the old engine did - which made `dcerpc` in a shipped colour rule paint
   // any frame whose Info happened to contain those letters.
   if (!res.known) return ALWAYS_FALSE;
-  return (p) => res.read(p).length > 0;
+  const read = bindContext(res, context);
+  return (p) => read(p).length > 0;
 }
 
-function build(node: Node): Predicate {
+function build(node: Node, context: FilterContext | undefined): Predicate {
   switch (node.t) {
     case 'or': {
-      const l = build(node.l), r = build(node.r);
+      const l = build(node.l, context), r = build(node.r, context);
       return (p) => l(p) || r(p);
     }
     case 'xor': {
-      const l = build(node.l), r = build(node.r);
+      const l = build(node.l, context), r = build(node.r, context);
       return (p) => l(p) !== r(p);
     }
     case 'and': {
-      const l = build(node.l), r = build(node.r);
+      const l = build(node.l, context), r = build(node.r, context);
       return (p) => l(p) && r(p);
     }
     case 'not': {
-      const e = build(node.e);
+      const e = build(node.e, context);
       return (p) => !e(p);
     }
-    case 'present': return buildPresent(node.f);
-    case 'compare': return buildCompare(node.f, node.op, node.v);
-    case 'member': return buildMember(node.f, node.set, node.negated);
-    case 'bitmask': return buildBitmask(node.f, node.mask);
+    case 'present': return buildPresent(node.f, context);
+    case 'compare': return buildCompare(node.f, node.op, node.v, context);
+    case 'member': return buildMember(node.f, node.set, node.negated, context);
+    case 'bitmask': return buildBitmask(node.f, node.mask, context);
   }
 }
 
-/** Compiles a filter expression. Throws `FilterSyntaxError` on bad syntax. */
-export function compile(expression: string): Predicate {
-  return build(parseFilter(expression));
+/**
+ * Compiles a filter expression. Throws `FilterSyntaxError` on bad syntax.
+ *
+ * `context` carries what lives outside the packet (`FilterContext`). The
+ * predicate keeps the object and reads it on every call, so a caller that
+ * replaces `context.marked` is seen by a predicate it compiled earlier.
+ */
+export function compile(expression: string, context?: FilterContext): Predicate {
+  return build(parseFilter(expression), context);
 }
 
 export interface FilterIssue {

@@ -22,8 +22,23 @@ import { DIRECTION_NAMES, directionOf, isDuplicate } from '../direction';
 import { FIELDS, FIELD_BY_ABBREV, FieldDef, FieldType, LAYERS } from '../dissect/fieldRegistry';
 import { fieldReader } from '../dissect/fieldAccess';
 import { protocolsInFrame } from '../dissect/protocolsInFrame';
+import type { Marks } from '../marks';
 
 export type Scalar = string | number;
+
+/**
+ * What a filter reads that is not on the packet (ADR 0067).
+ *
+ * Today that is the capture's marks: `frame.marked` is true of a frame because
+ * the user marked it after it was stored, so no row can carry it. A matcher
+ * holds this **object**, not the set inside it, and reads `marked` on every
+ * frame it decides: a caller that replaces `context.marked` is read by a
+ * matcher compiled before it did, so a held matcher never keeps a stale set.
+ * (A cache of RESULTS is another matter: see `incrementalFilter.ts`.)
+ */
+export interface FilterContext {
+  marked?: Marks;
+}
 
 export interface FieldResolution {
   /** The canonical name, for error messages and round-tripping. */
@@ -49,8 +64,17 @@ export interface FieldResolution {
    * string is still matched exactly.
    */
   ci: boolean;
-  /** Every value this frame carries for the name; empty when it carries none. */
-  read: (p: Packet) => Scalar[];
+  /**
+   * Every value this frame carries for the name; empty when it carries none.
+   * Only `frame.marked` looks at the context; every other reader ignores it.
+   */
+  read: (p: Packet, context?: FilterContext) => Scalar[];
+  /**
+   * The reader looks at the context. Set so the compiler binds the context only
+   * where it is read and leaves every other reader unwrapped: a wrapper per
+   * read is a cost on the busiest path in the app.
+   */
+  contextual?: true;
 }
 
 /** Types whose values are compared without regard to case. */
@@ -98,7 +122,9 @@ interface AliasDef {
   type: FieldType | 'unknown';
   /** Overrides the default drawn from `type`. */
   ci?: boolean;
-  read: (p: Packet) => Scalar[];
+  read: (p: Packet, context?: FilterContext) => Scalar[];
+  /** See `FieldResolution.contextual`. */
+  contextual?: true;
 }
 
 /**
@@ -114,6 +140,15 @@ const ALIASES: Record<string, AliasDef> = {
   // --- frame -----------------------------------------------------------------
   'frame.number': { type: 'uint', read: (p) => [p.id] },
   'frame.len': { type: 'uint', read: (p) => [p.length] },
+  // Present on every frame, 1 or 0, as in Wireshark: a bare `frame.marked` is
+  // every frame and `frame.marked == 1` the marked ones. Read through the
+  // context, not the packet; with no context nothing is marked. The registry
+  // keeps its tree-only row, as it does for `frame.number`: an alias wins in
+  // `resolveField`, so the name filters and the tree row is untouched.
+  'frame.marked': {
+    type: 'uint', contextual: true,
+    read: (p, context) => [context?.marked?.has(p.id) ? 1 : 0],
+  },
   'frame.cap_len': { type: 'uint', read: (p) => [p.rawBytes.length] },
   'frame.time_relative': { type: 'time', read: (p) => [p.relativeTime] },
   'frame.time_delta': { type: 'time', read: (p) => [p.timeDelta] },
@@ -313,7 +348,10 @@ export function resolveField(name: string): FieldResolution {
   const alias = ALIASES[name];
   if (alias) {
     const ci = alias.ci ?? (alias.type !== 'unknown' && CASE_INSENSITIVE_TYPES.has(alias.type));
-    return { name, type: alias.type, known: true, ci, read: alias.read };
+    return {
+      name, type: alias.type, known: true, ci, read: alias.read,
+      ...(alias.contextual === true ? { contextual: true as const } : {}),
+    };
   }
 
   // Exact first, then case-insensitively. `read` uses the REGISTERED spelling

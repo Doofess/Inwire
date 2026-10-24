@@ -175,6 +175,14 @@ export type ToCapture =
       toId: number;
       startChunk: number;
     }
+  /**
+   * Replaces the open capture's whole set of marked frame ids and persists it
+   * (ADR 0067). One-way: the renderer holds the live set and the store keeps
+   * the file, so there is nothing to answer. Ignored when `captureId` is not
+   * the open capture, so a message that outlives a Clear View or a Reopen
+   * cannot write one capture's marks into the next.
+   */
+  | { type: 'marks'; captureId: string; ids: number[] }
   | { type: 'stats' };
 
 export type FromCapture =
@@ -210,6 +218,12 @@ export type FromCapture =
       storedRange: { first: number; last: number } | null;
       /** The highest id stored, so numbering resumes past it. Zero when empty. */
       lastId: number;
+      /**
+       * The frame ids the user marked, ascending: the capture's own, from
+       * `marks.iwmrk`. Empty for a new capture and for a file that is missing
+       * or torn, which never fails the open (ADR 0067).
+       */
+      marks: number[];
       requestId?: number;
     }
   /**

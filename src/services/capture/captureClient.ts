@@ -110,6 +110,8 @@ export interface StoredCapture {
   chunkCount: number;
   /** The highest stored id, so `packetGenerator` resumes past it. */
   lastId: number;
+  /** The frame ids the user marked, ascending: the capture's own (ADR 0067). */
+  marks: number[];
 }
 
 /**
@@ -267,6 +269,7 @@ class CaptureClient {
             frameCount: message.frameCount,
             chunkCount: message.chunkCount,
             lastId: message.lastId,
+            marks: message.marks,
           });
         }
         break;
@@ -531,6 +534,17 @@ class CaptureClient {
       (requestId) => ({ type: 'open', captureId, requestId }),
       null,
     );
+  }
+
+  /**
+   * Replaces the capture's marked frame ids and has the store keep them
+   * (ADR 0067). One-way, and the store ignores it when `captureId` is not the
+   * capture it has open - so a call that outlives a Clear View or a Reopen
+   * cannot mark the next capture. The renderer holds the live set; this is its
+   * copy on disk, and what a filter scan over disk rows reads.
+   */
+  setMarks(captureId: string, ids: number[]): void {
+    this.send({ type: 'marks', captureId, ids });
   }
 
   /**
