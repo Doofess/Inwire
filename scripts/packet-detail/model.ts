@@ -189,6 +189,28 @@ function makePacket(id: number, over: Partial<Packet> = {}): Packet {
   // A nonsense timestamp must not render "Invalid Date" into the header.
   const broken = buildFrameSummary(makePacket(9, { tsUs: Number.NaN }));
   check('an unusable timestamp degrades to a word, not Invalid Date', [broken.localTime, broken.utcTime], ['unknown', 'unknown']);
+
+  // Both absolute times in one format, the UTC one marked as such. The local
+  // one was the locale's own (`24/10/2026, 15:00:00`) beside an ISO-shaped UTC
+  // line: two formats for one instant, one panel apart.
+  const ms = Date.UTC(2026, 9, 24, 12, 0, 0);
+  const atMicro = buildFrameSummary(makePacket(10, { tsUs: ms * 1000 + 123456 }));
+  check('the UTC time is YYYY-MM-DD HH:MM:SS.ffffff UTC', atMicro.utcTime, '2026-10-24 12:00:00.123456 UTC');
+  checkTrue('the local time has the same shape, without the zone',
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/.test(atMicro.localTime));
+  const d = new Date(ms);
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  check('the local time reads the local clock',
+    atMicro.localTime,
+    `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.123456`);
+
+  const atNano = buildFrameSummary(makePacket(11, {
+    tsUs: ms * 1000 + 123456,
+    tsNanos: BigInt(ms) * 1_000_000n + 123_456_789n,
+    tsPrecision: 9,
+  }));
+  check('a nanosecond capture carries nine digits in UTC', atNano.utcTime, '2026-10-24 12:00:00.123456789 UTC');
+  checkTrue('...and in local time', /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.123456789$/.test(atNano.localTime));
 }
 
 // --- Related frames ---------------------------------------------------------

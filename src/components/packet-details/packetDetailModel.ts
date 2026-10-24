@@ -137,6 +137,20 @@ function formatSeconds(seconds: number, precision: number): string {
   return seconds.toFixed(precision);
 }
 
+/**
+ * `YYYY-MM-DD HH:MM:SS.<digits>` on the local clock or on UTC - one shape for
+ * both absolute times, so the two lines differ only in the hours and the zone.
+ * The locale's own format sat beside an ISO-shaped UTC line before: two
+ * spellings of one instant, read one under the other.
+ */
+export function formatAbsolute(date: Date, fractionalDigits: string, utc: boolean): string {
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  const [y, mo, d, h, mi, s] = utc
+    ? [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()]
+    : [date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), date.getMinutes(), date.getSeconds()];
+  return `${y}-${p2(mo + 1)}-${p2(d)} ${p2(h)}:${p2(mi)}:${p2(s)}.${fractionalDigits}`;
+}
+
 export function buildFrameSummary(packet: Packet): FrameSummary {
   const precision = packet.tsPrecision ?? 6;
   const date = new Date(packet.tsUs / 1000);
@@ -149,12 +163,8 @@ export function buildFrameSummary(packet: Packet): FrameSummary {
   const fractionalDigits = formatSeconds(fractional, precision).slice(2);
 
   const valid = Number.isFinite(packet.tsUs) && !Number.isNaN(date.getTime());
-  const localTime = valid
-    ? `${date.toLocaleString(undefined, { hour12: false })}.${fractionalDigits}`
-    : 'unknown';
-  const utcTime = valid
-    ? `${date.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '')}.${fractionalDigits} UTC`
-    : 'unknown';
+  const localTime = valid ? formatAbsolute(date, fractionalDigits, false) : 'unknown';
+  const utcTime = valid ? `${formatAbsolute(date, fractionalDigits, true)} UTC` : 'unknown';
 
   const captured = packet.rawBytes?.length ?? 0;
 
