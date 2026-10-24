@@ -112,6 +112,7 @@ const NOT_TESTS: Record<string, string> = {
   'electron/speed-test-drive.ts': 'runs one real speed test against Cloudflare in the built app and prints the numbers - an outbound test by design, and the network decides the answer',
   'speed-test/gen-colos.ts': 'generator; fetches Cloudflare\'s data-centre list and WRITES src/services/speedTest/colos.ts - run by hand, committed with its output',
   'perf/parallel-threads.ts': 'measurement; dissects a capture on worker_threads shards and prints frames a second against one core, with no pass mark (ADR 0053 phase 3)',
+  'perf/row-codec.ts': 'measurement; times structured clone, JSON and the chunk codec carrying dissected rows between threads, with no pass mark (ADR 0053 phase 6)',
   'monitoring/measurement.ts':
     'measurement and human step (ADRs 0058-0059); the journal mode writes ~2.7 GB to temp, socket, journal and rollup print '
     + 'machine properties with no pass mark, and the firewall mode needs the installed agent, WSL and a person to answer the Windows Security prompt',
