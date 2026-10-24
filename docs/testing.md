@@ -139,7 +139,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | Registry abbreviations exist in Wireshark | `scripts/dissect/wireshark-abbrevs.ts` |
 | The filter engine holds its 50,000-frame budget | `scripts/filter/engine.ts` |
 | No handler or preload method for the key log takes a path | `scripts/electron/keylog-follow.ts` |
-| Main never sends to a crashed page; a crash asks Reload / Quit | `scripts/electron/renderer-life.ts`, `scripts/electron/smoke.ts` |
+| Main never sends to a crashed page; a crash loads the crash screen (Reload / Quit), the OS box only if that dies | `scripts/electron/renderer-life.ts`, `scripts/electron/smoke.ts` |
 | Reverse DNS has at most four lookups in flight | `scripts/geoip/reverse-dns-queue.ts` |
 | One icon set; `Map` and `Image` aliased | `scripts/themes/icon-set.ts` |
 | Scripts launch the app in the background | `scripts/electron/background-launch.ts` |

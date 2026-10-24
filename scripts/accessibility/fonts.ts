@@ -147,10 +147,16 @@ const themeBlock = css.match(/^@theme\b[^{]*\{[\s\S]*?^\}/m)?.[0] ?? '';
 check('the remap is not in @theme, where it would apply to every OS',
   /--font-weight-medium/.test(themeBlock), false);
 
-const entry = withoutComments(text('src/main.tsx'));
-check('main.tsx stamps data-platform from the bridge before rendering',
-  /documentElement\.dataset\.platform\s*=\s*window\.inwire\?\.platform/.test(entry)
-    && entry.indexOf('dataset.platform') < entry.indexOf('createRoot('), true);
+const providers = withoutComments(text('src/components/common/RootProviders.tsx'));
+check('RootProviders stamps data-platform from the bridge',
+  /documentElement\.dataset\.platform\s*=\s*window\.inwire\?\.platform/.test(providers)
+    && /stampPlatform\(\);/.test(providers), true);
+for (const entryFile of ['src/main.tsx', 'src/crash.tsx']) {
+  const entry = withoutComments(text(entryFile));
+  check(`${entryFile} prepares the document before rendering`,
+    entry.indexOf('prepareDocument();') > -1
+      && entry.indexOf('prepareDocument();') < entry.indexOf('createRoot('), true);
+}
 
 // Segoe UI Variable's figures are proportional by default - a 1 is narrower
 // than a 0 - and only `tnum` lines a column of them up. Static Segoe UI was

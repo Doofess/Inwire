@@ -198,6 +198,10 @@ console.log('\n--- what the handler serves, and what it refuses ---\n');
   check('an extension-less path is the shell', kind('/settings'), 'shell');
   check('a dotfile is not an extension', kind('/.well-known'), 'shell');
 
+  const crash = decideServe('/crash.html');
+  check('the crash screen is a file served as HTML', [crash.kind, crash.kind === 'file' && crash.mime],
+    ['file', 'text/html; charset=utf-8']);
+
   const asset = decideServe('/assets/index-abc123.js');
   check('a script is a file', [asset.kind, asset.kind === 'file' && asset.mime],
     ['file', 'text/javascript; charset=utf-8']);

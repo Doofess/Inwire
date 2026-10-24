@@ -105,7 +105,7 @@ checkTrue('the default dark theme is still called `dark`',
 // The failure this prevents is silent, not loud. next-themes does not validate
 // the stored value against `themes`, so a name that maps nowhere leaves the app
 // with a class no stylesheet defines: light chrome, a dark packet palette, and
-// no `dark:` utilities. See migrateStoredTheme in main.tsx.
+// no `dark:` utilities. See migrateStoredTheme in RootProviders.tsx.
 for (const [retired, target] of Object.entries(RETIRED_THEMES)) {
   checkTrue(`${retired} migrates to a theme that exists (${target})`,
     THEME_NAMES.includes(target));

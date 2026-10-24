@@ -1,5 +1,5 @@
 /**
- * Whether main may talk to a page, and what to ask when the page dies.
+ * Whether main may talk to a page, and what to do when the page dies.
  *
  * Kept free of Electron so `scripts/electron/renderer-life.ts` can hold both
  * decisions under plain tsx. A crashed renderer keeps its BrowserWindow and its
@@ -29,38 +29,33 @@ export interface CrashDetails {
   exitCode: number;
 }
 
-export interface CrashPrompt {
-  message: string;
-  detail: string;
-}
-
-/** Reload is first, and it is also what Esc and the default pick. */
-export const CRASH_BUTTONS = ['Reload', 'Quit'] as const;
-
-const CRASH_FOLLOW_UP =
-  'Reload brings the window back. Quit closes Inwire, and still asks first if a capture is unsaved.';
-
 /**
- * The box shown after a crash, or null when the process simply exited cleanly,
- * which is not a crash. The reason is put in plain words because Electron's
- * own strings ("integrity-failure") mean nothing to the person reading.
+ * What main does when a page is gone: nothing for a clean exit, which is not a
+ * crash; the crash screen, a page loaded into the same window; or the OS's box.
+ *
+ * The box is only for the crash screen dying itself. Loading the crash screen
+ * over a crash screen that keeps dying would loop for ever, and a page that
+ * cannot stay up is the one case where the OS's task dialog (light whatever the
+ * theme, but alive) beats a window that blinks. The dead page's own URL is the
+ * evidence, so no flag has to be remembered across the reload; its query is
+ * ignored, because the screen carries the reason there.
  */
-export function crashPrompt(details: CrashDetails): CrashPrompt | null {
-  if (details.reason === 'clean-exit') return null;
-  let first: string;
-  switch (details.reason) {
-    case 'crashed': first = `The page crashed (exit code ${details.exitCode}).`; break;
-    case 'oom': first = 'The page ran out of memory.'; break;
-    case 'killed': first = 'The page was ended by another program or by Windows.'; break;
-    case 'launch-failed': first = 'The page could not start.'; break;
-    case 'integrity-failure': first = "Windows refused to run the page's code."; break;
-    default: first = `The page exited unexpectedly (exit code ${details.exitCode}).`;
+export function crashResponse(
+  details: CrashDetails,
+  deadUrl: string,
+): 'none' | 'screen' | 'native' {
+  if (details.reason === 'clean-exit') return 'none';
+  let pathname = '';
+  try {
+    pathname = new URL(deadUrl).pathname;
+  } catch {
+    // Not a URL: the page was never the crash screen.
   }
-  return { message: "Inwire's window stopped working", detail: `${first} ${CRASH_FOLLOW_UP}` };
+  return pathname.endsWith('/crash.html') ? 'native' : 'screen';
 }
 
 /**
- * A background launch shows no box (a modal one would sit in front of the
+ * A background launch shows no OS box (a modal one would sit in front of the
  * owner and hang the test), so a test names the answer in
  * `INWIRE_CRASH_ANSWER`. Anything else is no answer.
  */
