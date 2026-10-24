@@ -62,6 +62,8 @@ export function nextMarked(
 
 /** The marks file's version. A reader that finds another treats the file as torn. */
 const VERSION = 1;
+const ENCODER = new TextEncoder();
+const DECODER = new TextDecoder('utf-8', { fatal: true });
 
 /**
  * The bytes of `marks.iwmrk`: JSON `{"v":1,"ids":[...]}`, ids ascending.
@@ -71,7 +73,7 @@ const VERSION = 1;
  */
 export function encodeMarks(ids: Marks): Uint8Array {
   const sorted = [...ids].sort((a, b) => a - b);
-  return new TextEncoder().encode(JSON.stringify({ v: VERSION, ids: sorted }));
+  return ENCODER.encode(JSON.stringify({ v: VERSION, ids: sorted }));
 }
 
 /**
@@ -82,7 +84,7 @@ export function decodeMarks(bytes: Uint8Array): number[] | null {
   if (bytes.length === 0) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    parsed = JSON.parse(DECODER.decode(bytes));
   } catch {
     return null;
   }
