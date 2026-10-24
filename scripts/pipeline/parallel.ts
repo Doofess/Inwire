@@ -17,6 +17,12 @@
  *   - two adversarial assignments: every new connection to the next shard in
  *     turn, and everything on one shard but the first connection.
  *
+ * Those runs are light: a shard row stays in its pack, and the digest rebuilds
+ * it from the pack, its bytes and its overlay. A 7-shard run with `decodeRows`
+ * (more than one interface) must agree too, and so must a run that is handed a
+ * socket table a third of the way in, which a shard annotates with and the
+ * single Worker's sequential path does at the same frame (ADR 0053 phase 6).
+ *
  * Then every frame of the 7-shard run is rebuilt from its record, as the
  * detail pane would, and must draw the tree it drew at arrival.
  *
@@ -46,7 +52,10 @@ import { FrameDissector } from '../../src/services/pipeline/frameDissector';
 import { Coordinator, WatchedTcpOrder, type CoordFrame, type Merged, type ShardRoute } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
 import { unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
-import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
+import { applyOverlay } from '../../src/services/pipeline/rowOverlay';
+import { OpWriter, readOps, type FromShard, type ToShard } from '../../src/services/pipeline/shardProtocol';
+import { FlowAnnotationStore } from '../../src/services/flowAnnotations';
+import { annotatePacket } from '../../src/services/dissect/processFields';
 import { NO_HOST, type HostIdentity } from '../../src/services/direction';
 import type { InfoPatch } from '../../src/services/dissect/types';
 import type { Packet, ProtocolLayer } from '../../src/types/packet';
@@ -126,15 +135,26 @@ function trackers(sequencer: Sequencer) {
   };
 }
 
-/** The single Worker: one Sequencer, one recorder, every frame in order. */
-function sequential(capture: Capture): string[] {
+type Table = Parameters<FlowAnnotationStore['apply']>[0];
+
+/** A socket table, and the index of the first frame that arrives after it. */
+interface TableAt { at: number; table: Table }
+
+/**
+ * The single Worker: one Sequencer, one recorder, every frame in order. Each
+ * row is annotated as `ingest` does, with the table as it stood at its index.
+ */
+function sequential(capture: Capture, table?: TableAt): string[] {
   const dissector = new FrameDissector(trackers(new Sequencer()), FIXED_ENV, null);
   dissector.host = capture.host ?? dissector.host;
-  return capture.inputs.map((input) => {
+  const annotations = new FlowAnnotationStore();
+  return capture.inputs.map((input, index) => {
+    if (table !== undefined && index === table.at) annotations.apply(table.table, 0);
     const bytes = input.bytes.slice();
     let out: string;
     try {
       const d = dissector.dissect({ ...input, bytes });
+      annotatePacket(d.packet, annotations);
       out = digest(d.packet, d.packet.layers, d.record, d.derived, d.icmpMatchedRequestFrameId, d.infoPatches);
     } catch (err) {
       out = `error failed to dissect a captured frame: ${String(err)}`;
@@ -167,19 +187,59 @@ interface Run {
   crossLane: number;
   barrierMismatch: number;
   ms: number;
+  /** Packs the coordinator decoded, packs the shards sent, and results whose side said `needsRow`. */
+  packsDecoded: number;
+  packs: number;
+  needsRowResults: number;
+}
+
+interface RunOptions {
+  /** Keep every merged frame (the revisit and pack checks read them). */
+  keep?: boolean;
+  /** The coordinator's `decodeRows`: more than one interface. */
+  decodeRows?: boolean;
+  /** Broadcast this table once the frames before `at` are dispatched. */
+  table?: TableAt;
+  /** Broadcast a table and then `flowsClear` before any frame. */
+  clearTable?: Table;
 }
 
 /** The coordinator and its shards, every message through a structured clone, delivered shuffled. */
-function parallel(capture: Capture, config: Config, keep = false): Run {
+function parallel(capture: Capture, config: Config, options: RunOptions = {}): Run {
+  const keep = options.keep ?? false;
   const random = rng(capture.inputs.length * 31 + config.shards);
   const shardInbox: { message: ToShard }[][] = Array.from({ length: config.shards }, () => []);
   const coordInbox: { shard: number; message: FromShard }[] = [];
+  let packs = 0;
+  let needsRowResults = 0;
   const shards = Array.from({ length: config.shards }, (_, s) => new Shard((message, transfer) => {
+    if (message.type === 'results') {
+      if (message.pack !== null) packs++;
+      for (const result of message.results) if (result.side?.needsRow) needsRowResults++;
+    }
     coordInbox.push({ shard: s, message: structuredClone(message, { transfer: transfer as ArrayBuffer[] }) });
   }, { shards: config.shards, cacheFrames: 64, env: FIXED_ENV, withTrees: true }));
 
   const digests: string[] = new Array(capture.inputs.length);
   const merged: Merged[] = [];
+  // The Worker's own store: lane 0's rows are annotated at the merge, as `emitMerged` does.
+  const annotations = new FlowAnnotationStore();
+  let tableApplied = false;
+  // A shard row that stayed in its pack, rebuilt as the window would: decoded
+  // once per pack, its bytes beside it, the merge's overlay over it.
+  const decodedPacks = new Map<RowPack, Packet[]>();
+  const rebuilt = (m: Merged): Packet => {
+    const ref = m.packed!;
+    let rows = decodedPacks.get(ref.pack);
+    if (rows === undefined) {
+      if (decodedPacks.size >= 64) decodedPacks.delete(decodedPacks.keys().next().value!);
+      decodedPacks.set(ref.pack, rows = unpackRows(ref.pack));
+    }
+    const row = rows[ref.index];
+    row.rawBytes = m.bytes ?? new Uint8Array(0);
+    if (m.overlay !== undefined) applyOverlay(row, m.overlay);
+    return row;
+  };
   const sequencer = new Sequencer(new WatchedTcpOrder());
   const coordinator = new Coordinator({
     shards: config.shards,
@@ -194,13 +254,21 @@ function parallel(capture: Capture, config: Config, keep = false): Run {
       shardInbox[shard].push({ message: structuredClone(message, { transfer: transfer as ArrayBuffer[] }) });
     },
     emit: (m) => {
+      if (options.table !== undefined && !tableApplied && m.id - 1 >= options.table.at) {
+        annotations.apply(options.table.table, 0);
+        tableApplied = true;
+      }
+      // A shard annotated its own rows; lane 0's are the Worker's to annotate.
+      if (m.lane === 0 && m.packet !== undefined) annotatePacket(m.packet, annotations);
       const layers = m.lane === 0 ? m.packet?.layers : m.layers;
-      digests[m.id - 1] = digest(m.packet, layers, m.record, m.derived, m.icmpMatchedRequestFrameId, m.infoPatches, m.error);
+      const packet = m.packet ?? (m.packed !== undefined ? rebuilt(m) : undefined);
+      digests[m.id - 1] = digest(packet, layers, m.record, m.derived, m.icmpMatchedRequestFrameId, m.infoPatches, m.error);
       if (keep) merged.push({ ...m, layers });
-      const bytes = m.packet?.rawBytes;
+      const bytes = packet?.rawBytes;
       if (bytes && bytes.byteLength > 0 && !keep) structuredClone(bytes.buffer, { transfer: [bytes.buffer as ArrayBuffer] });
     },
   });
+  coordinator.decodeRows = options.decodeRows ?? false;
   coordinator.lane0.host = capture.host ?? coordinator.lane0.host;
   if (capture.host) {
     coordinator.broadcast({
@@ -229,11 +297,27 @@ function parallel(capture: Capture, config: Config, keep = false): Run {
 
   const t0 = performance.now();
   const CHUNK = 257;
-  for (let i = 0; i < capture.inputs.length; i += CHUNK) {
-    const chunk: CoordFrame[] = capture.inputs.slice(i, i + CHUNK).map((input) => ({ ...input, bytes: input.bytes.slice() }));
+  let tableSent = false;
+  if (options.clearTable !== undefined) {
+    // Told, then told to forget: no frame may be annotated.
+    coordinator.broadcast({ type: 'flows', table: options.clearTable, nowUs: 0 });
+    coordinator.broadcast({ type: 'flowsClear' });
+  }
+  const total = capture.inputs.length;
+  const tableAt = options.table?.at ?? -1;
+  for (let i = 0; i < total;) {
+    // A chunk never straddles the table: the frames before it are dispatched, then it is broadcast.
+    let end = Math.min(i + CHUNK, total);
+    if (!tableSent && i < tableAt && tableAt < end) end = tableAt;
+    if (!tableSent && options.table !== undefined && i === tableAt) {
+      coordinator.broadcast({ type: 'flows', table: options.table.table, nowUs: 0 });
+      tableSent = true;
+    }
+    const chunk: CoordFrame[] = capture.inputs.slice(i, end).map((input) => ({ ...input, bytes: input.bytes.slice() }));
     coordinator.dispatch(chunk);
     const steps = Math.floor(random() * 6);
     for (let k = 0; k < steps; k++) if (!step()) break;
+    i = end;
   }
   while (step()) { /* until every message is delivered */ }
   let idle = false;
@@ -242,6 +326,7 @@ function parallel(capture: Capture, config: Config, keep = false): Run {
   return {
     digests, merged, lanes: [...coordinator.perLane], crossLane: coordinator.crossLane,
     barrierMismatch: coordinator.barrierMismatch, ms: performance.now() - t0,
+    packsDecoded: coordinator.packsDecoded, packs, needsRowResults,
   };
 }
 
@@ -291,6 +376,55 @@ function firstDiff(a: string[], b: string[]): number {
   return -1;
 }
 
+/** A socket table naming the capture's first `max` TCP flows' local-looking endpoints. */
+function tableOf(capture: Capture, max: number): Table {
+  const dissector = new FrameDissector(trackers(new Sequencer()), FIXED_ENV, null);
+  dissector.host = capture.host ?? dissector.host;
+  const endpoints = new Map<string, [string, string, number, number]>();
+  for (const input of capture.inputs.slice(0, 8192)) {
+    if (endpoints.size >= max) break;
+    try {
+      const { packet } = dissector.dissect({ ...input, bytes: input.bytes.slice() });
+      if (!packet.frameProtocols?.includes('tcp') || packet.sourcePort === undefined) continue;
+      const key = `${packet.source}|${packet.sourcePort}`;
+      if (!endpoints.has(key)) endpoints.set(key, ['tcp', packet.source, packet.sourcePort, 1000 + endpoints.size]);
+    } catch { /* a frame that fails to dissect names no flow */ }
+  }
+  const procs: Table['procs'] = {};
+  for (const entry of endpoints.values()) procs[String(entry[3])] = { name: `proc${entry[3]}.exe`, exe: '' };
+  return { full: true, procs, add: [...endpoints.values()], gone: [] };
+}
+
+/**
+ * A socket table that arrives a third of the way in annotates what one core
+ * annotates (Review Focus 1), and `flowsClear` empties a shard's table.
+ */
+async function tableRuns(capture: Capture, want: string[], withClear: boolean): Promise<void> {
+  const table = tableOf(capture, 50);
+  if (table.add.length === 0) {
+    console.log(`SKIP  ${capture.name}: no TCP flow to name in a socket table`);
+    return;
+  }
+  const at = Math.floor(capture.inputs.length / 3);
+  const wantTable = sequential(capture, { at, table });
+  let annotated = 0;
+  for (let i = 0; i < want.length; i++) if (wantTable[i] !== want[i]) annotated++;
+  const config: Config = { label: 'N=7 by connection', shards: 7, route: 'connection' };
+  const run = parallel(capture, config, { table: { at, table } });
+  const diff = firstDiff(wantTable, run.digests);
+  check(`${capture.name}, ${config.label}: a socket table broadcast after frame ${at.toLocaleString()} annotates what one core annotates`,
+    diff === -1 && annotated > 0,
+    diff !== -1 ? `frame ${diff + 1} differs${VERBOSE ? `: ${lineDiff(wantTable[diff], run.digests[diff])}` : ''}`
+      : 'the table annotated no row, so nothing was compared');
+  console.log(`        ${table.add.length} flows in the table, ${annotated.toLocaleString()} rows annotated`);
+  if (!withClear) return;
+  const cleared = parallel(capture, config, { clearTable: table });
+  const clearedAt = firstDiff(want, cleared.digests);
+  check(`${capture.name}, ${config.label}: flowsClear empties a shard's table, so nothing is annotated`,
+    clearedAt === -1 && annotated > 0,
+    clearedAt !== -1 ? `frame ${clearedAt + 1} was annotated` : 'the table annotated no row, so the clear proved nothing');
+}
+
 async function equality(capture: Capture, configs: Config[]): Promise<void> {
   keyLog.clear();
   if (capture.keys !== null) keyLog.add(capture.keys);
@@ -306,6 +440,24 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
         at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], run.digests[at])}` : ''}`
           : `crossLane ${run.crossLane}, barrierMismatch ${run.barrierMismatch}`);
       console.log(`        lanes ${run.lanes.join(' / ')}; ${run.ms.toFixed(0)} ms in one process (one core: ${oneCore.toFixed(0)} ms)`);
+      check(`${capture.name}, ${config.label}: a light run decodes only packs holding a needsRow row`,
+        run.packsDecoded <= run.needsRowResults && (run.needsRowResults > 0 || run.packsDecoded === 0),
+        `${run.packsDecoded} packs decoded, ${run.needsRowResults} results with needsRow`);
+      console.log(`        ${run.packsDecoded.toLocaleString()} of ${run.packs.toLocaleString()} packs decoded,`
+        + ` ${run.needsRowResults.toLocaleString()} needsRow results`);
+    }
+    if (capture.name === 'burst') {
+      await tableRuns(capture, want, false);
+    } else {
+      const seven: Config = { label: 'N=7 by connection, decodeRows', shards: 7, route: 'connection' };
+      const decoded = parallel(capture, seven, { decodeRows: true });
+      const at = firstDiff(want, decoded.digests);
+      check(`${capture.name}, ${seven.label}: all ${want.length.toLocaleString()} frames as one core dissects them`,
+        at === -1 && decoded.crossLane === 0 && decoded.barrierMismatch === 0,
+        at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], decoded.digests[at])}` : ''}` : '');
+      check(`${capture.name}, ${seven.label}: every pack the shards sent was decoded`,
+        decoded.packsDecoded === decoded.packs, `${decoded.packsDecoded} of ${decoded.packs}`);
+      await tableRuns(capture, want, true);
     }
   } finally {
     keyLog.clear();
@@ -370,7 +522,8 @@ function revisits(capture: Capture): void {
   keyLog.clear();
   if (capture.keys !== null) keyLog.add(capture.keys);
   try {
-    const run = parallel(capture, { label: 'revisit', shards: 7, route: 'connection' }, true);
+    // Decoded, so every shard row is an object to compare against its pack.
+    const run = parallel(capture, { label: 'revisit', shards: 7, route: 'connection' }, { keep: true, decodeRows: true });
     const bytes = (id: number) => capture.inputs[id - 1]?.bytes;
     let rebuilt = 0;
     let missed = 0;
@@ -404,7 +557,28 @@ function revisits(capture: Capture): void {
   }
 }
 
+/** A hole before a frame rides in its op, beside the nanoseconds, and is absent when there was none. */
+function holeRidesInTheOp(): void {
+  const facts = { index: 0, pnum: 1, sinceFirst: 0, sincePrev: 0 };
+  const pair = { a: 'a', b: 'b', facts };
+  const frame = (id: number, extra: { nanosRemainder?: number; holeBefore?: number } | undefined) => ({
+    id, bytes: new Uint8Array(4), tsUs: id, relativeTime: 0, timeDelta: 0, origLen: 4, linktype: 1,
+    ...(extra === undefined ? {} : { facts: extra }),
+  });
+  const writer = new OpWriter();
+  writer.tcp(frame(1, { holeBefore: 7 }), 'ip', pair, pair, 'k', 0);
+  writer.tcp(frame(2, undefined), 'ip', pair, pair, 'k', 0);
+  writer.fragment(frame(3, { nanosRemainder: 250, holeBefore: 3 }), 'ip', pair, pair, { nextStreamId: 1, forgets: null });
+  writer.tcp(frame(4, { nanosRemainder: 9 }), 'ip', pair, pair, 'k', 0);
+  const ops = [...readOps(structuredClone(writer.seal()))].map((op) => op.frame!.facts);
+  check('a hole rides in the op: holeBefore 7 comes back as 7, beside the nanoseconds when there are some',
+    ops[0]?.holeBefore === 7 && ops[1] === undefined && ops[2]?.holeBefore === 3 && ops[2]?.nanosRemainder === 250
+      && ops[3]?.holeBefore === undefined && ops[3]?.nanosRemainder === 9,
+    JSON.stringify(ops));
+}
+
 async function main(): Promise<void> {
+  holeRidesInTheOp();
   const captures: Capture[] = [];
   for (const fixture of FIXTURES) {
     if (!existsSync(fixture.path)) {

@@ -17,6 +17,8 @@ import type { BarrierHint, BarrierReport } from '../dissect/shardNumbering';
 import type { InfoPatch } from '../dissect/types';
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { RowPack } from './rowPack';
+import type { RowSide } from './rowSteps';
+import type { FlowAnnotationStore } from '../flowAnnotations';
 
 /** A frame, as a lane dissects it. */
 export interface WireFrame {
@@ -29,7 +31,12 @@ export interface WireFrame {
   linktype: number;
   /** The agent's adapter index, looked up in the shard's copy of the table. */
   iface?: number;
-  facts?: { nanosRemainder?: number };
+  /**
+   * `holeBefore`: the frames the live stream skipped just before this one,
+   * which `markLiveGap` writes into the row. A shard writes it because it is
+   * the one packing the row.
+   */
+  facts?: { nanosRemainder?: number; holeBefore?: number };
 }
 
 /** One conversation index's answer, and the two endpoints it was asked for. */
@@ -65,7 +72,9 @@ const ETH_A = 20;
 const ETH_B = 21;
 const IP_A = 22;
 const IP_B = 23;
-const SLOTS = 24;
+/** The frames skipped just before this one; -1: none (a hole is always at least 1). */
+const HOLE = 24;
+const SLOTS = 25;
 
 /** A batch of ops for one shard, as it travels. */
 export interface OpBatch {
@@ -116,6 +125,7 @@ export class OpWriter {
     nums[at + LINKTYPE] = frame.linktype;
     nums[at + IFACE] = frame.iface ?? -1;
     nums[at + NANOS] = frame.facts === undefined ? Number.NaN : frame.facts.nanosRemainder ?? -1;
+    nums[at + HOLE] = frame.facts?.holeBefore ?? -1;
     nums[at + FAMILY] = family === 'ip' ? 0 : 1;
     writeFacts(nums, at + ETH, eth.facts);
     writeFacts(nums, at + IP, ip.facts);
@@ -194,11 +204,17 @@ export function* readOps(batch: OpBatch): Generator<ReadOp> {
     }
     const nanos = nums[at + NANOS];
     const iface = nums[at + IFACE];
+    const hole = nums[at + HOLE];
     const wire: WireFrame = {
       id: nums[at + ID], bytes: bytes[frame++], tsUs: nums[at + TS_US], relativeTime: nums[at + RELATIVE],
       timeDelta: nums[at + DELTA], origLen: nums[at + ORIG_LEN], linktype: nums[at + LINKTYPE],
       ...(iface >= 0 ? { iface } : {}),
-      ...(Number.isNaN(nanos) ? {} : { facts: { nanosRemainder: nanos < 0 ? undefined : nanos } }),
+      ...(Number.isNaN(nanos) && hole < 0 ? {} : {
+        facts: {
+          ...(Number.isNaN(nanos) ? {} : { nanosRemainder: nanos < 0 ? undefined : nanos }),
+          ...(hole >= 0 ? { holeBefore: hole } : {}),
+        },
+      }),
     };
     const eth: Numbered = { a: strings[nums[at + ETH_A]], b: strings[nums[at + ETH_B]], facts: readFacts(nums, at + ETH) };
     const ip: Numbered = { a: strings[nums[at + IP_A]], b: strings[nums[at + IP_B]], facts: readFacts(nums, at + IP) };
@@ -246,6 +262,16 @@ export type ToShard =
   | { type: 'interfaces'; interfaces: [number, ShardInterface][] }
   | { type: 'keylog'; text: string }
   | { type: 'keylogClear' }
+  /**
+   * A `socket_table` message, applied to the shard's own annotation store with
+   * the Worker's clock (`nowUs`), never the shard's: a shard annotates every
+   * frame with the table the single Worker would have had at that frame. The
+   * coordinator sends it in dispatch order, behind every frame already given
+   * to the shard.
+   */
+  | { type: 'flows'; table: Parameters<FlowAnnotationStore['apply']>[0]; nowUs: number }
+  /** The Worker's annotation store was cleared: a new capture, or a lost link. */
+  | { type: 'flowsClear' }
   | { type: 'detail'; requestId: number; id: number };
 
 /** What one frame's dissection on a shard produced. */
@@ -255,6 +281,12 @@ export interface ShardResult {
   row?: number;
   /** The frame's bytes, which travel beside the pack rather than in its row. */
   bytes?: Uint8Array;
+  /**
+   * What the merge needs from this row without decoding it: the fingerprint's
+   * and facts' inputs, a `tls.stream` still a placeholder (`rowSteps.ts`).
+   * Absent when every key would be.
+   */
+  side?: RowSide;
   record?: Uint8Array;
   derived?: Uint8Array | null;
   deferredAt?: readonly number[];

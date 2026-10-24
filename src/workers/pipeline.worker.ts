@@ -480,6 +480,8 @@ function startParallel(shards: number): void {
     emit: (merged) => emitMerged(merged),
   });
   coordinator.lane0.host = host;
+  // Every row decoded, as before: the merge below still reads each one whole.
+  coordinator.decodeRows = true;
   for (let s = 0; s < shards; s++) {
     // The same script, in its shard role (`shardRole.ts`).
     const worker = new Worker(self.location.href, { type: 'module', name: `${SHARD_NAME}${s}` });
@@ -567,7 +569,7 @@ function emitMerged(merged: Merged): void {
 
   // After the last write to the row, so the overlay carries every one of them.
   // The mark it is compared with was taken when the coordinator unpacked the row.
-  queueRow(packet, merged.packed ?? null, merged.packed === undefined ? null : overlayOf(packet, merged.packed.mark));
+  queueRow(packet, merged.packed ?? null, merged.packed?.mark === undefined ? null : overlayOf(packet, merged.packed.mark));
   if (merged.icmpMatchedRequestFrameId !== undefined) {
     pendingIcmpReplies.push({ requestFrameId: merged.icmpMatchedRequestFrameId, replyId: id });
   }

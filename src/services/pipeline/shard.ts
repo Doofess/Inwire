@@ -25,9 +25,11 @@ import { LIVE_ENV, MAX_TOTAL_BODY_BYTES, type DissectEnv } from '../dissect/diss
 import { ShardSequencer, settleTreeTls } from '../dissect/shardNumbering';
 import { applyInfoPatch } from '../dissect/infoPatch';
 import { keyLog } from '../tls/keyLog';
+import { FlowAnnotationStore } from '../flowAnnotations';
 import { FrameDissector } from './frameDissector';
 import { FifoMap } from './fifoMap';
 import { packRows } from './rowPack';
+import { rowSide, shardRowSteps } from './rowSteps';
 import {
   OP_FORGET, OP_FRAGMENT, OP_TCP, readOps,
   type FromShard, type ShardInterface, type ShardResult, type ToShard, type WireFrame,
@@ -69,6 +71,13 @@ export class Shard {
   /** Each adapter's clock, where the Worker knows it (`ShardInterface.tsPrecision`). */
   private precision = new Map<number, number>();
   private readonly env: DissectEnv;
+  /**
+   * The shard's copy of the Worker's socket table, so it annotates a row before
+   * packing it (`rowSteps.ts`). Told by `flows`, emptied by `flowsClear`; a
+   * capture's `reset` leaves it alone, because the Worker clears its own store
+   * beside it and says so.
+   */
+  private readonly annotations = new FlowAnnotationStore();
 
   constructor(
     private readonly post: (message: FromShard, transfer: Transferable[]) => void,
@@ -132,6 +141,13 @@ export class Shard {
         keyLog.clear();
         // A cached tree can hold what the key log opened.
         this.trees.clear();
+        return;
+      case 'flows':
+        // The Worker's clock, not this thread's: lives are stamped by it.
+        this.annotations.apply(message.table, message.nowUs);
+        return;
+      case 'flowsClear':
+        this.annotations.clear();
         return;
       case 'detail': {
         const tree = this.trees.get(message.id) ?? null;
@@ -206,24 +222,29 @@ export class Shard {
       });
       const packet = d.packet;
       const layers = packet.layers;
+      // The clock `emitMerged` writes, by its rule - the adapter's, or 6 where
+      // the Worker did not say (a miss in its table, and a frame with no
+      // adapter, are both 6) - written here so it rides in the pack rather than
+      // in an overlay on every row.
+      const precision = (frame.iface === undefined ? undefined : this.precision.get(frame.iface)) ?? 6;
+      packet.tsPrecision = precision;
+      if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.facts?.nanosRemainder ?? 0);
+      // What `ingest` does next, on the tree still in hand: the process row and
+      // a gap mark land in the cached tree and in the row about to be packed.
+      shardRowSteps(packet, this.annotations, frame.facts?.holeBefore);
+      const side = rowSide(packet, this.dissector.host);
       result = {
         id, record: d.record, derived: d.derived,
+        ...(side !== undefined ? { side } : {}),
         ...(d.deferredAt.length > 0 ? { deferredAt: d.deferredAt } : {}),
         ...(d.icmpMatchedRequestFrameId !== undefined ? { icmpMatchedRequestFrameId: d.icmpMatchedRequestFrameId } : {}),
         ...(d.infoPatches ? { infoPatches: d.infoPatches } : {}),
+        // After the steps, so the copy holds the rows they wrote.
         ...(this.options.withTrees ? { layers: structuredClone(layers) } : {}),
       };
       this.cache(id, layers);
       packet.layers = [];
       row = packet;
-      // The clock `emitMerged` writes, by its rule, written here so it rides in
-      // the pack rather than in an overlay on every row. Where the Worker did
-      // not say, the merge still writes it and the overlay carries it.
-      const precision = frame.iface === undefined ? undefined : this.precision.get(frame.iface);
-      if (precision !== undefined) {
-        packet.tsPrecision = precision;
-        if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.facts?.nanosRemainder ?? 0);
-      }
       // A tree still cached here gains the links this frame wrote, as the
       // single Worker's cache does.
       for (const patch of d.infoPatches ?? []) this.patchTree(patch);
