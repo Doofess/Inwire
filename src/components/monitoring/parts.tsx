@@ -24,6 +24,13 @@ export const BUTTON_SECONDARY = `inline-flex h-8 items-center justify-center gap
   font-semibold text-foreground transition-colors hover:bg-accent cursor-pointer disabled:cursor-not-allowed disabled:opacity-50
   focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background`;
 
+/** BUTTON_SECONDARY's size for an action that deletes: a `--destructive` outline, filled on hover. */
+export const BUTTON_DESTRUCTIVE = `inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-destructive/60 bg-transparent px-3
+  text-xs font-semibold text-destructive transition-colors hover:border-destructive hover:bg-destructive
+  hover:text-destructive-foreground cursor-pointer disabled:cursor-not-allowed disabled:opacity-50
+  disabled:hover:bg-transparent disabled:hover:text-destructive
+  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background`;
+
 /** The field's surface without a width, for a control sized by its row rather than filling it. */
 export const INPUT_SURFACE = `h-8 rounded-md border border-input bg-background px-2.5 font-mono text-xs text-foreground
   placeholder:text-muted-foreground/70 disabled:opacity-60

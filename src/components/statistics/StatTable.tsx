@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
+import { MICRO_LABEL } from '../common/typography';
 
 /**
  * The sortable table the statistics tabs are made of.
@@ -89,7 +90,7 @@ export function StatTable<T>({
     <div className="overflow-x-auto">
       <table className="w-full text-left border-collapse font-mono text-[11px]">
         <thead className="sticky top-0 z-10 bg-card">
-          <tr className="border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground">
+          <tr className={`border-b border-border ${MICRO_LABEL}`}>
             {columns.map((c) => (
               <th
                 key={c.key}

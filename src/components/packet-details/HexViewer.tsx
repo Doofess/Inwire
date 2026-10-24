@@ -23,6 +23,7 @@ import { hasBytes } from '../../services/packetBytes';
 import type { PacketDetailState } from '../../lib/usePacketDetail';
 import { PaneHeader } from '../common/PaneHeader';
 import { EmptyState } from '../common/EmptyState';
+import { MICRO_LABEL } from '../common/typography';
 
 export interface HexViewerProps {
   packet: Packet | null;
@@ -138,7 +139,7 @@ export const HexCopyMenu: React.FC<{ packet: Packet }> = ({ packet }) => {
           type="button"
           title="Copy this frame's bytes"
           aria-label="Copy this frame's bytes"
-          className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide border
+          className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border
             transition-colors flex items-center gap-1 cursor-pointer border-border
             hover:bg-accent text-foreground bg-secondary/50
             data-[state=open]:bg-accent"
@@ -151,7 +152,7 @@ export const HexCopyMenu: React.FC<{ packet: Packet }> = ({ packet }) => {
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-52">
-        <DropdownMenuLabel className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+        <DropdownMenuLabel className={MICRO_LABEL}>
           Copy {packet.rawBytes.length} bytes as
         </DropdownMenuLabel>
         {COPY_FORMATS.map(f => (
@@ -222,7 +223,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
   if (!hasBytes(packet)) {
     const gone = bytesState === 'unavailable';
     return (
-      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground font-mono text-xs">
+      <div className="h-full flex items-center justify-center p-6 text-center text-muted-foreground text-xs">
         <div className="flex flex-col items-center gap-1.5 max-w-xs">
           {gone
             ? <DatabaseX className="w-6 h-6 text-muted-foreground/70 mb-1" />
@@ -275,7 +276,7 @@ export const HexViewer: React.FC<HexViewerProps> = ({
           exactly why `PaneHeader` fixes its own height instead of padding to
           fit: this bar used to be four pixels taller than the two either side
           of it. */}
-      <PaneHeader title="Hex View" detail={`(${packet.rawBytes.length} bytes)`}>
+      <PaneHeader title="Hex view" detail={`(${packet.rawBytes.length} bytes)`}>
         <HexCopyMenu packet={packet} />
       </PaneHeader>
 

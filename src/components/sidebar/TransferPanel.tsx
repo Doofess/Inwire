@@ -407,7 +407,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
                 : 'hover:bg-accent/60 dark:hover:bg-foreground/5'}`}
             >
               <span className="block text-xs">{option.label}</span>
-              <span className="mt-0.5 block text-[10px] font-mono truncate
+              <span className="mt-0.5 block text-[10px] truncate
                 text-muted-foreground" title={option.detail}>
                 {option.detail}
               </span>
@@ -596,7 +596,7 @@ const JobStatus: React.FC<{ job: ExportJobState }> = ({ job }) => {
             </button>
           </div>
           {known && (
-            <div className="text-[10px] leading-tight font-mono text-muted-foreground">
+            <div className="text-[10px] leading-tight text-muted-foreground">
               {COUNT.format(job.done)} / {COUNT.format(job.total)} frames
             </div>
           )}

@@ -48,7 +48,7 @@ import { usePreferenceStore } from '../../services/preferenceStore';
  * the buffer has dropped frames. A chart that silently answered for the filtered
  * subset would be the same chart with different numbers and no way to tell.
  */
-const PILL = 'px-2 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer';
+const PILL = 'px-2 py-0.5 rounded text-[11px] transition-colors cursor-pointer';
 
 /**
  * One row of mutually exclusive pills.

@@ -144,7 +144,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
           <span className="font-semibold text-foreground">
             {dragging ? 'Drop to import' : 'Click to upload, or drag & drop'}
           </span>
-          <span className="text-[11px] text-muted-foreground mt-1 font-mono text-center">
+          <span className="text-[11px] text-muted-foreground mt-1 text-center">
             .pcap .pcapng .cap · .csv .tsv · .xlsx · .json · .zip
           </span>
           {blockedBy !== null && (

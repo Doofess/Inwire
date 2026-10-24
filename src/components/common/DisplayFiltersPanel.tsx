@@ -193,7 +193,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
             move it between groups.
           </p>
         </div>
-        <span className="text-[10px] text-muted-foreground font-mono shrink-0 pt-0.5">
+        <span className="text-[10px] text-muted-foreground shrink-0 pt-0.5">
           {presetCount} filter{presetCount === 1 ? '' : 's'} / {library.groups.length} group
           {library.groups.length === 1 ? '' : 's'}
         </span>
@@ -264,7 +264,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                   </span>
                 )}
 
-                <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                <span className="text-[10px] text-muted-foreground shrink-0">
                   {group.presets.length}
                 </span>
 
@@ -278,7 +278,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                         onChange(deleteGroup(library, group.id));
                         setConfirmDeleteGroupId(null);
                       }}
-                      className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-medium transition-colors cursor-pointer"
+                      className="px-2 py-0.5 rounded bg-destructive hover:bg-destructive/90 text-destructive-foreground text-[11px] font-medium transition-colors cursor-pointer"
                     >
                       Delete
                     </button>
@@ -310,7 +310,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                 </button>
                 <button
                   onClick={() => handleDeleteGroup(group.id, group.presets.length)}
-                  className={`${iconButton} hover:text-rose-500`}
+                  className={`${iconButton} hover:text-destructive`}
                   title="Delete group"
                 >
                   <Trash className="w-3.5 h-3.5" />
@@ -408,7 +408,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                           </button>
                           <button
                             onClick={() => onChange(deletePreset(library, preset.id))}
-                            className={`${iconButton} hover:text-rose-500`}
+                            className={`${iconButton} hover:text-destructive`}
                             title="Delete filter"
                           >
                             <Trash className="w-3.5 h-3.5" />
@@ -454,7 +454,7 @@ export const DisplayFiltersPanel: React.FC<DisplayFiltersPanelProps> = ({ librar
                 onChange(DEFAULT_FILTER_PRESET_LIBRARY);
                 setConfirmRestore(false);
               }}
-              className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition-colors cursor-pointer"
+              className="px-2.5 py-1 rounded bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs font-medium transition-colors cursor-pointer"
             >
               Restore
             </button>

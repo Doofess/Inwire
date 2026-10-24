@@ -5,6 +5,7 @@ import { TriangleAlert, FileX, RefreshCw, X } from 'lucide-react';
 import { ImportFailure } from '../../services/exportSchema';
 import { modalBackdropMotion, modalPanelMotion } from '../../lib/modalMotion';
 import { useEscapeLayer } from '../../hooks/useEscapeLayer';
+import { MICRO_LABEL } from '../common/typography';
 
 /**
  * What the user sees when a file is refused.
@@ -100,7 +101,7 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
           {failure.kind === 'missing-columns' && (
             <div className="rounded-lg border border-border bg-muted/40 p-3 space-y-3">
               <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground font-mono mb-1.5">
+                <div className={`${MICRO_LABEL} mb-1.5`}>
                   Columns required
                 </div>
                 <div className="flex flex-wrap gap-1.5">
@@ -120,7 +121,7 @@ export const ImportErrorDialog: React.FC<ImportErrorDialogProps> = ({
               </div>
 
               <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground font-mono mb-1.5">
+                <div className={`${MICRO_LABEL} mb-1.5`}>
                   Columns found in your file
                 </div>
                 {failure.found.length === 0 ? (

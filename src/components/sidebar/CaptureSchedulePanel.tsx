@@ -89,7 +89,7 @@ const linkClass =
  * time, so they sat lopsided beside the Start chips and wrapped 3 then 2.
  */
 const chipClass = (on: boolean) =>
-  `w-full h-6 rounded-sm border px-1 font-mono text-[11px] text-center cursor-pointer transition-colors ${on
+  `w-full h-6 rounded-sm border px-1 text-[11px] whitespace-nowrap text-center cursor-pointer transition-colors ${on
     ? 'border-primary bg-primary/15 text-primary font-semibold'
     : 'border-border hover:border-primary'}`;
 const buttonClass =
@@ -178,7 +178,7 @@ const WhenRow: React.FC<{
       aria-label={`${label} date, ${describeDay(value, now)}${picking ? ', set on the calendar below' : ''}`}
       title={picking ? 'The calendar below sets this date' : 'Set this date on the calendar below'}
       onClick={onPick}
-      className={`flex-1 min-w-0 h-6 flex items-center gap-1.5 rounded-sm px-1.5 font-mono text-xs cursor-pointer
+      className={`flex-1 min-w-0 h-6 flex items-center gap-1.5 rounded-sm px-1.5 text-xs cursor-pointer
         border transition-colors ${picking
           ? 'border-transparent bg-primary/15 text-foreground'
           : 'border-border hover:border-primary'}`}
@@ -350,8 +350,8 @@ export const CaptureSchedulePanel: React.FC<CaptureSchedulePanelProps> = ({
                   label="Start"
                 />
               )}
-              <div className="grid grid-cols-[auto_1fr_1fr_1fr] items-center gap-1">
-                <span className={`${helpClass} mr-0.5`}>Start in</span>
+              <div className="grid grid-cols-3 items-center gap-1">
+                <span className={`${helpClass} col-span-3`}>Start in</span>
                 {[5, 15, 60].map((minutes) => (
                   <button
                     key={minutes}

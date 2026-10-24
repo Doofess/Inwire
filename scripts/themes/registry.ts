@@ -452,12 +452,13 @@ for (const t of THEME_OPTIONS) {
 }
 
 console.log();
-// --- selection, and High Contrast's 7:1 (ADR 0056) ----------------------------
-// The selected row is the accent mixed into the ground, and its text is the
-// accent itself, so the pair that has to hold is primary on that mix. The share
-// is per theme because it is the largest each ground allows: Light's accents
-// sit near 4.5:1 on the ground already, so 6% is all it has room for; the ring
-// and the weight carry the selection there, the tint only confirms it.
+// --- the selection tint, and High Contrast's 7:1 (ADR 0056) -------------------
+// --selection is the accent mixed into the ground, with the accent itself as
+// its text, so the pair that has to hold is primary on that mix. The share is
+// per theme because it is the largest each ground allows: Light's accents sit
+// near 4.5:1 on the ground already, so 6% is all it has room for. The packet
+// list's selected row no longer wears it - that row is a solid --primary fill,
+// asked below with every accent - but other surfaces still do.
 const SELECTION_SHARE: Record<string, number> = { light: 6, dark: 22, dim: 13, contrast: 19 };
 
 function themeBlock(theme: string): string {
@@ -505,7 +506,46 @@ for (const theme of realThemes) {
   const primary = hexIn(theme, '--primary');
   const floor = theme === 'contrast' ? 7 : 4.5;
   const ratio = contrastRatio(primary, selectionHex(theme, primary));
-  checkTrue(`${theme}: the selected row's text (primary on the mix) is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
+  checkTrue(`${theme}: the selection tint's text (primary on the mix) is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
+}
+
+// A destructive action is an outline in --destructive at rest and a fill on
+// hover, so both readings are asked: the red as text on the surfaces it sits
+// on, and the foreground on the red.
+for (const theme of realThemes) {
+  const floor = theme === 'contrast' ? 7 : 4.5;
+  const red = hexIn(theme, '--destructive');
+  for (const bg of ['--background', '--card']) {
+    const ratio = contrastRatio(red, hexIn(theme, bg));
+    checkTrue(`${theme}: --destructive on ${bg} is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
+  }
+  const fill = contrastRatio(hexIn(theme, '--destructive-foreground'), red);
+  checkTrue(`${theme}: --destructive-foreground on --destructive is ${floor}:1 (${fill.toFixed(2)})`, fill >= floor);
+}
+{
+  const source = fs.readFileSync('src/components/common/DriverInfoPanel.tsx', 'utf8');
+  const cls = source.match(/export const DESTRUCTIVE_ACTION_BUTTON_CLASS =([^;]+);/)?.[1] ?? '';
+  checkTrue('DESTRUCTIVE_ACTION_BUTTON_CLASS is an outline in --destructive that fills on hover',
+    /border-destructive/.test(cls) && /text-destructive\b/.test(cls)
+      && /hover:bg-destructive\b/.test(cls) && /hover:text-destructive-foreground/.test(cls));
+  const settings = fs.readFileSync('src/components/common/SettingsPane.tsx', 'utf8');
+  checkTrue('Discard Capture wears DESTRUCTIVE_ACTION_BUTTON_CLASS',
+    /className=\{DESTRUCTIVE_ACTION_BUTTON_CLASS\}[\s\S]{0,200}Discard Capture/.test(settings));
+  const filters = fs.readFileSync('src/components/common/DisplayFiltersPanel.tsx', 'utf8');
+  checkTrue('Display Filters names no raw rose: deletion is --destructive', !/rose-\d/.test(filters));
+  const storage = fs.readFileSync('src/components/monitoring/StorageBlock.tsx', 'utf8');
+  checkTrue("monitoring's Discard… is BUTTON_DESTRUCTIVE", /className=\{BUTTON_DESTRUCTIVE\}/.test(storage));
+}
+
+// The selected packet row is a solid accent fill that overrides the colouring
+// rule: no 1px ring, no bold, and the fill and ink are --primary's pair, whose
+// contrast the accent loop below asks per swatch.
+{
+  const list = fs.readFileSync('src/components/packet-list/PacketList.tsx', 'utf8');
+  const branch = /isSelected\s*(?:\/\/[^\n]*\n\s*)*\?\s*'([^']*)'/.exec(list)?.[1] ?? '';
+  checkTrue('the selected packet row is a solid --primary fill with --primary-foreground ink',
+    /!bg-primary\b/.test(branch) && /!text-primary-foreground\b/.test(branch) && /--row-bg:var\(--primary\)/.test(branch));
+  checkTrue('...with no ring and no bold', branch !== '' && !/ring-1|font-bold/.test(branch));
 }
 
 for (const fg of ['--foreground', '--muted-foreground', '--primary']) {
@@ -536,13 +576,15 @@ for (const theme of realThemes) {
     const primary = a.primary[theme];
     const at = `${theme} / ${a.id}`;
     const fill = contrastRatio(a.primaryForeground[theme], primary);
-    checkTrue(`${at}: text on the accent fill is 4.5:1 (${fill.toFixed(2)})`, fill >= 4.5);
+    // The selected packet row is this fill, so it is held to the theme's floor:
+    // High Contrast's 7:1, not the 4.5 a button would get.
+    checkTrue(`${at}: text on the accent fill is ${floor}:1 (${fill.toFixed(2)})`, fill >= floor);
     for (const bg of ['--background', '--card', '--secondary']) {
       const r = contrastRatio(primary, hexIn(theme, bg));
       checkTrue(`${at}: the accent on ${bg} is ${floor}:1 (${r.toFixed(2)})`, r >= floor);
     }
     const sel = contrastRatio(primary, selectionHex(theme, primary));
-    checkTrue(`${at}: the selected row's text is ${floor}:1 (${sel.toFixed(2)})`, sel >= floor);
+    checkTrue(`${at}: the selection tint's text is ${floor}:1 (${sel.toFixed(2)})`, sel >= floor);
 
     const railFill = mixHex(primary, chrome, activeAlpha);
     const glyph = contrastRatio(hexIn(theme, '--foreground'), railFill);

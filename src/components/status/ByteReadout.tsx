@@ -65,13 +65,13 @@ export const ByteReadout: React.FC = () => {
           the rest sit at the item's muted default. That is the same vocabulary
           `StatusItem`'s three tones use, rather than a sixth colour system
           living in one cell. */}
-      <span>@<b className="text-foreground">{byte.offset}</b></span>
-      <span className="text-primary">{byte.hex}</span>
-      <span>{byte.dec}</span>
+      <span className="font-mono">@<b className="text-foreground">{byte.offset}</b></span>
+      <span className="font-mono text-primary">{byte.hex}</span>
+      <span className="font-mono">{byte.dec}</span>
       {/* The bits are the widest of the five and the least often read at a
           glance, so they are the first thing to go when the window is narrow. */}
-      <span className="hidden lg:inline">0b{byte.bits}</span>
-      <span className="text-foreground">{ascii}</span>
+      <span className="font-mono hidden lg:inline">0b{byte.bits}</span>
+      <span className="font-mono text-foreground">{ascii}</span>
     </StatusItem>
   );
 };

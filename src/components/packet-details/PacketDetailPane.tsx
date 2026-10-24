@@ -22,6 +22,7 @@ import {
   findPacketIndexById,
 } from './packetDetailModel';
 import { ChevronLeft, ChevronRight, ListTree } from 'lucide-react';
+import { MICRO_LABEL, TITLE } from '../common/typography';
 
 const DETAIL_LAYOUT_KEY = 'inwire.packetDetailLayout';
 
@@ -556,7 +557,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
       >
         <span className="font-bold text-foreground text-xs">
           Raw bytes
-          <span className="ml-2 font-normal text-muted-foreground text-[11px] font-mono">
+          <span className="ml-2 font-normal text-muted-foreground text-[11px]">
             {hasBytes(packet)
               ? `${packet.rawBytes.length.toLocaleString()} captured`
               : detailState === 'unavailable' ? 'not stored' : 'reading…'}
@@ -613,7 +614,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
       <div className="h-9 shrink-0 px-4 border-b border-border flex items-center gap-4">
         <div className="flex items-center gap-2 min-w-0">
           <ListTree className="w-4 h-4 shrink-0 text-primary" />
-          <span className="text-xs font-mono font-bold text-muted-foreground uppercase tracking-tighter shrink-0">
+          <span className={`${TITLE} shrink-0`}>
             Frame
           </span>
           <span className="text-xs font-mono font-bold text-primary shrink-0">
@@ -671,7 +672,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
           <div className="flex flex-col items-center gap-4 text-center">
             <ListTree className="w-8 h-8 text-muted-foreground/60" />
             <div className="flex flex-col items-center gap-1">
-              <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+              <span className={MICRO_LABEL}>
                 No frame selected
               </span>
               <span className="text-[11px] text-muted-foreground/70">
@@ -690,7 +691,7 @@ export const PacketDetailPane: React.FC<PacketDetailPaneProps> = ({
               <>
                 <button
                   onClick={() => setNarrowFactsOpen(open => !open)}
-                  className="shrink-0 flex items-center gap-2 px-5 py-1.5 border-b border-border bg-secondary/30 text-[10px] font-mono text-muted-foreground hover:bg-accent/40 cursor-pointer"
+                  className="shrink-0 flex items-center gap-2 px-5 py-1.5 border-b border-border bg-secondary/30 text-[10px] text-muted-foreground hover:bg-accent/40 cursor-pointer"
                   aria-expanded={narrowFactsOpen}
                 >
                   <ChevronRight

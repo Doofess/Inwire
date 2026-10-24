@@ -1,4 +1,5 @@
 import React from 'react';
+import { MICRO_LABEL } from './typography';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import {
   isModified,
@@ -23,7 +24,7 @@ import {
  * services/preferenceStore.
  */
 
-export const SECTION_CLASS = 'text-[10px] font-bold uppercase tracking-widest text-muted-foreground';
+export const SECTION_CLASS = MICRO_LABEL;
 
 interface SettingRowProps {
   label: string;

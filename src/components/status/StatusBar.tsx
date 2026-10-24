@@ -92,7 +92,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({ nameResolution, ...session
   <footer
     className="h-6 shrink-0 flex items-center justify-between
       bg-secondary text-secondary-foreground
-      text-[11px] font-mono select-none overflow-hidden"
+      text-[11px] select-none overflow-hidden"
     aria-label="Status"
   >
     {/* Left: is this thing working? Session state, in the order it fails in -

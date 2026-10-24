@@ -1,4 +1,5 @@
 import React from 'react';
+import { TITLE } from './typography';
 
 /**
  * The title bar the two panes under the packet list share.
@@ -27,12 +28,12 @@ import React from 'react';
  * `#Frame 12 (74 bytes)`, `(74 bytes)`. `children` is whatever sits at the far
  * right, which is the only part the two do differently.
  *
- * The name is muted and the detail is `--primary`, which is the split that was
- * already there: the pane is always called the same thing, and the number is
- * what changed.
+ * The name is a `TITLE` (`common/typography.ts`) and the detail is `--primary`,
+ * which is the split that was already there: the pane is always called the
+ * same thing, and the number is what changed.
  */
 export interface PaneHeaderProps {
-  /** The pane's name. Rendered uppercase; pass it in sentence case. */
+  /** The pane's name. Drawn as a TITLE: sentence case, semibold. */
   title: string;
   /** The one fact beside the name. Drawn in the accent. */
   detail?: React.ReactNode;
@@ -45,8 +46,8 @@ export const PaneHeader: React.FC<PaneHeaderProps> = ({ title, detail, children 
     className="h-9 shrink-0 px-4 border-b flex items-center justify-between gap-3
       transition-colors bg-card border-border text-card-foreground shadow-sm"
   >
-    <div className="flex items-center gap-2 text-xs font-mono font-bold min-w-0">
-      <span className="text-muted-foreground uppercase tracking-tighter shrink-0">{title}</span>
+    <div className="flex items-center gap-2 min-w-0 text-xs">
+      <span className={`${TITLE} shrink-0`}>{title}</span>
       {detail !== undefined && <span className="text-primary shrink-0">{detail}</span>}
     </div>
     {children}

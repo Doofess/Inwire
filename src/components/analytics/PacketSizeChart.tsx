@@ -1,5 +1,6 @@
 import React from 'react';
 import { Packet } from '../../types/packet';
+import { MICRO_LABEL } from '../common/typography';
 import { useIncrementalAggregate } from '../../lib/useIncrementalAggregate';
 import { SIZE_BUCKETS as BUCKETS, sizeBucketIndex } from '../../services/report/sizeBuckets';
 
@@ -104,7 +105,7 @@ export const PacketSizeChart: React.FC<PacketSizeChartProps> = ({ packets, chart
         {BUCKETS.map((bucket) => (
           <span
             key={bucket.short}
-            className="flex-1 min-w-0 text-center text-[9px] font-mono uppercase tracking-tight text-muted-foreground truncate"
+            className={`flex-1 min-w-0 text-center ${MICRO_LABEL} truncate`}
           >
             {bucket.short}
           </span>
