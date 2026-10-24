@@ -119,6 +119,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | Trackers keep nothing a transfer detaches | `scripts/pipeline/moved-bytes.ts`, `scripts/pipeline/arrival.ts` |
 | Catch-up from the agent's file equals an uninterrupted run | `scripts/pipeline/catch-up.ts` |
 | Parallel dissection equals the single Worker | `scripts/pipeline/parallel.ts` |
+| The shard's row steps plus the merge from a side record equal `ingest`'s order (process, gap, fingerprint, network facts) | `scripts/pipeline/row-steps.ts` |
 | Every frame's tree is rebuilt from its record | `scripts/pipeline/revisit.ts` |
 | No Node in the renderer; the preload imports only `electron` (reads the built bundle) | `scripts/electron/preload-sandbox.ts` |
 | `src/services/` and `src/lib/` import no Electron or `node:*`; `nodeBlockFile.ts` is unreachable from `src/main.tsx` (import-graph walk) | `scripts/capture/node-safe.ts` |
