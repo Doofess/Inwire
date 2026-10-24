@@ -45,7 +45,7 @@ export function QuitConfirmDialog(): React.ReactElement {
     });
   }), []);
 
-  // Up, focused on Keep capturing, and only then `shown` - the acknowledgement
+  // Up, focused on Cancel, and only then `shown` - the acknowledgement
   // is main's evidence the question is on screen, so it is sent after the
   // dialog is, never before.
   React.useEffect(() => {

@@ -424,7 +424,7 @@ the target size and spacing are what muscle memory aims at.
       the window instead, and the only symptom is a click that does nothing — on
       close, a window that cannot be closed.
 - [ ] **With frames in the buffer, press close.** The "Quit Inwire?" confirm
-      appears, drawn by the app. Keep capturing → the window stays and the
+      appears, drawn by the app. Cancel → the window stays and the
       capture is intact. The button calls `window.close()`, never `destroy()`;
       destroying would skip the confirm and discard a capture on one click.
       (`smoke.ts` clears `setUnsavedCapture` before closing, or its
@@ -436,7 +436,7 @@ the target size and spacing are what muscle memory aims at.
       buffer, check all four themes: the "Quit Inwire?" confirm follows the
       active palette. It is the renderer's own dialog
       (`QuitConfirmDialog.tsx`), because `showMessageBox` on Windows is a task
-      dialog the OS paints light whatever the app's theme. Keep capturing has
+      dialog the OS paints light whatever the app's theme. Cancel has
       focus; Tab moves between the two buttons only; Enter and Escape keep.
 - [ ] **...and a hung renderer still cannot trap the window.** The OS's own box
       is the fallback when the renderer does not acknowledge within a second

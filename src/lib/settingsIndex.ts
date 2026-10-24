@@ -130,7 +130,7 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
   {
     section: 'interface',
     label: 'Dashboard refresh',
-    description: "How often the panels on the right recalculate. Relaxed is a quarter of the work for the same panels; Paused holds them at their last values until you change this back.",
+    description: "How often the Routing Map redraws while a capture runs. Relaxed is a quarter of the work; Paused holds the map at its last picture until you change this back.",
     keywords: ['performance'],
     pref: pref(performanceStore, 'dashboardRefreshMs'),
   },

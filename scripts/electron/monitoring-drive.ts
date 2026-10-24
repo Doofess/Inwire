@@ -14,7 +14,7 @@
  *    4. the utility process killed: the exit is reported, nothing journaled is lost
  *    5. the page reloaded: intake goes on, the UI reconnects
  *    6. the port held by another program: a stated error, nothing journaled
- *    7. an unsaved capture, then the window closed: Keep capturing / Quit
+ *    7. an unsaved capture, then the window closed: Cancel / Quit
  *    8. the sheet closed and the page reloaded repeatedly: no duplicate feed
  *    9. the rollup sidecar deleted: history rebuilt identically
  *   10. the storage limit reached: a stated stop, not silent continuation
@@ -741,10 +741,10 @@ await scenario('7. unsaved capture, then the window closed', async () => {
 
   const requestClose = () => app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.close(); });
   await requestClose();
-  const keep = p.getByRole('button', { name: 'Keep capturing' });
+  const keep = p.getByRole('button', { name: 'Cancel' });
   checkTrue('7: closing the window raises the Quit Inwire? confirm', await until(() => keep.isVisible(), 8000));
   await keep.click();
-  checkTrue('7: Keep capturing keeps the window open', await until(async () => (await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)) === 1, 5000));
+  checkTrue('7: Cancel keeps the window open', await until(async () => (await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)) === 1, 5000));
   await openSheet(p);
   checkTrue('7: ...monitoring is still listening', await buttonVisible(p, 'Stop'));
   await led.send(port, [C]);

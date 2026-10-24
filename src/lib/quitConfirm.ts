@@ -11,12 +11,15 @@
 /** What the confirm says, in the app's own dialog and in the OS's fallback. */
 export const QUIT_CONFIRM_TEXT = {
   title: 'Quit Inwire?',
-  message: 'Quit while a capture is in the buffer?',
+  // A statement, not a second question under the title's: the title already asks.
+  message: 'A capture is still in the buffer.',
   detail:
     'Frames already written to the capture store are kept and will be '
     + 'restored next time. Anything still in memory is discarded.',
   quit: 'Quit',
-  keep: 'Keep capturing',
+  // "Cancel", not "Keep capturing": the buffer outlives a stopped capture, and
+  // the label must be true then too.
+  keep: 'Cancel',
 } as const;
 
 /**
