@@ -987,7 +987,8 @@ export const PacketList: React.FC<PacketListProps> = ({
    * selection, and a selection nobody can see reads as a jump that did nothing.
    *
    * A move this list made itself leaves the row in view, so this finds nothing
-   * to do for it. A row outside the view is centred, and following the live
+   * to do for it - except a click on a row the edge half hides, which the row
+   * records as seen before it selects. A row outside the view is centred, and following the live
    * tail stops under `reading`, as `moveSelection` stops it for any move that
    * is not to the newest row. The first selection seen is skipped: a restored
    * one is where the list opened, not a jump.
@@ -1585,7 +1586,10 @@ export const PacketList: React.FC<PacketListProps> = ({
                     // spacer rows are all it can see of the rest. 1-based, and
                     // offset by the header row.
                     aria-rowindex={startIndex + i + 2}
-                    onClick={() => onSelectPacket(packet)}
+                    // Seen before it is selected: a click is not a jump, and
+                    // centring a half-shown row moved the list under the
+                    // pointer, so a double-click opened a different frame.
+                    onClick={() => { scrolledToIdRef.current = packet.id; onSelectPacket(packet); }}
                     // Double click also fires the single-click select first,
                     // which is what we want: the row ends up selected behind
                     // the window that opens over it.

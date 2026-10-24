@@ -115,7 +115,8 @@ try {
   await clicks('Interfaces', () => p.getByRole('button', { name: 'Interfaces' }).click());
   await clicks('the stub adapter', () => p.getByText('Ethernet', { exact: true }).first().click());
   checkTrue('Start can be pressed', await clicks('Start capture', () => p.getByLabel('Start capture').click()));
-  checkTrue('frames arrive', await until(async () => (await counted(p)) >= 30));
+  // Enough to overflow the list, which the half-shown-row check needs.
+  checkTrue('frames arrive', await until(async () => (await counted(p)) >= 120));
   checkTrue('the capture can be stopped', await clicks('Stop capture', () => p.getByLabel('Stop capture').first().click()));
   const total = await settled(p);
   checkTrue('there are enough frames to mark', total >= 12, `counted ${total}`);
@@ -159,6 +160,49 @@ try {
   }
   const selectedId = (q: Page) => q.evaluate(
     () => document.querySelector('tbody tr[aria-selected="true"] td')?.textContent?.trim() ?? '');
+
+  console.log('\n--- a click on a half-shown row leaves the list where it is ---\n');
+  // The list scrolls a selection made from OUTSIDE it into view (Go to packet,
+  // Next marked). A click on the list's own bottom row, half cut off, is not
+  // one: centring it moved the list half a screen under the pointer, and the
+  // second click of a double-click opened a different frame.
+  // Off a row boundary, then a pause: the list is virtualised, and the rows at
+  // the new position exist only once it has rendered for the scroll.
+  await p.evaluate(() => {
+    let box = document.querySelector('tbody')?.parentElement ?? null;
+    while (box && box.scrollHeight <= box.clientHeight) box = box.parentElement;
+    if (box) box.scrollTop = Math.floor((box.scrollHeight - box.clientHeight) / 2) + 7;
+  });
+  await sleep(500);
+  const edge = await p.evaluate(() => {
+    let box = document.querySelector('tbody')?.parentElement ?? null;
+    while (box && box.scrollHeight <= box.clientHeight) box = box.parentElement;
+    if (!box) return null;
+    const bottom = box.getBoundingClientRect().bottom;
+    const cut = [...document.querySelectorAll('tbody tr[role="row"]')].find((tr) => {
+      const r = tr.getBoundingClientRect();
+      return r.top < bottom - 4 && r.bottom > bottom;
+    });
+    if (!cut) return null;
+    const r = cut.getBoundingClientRect();
+    return { x: r.left + 20, y: Math.floor((r.top + bottom) / 2), id: cut.querySelector('td')?.textContent?.trim() ?? '' };
+  });
+  checkTrue('the list overflows with a row cut off at its foot', edge !== null);
+  if (edge) {
+    await sleep(300);
+    const scrollOf = () => p.evaluate(() => {
+      let box = document.querySelector('tbody')?.parentElement ?? null;
+      while (box && box.scrollHeight <= box.clientHeight) box = box.parentElement;
+      return box?.scrollTop ?? -1;
+    });
+    const before = await scrollOf();
+    await p.mouse.click(edge.x, edge.y);
+    checkTrue('the half-shown row is selected', await until(async () => (await selectedId(p)) === edge.id, 5_000),
+      `selected ${await selectedId(p)}, clicked ${edge.id}`);
+    await sleep(300);
+    const after = await scrollOf();
+    checkTrue('...and the list did not move under the pointer', after === before, `scrollTop ${before} -> ${after}`);
+  }
 
   console.log('\n--- Ctrl+M marks, and selection beats mark ---\n');
   const marked = await resolved(p, '--marked');
