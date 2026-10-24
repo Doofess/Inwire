@@ -3,7 +3,7 @@ import { TriangleAlert } from 'lucide-react';
 import type { MonitoringClient } from '../../services/monitoring/client';
 import type { DiscardScope, LocationReply } from '../../services/monitoring/control';
 import { MONITORING_FOLDER, RETENTION_OFF_NOTE, type RetentionDraft, type SourceDraft } from './monitoringCopy';
-import { BUTTON_SECONDARY, INPUT, INPUT_SURFACE, Note } from './parts';
+import { BUTTON_DESTRUCTIVE, BUTTON_SECONDARY, INPUT, INPUT_SURFACE, Note } from './parts';
 
 type Say = { tone: 'neutral' | 'bad'; text: string };
 type FolderAnswer = { ok: Extract<LocationReply, { ok: true }> } | { fail: string };
@@ -189,7 +189,7 @@ export function DiscardControl({ client, locked }: {
           <input type="datetime-local" aria-label="Discard evidence before" className={`${INPUT_SURFACE} font-sans`}
             value={before} onChange={(e) => { setBefore(e.target.value); setSay(null); }} />
         )}
-        <button type="button" className={BUTTON_SECONDARY} disabled={scope === 'before' && beforeMs === null}
+        <button type="button" className={BUTTON_DESTRUCTIVE} disabled={scope === 'before' && beforeMs === null}
           onClick={() => void discard()}>
           {discarding ? 'Discarding…' : 'Discard…'}
         </button>

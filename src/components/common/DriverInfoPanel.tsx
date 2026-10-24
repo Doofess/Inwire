@@ -107,6 +107,19 @@ export const DRIVER_ACTION_BUTTON_CLASS =
   + 'bg-primary text-primary-foreground hover:bg-primary/90 '
   + 'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-primary cursor-pointer';
 
+/**
+ * The same pill for an action that deletes: an outline in `--destructive` at
+ * rest, filled on hover. Not a solid red, because it sits beside a primary
+ * pill and two filled buttons of equal weight would make neither the default;
+ * the red says what it costs before the pointer gets there.
+ */
+export const DESTRUCTIVE_ACTION_BUTTON_CLASS =
+  'flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-medium transition-colors '
+  + 'border border-destructive/60 text-destructive bg-transparent '
+  + 'hover:bg-destructive hover:text-destructive-foreground hover:border-destructive '
+  + 'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent '
+  + 'disabled:hover:text-destructive disabled:hover:border-destructive/60 cursor-pointer';
+
 export const DriverInfoPanel: React.FC<DriverInfoPanelProps> = ({
   agentStatus,
   droppedBuffer = 0,

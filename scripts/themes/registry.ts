@@ -508,6 +508,34 @@ for (const theme of realThemes) {
   checkTrue(`${theme}: the selected row's text (primary on the mix) is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
 }
 
+// A destructive action is an outline in --destructive at rest and a fill on
+// hover, so both readings are asked: the red as text on the surfaces it sits
+// on, and the foreground on the red.
+for (const theme of realThemes) {
+  const floor = theme === 'contrast' ? 7 : 4.5;
+  const red = hexIn(theme, '--destructive');
+  for (const bg of ['--background', '--card']) {
+    const ratio = contrastRatio(red, hexIn(theme, bg));
+    checkTrue(`${theme}: --destructive on ${bg} is ${floor}:1 (${ratio.toFixed(2)})`, ratio >= floor);
+  }
+  const fill = contrastRatio(hexIn(theme, '--destructive-foreground'), red);
+  checkTrue(`${theme}: --destructive-foreground on --destructive is ${floor}:1 (${fill.toFixed(2)})`, fill >= floor);
+}
+{
+  const source = fs.readFileSync('src/components/common/DriverInfoPanel.tsx', 'utf8');
+  const cls = source.match(/export const DESTRUCTIVE_ACTION_BUTTON_CLASS =([^;]+);/)?.[1] ?? '';
+  checkTrue('DESTRUCTIVE_ACTION_BUTTON_CLASS is an outline in --destructive that fills on hover',
+    /border-destructive/.test(cls) && /text-destructive\b/.test(cls)
+      && /hover:bg-destructive\b/.test(cls) && /hover:text-destructive-foreground/.test(cls));
+  const settings = fs.readFileSync('src/components/common/SettingsPane.tsx', 'utf8');
+  checkTrue('Discard Capture wears DESTRUCTIVE_ACTION_BUTTON_CLASS',
+    /className=\{DESTRUCTIVE_ACTION_BUTTON_CLASS\}[\s\S]{0,200}Discard Capture/.test(settings));
+  const filters = fs.readFileSync('src/components/common/DisplayFiltersPanel.tsx', 'utf8');
+  checkTrue('Display Filters names no raw rose: deletion is --destructive', !/rose-\d/.test(filters));
+  const storage = fs.readFileSync('src/components/monitoring/StorageBlock.tsx', 'utf8');
+  checkTrue("monitoring's Discard… is BUTTON_DESTRUCTIVE", /className=\{BUTTON_DESTRUCTIVE\}/.test(storage));
+}
+
 for (const fg of ['--foreground', '--muted-foreground', '--primary']) {
   for (const bg of ['--background', '--card', '--secondary']) {
     const ratio = contrastRatio(hexIn('contrast', fg), hexIn('contrast', bg));

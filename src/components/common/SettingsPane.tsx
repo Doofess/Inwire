@@ -20,7 +20,7 @@ import {
   settingsTabSelected,
   type SettingsSection,
 } from '../../lib/settingsIndex';
-import { DriverInfoPanel, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
+import { DriverInfoPanel, DESTRUCTIVE_ACTION_BUTTON_CLASS, DRIVER_ACTION_BUTTON_CLASS } from './DriverInfoPanel';
 import { UpdateCenterPanel } from './UpdateCenterPanel';
 import { AppearanceSettingsPanel } from './AppearanceSettingsPanel';
 import { InterfaceSettingsPanel } from './InterfaceSettingsPanel';
@@ -400,9 +400,11 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                         not closing the last window and not reopening it
                         (docs/decisions/0012-stored-captures-persist.md).
 
-                        The same pill as the three driver actions above: they sit
-                        in the same tab and do the same kind of thing, and two
-                        shapes for one job read as two kinds of job. */}
+                        The same pill as the driver action above: they sit in the
+                        same tab and do the same kind of thing, and two shapes
+                        for one job read as two kinds of job. Discard wears it
+                        in --destructive, because the colour is where the two
+                        stop being the same kind of thing. */}
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={onClearPackets}
@@ -415,7 +417,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                       <button
                         onClick={onDiscardCapture}
                         disabled={captureStorage.bytesOnDisk === 0 && totalPacketsCount === 0}
-                        className={DRIVER_ACTION_BUTTON_CLASS}
+                        className={DESTRUCTIVE_ACTION_BUTTON_CLASS}
                       >
                         <Trash className="w-3.5 h-3.5" />
                         <span>Discard Capture</span>
