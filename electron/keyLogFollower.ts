@@ -49,6 +49,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { KEYLOG_STATUS_CHANNEL, KEYLOG_TEXT_CHANNEL } from './channels';
+import { canSend } from './rendererLife';
 import {
   LineAssembler, parseKeyLogSettings, planRead, POLL_MS, readSpans, REARM_TICKS,
   type KeyLogFollowStatus,
@@ -262,13 +263,13 @@ export class KeyLogFollower {
 
   private send(text: string): void {
     const target = this.target;
-    if (target === null || target.isDestroyed()) return;
+    if (target === null || !canSend(target)) return;
     target.send(KEYLOG_TEXT_CHANNEL, text);
   }
 
   private pushStatus(): void {
     const target = this.target;
-    if (target === null || target.isDestroyed()) return;
+    if (target === null || !canSend(target)) return;
     target.send(KEYLOG_STATUS_CHANNEL, this.status());
   }
 

@@ -38,6 +38,7 @@ import {
 import type { RetentionPolicy } from '../../src/services/monitoring/retention';
 import { LIMITS, type SourceConfig } from '../../src/services/monitoring/types';
 import { MONITORING_EXIT_CHANNEL, MONITORING_PORT_CHANNEL, MONITORING_STATUS_CHANNEL } from '../channels';
+import { canSend } from '../rendererLife';
 
 // --- what is injected -------------------------------------------------------------------------------
 
@@ -54,6 +55,7 @@ export interface ChildLike {
 export interface ContentsLike {
   readonly id: number;
   isDestroyed(): boolean;
+  isCrashed(): boolean;
   postMessage(channel: string, message: unknown, ports?: unknown[]): void;
   send(channel: string, ...args: unknown[]): void;
   once(event: 'destroyed', listener: () => void): unknown;
@@ -502,7 +504,7 @@ export class MonitoringHostCore {
     const { listener } = message.status;
     session.running = listener === 'starting' || listener === 'listening';
     // Unchanged, and only to the window that holds control.
-    if (this.bound !== null && !this.bound.isDestroyed()) this.bound.send(MONITORING_STATUS_CHANNEL, message.status);
+    if (this.bound !== null && canSend(this.bound)) this.bound.send(MONITORING_STATUS_CHANNEL, message.status);
   }
 
   /**
@@ -524,7 +526,7 @@ export class MonitoringHostCore {
     if (session.disposing) return;
     const contents = this.bound;
     this.bound = null;
-    if (contents !== null && !contents.isDestroyed()) {
+    if (contents !== null && canSend(contents)) {
       const exit: RuntimeExit = { code, wasRunning: session.running, message };
       contents.send(MONITORING_EXIT_CHANNEL, exit);
     }

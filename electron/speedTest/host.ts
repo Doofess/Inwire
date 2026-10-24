@@ -10,6 +10,7 @@
 import { BrowserWindow, utilityProcess, type UtilityProcess } from 'electron';
 import path from 'node:path';
 import { SPEEDTEST_EVENT_CHANNEL } from '../channels';
+import { canSend } from '../rendererLife';
 
 export class SpeedTestHost {
   private child: UtilityProcess | null = null;
@@ -18,7 +19,7 @@ export class SpeedTestHost {
 
   private broadcast(event: unknown): void {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(SPEEDTEST_EVENT_CHANNEL, event);
+      if (!window.isDestroyed() && canSend(window.webContents)) window.webContents.send(SPEEDTEST_EVENT_CHANNEL, event);
     }
   }
 

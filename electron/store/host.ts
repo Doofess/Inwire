@@ -10,6 +10,7 @@
 import { app, MessageChannelMain, utilityProcess, type UtilityProcess, type WebContents } from 'electron';
 import path from 'node:path';
 import { STORE_EXIT_CHANNEL, STORE_INGEST_PORT_CHANNEL, STORE_PORT_CHANNEL } from '../channels';
+import { canSend } from '../rendererLife';
 
 export class CaptureStoreHost {
   private child: UtilityProcess | null = null;
@@ -115,7 +116,7 @@ export class CaptureStoreHost {
    */
   watch(contents: WebContents): void {
     const listener = (reason: string): void => {
-      if (!contents.isDestroyed()) contents.send(STORE_EXIT_CHANNEL, reason);
+      if (canSend(contents)) contents.send(STORE_EXIT_CHANNEL, reason);
     };
     this.exitListeners.push(listener);
     // **Removed when the renderer goes, because this is called per port
