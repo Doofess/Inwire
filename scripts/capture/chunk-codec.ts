@@ -30,7 +30,7 @@ import {
   encodeChunk, decodeChunk, applyPrefixes, PrefixBlock, ChunkDirectory, chunkStoresLinkType, CHUNK_VERSION,
   ROW_LAYOUT_VERSION, CHUNK_MAGIC, encodePackedChunk, selectRows, type ChunkSlot,
   DIRECTORY_BYTES, prefixBlockBytes,
-  CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND, LAYER_BIT_ORDER,
+  CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND, LAYER_BIT_ORDER, decodeText,
 } from '../../src/services/capture/chunkCodec';
 import { LAYERS } from '../../src/services/dissect/fieldRegistry';
 import { PcapService } from '../../src/services/pcapParser';
@@ -780,10 +780,24 @@ function container(segments: { kind: number; bytes: Uint8Array }[], lane: number
 // Short ASCII strings are decoded without TextDecoder (#16). The cut-off and
 // the ASCII test are what could go wrong, so the texts sit either side of both.
 {
-  const texts = ['', 'a', 'x'.repeat(64), 'y'.repeat(65), '\x7f', 'café', '日本', '\u{1f600}', 'tab\there'];
+  const texts = ['', 'a', 'x'.repeat(64), 'y'.repeat(65), '\x7f', 'café', '日本', '\u{1f600}', 'tab\there',
+    '54321 → 443 [ACK] Seq=1 Ack=1 Win=512 Len=0', 'ÿࠀ￿퟿', '→'.repeat(21), '→'.repeat(22)];
   const back = roundTrip(texts.map((info, i) => frame({ id: i + 1, info })));
   check('every table string comes back exactly, ASCII or not, either side of 64 bytes',
     back.map((p) => p.info), texts);
+
+  // Bytes TextEncoder never writes, as a torn or foreign file could hold: the
+  // fast path must answer exactly as TextDecoder does, replacement characters
+  // and all, which it does by handing them over.
+  const odd = [
+    [0x80], [0xc2], [0xc0, 0x80], [0xc1, 0xbf], [0xe0, 0x80, 0x80], [0xe0, 0x9f, 0xbf], [0xed, 0xa0, 0x80],
+    [0xe2, 0x86], [0xe2, 0x28, 0x92], [0xf0, 0x9f, 0x98, 0x80], [0xf8, 0x88, 0x80, 0x80, 0x80], [0xff], [0x41, 0xc3, 0x28],
+    // A leading byte-order mark, which TextDecoder drops: kept as it behaves.
+    [0xef, 0xbb, 0xbf, 0x41],
+  ].map((b) => new Uint8Array(b));
+  const reference = new TextDecoder();
+  const wrong = odd.filter((b) => decodeText(b) !== reference.decode(b)).map((b) => [...b].map((x) => x.toString(16)).join(' '));
+  check('malformed UTF-8 decodes exactly as TextDecoder decodes it', wrong, []);
 }
 
 // --- split at decode: dense fields go straight into the window's block --------

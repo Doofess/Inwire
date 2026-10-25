@@ -602,16 +602,45 @@ export function decodeChunk(summary: Uint8Array, split?: FieldBlockWriter): Pack
 /** Each dense key's column, by its place in `DENSE_FIELDS`. */
 const DENSE_INDEX = new Map<string, number>(DENSE_FIELDS.map((k, i) => [k.abbrev, i]));
 
+const SHORT_TEXT = 64;
+const shortCodes = new Uint16Array(SHORT_TEXT);
+
 /**
- * One string-table entry. Most are short ASCII - an address, a port label, a
- * protocol name - and a TextDecoder call has a fixed cost that dwarfs those:
- * it was 5% of the window's main thread at 60,000 rows a second (#16). Longer
- * or non-ASCII text still goes through it, so UTF-8 is decoded exactly once.
+ * One string-table entry. Nearly all are short - 97% of the burst's are 64
+ * bytes or fewer - and a TextDecoder call has a fixed cost that dwarfs them:
+ * 5% of the window's main thread at 60,000 rows a second (#16). Most are not
+ * ASCII either, because an Info line's arrow is three bytes, so one- to
+ * three-byte UTF-8 is decoded here. Anything else - longer text, a four-byte
+ * character, a malformed or overlong sequence, a surrogate, a byte-order mark -
+ * goes to TextDecoder, so the answer is always the one it would give.
+ * Exported for `scripts/capture/chunk-codec.ts`, which holds it to that.
  */
-function decodeText(bytes: Uint8Array): string {
-  if (bytes.length > 64) return textDecoder.decode(bytes);
-  for (let i = 0; i < bytes.length; i++) if (bytes[i] > 0x7f) return textDecoder.decode(bytes);
-  return String.fromCharCode.apply(null, bytes as unknown as number[]);
+export function decodeText(bytes: Uint8Array): string {
+  const n = bytes.length;
+  if (n > SHORT_TEXT || (n >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)) {
+    return textDecoder.decode(bytes);
+  }
+  let out = 0;
+  for (let i = 0; i < n;) {
+    const b = bytes[i];
+    if (b < 0x80) {
+      shortCodes[out++] = b;
+      i++;
+    } else if (b >= 0xc2 && b < 0xe0 && i + 1 < n && (bytes[i + 1] & 0xc0) === 0x80) {
+      shortCodes[out++] = ((b & 0x1f) << 6) | (bytes[i + 1] & 0x3f);
+      i += 2;
+    } else if (b >= 0xe0 && b < 0xf0 && i + 2 < n) {
+      const c = bytes[i + 1];
+      const d = bytes[i + 2];
+      if ((c & 0xc0) !== 0x80 || (d & 0xc0) !== 0x80) return textDecoder.decode(bytes);
+      if ((b === 0xe0 && c < 0xa0) || (b === 0xed && c >= 0xa0)) return textDecoder.decode(bytes);
+      shortCodes[out++] = ((b & 0x0f) << 12) | ((c & 0x3f) << 6) | (d & 0x3f);
+      i += 3;
+    } else {
+      return textDecoder.decode(bytes);
+    }
+  }
+  return String.fromCharCode.apply(null, shortCodes.subarray(0, out) as unknown as number[]);
 }
 
 /** `container` false is a segment: it must be a flat summary, never another container. */
