@@ -202,15 +202,16 @@ export function shouldStopForDisk(freeBytes: number | null): boolean {
  * happened ten times a second forever, and a budget that trimmed the instant it
  * was exceeded would do it at a buffer size where the full pass costs far more.
  *
- * **One of the three no longer pays that price, and the other two still do.**
+ * **Some of them no longer pay that price, and the rest still do.**
  * The display filter recovers a trim through `prefixShift` - the retained
  * frames were already decided and stay decided, so a trim costs a binary search
- * and a slice rather than re-deciding the buffer. Every
- * `useIncrementalAggregate` still rebuilds from scratch, because
- * `foldIncrementally` has an `add` and no `remove`: a fold cannot un-see the
- * frames that went. So the slack is still what stands between a trim and a
- * full refold of the dashboard - it is doing less work than it was, and
- * removing it would still be a mistake.
+ * and a slice rather than re-deciding the buffer. So do App's name map and
+ * expert log: `foldIncrementally` takes an optional `drop`, which they give it,
+ * and a trim costs the frames trimmed. The chart folds (the traffic timeline,
+ * the map, the size distribution) pass none, so they still rebuild from
+ * scratch. The slack is still what stands between a trim and a full refold of
+ * those - it is doing less work than it was, and removing it would still be a
+ * mistake.
  */
 export const BUDGET_SLACK = 0.05;
 

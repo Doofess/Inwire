@@ -116,6 +116,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | The store stops whole at its heap ceiling | `scripts/capture/heap-guard.ts` |
 | Native zlib output and `fflate` read each other | `scripts/capture/native-zlib.ts` |
 | Buffer trim is reachable before auto-pause | `scripts/session/buffer-budget.ts` |
+| A window trim does not refold the window: the expert log subtracts the trimmed frames and equals a rebuild (groups, frames, counts, categories), and names stay learned (ADR 0053 phase 6) | `scripts/expert/trim.ts` |
 | An import matches the whole-array result with the patch window forced small | `scripts/capture/import-stream.ts` |
 | Trackers keep nothing a transfer detaches | `scripts/pipeline/moved-bytes.ts`, `scripts/pipeline/arrival.ts` |
 | Catch-up from the agent's file equals an uninterrupted run | `scripts/pipeline/catch-up.ts` |
