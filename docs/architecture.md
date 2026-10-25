@@ -141,7 +141,10 @@ coordinator. One Sequencer numbers frames; plain TCP conversations are assigned
 to nested shard Workers, other traffic stays with the coordinator, and results
 merge back into ID order. Shards use the same Worker script in a distinct role;
 they must not start the coordinator's timers. `services/pipeline/coordinator.ts`,
-`threads.ts`, `shard.ts` and `shardProtocol.ts` define this path.
+`threads.ts`, `shard.ts` and `shardProtocol.ts` define this path. A shard
+annotates its rows and sends them packed (`rowPack.ts`). The coordinator adds
+its merge's writes as an overlay and forwards the packs to the window and the
+store, which writes them into its chunks without re-encoding.
 
 ### Credits, shedding and catch-up
 
@@ -226,7 +229,9 @@ The agent's original pcapng files are separate, in each capture directory's `pca
 The index writes version 3, reads versions 1–3 and continues existing captures
 at their own format version. Version 1 has no frame records; version 2 adds
 records; version 3 adds segments and a retained-data floor. Chunk version 2
-stores link type; an absent old link type is not proof of Ethernet.
+stores link type; an absent old link type is not proof of Ethernet. Chunk
+version 3 holds the shards' packed rows as version 2 segments, with overlays
+and patches beside them (ADR 0053 phase 6).
 Consult `captureIndex.ts` and `chunkCodec.ts` before changing either format.
 
 Bytes are durable input; rows and records are derived accelerators attached by
