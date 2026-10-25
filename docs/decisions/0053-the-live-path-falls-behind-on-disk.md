@@ -504,6 +504,29 @@ production build all kept up: advanced 57,700-58,400 against 57,800-58,200
 sent, 0 skipped, lag flat at 18,000-44,000, long tasks 3%, 6% and 3%, level
 0.5-0.6 s after the agent stopped. The store's reader is unchanged.
 
+**#17, first part: the catch-up seek, 2026-10-25.** Profiled at 90,000 f/s,
+nothing was saturated: the coordinator was 40% idle, the shards 58-79%, the
+renderer 59%. The view still advanced only 37,400 f/s, because phase 4's
+catch-up counted every frame from the start of the file to reach the hole. A
+capture with no ring has one file, and a hole 2.0M frames in meant reading
+2.2 GB before the first useful frame. Now every frame passed on adds its
+EPB's length to a per-file sum, and a catch-up with an anchor jumps there
+after one header read. The sum holds only for what the agent writes (an EPB
+with no options, nothing between them). So a landing must start with the
+anchor's EPB at the anchor's length and match the anchor; a miss counts from
+the start and seeks no more that capture. The faster file exposed a race: it
+could level before main's notice of the next shed batch arrived, and that
+notice then marked frames the file was about to deliver as a hole. A shed
+notice is now clipped to what the file has not delivered.
+Two 60,000-then-90,000 follow runs, with no ring. At 90,000 the view
+advanced 58,200 and 57,400 f/s, against 37,400 before. Catch-up read
+1,057-1,078 MB in about 255 reads, against 3.1 GB in 741, and bytes read
+were within 0.03% of the EPB bytes the file delivered. Nothing was skipped,
+every frame was shown, and the view was level 13.5 s after the agent stopped.
+At 60,000 the first run kept up (59,000 of 59,200), and the second fell
+behind (45,100) and caught up from the file. That miss is the live
+coordinator's ceiling, the rest of #17, left for its own decision.
+
 **The equality tests.**
 - `scripts/pipeline/parallel.ts`: packed rows against the single Worker on
   every fixture and the burst.

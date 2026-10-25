@@ -51,9 +51,29 @@ export class PcapngTail {
    * written yet, read again later. Past `STALL_LIMIT` the file is corrupt.
    */
   stalled = 0;
+  /** File offset of the block `next` last gave back. */
+  blockAt = 0;
 
   constructor(startOffset = 0) {
     this.base = startOffset;
+  }
+
+  /** The file offset of the next block to be read: everything before it is consumed. */
+  get position(): number {
+    return this.base + this.at;
+  }
+
+  /**
+   * Go on reading from `offset`, a block boundary somewhere ahead, with what
+   * the section's header and IDBs said kept - which is why a seek reads them
+   * first (#17). Whatever is held is let go; nothing checks the offset, so a
+   * caller checks what it finds there.
+   */
+  jump(offset: number): void {
+    this.base = offset;
+    this.buf = new Uint8Array(0);
+    this.at = 0;
+    this.stalled = 0;
   }
 
   /** The file offset the next chunk must be read from. */
@@ -64,6 +84,13 @@ export class PcapngTail {
   /** Bytes held and not yet consumed. */
   get pending(): number {
     return this.buf.length - this.at;
+  }
+
+  /** The type and length of the block at the read position, once eight bytes of it are here. */
+  blockHead(): { type: number; length: number } | null {
+    if (this.buf.length - this.at < 8) return null;
+    const view = new DataView(this.buf.buffer, this.buf.byteOffset + this.at, 8);
+    return { type: view.getUint32(0, this.little), length: view.getUint32(4, this.little) };
   }
 
   /** A chunk read from `readOffset` on. */
@@ -120,6 +147,7 @@ export class PcapngTail {
         return null;
       }
       this.stalled = 0;
+      this.blockAt = this.base + this.at;
       this.at += length;
       if (type === 0x0a0d0d0a) {
         this.nsPerTick = [];

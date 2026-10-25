@@ -28,6 +28,20 @@
  * as it was before this existed. A second that fails is counted
  * (`misaligned`) and catch-up is off for the rest of the capture.
  *
+ * ## Finding the hole (#17)
+ *
+ * Counting from the start of the file reads every frame before the hole, and
+ * a capture with no ring has one file: a hole 2.0M frames in read 2.2 GB to
+ * reach it, at a fifth of the speed live had. So every frame passed on to be
+ * dissected, live or read back, adds its EPB's length to a running sum per
+ * file (`passed`), and a catch-up with an anchor jumps there - after one read
+ * of the file's header, whose IDBs the frames need - instead of counting.
+ * The sum is exact only for what the agent writes: an EPB with no options
+ * and no other block between them. A landing is not trusted: the block there
+ * must be an EPB, the anchor's length when it landed on the anchor, and the
+ * anchor itself must match. A landing that fails either is a `seekMiss`:
+ * counted from the start as before, and no seek again in this capture.
+ *
  * ## Rejoining
  *
  * While catching up, live frames from the hole on are dropped - the file has
@@ -42,6 +56,7 @@
  * Pure: the Worker does the reading and the dissecting, and
  * `scripts/pipeline/catch-up.ts` drives every path here with no Worker.
  */
+import { MAX_SNAPLEN } from '../captureOptions';
 import { PcapngTail, type TailFrame } from './pcapngTail';
 
 /** Within this many frames of live, live frames are held for the rejoin. */
@@ -54,6 +69,28 @@ export const HOLD_MAX_BYTES = 96 * 1024 * 1024;
 export const READ_BYTES = 4 * 1024 * 1024;
 /** How long to wait before reading a file again that had nothing new. */
 export const RETRY_MS = 150;
+/**
+ * The first read of a file a seek will jump into: its section header and
+ * IDBs, which say the byte order, the clock and the adapters' names (#17).
+ */
+export const HEADER_READ = 64 * 1024;
+/**
+ * Frames counted ahead of a gap in the numbering - two adapters' skew - while
+ * the sizes wait for the frame missing. A gap no frame fills stops the sizes
+ * there, which only makes a later seek land earlier.
+ */
+const AHEAD_MAX = 4096;
+/** Reads of zeros where a seek landed - a block not written yet - before the landing is called wrong. */
+const LANDING_TRIES = 20;
+
+/**
+ * An EPB's length for a frame of `capLen` bytes, as the agent writes it: no
+ * options (`agent-rs/src/pcapng.rs`). An agent that wrote any would make a
+ * seek land wrong, which the landing's check catches.
+ */
+export function epbBytes(capLen: number): number {
+  return 32 + capLen + ((4 - (capLen % 4)) % 4);
+}
 
 /** What catch-up needs of a live frame. */
 export interface SeqFrame {
@@ -206,6 +243,38 @@ interface Cursor {
   tail: PcapngTail;
   /** The number of the next packet `tail` will give. */
   next: number;
+  /** Where the file's first EPB is, once its header has been read. */
+  headerEnd: number | null;
+  /** Where to jump once the header has been read, by the frames' sizes. */
+  seek: SizedPoint | null;
+  /**
+   * A jump the anchor has not proved yet: where it landed, and how often a
+   * read found zeros there, and the EPB length it must find when it landed on
+   * the anchor itself. A landing the anchor disproves is counted again from
+   * the start of the file.
+   */
+  landing: { at: number; zeros: number; length: number | null } | null;
+}
+
+/** A frame's place in its file, from the sizes of the frames before it: `rel` bytes past the first EPB. */
+interface SizedPoint {
+  seq: number;
+  rel: number;
+}
+
+/** How far the frames on their way to be dissected have got through their file, by size. */
+interface Sizes {
+  index: number;
+  firstSeq: number;
+  /** The next frame to be counted, and the bytes of EPBs before it. */
+  next: number;
+  rel: number;
+  /** The EPB length of frame `next - 1`. */
+  lastLen: number;
+}
+
+function freshCursor(index: number, name: string, firstSeq: number): Cursor {
+  return { index, name, tail: new PcapngTail(0), next: firstSeq, headerEnd: null, seek: null, landing: null };
 }
 
 export class CatchUp<F extends SeqFrame> {
@@ -230,9 +299,16 @@ export class CatchUp<F extends SeqFrame> {
   /** Frames numbered before this were read from the file; a late live copy is a duplicate. */
   private coveredBelow = 0;
   private coveredFrom = 0;
+  /** The sizes so far, and frames counted past a gap in the numbering until it fills. */
+  private sizes: Sizes | null = null;
+  private ahead = new Map<number, number>();
+  /** A seek landed wrong once: this capture's files are not what the sizes say, so count. */
+  private seekOff = false;
 
   /** Counts, for a readout and the tests. */
-  readonly stats = { started: 0, rejoined: 0, framesRead: 0, ended: 0, misaligned: 0, holdOverflows: 0 };
+  readonly stats = {
+    started: 0, rejoined: 0, framesRead: 0, ended: 0, misaligned: 0, holdOverflows: 0, seeks: 0, seekMisses: 0,
+  };
 
   constructor(private readonly files: CaptureFiles) {}
 
@@ -258,6 +334,111 @@ export class CatchUp<F extends SeqFrame> {
     this.dropped = [];
     this.coveredBelow = 0;
     this.coveredFrom = 0;
+    this.sizes = null;
+    this.ahead.clear();
+    this.seekOff = false;
+  }
+
+  /**
+   * A frame on its way to be dissected, live or read back: the sum of the
+   * sizes is where the next one sits in its file (#17). Each number passes
+   * once, in order but for two adapters' skew, which `ahead` waits out.
+   */
+  passed(seq: number, capLen: number): void {
+    let sizes = this.sizes;
+    if (sizes === null || this.files.get(sizes.index)?.firstSeq !== sizes.firstSeq) {
+      const file = this.files.holding(seq);
+      if (file === undefined || file.firstSeq === null) return;
+      sizes = this.sizes = { index: file.index, firstSeq: file.firstSeq, next: file.firstSeq, rel: 0, lastLen: 0 };
+      this.ahead.clear();
+    }
+    // A file whose last frames never came - a ring deleted it - is left for
+    // the next once a frame of the next arrives.
+    const after = this.files.after(sizes.index);
+    if (after !== undefined && seq >= after.firstSeq! && sizes.next < after.firstSeq!) {
+      sizes = this.sizes = { index: after.index, firstSeq: after.firstSeq!, next: after.firstSeq!, rel: 0, lastLen: 0 };
+      for (const early of this.ahead.keys()) if (early < sizes.next) this.ahead.delete(early);
+    }
+    if (seq < sizes.next) return;
+    if (seq > sizes.next) {
+      if (this.ahead.size < AHEAD_MAX) this.ahead.set(seq, epbBytes(capLen));
+      return;
+    }
+    this.count(sizes, epbBytes(capLen));
+    let len;
+    while ((len = this.ahead.get(this.sizes!.next)) !== undefined) {
+      this.ahead.delete(this.sizes!.next);
+      this.count(this.sizes!, len);
+    }
+  }
+
+  private count(sizes: Sizes, len: number): void {
+    const after = this.files.after(sizes.index);
+    if (after !== undefined && after.firstSeq === sizes.next) {
+      sizes = this.sizes = { index: after.index, firstSeq: after.firstSeq, next: after.firstSeq, rel: 0, lastLen: 0 };
+    }
+    sizes.rel += len;
+    sizes.lastLen = len;
+    sizes.next++;
+  }
+
+  /**
+   * Where to read from for a hole whose anchor is frame `anchorSeq` of
+   * `file`: the anchor's own place, or the last place the sizes reached
+   * before it - counted on from there. Null when the sizes know nothing of
+   * that file, or nothing past its first frame.
+   */
+  private seekPoint(file: FileFacts, anchorSeq: number): SizedPoint | null {
+    const sizes = this.sizes;
+    if (this.seekOff || sizes === null || sizes.index !== file.index || sizes.firstSeq !== file.firstSeq) return null;
+    const point = sizes.next === anchorSeq + 1
+      ? { seq: anchorSeq, rel: sizes.rel - sizes.lastLen }
+      : sizes.next <= anchorSeq ? { seq: sizes.next, rel: sizes.rel } : null;
+    return point !== null && point.seq > sizes.firstSeq ? point : null;
+  }
+
+  /** Read on from `point`: at once when the header is read, else after it. */
+  private aim(cursor: Cursor, point: SizedPoint): void {
+    this.stats.seeks++;
+    if (cursor.headerEnd === null) { cursor.seek = point; return; }
+    this.land(cursor, cursor.headerEnd + point.rel, point.seq);
+  }
+
+  private land(cursor: Cursor, at: number, seq: number): void {
+    cursor.tail.jump(at);
+    cursor.next = seq;
+    cursor.seek = null;
+    const anchor = this.anchor;
+    cursor.landing = { at, zeros: 0, length: anchor !== null && anchor.seq === seq ? epbBytes(anchor.capLen) : null };
+  }
+
+  /**
+   * Whether the bytes where a seek landed start an EPB, as far as eight bytes
+   * say: 'zeros' for a block not written yet, which is read again. A landing
+   * in the middle of a block can read as one longer than anything here, which
+   * would wait for ever, so it is judged by its head, not by whether it closes.
+   */
+  private landingHead(cursor: Cursor): 'ok' | 'zeros' | 'wrong' | 'short' {
+    const head = cursor.tail.blockHead();
+    if (head === null) return 'short';
+    if (head.type === 0 && head.length === 0) return 'zeros';
+    const length = cursor.landing!.length;
+    const fits = length !== null ? head.length === length : head.length >= 32 && head.length <= epbBytes(MAX_SNAPLEN) && head.length % 4 === 0;
+    return head.type === 6 && fits ? 'ok' : 'wrong';
+  }
+
+  /**
+   * The seek landed somewhere the anchor is not: the sizes do not describe
+   * this file. Counted again from its start, as before seeking existed, and
+   * not sought again this capture.
+   */
+  private missed(cursor: Cursor, out: ReadResult<F>): ReadResult<F> {
+    this.stats.seekMisses++;
+    this.seekOff = true;
+    const facts = this.files.get(cursor.index);
+    this.cursor = freshCursor(cursor.index, cursor.name, facts?.firstSeq ?? cursor.next);
+    out.retryMs = 0;
+    return out;
   }
 
   /**
@@ -284,12 +465,21 @@ export class CatchUp<F extends SeqFrame> {
     // at the frame before it, which it checked - is carried on with no anchor.
     const resume = this.cursor !== null && this.cursor.index === file.index && this.cursor.next === fromSeq;
     if (!resume && (this.cursor === null || this.cursor.index !== file.index || this.cursor.next > want)) {
-      this.cursor = { index: file.index, name: file.name, tail: new PcapngTail(0), next: file.firstSeq! };
+      this.cursor = freshCursor(file.index, file.name, file.firstSeq!);
     }
     this.on = true;
     this.from = fromSeq;
     this.sessionFrom = fromSeq;
     this.anchor = !resume && anchor !== null && anchor.seq === fromSeq - 1 ? anchor : null;
+    // Rather than count every frame from where the cursor is - the start of
+    // the file, the first time - go to where the sizes put the anchor, which
+    // then proves the landing. Only with an anchor: nothing else could.
+    // (A cursor is there now: carried on, or made just above.)
+    const cursor = this.cursor!;
+    if (this.anchor !== null && cursor.seek === null && cursor.landing === null) {
+      const point = this.seekPoint(file, this.anchor.seq);
+      if (point !== null && point.seq > cursor.next) this.aim(cursor, point);
+    }
     this.edge = fromSeq;
     this.edgeUs = anchor?.tsUs ?? 0;
     this.lastFileUs = anchor?.tsUs ?? 0;
@@ -354,7 +544,8 @@ export class CatchUp<F extends SeqFrame> {
   wantRead(): ReadRequest | null {
     if (!this.on || this.inFlight || this.cursor === null) return null;
     this.inFlight = true;
-    return { name: this.cursor.name, offset: this.cursor.tail.readOffset, length: READ_BYTES };
+    const length = this.cursor.seek !== null && this.cursor.headerEnd === null ? HEADER_READ : READ_BYTES;
+    return { name: this.cursor.name, offset: this.cursor.tail.readOffset, length };
   }
 
   /**
@@ -373,19 +564,36 @@ export class CatchUp<F extends SeqFrame> {
       this.files.gone(cursor.index);
       const next = this.files.after(cursor.index);
       if (next === undefined || next.name === null) return this.end('noFile', out);
-      this.cursor = { index: next.index, name: next.name, tail: new PcapngTail(0), next: next.firstSeq! };
+      this.cursor = freshCursor(next.index, next.name, next.firstSeq!);
       out.retryMs = 0;
       return out;
     }
     const bytes = result.bytes ?? new Uint8Array(0);
     const before = cursor.tail.readOffset;
     cursor.tail.push(bytes);
+    const landing = cursor.landing;
+    if (landing !== null && cursor.tail.position === landing.at) {
+      // Where the seek landed must be an EPB - the anchor's, by its length,
+      // when it landed on the anchor. Zeros are one not written yet, if no
+      // more than so often; anything else is the middle of a block.
+      const head = this.landingHead(cursor);
+      if (head === 'wrong' || (head === 'zeros' && ++landing.zeros > LANDING_TRIES)) return this.missed(cursor, out);
+    }
     let frame;
     try {
-      while ((frame = cursor.tail.next(cursor.next >= this.from - 1)) !== null) {
+      while ((frame = cursor.tail.next(cursor.seek === null && cursor.next >= this.from - 1)) !== null) {
+        if (cursor.headerEnd === null) cursor.headerEnd = cursor.tail.blockAt;
+        if (cursor.seek !== null) {
+          // The header is read: on to where the sizes say.
+          this.land(cursor, cursor.headerEnd + cursor.seek.rel, cursor.seek.seq);
+          continue;
+        }
         const seq = cursor.next++;
         if (this.anchor !== null && seq === this.anchor.seq) {
-          if (!sameFrame(frame, this.anchor)) return this.end('anchorMismatch', out);
+          if (!sameFrame(frame, this.anchor)) {
+            return cursor.landing !== null ? this.missed(cursor, out) : this.end('anchorMismatch', out);
+          }
+          cursor.landing = null;
           this.anchor = null;
           continue;
         }
@@ -452,7 +660,7 @@ export class CatchUp<F extends SeqFrame> {
           // into the next would be off; a hole is marked rather than guessed.
           return this.end('misaligned', out);
         }
-        this.cursor = { index: next.index, name: next.name, tail: new PcapngTail(0), next: next.firstSeq };
+        this.cursor = freshCursor(next.index, next.name, next.firstSeq);
         out.retryMs = 0;
       } else {
         out.retryMs = RETRY_MS;
@@ -588,6 +796,14 @@ export class CatchUpRouter<F extends SeqFrame> {
   shed(firstSeq: number, frames: number): void {
     if (this.catchUp.active) { this.catchUp.shedSeen(firstSeq, frames); return; }
     const expected = this.flow.expectedSeq;
+    // A file read faster than main's word of what it shed can level before
+    // a later batch's notice arrives: the part the file delivered is not a
+    // hole, and the rest is one to catch up from where the file stopped.
+    if (expected !== null && firstSeq < expected) {
+      frames -= expected - firstSeq;
+      firstSeq = expected;
+      if (frames <= 0) return;
+    }
     if (this.enabled && expected !== null && expected <= firstSeq && this.catchUp.start(expected, this.anchor)) {
       this.catchUp.shedSeen(firstSeq, frames);
       return;
@@ -634,6 +850,7 @@ export class CatchUpRouter<F extends SeqFrame> {
   private pass(frame: F): void {
     const hole = this.flow.seqArrived(frame.seq);
     if (this.anchor === null || frame.seq > this.anchor.seq) this.anchor = anchorOf(frame);
+    if (this.enabled) this.catchUp.passed(frame.seq, frame.bytes.length);
     this.deliver(frame, hole);
   }
 }
