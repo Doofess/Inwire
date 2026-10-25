@@ -121,7 +121,8 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | An import matches the whole-array result with the patch window forced small | `scripts/capture/import-stream.ts` |
 | Trackers keep nothing a transfer detaches | `scripts/pipeline/moved-bytes.ts`, `scripts/pipeline/arrival.ts` |
 | Catch-up from the agent's file equals an uninterrupted run | `scripts/pipeline/catch-up.ts` |
-| A hole late in a file is reached by the frames' sizes: nothing read between the header and the frame before the hole, in one file or a ring's second; a landing the sizes put wrong is caught and counted from the start (#17) | `scripts/pipeline/catch-up.ts` |
+| A hole late in a file is reached by the frames' sizes: nothing read between the header and the frame before the hole, in one file or a ring's second; a landing the sizes put wrong is caught and counted from the start; a gap that never fills, a clear while catching up and a ring file that never passed do not turn the seek off (#17) | `scripts/pipeline/catch-up.ts` |
+| Every place the frames' sizes give is exactly the frame's offset, through skew, gaps and runs learned while frames still pass (#17) | `scripts/pipeline/frame-sizes.ts` |
 | Parallel dissection equals the single Worker | `scripts/pipeline/parallel.ts` |
 | The shard's row steps plus the merge from a side record equal `ingest`'s order (process, gap, fingerprint, network facts) | `scripts/pipeline/row-steps.ts` |
 | Every key a merge step writes to a shard row is in its overlay, so the window and the disk keep it | `scripts/pipeline/row-overlay.ts` runs a copy of the merge steps, as `parallel.ts` and `pack-native-equality.ts` copy the Worker's emit; a new write in `emitMerged` itself is unenforced until it is copied there |

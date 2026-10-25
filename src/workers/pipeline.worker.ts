@@ -683,11 +683,12 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   if (!applyThreads() && parallel !== null) parallel.coordinator.reset(laneZero());
   // A clear while catching up: what the file still owed is from before the
   // clear, so it is not read, and the numbering starts again from the next
-  // live frame rather than calling the cleared part a hole.
+  // live frame rather than calling the cleared part a hole. The agent's
+  // files go on, and where they were read is kept for the next hole.
   if (catchUp.active) {
     stopCatchUp();
     flow.startCapture();
-    router.reset();
+    router.clear();
   }
   ordering.clear();
   // Cleared frames will never be dissected, so main is told it is owed

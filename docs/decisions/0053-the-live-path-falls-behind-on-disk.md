@@ -517,7 +517,12 @@ anchor's EPB at the anchor's length and match the anchor; a miss counts from
 the start and seeks no more that capture. The faster file exposed a race: it
 could level before main's notice of the next shed batch arrived, and that
 notice then marked frames the file was about to deliver as a hole. A shed
-notice is now clipped to what the file has not delivered.
+notice is now clipped to what the file has not delivered. The sums are kept
+in runs: a gap the stream never fills (a clear while catching up, a few
+frames the agent's queue shed, a ring file that never passed) is counted
+across by the read, which then learns where the next run starts and jumps
+on. A first version kept one contiguous sum, and any such gap switched the
+seek off for the rest of the capture.
 Two 60,000-then-90,000 follow runs, with no ring. At 90,000 the view
 advanced 58,200 and 57,400 f/s, against 37,400 before. Catch-up read
 1,057-1,078 MB in about 255 reads, against 3.1 GB in 741, and bytes read

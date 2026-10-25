@@ -140,6 +140,10 @@ interface Plan {
   stopAtEnd?: boolean;
   /** A block that is not a frame, written before this frame - one the frames' sizes do not account for. */
   extraBlockAt?: number;
+  /** Frames the stream never carries, too few to catch up - the agent's queue shed them; the file has them. */
+  liveDrops?: Set<number>;
+  /** The view is cleared before this batch is handled, as the Worker clears it. */
+  clearAtBatch?: number;
 }
 
 interface Run {
@@ -271,6 +275,13 @@ function run(frames: Frame[], plan: Plan): Run {
   // file sees the file's frames before the live copies of them.
   const port: { no: number; group: Frame[] }[] = [];
   const handle = ({ no: batchNo, group }: { no: number; group: Frame[] }) => {
+    // `resetPipeline` in the Worker: a clear while catching up.
+    if (plan.clearAtBatch === batchNo && catchUp.active) {
+      router.stop();
+      flow.startCapture();
+      router.clear();
+    }
+    if (plan.liveDrops) group = group.filter((f) => !plan.liveDrops!.has(f.seq));
     if (plan.mainShed?.has(batchNo)) {
       router.shed(group[0].seq, group.length);
     } else if (!plan.agentShed?.has(batchNo)) {
@@ -443,6 +454,48 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
       diff === null && r.holes.length === 0 && r.catchUp.stats.seeks === 1 && r.catchUp.stats.seekMisses === 0
       && between.length === 0,
       diff ?? `${between.length} reads elsewhere, the first ${JSON.stringify(between[0])}; ${JSON.stringify(r.catchUp.stats)}`);
+  }
+  {
+    // A gap the frames' sizes never see filled - five frames the agent's
+    // queue shed, marked, not caught up - stops nothing: the seek lands
+    // before the gap, counts across it, and jumps on to the hole.
+    const anchorSeq = (batches - 8) * 300 - 1;
+    const drops = new Set([6000, 6001, 6002, 6003, 6004]);
+    const r = run(frames, { mainShed: new Set([batches - 8, batches - 7, batches - 6]), liveDrops: drops });
+    const between = r.reads.filter((x) => x.offset >= r.startOf(6006) && x.offset < r.startOf(anchorSeq));
+    check(`${label}: a gap that never fills - counted across, then sought past`,
+      between.length === 0 && r.catchUp.stats.seekMisses === 0 && r.catchUp.stats.misaligned === 0
+      && r.delivered.length === n - 5,
+      `${between.length} reads between; ${JSON.stringify({ stats: r.catchUp.stats, holes: r.holes })}`);
+  }
+  {
+    // Cleared while catching up: what the file still owed is never read, so
+    // the sizes have a gap from where the catch-up stopped to the next live
+    // frame. The file is the same file, read from where it was.
+    const anchorSeq = (batches - 8) * 300 - 1;
+    const shed = new Set([20, 21, 22, batches - 8, batches - 7, batches - 6]);
+    const r = run(frames, { mainShed: shed, clearAtBatch: 22 });
+    // Nothing before the first hole is read, before the clear or after it,
+    // nor anything past the clear's gap on the way to the second.
+    const between = r.reads.filter((x) => (x.offset >= HEADER_READ && x.offset < r.startOf(5999))
+      || (x.offset >= r.startOf(6901) && x.offset < r.startOf(anchorSeq)));
+    check(`${label}: a clear while catching up - the next hole is still sought`,
+      between.length === 0 && r.catchUp.stats.seekMisses === 0 && r.catchUp.stats.misaligned === 0
+      && r.holes.filter((h) => h.at > 6900).length === 0 && r.catchUp.off === null,
+      `${between.length} reads between, the first at ${between[0]?.offset}; ${JSON.stringify({ stats: r.catchUp.stats, holes: r.holes })}`);
+  }
+  {
+    // A ring file none of whose frames ever passed - shed, and deleted
+    // before it was read: the sizes start again with the file after it.
+    const perFile = 600;
+    const anchorSeq = (batches - 8) * 300 - 1;
+    const shed = new Set([2, 3, batches - 8, batches - 7, batches - 6]);
+    const r = run(frames, { perFile, mainShed: shed, deleteFile: { index: 2, atBatch: 2 }, lag: 3000 });
+    const lateName = `capture_${String(Math.floor(anchorSeq / perFile) + 1).padStart(5, '0')}_20261009120000.pcapng`;
+    const between = r.reads.filter((x) => x.name === lateName && x.offset >= HEADER_READ && x.offset < r.startOf(anchorSeq));
+    check(`${label}: a ring file that never passed - the next file's hole is still sought`,
+      between.length === 0 && r.catchUp.stats.seekMisses === 0 && r.catchUp.stats.misaligned === 0,
+      `${between.length} reads between; ${JSON.stringify({ stats: r.catchUp.stats, holes: r.holes })}`);
   }
   {
     // The port runs behind the file: by the time live frames are handled the

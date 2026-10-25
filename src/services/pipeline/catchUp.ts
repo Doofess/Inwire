@@ -34,8 +34,12 @@
  * a capture with no ring has one file: a hole 2.0M frames in read 2.2 GB to
  * reach it, at a fifth of the speed live had. So every frame passed on to be
  * dissected, live or read back, adds its EPB's length to a running sum per
- * file (`passed`), and a catch-up with an anchor jumps there - after one read
- * of the file's header, whose IDBs the frames need - instead of counting.
+ * file (`passed`, `frameSizes.ts`), and a catch-up with an anchor jumps there
+ * - after one read of the file's header, whose IDBs the frames need - instead
+ * of counting. A gap the stream never filled leaves the frames after it
+ * unplaced: the jump lands before the gap, counts across it, learns where the
+ * next run starts and jumps on (`gapEnd`). A clear keeps the cursor and the
+ * sizes, because the agent's numbering and files go on.
  * The sum is exact only for what the agent writes: an EPB with no options
  * and no other block between them. A landing is not trusted: the block there
  * must be an EPB, the anchor's length when it landed on the anchor, and the
@@ -57,6 +61,7 @@
  * `scripts/pipeline/catch-up.ts` drives every path here with no Worker.
  */
 import { MAX_SNAPLEN } from '../captureOptions';
+import { FrameSizes, type SizedPoint } from './frameSizes';
 import { PcapngTail, type TailFrame } from './pcapngTail';
 
 /** Within this many frames of live, live frames are held for the rejoin. */
@@ -74,12 +79,6 @@ export const RETRY_MS = 150;
  * IDBs, which say the byte order, the clock and the adapters' names (#17).
  */
 export const HEADER_READ = 64 * 1024;
-/**
- * Frames counted ahead of a gap in the numbering - two adapters' skew - while
- * the sizes wait for the frame missing. A gap no frame fills stops the sizes
- * there, which only makes a later seek land earlier.
- */
-const AHEAD_MAX = 4096;
 /** Reads of zeros where a seek landed - a block not written yet - before the landing is called wrong. */
 const LANDING_TRIES = 20;
 
@@ -256,23 +255,6 @@ interface Cursor {
   landing: { at: number; zeros: number; length: number | null } | null;
 }
 
-/** A frame's place in its file, from the sizes of the frames before it: `rel` bytes past the first EPB. */
-interface SizedPoint {
-  seq: number;
-  rel: number;
-}
-
-/** How far the frames on their way to be dissected have got through their file, by size. */
-interface Sizes {
-  index: number;
-  firstSeq: number;
-  /** The next frame to be counted, and the bytes of EPBs before it. */
-  next: number;
-  rel: number;
-  /** The EPB length of frame `next - 1`. */
-  lastLen: number;
-}
-
 function freshCursor(index: number, name: string, firstSeq: number): Cursor {
   return { index, name, tail: new PcapngTail(0), next: firstSeq, headerEnd: null, seek: null, landing: null };
 }
@@ -299,11 +281,12 @@ export class CatchUp<F extends SeqFrame> {
   /** Frames numbered before this were read from the file; a late live copy is a duplicate. */
   private coveredBelow = 0;
   private coveredFrom = 0;
-  /** The sizes so far, and frames counted past a gap in the numbering until it fills. */
-  private sizes: Sizes | null = null;
-  private ahead = new Map<number, number>();
+  /** The frames' sizes through the file they are in. */
+  private sizes: FrameSizes | null = null;
   /** A seek landed wrong once: this capture's files are not what the sizes say, so count. */
   private seekOff = false;
+  /** The first frame the cursor will count whose place the sizes do not know: on to the anchor from there. */
+  private gapEnd: number | null = null;
 
   /** Counts, for a readout and the tests. */
   readonly stats = {
@@ -335,66 +318,62 @@ export class CatchUp<F extends SeqFrame> {
     this.coveredBelow = 0;
     this.coveredFrom = 0;
     this.sizes = null;
-    this.ahead.clear();
     this.seekOff = false;
+    this.gapEnd = null;
+  }
+
+  /**
+   * The view was cleared while catching up. As `reset`, but the agent's
+   * numbering goes on in the same files, so where reading them had got to and
+   * their sizes are kept: the next hole is sought, not counted from the start.
+   * A jump the anchor had not proved yet is let go.
+   */
+  clear(): void {
+    const cursor = this.cursor;
+    const sizes = this.sizes;
+    const seekOff = this.seekOff;
+    this.reset();
+    this.cursor = cursor !== null && cursor.seek === null && cursor.landing === null ? cursor : null;
+    this.sizes = sizes;
+    this.seekOff = seekOff;
   }
 
   /**
    * A frame on its way to be dissected, live or read back: the sum of the
-   * sizes is where the next one sits in its file (#17). Each number passes
-   * once, in order but for two adapters' skew, which `ahead` waits out.
+   * sizes is where the next one sits in its file (#17). A frame of a later
+   * file starts that file's sizes - also past a file none of whose frames
+   * passed, which a ring deleted.
    */
   passed(seq: number, capLen: number): void {
     let sizes = this.sizes;
     if (sizes === null || this.files.get(sizes.index)?.firstSeq !== sizes.firstSeq) {
       const file = this.files.holding(seq);
       if (file === undefined || file.firstSeq === null) return;
-      sizes = this.sizes = { index: file.index, firstSeq: file.firstSeq, next: file.firstSeq, rel: 0, lastLen: 0 };
-      this.ahead.clear();
+      sizes = this.sizes = new FrameSizes(file.index, file.firstSeq);
     }
-    // A file whose last frames never came - a ring deleted it - is left for
-    // the next once a frame of the next arrives.
-    const after = this.files.after(sizes.index);
-    if (after !== undefined && seq >= after.firstSeq! && sizes.next < after.firstSeq!) {
-      sizes = this.sizes = { index: after.index, firstSeq: after.firstSeq!, next: after.firstSeq!, rel: 0, lastLen: 0 };
-      for (const early of this.ahead.keys()) if (early < sizes.next) this.ahead.delete(early);
+    for (let after = this.files.after(sizes.index); after?.firstSeq != null && seq >= after.firstSeq; after = this.files.after(sizes.index)) {
+      sizes = this.sizes = new FrameSizes(after.index, after.firstSeq);
     }
-    if (seq < sizes.next) return;
-    if (seq > sizes.next) {
-      if (this.ahead.size < AHEAD_MAX) this.ahead.set(seq, epbBytes(capLen));
-      return;
-    }
-    this.count(sizes, epbBytes(capLen));
-    let len;
-    while ((len = this.ahead.get(this.sizes!.next)) !== undefined) {
-      this.ahead.delete(this.sizes!.next);
-      this.count(this.sizes!, len);
-    }
-  }
-
-  private count(sizes: Sizes, len: number): void {
-    const after = this.files.after(sizes.index);
-    if (after !== undefined && after.firstSeq === sizes.next) {
-      sizes = this.sizes = { index: after.index, firstSeq: after.firstSeq, next: after.firstSeq, rel: 0, lastLen: 0 };
-    }
-    sizes.rel += len;
-    sizes.lastLen = len;
-    sizes.next++;
+    sizes.add(seq, epbBytes(capLen));
   }
 
   /**
    * Where to read from for a hole whose anchor is frame `anchorSeq` of
-   * `file`: the anchor's own place, or the last place the sizes reached
-   * before it - counted on from there. Null when the sizes know nothing of
-   * that file, or nothing past its first frame.
+   * `file`: the anchor's own place, or the end of the last run of frames
+   * placed before it - counted on from there. Null when the sizes know
+   * nothing of that file.
    */
   private seekPoint(file: FileFacts, anchorSeq: number): SizedPoint | null {
     const sizes = this.sizes;
     if (this.seekOff || sizes === null || sizes.index !== file.index || sizes.firstSeq !== file.firstSeq) return null;
-    const point = sizes.next === anchorSeq + 1
-      ? { seq: anchorSeq, rel: sizes.rel - sizes.lastLen }
-      : sizes.next <= anchorSeq ? { seq: sizes.next, rel: sizes.rel } : null;
-    return point !== null && point.seq > sizes.firstSeq ? point : null;
+    return sizes.point(anchorSeq);
+  }
+
+  /** Where the cursor, counting on, will learn a run's place on its way to the anchor. */
+  private findGapEnd(cursor: Cursor): void {
+    const sizes = this.sizes;
+    this.gapEnd = this.anchor === null || this.seekOff || sizes === null || sizes.index !== cursor.index
+      ? null : sizes.unplacedFrom(cursor.next, this.anchor.seq);
   }
 
   /** Read on from `point`: at once when the header is read, else after it. */
@@ -410,6 +389,7 @@ export class CatchUp<F extends SeqFrame> {
     cursor.seek = null;
     const anchor = this.anchor;
     cursor.landing = { at, zeros: 0, length: anchor !== null && anchor.seq === seq ? epbBytes(anchor.capLen) : null };
+    this.findGapEnd(cursor);
   }
 
   /**
@@ -480,6 +460,7 @@ export class CatchUp<F extends SeqFrame> {
       const point = this.seekPoint(file, this.anchor.seq);
       if (point !== null && point.seq > cursor.next) this.aim(cursor, point);
     }
+    this.findGapEnd(cursor);
     this.edge = fromSeq;
     this.edgeUs = anchor?.tsUs ?? 0;
     this.lastFileUs = anchor?.tsUs ?? 0;
@@ -589,6 +570,15 @@ export class CatchUp<F extends SeqFrame> {
           continue;
         }
         const seq = cursor.next++;
+        if (seq === this.gapEnd && cursor.headerEnd !== null && this.sizes?.index === cursor.index) {
+          // Counted across a gap in the sizes: the run after it is placed
+          // now, and from there, often, the anchor.
+          this.sizes.learn(seq, cursor.tail.blockAt - cursor.headerEnd);
+          const facts = this.files.get(cursor.index);
+          const point = facts !== undefined && this.anchor !== null ? this.seekPoint(facts, this.anchor.seq) : null;
+          if (point !== null && point.seq > cursor.next) { this.aim(cursor, point); continue; }
+          this.findGapEnd(cursor);
+        }
         if (this.anchor !== null && seq === this.anchor.seq) {
           if (!sameFrame(frame, this.anchor)) {
             return cursor.landing !== null ? this.missed(cursor, out) : this.end('anchorMismatch', out);
@@ -768,6 +758,12 @@ export class CatchUpRouter<F extends SeqFrame> {
   reset(): void {
     this.anchor = null;
     this.catchUp.reset();
+  }
+
+  /** The view cleared while catching up: the numbering starts again, the files and where they were read go on. */
+  clear(): void {
+    this.anchor = null;
+    this.catchUp.clear();
   }
 
   /** A live frame off the pipe, or one handed back from a hold. */
