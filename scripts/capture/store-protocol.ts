@@ -712,7 +712,7 @@ console.log('\n--- packed rows from the Worker (appendPacked) ---\n');
   const packed = host();
   packed.send({ type: 'open', captureId: 'cap-20261024-020000-0002' });
   const flush = new PackedFlush();
-  flush.object(meta);
+  flush.object(meta, meta.rawBytes);
   const rows = deserialize(serialize(new PackSender().seal(flush))) as PackedRows;
   packed.send({ type: 'appendPacked', rows, sent: new Uint8Array([0]) });
   packed.send({ type: 'finish' });
@@ -837,7 +837,8 @@ console.log('\n--- packed rows kept in their packs, and decoded (packNative) ---
       const flags: number[] = [];
       for (const id of ids) {
         if (isObject(id)) {
-          flush.object(carries(id) ? rowOf(id) : bareOf(id));
+          const object = carries(id) ? rowOf(id) : bareOf(id);
+          flush.object(object, object.rawBytes);
         } else {
           const { lane, k } = at.get(id)!;
           flush.packed(packOf.get(`${lane}:${Math.floor(k / PACK)}`)!, k % PACK, carries(id) ? rowOf(id).rawBytes : null, overlayOf(id));

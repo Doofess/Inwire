@@ -1165,33 +1165,13 @@ function postFlushed(): void {
   pendingIcmpReplies = [];
   pendingInfoPatches = [];
 
-  // The frames' bytes are MOVED rather than copied. `retain()` gives every
-  // frame an exactly-sized buffer of its own (agentBinary.ts), and the three
-  // arrays above have already been swapped out, so nothing here reads a packet
-  // again after this line - which is what makes detaching them safe.
-  //
-  // Measured at 2.16 us a frame, 1.27% of one (scripts/perf/throughput.ts).
-  // Small: the boundary is only ~4% of a frame to begin with, and the bytes are
-  // a fifth of that. Worth taking because it is free and correct, not because
-  // it moves the ceiling - the ceiling is dissection (docs/decisions/0007).
-  //
-  // Deduplicated because a transfer list may not name one buffer twice, and
-  // zero-length ones are skipped: a frame with no bytes shares the empty
-  // buffer, which would be a duplicate every time two of them land together.
-  const transfer: ArrayBuffer[] = [];
-  const seen = new Set<ArrayBuffer>();
-  for (const packet of packets) {
-    const bytes = packet.rawBytes;
-    if (!bytes || bytes.byteLength === 0) continue;
-    const buffer = bytes.buffer as ArrayBuffer;
-    // A view over a larger buffer would detach more than this frame - never
-    // true for a retained live frame, but a restored or fallback packet is
-    // built elsewhere and this is not the place to assume.
-    if (bytes.byteOffset !== 0 || bytes.byteLength !== buffer.byteLength) continue;
-    if (seen.has(buffer)) continue;
-    seen.add(buffer);
-    transfer.push(buffer);
-  }
+  // The frames' bytes reach the window as ONE slab per flush: `seal` copies
+  // every row's bytes into a single exactly-sized buffer, and that buffer alone
+  // is transferred. Nothing about a frame's own buffer matters any more - a
+  // view into an agent batch, a restored or fallback packet - so no frame is
+  // detached and the trackers' `.slice()` rule guards only the slab's reader.
+  // An object row's own `rawBytes` is swapped for the empty view before the
+  // post, below, because its bytes travel in the slab.
 
   // **The rows and their patches go to the store from here, not from the
   // window.** They used to cross to the renderer's main thread and be cloned
@@ -1201,7 +1181,7 @@ function postFlushed(): void {
   // graph cloned here is the one `plainForStore` copied there, bytes and all,
   // and the writer's one question - do I have a slot? - answers as before.
   // Behind this group's bytes on the same port, so a row never overtakes its
-  // slot; before the transfer below, which detaches the bytes this clones.
+  // slot; before the window's post below, which empties the objects' bytes.
   //
   // **And the bytes stay behind.** The store wrote each of these frames' bytes
   // when this Worker posted them, a flush ago; cloning them again cost 30% of
@@ -1219,8 +1199,9 @@ function postFlushed(): void {
   const stored = storePort !== null;
   const windowRows = new PackedFlush();
   const storeRows = storePort !== null ? new PackedFlush() : null;
+  // Every row, when none went as a pack; then `postRows` sends them whole. Also
+  // the object rows of a packed flush: their bytes ride in each flush's slab.
   const storeObjects: Packet[] = [];
-  // Every row, when none went as a pack; then `postRows` sends them whole.
   const wholeRows: Packet[] = [];
   let storePacked = false;
   for (let i = 0; i < packets.length; i++) {
@@ -1229,10 +1210,10 @@ function postFlushed(): void {
     if (ref === null) {
       const whole = wholeRow(packet);
       wholeRows.push(whole);
-      windowRows.object(whole);
+      windowRows.object(whole, whole.rawBytes);
       if (storeRows !== null) {
-        storeRows.object(whole);
-        if (inSentRun(whole)) storeObjects.push(whole);
+        storeRows.object(whole, inSentRun(whole) ? null : whole.rawBytes);
+        storeObjects.push(whole);
       }
       continue;
     }
@@ -1250,9 +1231,15 @@ function postFlushed(): void {
     if (infoPatches.length > 0) storePort.postMessage({ type: 'patches', patches: infoPatches });
   }
 
+  const rows = windowSender.seal(windowRows);
+  // Their bytes are in the slab now, and nothing reads a row's own after this
+  // line (the store's posts are done): left empty, not restored - every row,
+  // packed ones too, as the per-frame transfer used to detach them, so no
+  // row the Worker still holds keeps a batch of bytes alive.
+  for (const packet of packets) packet.rawBytes = NO_ROW_BYTES;
   post({
-    type: 'frames', rows: windowSender.seal(windowRows), icmpReplies, infoPatches, lateCount: ordering.lateCount, stored,
-  }, transfer);
+    type: 'frames', rows, icmpReplies, infoPatches, lateCount: ordering.lateCount, stored,
+  }, [rows.bytes.buffer as ArrayBuffer]);
   // Owed until the app says it committed them (`rowsTaken`).
   flow.rowsPosted(packets.length);
   lastPostedAt = performance.now();
@@ -1270,17 +1257,18 @@ function inSentRun(packet: RowStub): boolean {
  * A flush that holds packed rows, to the store as one message in merged order.
  * `sent` says, row by row, which rows' bytes went ahead (`inSentRun`) - the
  * store cannot tell from an empty `rawBytes`, which an agent's metadata-only
- * frame also has. A packed row in the run was sealed with no bytes, and an
- * object in the run has its `rawBytes` swapped out for the synchronous clone,
- * as `postRows` does.
+ * frame also has. A packed row in the run was sealed with no bytes. Every
+ * object row (`objects`: all of the flush's) has
+ * its `rawBytes` swapped out for the synchronous clone, as `postRows` does:
+ * its bytes, where the store needs them, ride in the flush's slab.
  */
-function postPackedRows(port: MessagePort, flush: PackedFlush, sent: Uint8Array, inRun: readonly Packet[]): void {
-  const bytes = inRun.map((packet) => packet.rawBytes);
-  for (const packet of inRun) packet.rawBytes = NO_ROW_BYTES;
+function postPackedRows(port: MessagePort, flush: PackedFlush, sent: Uint8Array, objects: readonly Packet[]): void {
+  const bytes = objects.map((packet) => packet.rawBytes);
+  for (const packet of objects) packet.rawBytes = NO_ROW_BYTES;
   try {
     port.postMessage({ type: 'appendPacked', rows: storeSender.seal(flush), sent });
   } finally {
-    for (let i = 0; i < inRun.length; i++) inRun[i].rawBytes = bytes[i];
+    for (let i = 0; i < objects.length; i++) objects[i].rawBytes = bytes[i];
   }
 }
 

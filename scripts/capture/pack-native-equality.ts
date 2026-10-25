@@ -209,7 +209,7 @@ function storeLog(capture: Capture, config: Config, decodeRows: boolean): Log {
           usePack(m, m.packed.mark === undefined ? null : overlayOf(packet, m.packed.mark));
         } else {
           const whole: Packet = { ...packet, rawBytes: NO_BYTES };
-          flush.object(whole);
+          flush.object(whole, null);
           objects.push(whole);
           log.objectRows++;
         }
