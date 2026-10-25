@@ -19,6 +19,7 @@ import type { AgentServiceFacts } from './agentLink';
 import { publishLiveLag } from './liveLag';
 import type { DissectionThreads } from './pipeline/threads';
 import { PackReader } from './pipeline/rowPack';
+import { FieldBlockWriter } from './dissect/fieldSplit';
 import type {
   FromPipeline, PipelineInterface, PipelineStatus, ReplayFrame, ToPipeline,
 } from './pipeline/protocol';
@@ -124,8 +125,11 @@ export class PipelineClient {
     replay: () => ReplayBundle | Promise<ReplayBundle>;
   }>();
 
-  /** The packs the Worker has sent, until their last row is read (`rowPack.ts`). */
-  private readonly packReader = new PackReader();
+  /**
+   * The packs the Worker has sent, until their last row is read (`rowPack.ts`).
+   * It splits each row's dense fields as it decodes them, for the buffer.
+   */
+  private readonly packReader = new PackReader(new FieldBlockWriter());
 
   onStatus: (status: PipelineStatus) => void = () => {};
   onAgentMessage: (message: AgentMessage) => void = () => {};

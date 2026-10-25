@@ -25,6 +25,7 @@ import type { Packet } from '../../types/packet';
 import { applyPrefixes, decodeChunk, encodeChunk } from '../capture/chunkCodec';
 import type { PackedRowIn, RowIn } from '../capture/captureWriter';
 import { applyOverlay, type RowOverlay } from './rowOverlay';
+import type { FieldBlockWriter } from '../dissect/fieldSplit';
 
 export interface RowPack {
   /** Unique among the packs one coordinator epoch sees. */
@@ -44,8 +45,9 @@ export function packRows(key: number, rows: readonly Packet[], capLengths: reado
   return { key, prefix, summary, count: rows.length };
 }
 
-export function unpackRows(pack: RowPack): Packet[] {
-  const rows = decodeChunk(pack.summary);
+/** With `split`, the dense fields go into its blocks as they are read (`decodeChunk`). */
+export function unpackRows(pack: RowPack, split?: FieldBlockWriter): Packet[] {
+  const rows = decodeChunk(pack.summary, split);
   // The timestamp, length, status and stream are in the fixed-width prefix.
   applyPrefixes(rows, pack.prefix);
   return rows;
@@ -155,9 +157,19 @@ interface Held {
   left: number;
 }
 
-/** A receiver's end: the packs it has been sent, until their last row is read. */
+/**
+ * A receiver's end: the packs it has been sent, until their last row is read.
+ *
+ * The window's reader is given a `FieldBlockWriter` and splits each row as it
+ * decodes, so `absorb` finds it done (#16). The store's is not: its rows are
+ * re-encoded or folded, never buffered, and a block would not survive the
+ * clone they cross anyway. A writer of the reader's own rather than the
+ * buffer's, because nothing asks which writer made a block.
+ */
 export class PackReader {
   private readonly packs = new Map<number, Held>();
+
+  constructor(private readonly split?: FieldBlockWriter) {}
 
   /** Every row of the flush, in order, with its bytes and overlay applied. */
   read(flush: PackedRows): Packet[] {
@@ -182,7 +194,7 @@ export class PackReader {
   /** `read`'s body; with `slots` it also fills them, so the two cannot disagree. */
   private take(flush: PackedRows, slots: RowIn[] | null): Packet[] {
     if (flush.packsReset) this.packs.clear();
-    for (const pack of flush.packs) this.packs.set(pack.key, { pack, rows: unpackRows(pack), left: pack.count });
+    for (const pack of flush.packs) this.packs.set(pack.key, { pack, rows: unpackRows(pack, this.split), left: pack.count });
     const { order, objects, bytes } = flush;
     const out: Packet[] = new Array(order.length / 2);
     let packed = 0;

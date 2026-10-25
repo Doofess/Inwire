@@ -69,6 +69,7 @@ function rankFor(value: number): number {
 
 export class FieldBlock {
   private readonly columns = new Map<string, Column>();
+  private readonly ordered: Column[] = [];
   /** One bit per declared key per row; see the constructor. */
   private readonly presence: Uint8Array;
   private readonly presenceStride: number;
@@ -95,6 +96,7 @@ export class FieldBlock {
       };
       if (key.width === 'str') { column.table = []; column.index = new Map(); }
       this.columns.set(key.abbrev, column);
+      this.ordered.push(column);
     });
   }
 
@@ -122,7 +124,20 @@ export class FieldBlock {
   tryWrite(row: number, abbrev: string, value: string | number): boolean {
     const column = this.columns.get(abbrev);
     if (column === undefined) return false;
+    this.put(column, row, value);
+    return true;
+  }
 
+  /**
+   * `write` by the key's place in the declared list rather than its name: a
+   * decoder that resolved its string table against `DENSE_FIELDS` once per
+   * pack makes no lookup per field (`decodeChunk`).
+   */
+  writeAt(row: number, index: number, value: string | number): void {
+    this.put(this.ordered[index], row, value);
+  }
+
+  private put(column: Column, row: number, value: string | number): void {
     if (column.width === 'str') {
       const text = String(value);
       let at = column.index!.get(text);
@@ -147,7 +162,6 @@ export class FieldBlock {
     }
 
     this.presence[row * this.presenceStride + column.presenceByte] |= column.presenceMask;
-    return true;
   }
 
   read(row: number, abbrev: string): string | number | undefined {

@@ -37,6 +37,25 @@ export class FieldBlockWriter {
     this.block = new FieldBlock(DENSE_FIELDS, this.rowsPerBlock);
   }
 
+  /**
+   * A row for one frame, in the block `current` names after the call. For a
+   * reader that splits as it decodes (`decodeChunk`), and for `absorb`.
+   */
+  claim(): number {
+    let row = this.block.claimRow();
+    if (row === -1) {
+      // The full block is simply let go of: the frames already pointing at it
+      // keep it alive for exactly as long as they are in the buffer.
+      this.block = new FieldBlock(DENSE_FIELDS, this.rowsPerBlock);
+      row = this.block.claimRow();
+    }
+    return row;
+  }
+
+  get current(): FieldBlock {
+    return this.block;
+  }
+
   absorb(packets: readonly Packet[]): void {
     for (const packet of packets) {
       const bag = packet.fields;
@@ -45,13 +64,7 @@ export class FieldBlockWriter {
       // time round but would take a row it does not need.
       if (packet.cols !== undefined) continue;
 
-      let row = this.block.claimRow();
-      if (row === -1) {
-        // The full block is simply let go of: the frames already pointing at it
-        // keep it alive for exactly as long as they are in the buffer.
-        this.block = new FieldBlock(DENSE_FIELDS, this.rowsPerBlock);
-        row = this.block.claimRow();
-      }
+      const row = this.claim();
 
       // One pass over the frame's OWN keys - 24.7 of them on average, against
       // 33 declared - building the sparse remainder as it goes. Rebuilt rather
