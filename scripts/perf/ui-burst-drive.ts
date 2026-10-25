@@ -57,9 +57,9 @@ const APP = arg('app', '');
 /** Multi Threaded Capture: `auto`, the default, or an offered count (1, 2, 4, 6, 8, 12, 16). */
 const THREADS = arg('threads', 'auto');
 /**
- * The packet buffer, in MB (128, 256, 512, 1024, 2048), or `auto`. At 60k the
- * `auto` budget lets the window's heap reach the heap guard's wall and the
- * capture stops itself mid-drive (issue #15), so the ADR 0053 gate uses 1024.
+ * The packet buffer, in MB (128, 256, 512, 1024, 2048), or `auto`, the default and
+ * what the gate runs. The phase 6 gate ran at 1024 while the heap guard stopped
+ * `auto` captures on garbage (issue #15, fixed by ADR 0036's amendment).
  */
 const BUFFER_MB = arg('buffer-mb', 'auto');
 const PROFILE_PREFIX = arg('profile', '');

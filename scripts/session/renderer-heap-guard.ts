@@ -26,8 +26,11 @@ import {
   resolveBufferBudget,
 } from '../../src/services/bufferBudget';
 import {
+  HEAP_SAMPLE_MS,
+  HEAP_UNCOLLECTED_SAMPLES,
   HEAP_USABLE_RATIO,
   HEAP_WARN_RATIO,
+  HeapJudge,
   judgeRendererHeap,
   readHeap,
 } from '../../src/services/rendererHeapGuard';
@@ -86,6 +89,56 @@ checkTrue('the stop message says the capture is safe on disk',
   stopMessage.level === 'stop' && /on disk/.test(stopMessage.message));
 checkTrue('...and names the setting that changes the outcome',
   stopMessage.level === 'stop' && /buffer/i.test(stopMessage.message));
+
+console.log('\n--- it judges what a collection leaves, not the garbage before one ---\n');
+
+// `usedJSHeapSize` counts garbage until a full collection runs, and V8 lets the
+// heap grow to several times its live size before one: at 60,000 frames a
+// second a live set of 1.1-1.9 GB read as a sawtooth up to 4.1 GB. These are the
+// readings the ADR 0053 gate drives recorded (issue #15), every 2 s. A guard on
+// one sample stopped those captures; nothing in them was near the wall.
+function replay(samples: readonly number[], limit: number | null = V8_DEFAULT): string[] {
+  const judge = new HeapJudge();
+  return samples.map((used) => judge.judge(used * MB, limit).level);
+}
+const firstStop = (levels: string[]) => levels.indexOf('stop');
+
+const RUN_1 = [1147, 1602, 2034, 2431, 1439, 1863, 2264, 2689, 3086, 1760, 2210, 2604, 3972, 1202, 1208, 1214];
+const RUN_2 = [1814, 2217, 1398, 1813, 2271, 2666, 1518, 1996, 2415, 2841, 3236, 1805, 3277, 3839, 4128, 4109];
+const RUN_3 = [2050, 2551, 1470, 2027, 2521, 3142, 1891, 2465, 3002, 3561, 1863];
+check('run 1 of the 60k gate never stops: one sample at 3,972 MB, then a collection to 1,202',
+  firstStop(replay(RUN_1)), -1);
+check('run 2 never stops: 3,839 and 4,128 MB are garbage above a 1,805 MB trough', firstStop(replay(RUN_2)), -1);
+check('run 3 never stops', firstStop(replay(RUN_3)), -1);
+check('...and none of them warns, since every trough is under 2 GB',
+  [RUN_1, RUN_2, RUN_3].some((run) => replay(run).includes('warn')), false);
+
+// A live set that really does climb. Near the limit V8's peaks have little room
+// above the live size, so a collection there frees under a tenth: 4,150 -> 3,800
+// is still a collection, and what it leaves is past the wall.
+const climbing = replay([2600, 3400, 2900, 3700, 3300, 4000, 3600, 4150, 3800]);
+check('a trough past the wall stops, on the sample that shows it', firstStop(climbing), 8);
+check('...after warning once, on the first trough past the warning line',
+  [climbing.indexOf('warn'), climbing.filter((l) => l === 'warn').length].join(), [4, 1].join());
+
+// A scavenge frees at most the young generation, tens of megabytes. A dip that
+// small is not a collection, and must not be read as a live size at the wall.
+check('a scavenge-sized dip at the wall is not a trough',
+  firstStop(replay([1500, 3000, 3900, 3880, 3895, 3870])), -1);
+
+// The fallback, for a heap past the wall that never shows a collection at all.
+// After run 2 stopped, its garbage sat at 4.1 GB for seven samples (14 s) before
+// one ran, so the count is well past that.
+const flat = (n: number) => [1500, ...Array.from({ length: n }, () => 3900)];
+check(`${HEAP_UNCOLLECTED_SAMPLES - 1} samples past the wall with no collection do not stop`,
+  firstStop(replay(flat(HEAP_UNCOLLECTED_SAMPLES - 1))), -1);
+check(`...the ${HEAP_UNCOLLECTED_SAMPLES}th does`, firstStop(replay(flat(HEAP_UNCOLLECTED_SAMPLES))), HEAP_UNCOLLECTED_SAMPLES);
+checkTrue('...and that is longer than the 14 s plateau run 2 showed', HEAP_UNCOLLECTED_SAMPLES * HEAP_SAMPLE_MS > 14_000);
+check('a collection resets the count',
+  firstStop(replay([...flat(HEAP_UNCOLLECTED_SAMPLES - 1), 1500, ...Array.from({ length: HEAP_UNCOLLECTED_SAMPLES - 1 }, () => 3900)])), -1);
+
+check('an unknown limit says nothing over a whole run either', replay([...RUN_2, ...flat(40)], null).includes('ok'), true);
+checkTrue('...not one sample of it', replay([...RUN_2, ...flat(40)], null).every((l) => l === 'ok'));
 
 // Off a browser there is no `performance.memory`, and reading it must not
 // throw - this script is itself the proof, since it runs under plain tsx.
