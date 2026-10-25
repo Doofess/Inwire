@@ -530,7 +530,11 @@ were within 0.03% of the EPB bytes the file delivered. Nothing was skipped,
 every frame was shown, and the view was level 13.5 s after the agent stopped.
 At 60,000 the first run kept up (59,000 of 59,200), and the second fell
 behind (45,100) and caught up from the file. That miss is the live
-coordinator's ceiling, the rest of #17, left for its own decision.
+coordinator's ceiling, the rest of #17, left for its own decision. Those
+two runs were on the single-sum version. A third run, on the kept runs,
+kept up at 60,000 (58,950 of 59,200) and advanced 56,900 f/s at 90,000. It
+too skipped nothing and showed every frame (4.2M), and was level 14.5 s
+after the stop.
 
 **The equality tests.**
 - `scripts/pipeline/parallel.ts`: packed rows against the single Worker on
