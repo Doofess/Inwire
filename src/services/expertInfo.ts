@@ -252,25 +252,124 @@ export function expertItemsFor(packet: Packet): ExpertItem[] {
 }
 
 /**
+ * The frames behind one group in a log that can forget them: a queue of
+ * (frame id, protocol label) pairs in arrival order, in one `Uint32Array`.
+ *
+ * A group can no longer keep just its first 200 frames. Once the window trims
+ * them, the next 200 are the answer, and the only way to know them is to have
+ * kept every occurrence. That is 8 bytes a finding here, against a Map entry
+ * apiece. The protocol rides along because a group's row reads it off its
+ * first remaining occurrence, and a rebuild over the window would too: "Frame
+ * also captured on another interface" is raised on frames of every protocol.
+ *
+ * Removal is only ever from the front - the buffer trims its head and frame
+ * ids rise - so it is a head index. Once the head passes half of what has
+ * been written the live part moves down, which keeps both ends O(1) amortised
+ * and the array within twice what the group holds.
+ */
+class Occurrences {
+  private data = new Uint32Array(8);
+  /** First live pair and one past the last, in pairs. */
+  private head = 0;
+  private tail = 0;
+
+  get length(): number {
+    return this.tail - this.head;
+  }
+
+  push(frame: number, protocol: number): void {
+    if (this.tail * 2 === this.data.length) {
+      if (this.head * 2 >= this.tail) this.compact(this.data.length);
+      else this.compact(this.data.length * 2);
+    }
+    this.data[this.tail * 2] = frame;
+    this.data[this.tail * 2 + 1] = protocol;
+    this.tail++;
+  }
+
+  /** Drops the oldest occurrence if it is `frame`'s; false when it is not. */
+  shift(frame: number): boolean {
+    if (this.head === this.tail || this.data[this.head * 2] !== frame) return false;
+    this.head++;
+    if (this.head === this.tail) {
+      this.head = this.tail = 0;
+    } else if (this.head * 2 >= this.tail && this.head >= 16) {
+      // Past half of what was written: move the live part down, and let a
+      // group that has shrunk a long way give its array back.
+      const live = this.tail - this.head;
+      this.compact(live * 4 <= this.data.length / 2 ? Math.max(8, live * 4) : this.data.length);
+    }
+    return true;
+  }
+
+  /** The protocol id of the oldest occurrence. */
+  firstProtocol(): number {
+    return this.data[this.head * 2 + 1];
+  }
+
+  /** Up to `max` of the oldest frame ids. */
+  frames(max: number): number[] {
+    const n = Math.min(max, this.tail - this.head);
+    const out = new Array<number>(n);
+    for (let i = 0; i < n; i++) out[i] = this.data[(this.head + i) * 2];
+    return out;
+  }
+
+  private compact(capacity: number): void {
+    const live = this.data.subarray(this.head * 2, this.tail * 2);
+    const next = capacity === this.data.length ? this.data : new Uint32Array(capacity);
+    next.set(live);
+    this.data = next;
+    this.tail -= this.head;
+    this.head = 0;
+  }
+}
+
+/** One group while it is being counted; `ExpertGroupRow` is what leaves the log. */
+interface GroupState {
+  key: string;
+  category: ExpertCategory;
+  summary: string;
+  count: number;
+  /** Report mode: the protocol of the first occurrence and the first 200 frames, as before. */
+  protocol: string;
+  frames: number[];
+  /** Window mode: every occurrence still in the window. */
+  occurrences: Occurrences | null;
+}
+
+/**
  * The running expert log.
  *
  * A class with `add` rather than a function over the buffer, so it can be
  * folded one packet at a time by `useIncrementalAggregate` - a full walk of
  * every layer of 50,000 frames ten times a second is exactly the cost that
  * hook exists to avoid.
+ *
+ * **In the app it also forgets.** The log covers the RAM window, and the
+ * window's head moves every time it passes its budget. `remove` takes a
+ * trimmed frame back out, so the log stays what a fold over the window would
+ * give - counts, `frames` and `categoryOf` included - without refolding a
+ * million rows each time. The name map makes the opposite choice on purpose
+ * (a name learned from a trimmed frame is still a name).
  */
 export class ExpertLog {
-  private rows = new Map<string, ExpertGroupRow>();
+  private rows = new Map<string, GroupState>();
   /** The category each frame is painted by: the first one in chain order. */
   private strongest = new Map<number, ExpertCategory>();
   private total = 0;
+  /** Protocol labels by number, for `Occurrences`. A few dozen at most. */
+  private protocolIds = new Map<string, number>();
+  private protocolNames: string[] = [];
 
   /**
-   * @param perFrame keep `categoryOf`'s answer for every frame. The app's log
-   * needs it and holds a window of frames; a report folding a whole capture
-   * off disk does not, and one Map entry per flagged frame is what runs out -
-   * a Map throws `RangeError` at about 16.7 million entries, which a long
-   * capture full of keep-alives reaches.
+   * @param perFrame keep `categoryOf`'s answer for every frame, and every
+   * group's occurrences so that `remove` can work. The app's log needs both
+   * and holds a window of frames; a report folding a whole capture off disk
+   * needs neither, and one Map entry per flagged frame is what runs out - a
+   * Map throws `RangeError` at about 16.7 million entries, which a long
+   * capture full of keep-alives reaches. Without it a group keeps its first
+   * 200 frames only, and `remove` throws.
    */
   constructor(private readonly perFrame = true) {}
 
@@ -278,16 +377,17 @@ export class ExpertLog {
     for (const item of expertItemsFor(packet)) {
       this.total++;
       const key = `${item.category}|${item.summary}`;
-      const row = this.rows.get(key);
-      if (row) {
-        row.count++;
-        if (row.frames.length < MAX_REMEMBERED_FRAMES) row.frames.push(item.frame);
-      } else {
-        this.rows.set(key, {
-          key, category: item.category, summary: item.summary,
-          protocol: item.protocol, count: 1, frames: [item.frame],
-        });
+      let row = this.rows.get(key);
+      if (!row) {
+        row = {
+          key, category: item.category, summary: item.summary, protocol: item.protocol,
+          count: 0, frames: [], occurrences: this.perFrame ? new Occurrences() : null,
+        };
+        this.rows.set(key, row);
       }
+      row.count++;
+      if (row.occurrences) row.occurrences.push(item.frame, this.protocolId(item.protocol));
+      else if (row.frames.length < MAX_REMEMBERED_FRAMES) row.frames.push(item.frame);
 
       if (!this.perFrame) continue;
       const current = this.strongest.get(item.frame);
@@ -297,9 +397,53 @@ export class ExpertLog {
     }
   }
 
-  /** Group rows, most consequential first, then commonest. */
+  /**
+   * Takes back what `add` recorded for a frame, which must be the oldest the
+   * log still holds. Frames go in the order they came, so the frame is the
+   * head of each queue it is in; one that is not is ignored rather than
+   * allowed to drive a count negative.
+   *
+   * Reads `expertItemsFor`, which a patch does not change - the flat list, the
+   * tree and the duplicate flag are all fixed when the frame is dissected.
+   */
+  remove(packet: Packet): void {
+    if (!this.perFrame) throw new Error('ExpertLog.remove needs perFrame: a report log keeps no occurrences');
+    for (const item of expertItemsFor(packet)) {
+      const row = this.rows.get(`${item.category}|${item.summary}`);
+      if (!row || !row.occurrences || !row.occurrences.shift(item.frame)) continue;
+      this.total--;
+      if (--row.count === 0) this.rows.delete(row.key);
+    }
+    this.strongest.delete(packet.id);
+  }
+
+  private protocolId(protocol: string): number {
+    let id = this.protocolIds.get(protocol);
+    if (id === undefined) {
+      id = this.protocolNames.length;
+      this.protocolNames.push(protocol);
+      this.protocolIds.set(protocol, id);
+    }
+    return id;
+  }
+
+  /**
+   * Group rows, most consequential first, then commonest.
+   *
+   * Every row is a copy, `frames` included: a caller keeps what it is handed,
+   * and the log goes on changing under it.
+   */
   groups(): ExpertGroupRow[] {
-    return [...this.rows.values()].sort(
+    const out: ExpertGroupRow[] = [];
+    for (const row of this.rows.values()) {
+      const queue = row.occurrences;
+      out.push({
+        key: row.key, category: row.category, summary: row.summary, count: row.count,
+        protocol: queue ? this.protocolNames[queue.firstProtocol()] : row.protocol,
+        frames: queue ? queue.frames(MAX_REMEMBERED_FRAMES) : row.frames.slice(),
+      });
+    }
+    return out.sort(
       // Then a total order, so two rows with one count do not swap places
       // between runs that saw them first in a different order - a report
       // folded in pages and one folded whole must list them identically.
@@ -341,12 +485,27 @@ export interface ExpertLookup {
   readonly size: number;
 }
 
+/**
+ * A handle on the log that keeps what it has answered.
+ *
+ * The fold goes on changing the one log, and now removes from it too, so a
+ * handle that read through would show an earlier tick's consumer a later
+ * tick's capture. `size` is taken now, and `groups()` and `counts()` are
+ * computed on first ask and kept - the log is only folded at the start of a
+ * render, so a snapshot's first ask is made by the render it was built for.
+ * `categoryOf` reads through: a point lookup per frame, which nothing in the
+ * app calls, and copying the per-frame map each tick is the cost this exists
+ * to avoid.
+ */
 export function expertSnapshot(log: ExpertLog): ExpertLookup {
+  const size = log.size;
+  let groups: ExpertGroupRow[] | undefined;
+  let counts: Record<ExpertCategory, number> | undefined;
   return {
-    groups: () => log.groups(),
-    counts: () => log.counts(),
+    groups: () => (groups ??= log.groups()),
+    counts: () => (counts ??= log.counts()),
     categoryOf: (frame) => log.categoryOf(frame),
-    get size() { return log.size; },
+    size,
   };
 }
 

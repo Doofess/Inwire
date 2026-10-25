@@ -1,5 +1,5 @@
 import type { Packet } from '../types/packet';
-import { packetsExtend } from './packetPrefix';
+import { packetsExtend, prefixShift } from './packetPrefix';
 
 /**
  * Folding a growing packet buffer into a summary without re-reading the part
@@ -65,6 +65,21 @@ export function depsEqual(a: readonly unknown[], b: readonly unknown[]): boolean
  * Adds every packet not already accounted for to `cache`, rebuilding from
  * scratch when it cannot prove that is the same thing.
  *
+ * **A trim is survived only by a fold that can take a packet back.** The
+ * buffer's head moves whenever it passes its budget, and a fold with no `drop`
+ * cannot un-see the frames that went, so it rebuilds - over a full window that
+ * is a pass of a million rows, twice a second. With a `drop`, `prefixShift`
+ * says how many frames `k` left the head; `drop` runs on exactly those, taken
+ * from the old source, and `add` runs on what arrived after the old tail. A
+ * `drop` that does nothing is a legitimate answer: it is how a fold says that
+ * what a trimmed frame taught should outlive it (the name map). Changed deps,
+ * a replaced buffer or a shift that cannot be proved still rebuild.
+ *
+ * `drop` receives the packet object the fold held when it was trimmed, which
+ * after a patch is the patched copy and not the object `add` saw. A fold whose
+ * `drop` reads anything a patch can change (Info, the protocol label, tree
+ * links) would not undo what `add` did.
+ *
  * The returned cache is always safe to use as the next call's input. It is a
  * new object even when nothing was added, so the caller can compare by
  * identity without also having to know whether the fold did any work.
@@ -75,9 +90,18 @@ export function foldIncrementally<A>(
   add: (accumulator: A, packet: Packet) => void,
   deps: readonly unknown[],
   cache: AggregateCache<A> | null,
+  drop?: (accumulator: A, packet: Packet) => void,
 ): AggregateCache<A> {
-  const reusable = cache !== null && depsEqual(cache.deps, deps) && packetsExtend(packets, cache.source);
-  const acc = reusable ? cache.acc : create();
-  for (let i = reusable ? cache.source.length : 0; i < packets.length; i++) add(acc, packets[i]);
+  const shift = cache === null || !depsEqual(cache.deps, deps)
+    ? null
+    : drop ? prefixShift(packets, cache.source) : packetsExtend(packets, cache.source) ? 0 : null;
+  if (cache === null || shift === null) {
+    const acc = create();
+    for (let i = 0; i < packets.length; i++) add(acc, packets[i]);
+    return { acc, source: packets, deps };
+  }
+  const acc = cache.acc;
+  if (drop) for (let i = 0; i < shift; i++) drop(acc, cache.source[i]);
+  for (let i = cache.source.length - shift; i < packets.length; i++) add(acc, packets[i]);
   return { acc, source: packets, deps };
 }

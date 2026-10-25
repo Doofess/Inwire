@@ -123,6 +123,34 @@ function numberField(packet: Packet, key: string): number | null {
 }
 
 /**
+ * The MAC a frame this machine sent off-link was addressed to, or null.
+ *
+ * The part of the forwarding fact that reads the frame, so a shard can read it
+ * and the merge can count it later (`observeForwardedTo`).
+ */
+export function forwardingOf(packet: Packet, host: HostIdentity): string | null {
+  if (host.macs.size === 0) return null;
+  const srcMac = stringField(packet, 'eth.src');
+  if (srcMac === null || !host.macs.has(srcMac)) return null;
+  const destination = stringField(packet, 'ip.dst') ?? stringField(packet, 'ipv6.dst');
+  if (destination === null || isPrivateOrLocal(destination)) return null;
+  const dstMac = stringField(packet, 'eth.dst');
+  if (dstMac === null || host.macs.has(dstMac)) return null;
+  return dstMac;
+}
+
+/** What a TLS frame says about encrypted DNS: the destination port, address and server name. */
+export interface TlsFacts { port: number | null; server: string | null; sni: string | null }
+
+export function tlsFactsOf(packet: Packet): TlsFacts {
+  return {
+    port: numberField(packet, 'tcp.dstport'),
+    server: stringField(packet, 'ip.dst') ?? stringField(packet, 'ipv6.dst'),
+    sni: stringField(packet, 'tls.handshake.extensions_server_name'),
+  };
+}
+
+/**
  * Collects the facts a capture reveals, as frames arrive.
  *
  * Stateful and incremental rather than a pass over the buffer, because it runs
@@ -214,14 +242,16 @@ export class NetworkFactsCollector {
    * of the segment uses.
    */
   private observeForwarding(packet: Packet, host: HostIdentity): void {
-    if (host.macs.size === 0) return;
-    const srcMac = stringField(packet, 'eth.src');
-    if (srcMac === null || !host.macs.has(srcMac)) return;
-    const destination = stringField(packet, 'ip.dst') ?? stringField(packet, 'ipv6.dst');
-    if (destination === null || isPrivateOrLocal(destination)) return;
-    const dstMac = stringField(packet, 'eth.dst');
-    if (dstMac === null || host.macs.has(dstMac)) return;
+    const dstMac = forwardingOf(packet, host);
+    if (dstMac !== null) this.observeForwardedTo(dstMac, host);
+  }
 
+  /**
+   * Counts a frame `forwardingOf` found. Checks the host again: a caller that
+   * read the frame elsewhere may hold an older identity than this one.
+   */
+  observeForwardedTo(dstMac: string, host: HostIdentity): void {
+    if (host.macs.size === 0 || host.macs.has(dstMac)) return;
     const seen = (this.forwardedTo.get(dstMac) ?? 0) + 1;
     this.forwardedTo.set(dstMac, seen);
     // Only promote a MAC that is actually carrying the traffic. One frame to a
@@ -362,15 +392,16 @@ export class NetworkFactsCollector {
   }
 
   private observeTls(packet: Packet): void {
-    const port = numberField(packet, 'tcp.dstport');
+    this.observeTlsFacts(tlsFactsOf(packet));
+  }
+
+  observeTlsFacts({ port, server, sni: name }: TlsFacts): void {
     // DoT has a port of its own, so it needs no name to be recognised - which
     // matters, because a DoT connection that resumes a session sends no SNI.
     if (port === 853) {
-      const server = stringField(packet, 'ip.dst') ?? stringField(packet, 'ipv6.dst');
       if (server !== null) this.addEncrypted(`${server} (DoT)`);
       return;
     }
-    const name = stringField(packet, 'tls.handshake.extensions_server_name');
     if (name === null) return;
     const lower = name.toLowerCase();
     // A name list rather than a heuristic. "Contains dns" would catch every

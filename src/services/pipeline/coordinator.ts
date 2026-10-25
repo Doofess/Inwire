@@ -49,6 +49,9 @@ import { settleDeferredAnswers } from '../dissect/frameRecord';
 import type { DissectEnv } from '../dissect/dissectEnv';
 import { FrameDissector, type Dissected, type LaneTrackers } from './frameDissector';
 import { OpWriter, type FromShard, type OpBatch, type ShardResult, type ToShard, type WireFrame } from './shardProtocol';
+import { unpackRows, type RowPack } from './rowPack';
+import { overlayMark, type OverlayMark, type RowOverlay } from './rowOverlay';
+import type { RowSide } from './rowSteps';
 import type { InfoPatch } from '../dissect/types';
 import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 
@@ -73,6 +76,28 @@ export interface Merged {
   error?: string;
   /** A shard frame's tree, for the equality test only (`withTrees`). */
   layers?: ProtocolLayer[];
+  /**
+   * A shard frame's row as the shard packed it: which pack, where in it, and
+   * the covered keys as they were on unpacking. The mark is taken here, not in
+   * the Worker, because `settleField` writes `tls.stream` before the Worker
+   * sees the frame.
+   */
+  packed?: PackedRef;
+  /**
+   * A light shard row: `packet` is absent, the row stays in its pack. Its
+   * bytes, its side record for the merge's order-dependent steps, and the
+   * overlay the coordinator has already built - the settled `tls.stream`.
+   */
+  bytes?: Uint8Array;
+  side?: RowSide;
+  overlay?: RowOverlay;
+}
+
+export interface PackedRef {
+  pack: RowPack;
+  index: number;
+  /** Absent for a light row, which was never decoded here: it has no covered values to compare. */
+  mark?: OverlayMark;
 }
 
 /**
@@ -137,6 +162,12 @@ interface Entry {
   done: boolean;
   d?: Dissected;
   result?: ShardResult;
+  /** The shard's row for this frame, decoded when it had to be, and the pack it came from. */
+  packet?: Packet;
+  packed?: PackedRef;
+  /** A light row's bytes and side record, from its result. */
+  bytes?: Uint8Array;
+  side?: RowSide;
   error?: string;
   tls?: number[];
 }
@@ -162,14 +193,16 @@ export class Coordinator {
   lane0: FrameDissector;
 
   private epoch = 0;
-  private held: CoordFrame[] = [];
+  /** Frames not yet routed, and the messages that go to the shards between them (`broadcast`). */
+  private held: (CoordFrame | { marker: ToShard })[] = [];
   private heldFrom = 0;
   private barrier: { id: number; shard: number; hint: BarrierHint } | null = null;
   private readonly entries = new Map<number, Entry>();
   private nextEmit: number | null = null;
   /** Each shard's open batch, and the sealed ones waiting to be sent. */
   private writers: OpWriter[];
-  private ready: OpBatch[][];
+  /** Sealed batches, and the ordered messages that wait between them. */
+  private ready: (OpBatch | ToShard)[][];
   private inFlight: number[];
   private settles: [number, number][][];
   private rows: [number, ProtocolField[]][][];
@@ -182,10 +215,20 @@ export class Coordinator {
   /** Placeholder to real `tls.stream`, per shard lane. */
   private tlsMaps: Map<number, number>[];
   private nextTls = 0;
+  /** The next pack's key; never reset, so no two packs of one coordinator share one. */
+  private nextPackKey = 0;
   /** Which shard lane holds a recent frame's tree, for `detail`. */
   private readonly treeLane: IdRing;
   private idleWaiters: (() => void)[] = [];
 
+  /**
+   * Decode every shard pack on arrival. Off, a pack is decoded only when a
+   * result in it says `needsRow`, and every other shard row stays in its pack
+   * for the merge to work from its side record. The Worker turns it on with
+   * more than one interface, where `duplicates.scan` reads every row.
+   */
+  decodeRows = false;
+  private decoded = 0;
   /** Connections a lane-0 lookup found already living on a shard: the one divergence. */
   crossLane = 0;
   /** Barrier reports that disagreed with what the coordinator's order said. */
@@ -228,6 +271,11 @@ export class Coordinator {
     return this.sequencer.clock;
   }
 
+  /** Packs decoded here since the start - the cost a light run avoids (`decodeRows`). */
+  get packsDecoded(): number {
+    return this.decoded;
+  }
+
   /** Frames dispatched, or waiting to be, that have not been merged. */
   get backlog(): number {
     return this.held.length - this.heldFrom + this.entries.size;
@@ -246,10 +294,39 @@ export class Coordinator {
     if (message.epoch !== this.epoch) return;
     this.inFlight[shard] = Math.max(0, this.inFlight[shard] - 1);
     let barrierCleared = false;
+    // Decoded once for the whole message, and only when the merge has to read
+    // the rows (`decodeRows`, or a result whose protocols `networkFacts` reads
+    // whole). A pack with one such row is decoded entire, and each row of it
+    // then takes the decoded path: its side record is ignored, so nothing is
+    // counted twice. The key is the coordinator's to give: a shard does not
+    // know its own index, and it must not repeat across epochs.
+    let rows: Packet[] | null = null;
+    let pack: RowPack | null = null;
+    if (message.pack !== null) {
+      pack = message.pack;
+      pack.key = this.nextPackKey++;
+      if (this.decodeRows || message.results.some((result) => result.side?.needsRow)) {
+        rows = unpackRows(pack);
+        this.decoded += 1;
+      }
+    }
     for (const result of message.results) {
       const entry = this.entries.get(result.id);
       if (entry === undefined) continue;
       entry.result = result;
+      if (result.row !== undefined && pack !== null) {
+        if (rows !== null) {
+          const packet = rows[result.row];
+          packet.rawBytes = result.bytes ?? new Uint8Array(0);
+          entry.packet = packet;
+          entry.packed = { pack, index: result.row, mark: overlayMark(packet) };
+        } else {
+          // Light: the row stays where the shard put it.
+          entry.packed = { pack, index: result.row };
+          entry.bytes = result.bytes ?? new Uint8Array(0);
+          if (result.side !== undefined) entry.side = result.side;
+        }
+      }
       entry.done = true;
       if (this.barrier !== null && this.barrier.id === result.id) {
         this.settleBarrier(result.barrier);
@@ -329,7 +406,27 @@ export class Coordinator {
 
   /** Something every shard must hear: the key log, the host, the adapters. */
   broadcast(message: ToShard): void {
-    for (let s = 0; s < this.shards; s++) if (!this.dead.has(s)) this.options.send(s, message, []);
+    if (message.type !== 'flows') {
+      for (let s = 0; s < this.shards; s++) if (!this.dead.has(s)) this.options.send(s, message, []);
+      return;
+    }
+    // A socket table has a place in the frame order: a shard must annotate a
+    // frame dispatched before it without it, and one dispatched after with it,
+    // as the single Worker does. So it waits behind the frames not yet routed,
+    // and then behind every batch already queued for a shard.
+    if (this.heldFrom < this.held.length) this.held.push({ marker: message });
+    else this.sendOrdered(message);
+    this.pump();
+  }
+
+  /** `message`, to every shard, behind each frame routed to it so far and ahead of any routed later. */
+  private sendOrdered(message: ToShard): void {
+    for (let s = 0; s < this.shards; s++) {
+      if (this.dead.has(s)) continue;
+      if (!this.writers[s].empty) this.sealWriter(s);
+      if (this.ready[s].length === 0) this.options.send(s, message, []);
+      else this.ready[s].push(message);
+    }
   }
 
   /** The shard (0-based) holding a recent frame's tree, or null for lane 0 or a frame no longer known. */
@@ -374,6 +471,10 @@ export class Coordinator {
   private advance(): void {
     while (this.barrier === null && this.heldFrom < this.held.length) {
       const frame = this.held[this.heldFrom++];
+      if ('marker' in frame) {
+        this.sendOrdered(frame.marker);
+        continue;
+      }
       if (this.nextEmit === null) this.nextEmit = frame.id;
       const lane = frameLane(frame.bytes, frame.linktype);
       if (lane.lane === 'tcp') this.routeSegment(frame, lane);
@@ -489,6 +590,7 @@ export class Coordinator {
     const end = Math.min(this.held.length, this.heldFrom + LOOKAHEAD_FRAMES);
     for (let i = this.heldFrom; i < end; i++) {
       const frame = this.held[i];
+      if ('marker' in frame) continue;
       const lane = frameLane(frame.bytes, frame.linktype);
       if (isTcpFragment(lane) && lane.datagram === datagram && lane.key !== undefined) return lane.key;
     }
@@ -585,9 +687,11 @@ export class Coordinator {
       if (this.dead.has(s)) continue;
       while (this.inFlight[s] < this.maxInFlight) {
         if (this.ready[s].length === 0 && !this.writers[s].empty) this.sealWriter(s);
-        const batch = this.ready[s].shift();
-        if (batch === undefined) break;
-        this.sendBatch(s, batch);
+        const next = this.ready[s].shift();
+        if (next === undefined) break;
+        // An ordered message goes out as it comes up: it is not work in flight.
+        if ('type' in next) this.options.send(s, next, []);
+        else this.sendBatch(s, next);
       }
       if (this.ready[s].length === 0 && this.writers[s].empty) this.sendBatch(s, null);
     }
@@ -666,14 +770,27 @@ export class Coordinator {
       if (d.icmpMatchedRequestFrameId !== undefined) merged.icmpMatchedRequestFrameId = d.icmpMatchedRequestFrameId;
       if (d.infoPatches) merged.infoPatches = d.infoPatches;
       if (settleField(d.packet, resolve)) settleTreeTls(d.packet.layers, resolve);
-    } else if (result?.packet !== undefined) {
-      merged.packet = result.packet;
+    } else if (result !== undefined && (entry.packet !== undefined || entry.packed !== undefined)) {
+      const packet = entry.packet;
+      if (packet !== undefined) merged.packet = packet;
+      if (entry.packed !== undefined) merged.packed = entry.packed;
       merged.record = result.record === undefined
         ? undefined : settleDeferredAnswers(result.record, result.deferredAt ?? NO_OFFSETS, resolve);
       merged.derived = result.derived ?? null;
       if (result.icmpMatchedRequestFrameId !== undefined) merged.icmpMatchedRequestFrameId = result.icmpMatchedRequestFrameId;
       if (result.infoPatches) merged.infoPatches = result.infoPatches;
-      settleField(result.packet, resolve);
+      if (packet !== undefined) {
+        settleField(packet, resolve);
+      } else {
+        // A light row: the placeholder it took is settled in an overlay, not in a row nobody decoded.
+        merged.bytes = entry.bytes;
+        if (entry.side !== undefined) {
+          merged.side = entry.side;
+          if (entry.side.tlsStream !== undefined) {
+            merged.overlay = { fields: { 'tls.stream': resolve(entry.side.tlsStream) } };
+          }
+        }
+      }
       if (result.layers) {
         settleTreeTls(result.layers, resolve);
         merged.layers = result.layers;
@@ -735,7 +852,7 @@ const LOAD_HALF_LIFE = 8192;
 const NO_OFFSETS: readonly number[] = [];
 
 /** A frame's `tls.stream` field, settled in place; true when it held a placeholder. */
-function settleField(packet: Packet, resolve: (placeholder: number) => number): boolean {
+export function settleField(packet: Packet, resolve: (placeholder: number) => number): boolean {
   const value = packet.fields?.['tls.stream'];
   if (typeof value !== 'number' || value >= 0) return false;
   packet.fields!['tls.stream'] = resolve(value);

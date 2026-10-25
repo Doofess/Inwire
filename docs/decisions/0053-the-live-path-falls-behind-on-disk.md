@@ -36,7 +36,13 @@ changed from the design. **Phase 4 landed 2026-10-09**: a hole in the live
 stream is read back out of the agent's own pcapng and dissected in order, and
 the view rejoins the stream where the file reaches it - on the burst at 94,000
 frames a second, every frame sent was in the list and none skipped (see
-**Phase 4, as built**). Phases 5 and 6 are still to come. The fixes
+**Phase 4, as built**). **Phase 6 landed 2026-10-25**, not in the shape its
+line below first gave it: a shard's finished rows travel as one packed buffer,
+the store's own chunk codec, and reach the disk without being decoded and
+encoded again. On the burst at 60,000 frames a second the view now advances
+58,000-60,000 against 41,000, with nothing skipped. The gate as set was missed
+on two counts, recorded under **Phase 6, as built** with the owner's ruling.
+Phase 5 is still to come. The fixes
 that measured the problem landed the same day and are listed under **What came
 first**. Narrows **[0038](0038-the-worker-writes-the-bytes.md)**: the
 Worker still writes the bytes before it dissects, and now also stops when the
@@ -384,6 +390,120 @@ to an uninterrupted run, frame for frame and, dissected, hash for hash.
    QUIC sharded by server; SDP handed out in frame order.
 6. **Shards post rows straight to the store and renderer**, merged by a
    watermark - only if a profile asks, above ~120,000 frames a second.
+   *Landed as packed rows through the coordinator, at 60,000* - see below.
+
+### Phase 6, as built
+
+A profile asked well below 120,000. The single coordinator was the bound at
+about 41,000 frames a second, and posting rows past it would have needed a
+second merge. So the rows still go through the coordinator. What changed is
+their form, and who touches them.
+
+`services/pipeline/rowPack.ts` (`RowPack`, `PackSender`, `PackReader`),
+`rowOverlay.ts`, `rowSteps.ts`; `capture/chunkCodec.ts` (`encodePackedChunk`,
+chunk version 3); `capture/captureWriter.ts` (`packNative`);
+`PackReader.readSlots` in the store's host. Also `ExpertLog.remove` and the
+trim-safe fold in `incrementalAggregate.ts`.
+
+- **A shard packs its rows.** A results batch's rows, at most 384, are encoded
+  with `encodeChunk`, not deflated: a `RowPack`. The coordinator forwards the
+  pack's bytes with an order list (pack key and position, or an object) and a
+  `RowOverlay` of what its merge wrote. The window and the store each keep a
+  pack until its last row is read. Packs are copied, not transferred, because
+  a transfer list into the store's process drops the message. Every packed row
+  goes to the store packed.
+- **The merge's per-row work moved onto the shards.** A shard runs
+  `annotatePacket` and `markLiveGap` before it packs a row, on its own copy of
+  the socket table. The table is broadcast on the shards' port, in order, ahead
+  of any later batch. What has to be in capture order stays on the coordinator:
+  fingerprints learned and matched, and network facts observed. Those run from
+  a small `RowSide` the shard takes off the row, so the coordinator decodes a
+  pack only when there is more than one interface (`duplicates.scan`), or for a
+  row whose side says `needsRow` (DNS, DHCP, BOOTP, ICMPv6, ARP, LLDP: the
+  protocols `networkFacts.observe` reads whole). `scripts/pipeline/row-steps.ts`
+  holds the split to the single Worker's output.
+- **The store writes chunks from the packs (version 3).** A chunk that holds a
+  packed row is a container. Its header is `MAGIC, u16 3, u16 flags,
+  u32 frameCount, u16 segCount`. Then come the segments, each a complete
+  version 2 summary (a pack, a row selection of one, or a run of objects
+  re-encoded); a pack split by a chunk boundary is cut by row selection, and a
+  piece under 16 rows is re-encoded. Then `u16` per row naming its segment,
+  and side sections for overlays and patches. Decoding applies them in the
+  order the old path did: segment row, overlay, patches, prefixes. The prefix
+  block, the index, recovery and segments do not change. A chunk with no
+  packed row is version 2 byte for byte, so imports and the single Worker
+  write what they wrote. The writer's `packNative: false` re-encodes as before
+  and is the kill switch. **An older build** opens a capture with version 3
+  chunks, because the index version is unchanged. Its scans and filters read
+  the prefix blocks, which are unchanged, but reading the rows of a version 3
+  chunk fails, chunk by chunk. The stream digest still decodes the packs it
+  folds.
+- **A trim no longer refolds the window.** At a full window,
+  `planBufferTrim` moved the head about twice a second, and App's name map and
+  expert log folded the whole window again each time: about 1.27 million rows
+  and 180 ms. That cost was older than this phase; delivering more rows
+  exposed it. The folds now carry on through `prefixShift`. The expert log
+  subtracts the trimmed frames and stays exact to the window, with each
+  group's occurrences in an 8-byte-per-finding queue. Names learned from
+  trimmed frames stay.
+
+**Measured** (`ui-burst-drive.ts`, the burst at 60,000 frames a second offered,
+six shards, a fixed 1 GB buffer for issue #15's sake; following, then
+scrolling):
+
+| step | advanced, following / scrolling | lag | skipped | long tasks, following / scrolling | the bound after it |
+|---|---|---|---|---|---|
+| before (e9df904) | 41,000 / 44,400 | grows | 0 | 5% / 19% | the coordinator |
+| packed rows | 40,500-41,200 / 38,200-39,900 | grows | 15,686 in one run (the heap guard, #15) | 4-5% / 8-11% | the coordinator |
+| store writes batched | 42,100-47,600 | grows | 0 | - | the coordinator (82% busy, 20 us a frame) |
+| per-row work on the shards | 46,200-49,000 (following only) | grows | 0 | - | the store (gate shut 45-66%) |
+| version 3 chunks | 57,400-59,700 / 58,300-63,700 | flat | 0 | 11-14% / 47-49% | the window's refold |
+| trim-safe folds (the gate) | 58,400, 42,100, 58,600 / 60,500, 60,000, 59,300 | flat in two runs of three | 0 | 11%, 12%, 6% / 12%, 11%, 10% | renderer per-row work; shards at their limit |
+
+The profiles behind those steps:
+- **The coordinator:** decoding shard rows went from 16% of its time to 0.
+  Its idle share went from 16.5% to 23.6%, and a shard batch's round trip from
+  82-119 ms to 56-65 ms.
+- **The store:** idle went from 11% to 31%. Re-encoding, 29% of its time
+  (`fieldEntries` alone 9.6%), became `encodePackedChunk` at 0.5%.
+- **The window:** the refold was 35% of the main thread while scrolling, and
+  it went to no rebuilds at all.
+
+At 90,000 offered the view advances 49,300 a second while following and 51,900
+while scrolling, the lag grows, nothing is skipped, and the heap guard (#15)
+stops the capture before the third phase. A version 3 summary costs 4-23 bytes
+a frame more than version 2, deflated: 46.7 -> 50.5-60.3 bytes on `bulk` and
+57.3 -> 64.7-80.5 on `inwire`, the high end with rows dealt round six lanes by
+id, which is the worst case. Against the 1,151 bytes a frame on disk, that is
+0.3-2%.
+
+**The gate, missed on two counts.** It asked for all three 60,000 runs to keep
+up, with long tasks no worse than before. Following, long tasks were 11%, 12%
+and 6% against 4-5%. The second run fell behind while following, advancing
+42,100 with its lag growing from 104,000 to 464,000, and recovered while
+scrolling. Scrolling is inside the old range. The owner ruled on 2026-10-25 to
+land it as measured. What is left on the main thread while following is
+per-row work the old path had too: decoding packs (14%) and splitting fields
+(9%), now on about 40% more rows. That is **#16**. Shards at their in-flight
+limit, and the near 50,000-60,000 ceiling, are **#17**.
+
+**What phase 6 leaves for later.** #15 (the window's heap reaches the guard
+at a 1 GB buffer by the third phase of a 60,000 run), #16, #17, and the
+digest's decode of every pack.
+
+**The equality tests.**
+- `scripts/pipeline/parallel.ts`: packed rows against the single Worker on
+  every fixture and the burst.
+- `scripts/capture/pack-native-equality.ts`: the fixtures and a synthetic
+  capture, through virtual shards at 1, 2 and 7 and two adversarial
+  arrangements. It runs as the store's messages into a packNative host and a
+  re-encoding one, and requires byte-identical prefix, bytes and records files,
+  equal rows, digest and counters, a reopen, and a torn version 3 tail that
+  loses one chunk.
+- `scripts/capture/store-protocol.ts`: the same through `v8.serialize`.
+- `scripts/expert/trim.ts`: the trim-safe fold.
+- `live-revisit-drive.ts` now also requires that a fifth of live TCP rows name
+  their process: the annotation the shards took over.
 
 **The equality test** (`scripts/pipeline/parallel.ts`, plain `tsx`): every
 fixture and the burst, today's path against virtual shards at N = 1, 2 and 7

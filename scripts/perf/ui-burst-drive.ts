@@ -3,7 +3,7 @@
  * tasks, where the main thread's time goes, how far the list falls behind.
  *
  *   npx tsx scripts/perf/ui-burst-drive.ts --pcap some.pcapng [--rates 10000,20000,40000] [--seconds 25] [--threads auto|N] [--no-file]
- *       [--app <dir>] [--out report.txt] [--profile <prefix>] [--follow-only]
+ *       [--app <dir>] [--out report.txt] [--profile <prefix>] [--follow-only] [--profile-shards] [--buffer-mb auto|N]
  *
  * `--profile` also writes each phase's raw CPU profiles, the main thread's as
  * `<prefix>-<n>-main.cpuprofile` and the Worker's as `-worker`, for DevTools'
@@ -38,7 +38,7 @@
 import { createServer, type Socket } from 'node:net';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { SourceMapConsumer } from 'source-map-js';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
 import { BATCH_HEADER_BYTES, BATCH_RECORD_BYTES, BATCH_VERSION } from '../../src/services/agentBinary';
 import { FRAME_BINARY, FRAME_JSON, FrameReader, encodeFrame, encodeJsonFrame, frameText } from '../../src/services/agentFraming';
@@ -56,8 +56,16 @@ const OUT = arg('out', '');
 const APP = arg('app', '');
 /** Multi Threaded Capture: `auto`, the default, or an offered count (1, 2, 4, 6, 8, 12, 16). */
 const THREADS = arg('threads', 'auto');
+/**
+ * The packet buffer, in MB (128, 256, 512, 1024, 2048), or `auto`. At 60k the
+ * `auto` budget lets the window's heap reach the heap guard's wall and the
+ * capture stops itself mid-drive (issue #15), so the ADR 0053 gate uses 1024.
+ */
+const BUFFER_MB = arg('buffer-mb', 'auto');
 const PROFILE_PREFIX = arg('profile', '');
 const FOLLOW_ONLY = process.argv.includes('--follow-only');
+/** Profile the TCP shards too (ADR 0053), summed across them, with each one's idle share. */
+const PROFILE_SHARDS = process.argv.includes('--profile-shards');
 /** Whether the agent writes the capture's pcapng, as the real one does - what the view catches up from. */
 const FILE = !process.argv.includes('--no-file');
 const DEVTOOLS_PORT = 9339;
@@ -393,14 +401,15 @@ await page.waitForFunction(() => (document.getElementById('root')?.childElementC
 // Multi Threaded Capture (ADR 0053 phase 3): the profile is fresh, so the
 // setting is its default, `auto`, unless this asks for a count - written where
 // the app keeps it, and read by a reload before any capture.
-if (THREADS !== 'auto') {
-  await page.evaluate((threads) => localStorage.setItem('inwire.performance',
-    JSON.stringify({ dashboardRefreshMs: 500, packetBufferBytes: 'auto', dissectionThreads: threads })), Number(THREADS));
+if (THREADS !== 'auto' || BUFFER_MB !== 'auto') {
+  await page.evaluate(({ threads, buffer }) => localStorage.setItem('inwire.performance',
+    JSON.stringify({ dashboardRefreshMs: 500, packetBufferBytes: buffer, dissectionThreads: threads })),
+  { threads: THREADS === 'auto' ? 'auto' : Number(THREADS), buffer: BUFFER_MB === 'auto' ? 'auto' : Number(BUFFER_MB) * 1024 * 1024 });
   await page.reload();
   await page.evaluate('window.__name = (f) => f');
   await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
 }
-say(`multi threaded capture: ${THREADS}`);
+say(`multi threaded capture: ${THREADS}; packet buffer: ${BUFFER_MB === 'auto' ? 'auto' : `${BUFFER_MB} MB`}`);
 const cdp = await page.context().newCDPSession(page);
 await cdp.send('Performance.enable');
 await cdp.send('Profiler.enable');
@@ -426,6 +435,34 @@ async function attachWorker(): Promise<void> {
   await raw.send('Profiler.enable', {}, workerSession);
   await raw.send('Profiler.setSamplingInterval', { interval: 500 }, workerSession);
   say(`attached to the Worker: ${w.url.replace(/^.*\//, '')}`);
+}
+
+// The shards: the same script, named `inwire-shard-<n>` (`shardRole.ts`).
+const shardSessions: string[] = [];
+async function attachShards(): Promise<void> {
+  if (raw === null || !PROFILE_SHARDS || shardSessions.length > 0) return;
+  const { targetInfos } = await raw.send<{ targetInfos: { targetId: string; type: string; title?: string }[] }>('Target.getTargets');
+  for (const t of targetInfos.filter((x) => x.type === 'worker' && /inwire-shard/.test(x.title ?? ''))) {
+    const { sessionId } = await raw.send<{ sessionId: string }>('Target.attachToTarget', { targetId: t.targetId, flatten: true });
+    await raw.send('Profiler.enable', {}, sessionId);
+    await raw.send('Profiler.setSamplingInterval', { interval: 500 }, sessionId);
+    shardSessions.push(sessionId);
+  }
+  say(`attached to ${shardSessions.length} shard(s)`);
+}
+
+/** Several profiles as one, for a top-self-time table summed across them. */
+function mergeProfiles(profiles: CpuProfile[]): CpuProfile {
+  const merged: CpuProfile = { nodes: [], samples: [], timeDeltas: [] };
+  let offset = 0;
+  for (const p of profiles) {
+    let max = 0;
+    for (const node of p.nodes) { merged.nodes.push({ ...node, id: node.id + offset }); max = Math.max(max, node.id); }
+    merged.samples.push(...p.samples.map((id) => id + offset));
+    merged.timeDeltas.push(...p.timeDeltas);
+    offset += max + 1;
+  }
+  return merged;
 }
 
 // Instruments in the page: animation frames and long tasks.
@@ -464,6 +501,7 @@ if (raw && !workerSession) {
   await raw.send('Target.setDiscoverTargets', { discover: true });
   await attachWorker();
 }
+await attachShards();
 // Parse the source maps now, not between phases: an 11 MB map takes seconds,
 // and this process is also the agent.
 if (APP && existsSync(path.join(APP, 'dist', 'assets'))) {
@@ -558,16 +596,34 @@ for (const [phaseIndex, phase] of phases.entries()) {
   const shownStart = await shown();
   await cdp.send('Profiler.start');
   if (raw && workerSession) await raw.send('Profiler.start', {}, workerSession).catch(() => {});
+  for (const s of shardSessions) await raw!.send('Profiler.start', {}, s).catch(() => {});
   const t0 = Date.now();
   const lagSamples: number[] = [];
   const workerHeapSamples: number[] = [];
+  // What the renderer's heap guard reads (rendererHeapGuard.ts readHeap).
+  const guardHeapSamples: number[] = [];
+  let guardLimit = 0;
   const statusSamples: string[] = [];
   const skippedStart = await skipped();
+  // Each process's CPU in cores: the store and main are outside what a profile
+  // here can see. Electron divides `percentCPUUsage` by the machine's cores.
+  const cpuSamples = new Map<string, number[]>();
+  const cpu = async () => (await app.evaluate(({ app: electronApp }) => electronApp.getAppMetrics()
+    .map((m) => ({ name: `${m.type}${m.serviceName ? ` ${m.serviceName}` : m.name ? ` ${m.name}` : ''}`, cpu: m.cpu.percentCPUUsage }))))
+    .forEach(({ name, cpu: used }) => cpuSamples.set(name, [...(cpuSamples.get(name) ?? []), used]));
+  await cpu();
+  cpuSamples.clear();
   const sampler = (async () => {
     while (Date.now() - t0 < SECONDS * 1000) {
       await sleep(2000);
+      await cpu();
       lagSamples.push(await behindLive());
       workerHeapSamples.push((await heap()).worker);
+      const g = await page.evaluate(() => {
+        const m = (performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }).memory;
+        return m ? { used: m.usedJSHeapSize, limit: m.jsHeapSizeLimit } : null;
+      }).catch(() => null);
+      if (g) { guardHeapSamples.push(g.used / 2 ** 20); guardLimit = g.limit / 2 ** 20; }
       const text = (await statusText()).replace(/\s+/g, ' ').trim();
       const live = /(catching up|behind live [^·]*|[\d,]+ to go|[\d,]+ skipped)/g;
       statusSamples.push((text.match(live) ?? []).map((s) => s.trim()).join(' · ') || 'live');
@@ -580,6 +636,10 @@ for (const [phaseIndex, phase] of phases.entries()) {
   let workerProfile: CpuProfile | null = null;
   if (raw && workerSession) {
     try { workerProfile = (await raw.send<{ profile: CpuProfile }>('Profiler.stop', {}, workerSession)).profile; } catch { /* none */ }
+  }
+  const shardProfiles: CpuProfile[] = [];
+  for (const s of shardSessions) {
+    try { shardProfiles.push((await raw!.send<{ profile: CpuProfile }>('Profiler.stop', {}, s)).profile); } catch { /* gone */ }
   }
   if (PROFILE_PREFIX) {
     writeFileSync(`${PROFILE_PREFIX}-${phaseIndex + 1}-main.cpuprofile`, JSON.stringify(mainProfile));
@@ -601,7 +661,11 @@ for (const [phaseIndex, phase] of phases.entries()) {
   say(`  lag behind live (sent - shown - skipped), every 2 s: ${lagSamples.map((n) => n.toLocaleString()).join(', ')}`);
   say(`  skipped by the live view this phase: ${((await skipped()) - skippedStart).toLocaleString()} frames`);
   say(`  Worker heap every 2 s: ${workerHeapSamples.map((n) => n.toFixed(0)).join(', ')} MB`);
+  say(`  window heap as the guard reads it, every 2 s: ${guardHeapSamples.map((n) => n.toFixed(0)).join(', ')} MB; `
+    + `limit ${guardLimit.toFixed(0)} MB, stops at ${(guardLimit * 0.9).toFixed(0)} MB`);
   say(`  status bar every 2 s: ${statusSamples.join(' | ')}`);
+  say(`  process CPU, mean cores: ${[...cpuSamples].filter(([, v]) => v.length > 0)
+    .map(([name, v]) => `${name} ${(v.reduce((a, c) => a + c, 0) / v.length * availableParallelism() / 100).toFixed(2)}`).join(', ')}`);
   say(`  animation frames: ${(b.frames / elapsed).toFixed(1)} fps`);
   say(`  long tasks: ${(long.length / elapsed).toFixed(1)}/s, ${(longMs / elapsed / 10).toFixed(0)}% of wall time; `
     + `p50 ${long[Math.floor(long.length / 2)]?.toFixed(0) ?? '-'} ms, max ${long[0]?.toFixed(0) ?? '-'} ms`);
@@ -618,6 +682,15 @@ for (const [phaseIndex, phase] of phases.entries()) {
     topSelf(workerProfile).forEach(row);
     say('  Worker, by file:');
     topFiles(workerProfile).forEach(row);
+  }
+  if (shardProfiles.length > 0) {
+    const idle = shardProfiles.map((p) => topSelf(p, 1000).find((r) => r.fn.startsWith('(idle)'))?.pct ?? 0);
+    say(`  shards, idle each: ${idle.map((n) => `${n.toFixed(0)}%`).join(', ')}`);
+    const all = mergeProfiles(shardProfiles);
+    say('  shards, top self time (summed):');
+    topSelf(all, 20).forEach(row);
+    say('  shards, by file (summed):');
+    topFiles(all).forEach(row);
   }
 }
 
@@ -644,7 +717,7 @@ agent.setRate(0);
     ? `  level with live ${((Date.now() - t0) / 1000).toFixed(1)} s after the agent stopped sending`
     : `  NOT level with live 180 s after the agent stopped: ${left.toLocaleString()} frames behind; status "${text.replace(/\s+/g, ' ').trim()}"`);
   say(`  pipeline warnings: ${pipelineWarnings.length}`);
-  for (const line of [...new Set(pipelineWarnings)].slice(0, 5)) say(`    ${line.slice(0, 300)}`);
+  for (const line of [...new Set(pipelineWarnings)].slice(0, 40)) say(`    ${line.slice(0, 300)}`);
 }
 await page.getByLabel(/Stop capture|Pause capture/).first().click().catch(() => {});
 await sleep(1000);

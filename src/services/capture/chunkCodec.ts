@@ -55,13 +55,48 @@
  * the *accelerator* degrades and the filter falls back to the list, and
  * nothing decodes wrongly.
  * A layout that stored only the bitmap would silently lose a protocol instead.
+ *
+ * ## Version 3: a chunk that holds shard packs
+ *
+ * A shard hands the coordinator its rows already encoded as a version-2 summary
+ * (`pipeline/rowPack.ts`). Decoding and encoding them again in the store is
+ * most of what the store costs per frame, so a chunk that holds packed rows may
+ * instead be a **container**: the packs' own summaries, whole or reduced to the
+ * rows this chunk holds, as segments; one lane saying which segment each row of
+ * the chunk is in; and two side sections for what the merge and later frames
+ * wrote to a row after its shard was done (overlays, then info patches). Each
+ * segment is a complete version-2 summary, so `decodeChunk` reads it with the
+ * code it already had, and a container inside a segment is refused.
+ *
+ * The prefix block does not change, and neither does anything that reads only
+ * it. Only chunks that hold packed rows are containers: `encodeChunk` still
+ * writes version 2, so an import and the single Worker produce the files they
+ * always did. An older build opens a capture holding a container and fails the
+ * row reads of those chunks, one by one, with the version error below; the
+ * index and the prefix and byte blocks stay readable.
  */
 import type { Packet, PacketStatus, ProtocolType, ExpertInfo, ExpertCategory } from '../../types/packet';
 import { fieldEntries } from '../dissect/fieldAccess';
+import { applyInfoPatch } from '../dissect/infoPatch';
+import type { InfoPatch } from '../dissect/types';
+// A type only: `rowPack.ts` imports this module as a value, and a cycle between
+// the two would leave one of them half-initialised under a bundler.
+import type { RowPack } from '../pipeline/rowPack';
+import { applyOverlay, type RowOverlay } from '../pipeline/rowOverlay';
 
 export const CHUNK_MAGIC = 0x314b4349;            // 'ICK1'
 /**
- * 2 carries each frame's `linkType`; 1 did not.
+ * The layout of a row inside a summary, which is what `encodeChunk` writes and
+ * what a shard's pack is made of. Unchanged by version 3, which is a container
+ * around summaries in this layout, not a new layout for a row.
+ */
+export const ROW_LAYOUT_VERSION = 2;
+/**
+ * The newest summary this build reads: 3, the container. Writers use
+ * `ROW_LAYOUT_VERSION` for a flat summary and `encodePackedChunk` for a
+ * container.
+ *
+ * Of the row layout, 2 carries each frame's `linkType`; 1 did not.
  *
  * **A version-1 chunk still decodes**, and that is a promise rather than a
  * courtesy: a capture on disk outlives the build that wrote it, and a restore
@@ -78,7 +113,7 @@ export const CHUNK_MAGIC = 0x314b4349;            // 'ICK1'
  * row given whichever type the table held last, and an export of it wrote
  * the tunnel's frames under an Ethernet interface or the reverse.
  */
-export const CHUNK_VERSION = 2;
+export const CHUNK_VERSION = 3;
 /** The oldest summary layout this build reads. */
 const OLDEST_CHUNK_VERSION = 1;
 
@@ -335,6 +370,49 @@ export interface EncodedChunk {
 }
 
 /**
+ * Writes one frame's 72-byte filter record at `at`. The block is zero-filled
+ * by whoever allocated it, which is what keeps the two reserved bytes zero.
+ *
+ * Factored out of `encodeChunk` so a chunk that holds packed rows writes the
+ * records of its objects and placeholders exactly as a flat chunk would; a
+ * packed row's record is copied instead (`encodePackedChunk`).
+ */
+function writePrefixRecord(prefix: Uint8Array, prefixView: DataView, at: number, p: Packet): void {
+  prefixView.setFloat64(at + OFF_TS_US, p.tsUs, true);
+  prefixView.setUint32(at + OFF_LENGTH, p.length >>> 0, true);
+  prefixView.setUint32(at + OFF_STREAM_ID, p.streamId === undefined ? 0xffffffff : p.streamId >>> 0, true);
+  const srcKind = writeAddress(p.source, prefix, at + OFF_SRC_ADDR);
+  const dstKind = writeAddress(p.destination, prefix, at + OFF_DST_ADDR);
+
+  let layersLo = 0, layersHi = 0;
+  for (const token of p.frameProtocols ?? []) {
+    const bit = LAYER_BIT.get(token);
+    if (bit === undefined || bit >= 64) continue;   // overflow falls back to the list
+    if (bit < 32) layersLo |= 1 << bit; else layersHi |= 1 << (bit - 32);
+  }
+  prefixView.setUint32(at + OFF_LAYERS_LO, layersLo >>> 0, true);
+  prefixView.setUint32(at + OFF_LAYERS_HI, layersHi >>> 0, true);
+
+  let analysis = 0;
+  for (const flag of p.analysisFlags ?? []) {
+    const bit = ANALYSIS_BIT.get(flag);
+    if (bit !== undefined) analysis |= 1 << bit;
+  }
+  prefixView.setUint32(at + OFF_ANALYSIS, analysis >>> 0, true);
+
+  prefixView.setUint16(at + OFF_SRC_PORT, (p.sourcePort ?? 0) & 0xffff, true);
+  prefixView.setUint16(at + OFF_DST_PORT, (p.destPort ?? 0) & 0xffff, true);
+  // The nanosecond remainder rides beside `tsUs` rather than replacing it
+  // with a u64: epoch nanoseconds exceed 2^53, so a f64 cannot hold them and
+  // a BigInt read per row is too slow for a 38M-row scan. Microseconds are
+  // exact in a f64 for the next few centuries, and 0..999 fits a u16.
+  prefixView.setUint16(at + OFF_NANOS_REM, nanosRemainderOf(p.tsNanos), true);
+  prefixView.setUint16(at + OFF_DIRECTION, (p.direction ?? 0) & 0xffff, true);
+  prefix[at + OFF_STATUS] = Math.max(0, STATUS_ORDER.indexOf(p.status));
+  prefix[at + OFF_ADDR_KIND] = (srcKind & 0x0f) | ((dstKind & 0x0f) << 4);
+}
+
+/**
  * Encodes up to `CHUNK_FRAMES` packets.
  *
  * `packets` must be in ascending id order and non-empty. Ids may have holes - a
@@ -345,11 +423,11 @@ export function encodeChunk(
   packets: readonly Packet[],
   capLengths: readonly number[],
   /**
-   * The layout to write. Always `CHUNK_VERSION` in the app; 1 exists so the
-   * compatibility promise above can be asserted against a real old chunk
+   * The layout to write. Always `ROW_LAYOUT_VERSION` in the app; 1 exists so
+   * the compatibility promise above can be asserted against a real old chunk
    * rather than one described in a comment.
    */
-  version: 1 | 2 = CHUNK_VERSION,
+  version: 1 | 2 = ROW_LAYOUT_VERSION,
 ): EncodedChunk {
   if (packets.length === 0) throw new Error('encodeChunk: empty chunk');
   if (packets.length > CHUNK_FRAMES) {
@@ -385,41 +463,9 @@ export function encodeChunk(
 
   for (let i = 0; i < packets.length; i++) {
     const p = packets[i];
-    const at = i * PREFIX_BYTES;
 
     // --- the prefix: an accelerator, derived, never read back as truth -------
-    prefixView.setFloat64(at + OFF_TS_US, p.tsUs, true);
-    prefixView.setUint32(at + OFF_LENGTH, p.length >>> 0, true);
-    prefixView.setUint32(at + OFF_STREAM_ID, p.streamId === undefined ? 0xffffffff : p.streamId >>> 0, true);
-    const srcKind = writeAddress(p.source, prefix, at + OFF_SRC_ADDR);
-    const dstKind = writeAddress(p.destination, prefix, at + OFF_DST_ADDR);
-
-    let layersLo = 0, layersHi = 0;
-    for (const token of p.frameProtocols ?? []) {
-      const bit = LAYER_BIT.get(token);
-      if (bit === undefined || bit >= 64) continue;   // overflow falls back to the list
-      if (bit < 32) layersLo |= 1 << bit; else layersHi |= 1 << (bit - 32);
-    }
-    prefixView.setUint32(at + OFF_LAYERS_LO, layersLo >>> 0, true);
-    prefixView.setUint32(at + OFF_LAYERS_HI, layersHi >>> 0, true);
-
-    let analysis = 0;
-    for (const flag of p.analysisFlags ?? []) {
-      const bit = ANALYSIS_BIT.get(flag);
-      if (bit !== undefined) analysis |= 1 << bit;
-    }
-    prefixView.setUint32(at + OFF_ANALYSIS, analysis >>> 0, true);
-
-    prefixView.setUint16(at + OFF_SRC_PORT, (p.sourcePort ?? 0) & 0xffff, true);
-    prefixView.setUint16(at + OFF_DST_PORT, (p.destPort ?? 0) & 0xffff, true);
-    // The nanosecond remainder rides beside `tsUs` rather than replacing it
-    // with a u64: epoch nanoseconds exceed 2^53, so a f64 cannot hold them and
-    // a BigInt read per row is too slow for a 38M-row scan. Microseconds are
-    // exact in a f64 for the next few centuries, and 0..999 fits a u16.
-    prefixView.setUint16(at + OFF_NANOS_REM, nanosRemainderOf(p), true);
-    prefixView.setUint16(at + OFF_DIRECTION, (p.direction ?? 0) & 0xffff, true);
-    prefix[at + OFF_STATUS] = Math.max(0, STATUS_ORDER.indexOf(p.status));
-    prefix[at + OFF_ADDR_KIND] = (srcKind & 0x0f) | ((dstKind & 0x0f) << 4);
+    writePrefixRecord(prefix, prefixView, i * PREFIX_BYTES, p);
 
     // --- the byte directory: two columnar lanes, not part of the record -----
     prefixView.setUint32(directoryAt + i * 4, (i === 0 ? p.id : p.id - packets[i - 1].id) >>> 0, true);
@@ -532,9 +578,9 @@ function readNanos(src: Source): bigint | undefined {
 }
 
 /** The sub-microsecond part of a frame's timestamp, 0..999. */
-function nanosRemainderOf(p: Packet): number {
-  if (p.tsNanos === undefined) return 0;
-  return Number(p.tsNanos % 1000n);
+function nanosRemainderOf(tsNanos: bigint | undefined): number {
+  if (tsNanos === undefined) return 0;
+  return Number(tsNanos % 1000n);
 }
 
 /**
@@ -547,6 +593,11 @@ function nanosRemainderOf(p: Packet): number {
  * frame's own 1.2 kB, and it is rebuilt on demand.
  */
 export function decodeChunk(summary: Uint8Array): Packet[] {
+  return decodeSummary(summary, true);
+}
+
+/** `container` false is a segment: it must be a flat summary, never another container. */
+function decodeSummary(summary: Uint8Array, container: boolean): Packet[] {
   const src = new Source(summary);
   const magic = src.u32();
   if (magic !== CHUNK_MAGIC) throw new Error(`decodeChunk: bad magic 0x${magic.toString(16)}`);
@@ -556,6 +607,10 @@ export function decodeChunk(summary: Uint8Array): Packet[] {
   }
   src.u16();                                    // flags
   const frameCount = src.u32();
+  if (version === CHUNK_VERSION) {
+    if (!container) throw new Error('decodeChunk: a container inside a segment');
+    return decodeContainer(src, summary, frameCount);
+  }
   const tableLength = src.u32();
 
   const table: string[] = new Array(tableLength);
@@ -656,6 +711,589 @@ export function decodeChunk(summary: Uint8Array): Packet[] {
   return packets;
 }
 
+// --- version 3: a container of packs -------------------------------------------
+//
+//   MAGIC, u16 3, u16 flags, u32 frameCount, u16 segmentCount
+//   segmentCount x { u8 kind, u32 length, a complete version-2 summary }
+//   u16 lane[frameCount]     the segment that holds chunk row i
+//   the overlay section      { u32 count, string table, count x { u16 row, overlay } }
+//   the patch section        { u32 count, string table, count x { u16 row, patch } }
+//
+// Rows inside a segment ascend by id, as do the chunk's rows, so a row's
+// position inside its segment is the number of earlier rows that name that
+// segment in the lane: nothing stores it. Each section has a string table of
+// its own, because the segments' tables are the packs' and are not touched.
+
+const SEGMENT_PACK = 0;
+const SEGMENT_RUN = 1;
+/**
+ * A pack that contributes fewer rows than this to a chunk is not carried as a
+ * segment. Its few rows are decoded and join the run, because a segment costs a
+ * string table of its own, and for a handful of rows that table is most of it.
+ */
+const SELECT_MIN_ROWS = 16;
+
+function tableString(table: readonly string[], index: number): string {
+  const s = table[index];
+  if (s === undefined) throw new Error(`decodeChunk: string id ${index} past the table`);
+  return s;
+}
+
+function readTable(src: Source): string[] {
+  const length = src.u32();
+  const table: string[] = new Array(length);
+  for (let i = 0; i < length; i++) table[i] = textDecoder.decode(src.raw(src.u32()));
+  return table;
+}
+
+function writeTable(out: Sink, table: readonly string[]): void {
+  out.u32(table.length);
+  for (const s of table) {
+    const encoded = textEncoder.encode(s);
+    out.u32(encoded.length);
+    out.raw(encoded);
+  }
+}
+
+/** First-use string ids, for the side sections; `encodeChunk` keeps its own inline for speed. */
+class Interner {
+  readonly table: string[] = [];
+  private readonly seen = new Map<string, number>();
+
+  id(s: string): number {
+    let v = this.seen.get(s);
+    if (v === undefined) { v = this.table.length; this.seen.set(s, v); this.table.push(s); }
+    return v;
+  }
+}
+
+function decodeContainer(src: Source, summary: Uint8Array, frameCount: number): Packet[] {
+  const segmentCount = src.u16();
+  const segments: Packet[][] = new Array(segmentCount);
+  for (let s = 0; s < segmentCount; s++) {
+    const kind = src.u8();
+    if (kind !== SEGMENT_PACK && kind !== SEGMENT_RUN) throw new Error(`decodeChunk: segment kind ${kind}`);
+    const length = src.u32();
+    // `raw` clips silently at the end of the buffer; a length that lies must not.
+    if (src.offset + length > summary.length) throw new Error('decodeChunk: a segment runs past the end of the summary');
+    const bytes = src.raw(length);
+    if (bytes.length < 6 || bytes[4] !== ROW_LAYOUT_VERSION || bytes[5] !== 0) {
+      throw new Error('decodeChunk: a segment is not a version-2 summary');
+    }
+    segments[s] = decodeSummary(bytes, false);
+  }
+
+  // Gather the rows into chunk order. A wrong lane puts a row under another
+  // row's ordinal, which shows as a confident wrong Info line, so everything
+  // that could be inconsistent is checked here rather than trusted.
+  const next = new Array<number>(segmentCount).fill(0);
+  const packets: Packet[] = new Array(frameCount);
+  let previousId = -1;
+  for (let i = 0; i < frameCount; i++) {
+    const lane = src.u16();
+    if (lane >= segmentCount) throw new Error(`decodeChunk: row ${i} names segment ${lane} of ${segmentCount}`);
+    const row = segments[lane][next[lane]++];
+    if (row === undefined) throw new Error(`decodeChunk: segment ${lane} has fewer rows than the lane asks of it`);
+    if (row.id <= previousId) throw new Error(`decodeChunk: id ${row.id} after ${previousId}`);
+    previousId = row.id;
+    packets[i] = row;
+  }
+  for (let s = 0; s < segmentCount; s++) {
+    if (next[s] !== segments[s].length) throw new Error(`decodeChunk: segment ${s} has rows the lane does not place`);
+  }
+
+  // Overlays, then patches: the order the merge and the writer wrote them in.
+  const overlayCount = src.u32();
+  const overlayStrings = readTable(src);
+  for (let k = 0; k < overlayCount; k++) {
+    const row = src.u16();
+    if (row >= frameCount) throw new Error(`decodeChunk: an overlay for row ${row} of ${frameCount}`);
+    const overlay = readOverlay(src, overlayStrings);
+    const packet = packets[row];
+    applyOverlay(packet, overlay);
+    // `applyOverlay` assigns undefined for a member that clears its key; a
+    // flat chunk stores that as no key at all, and the two must read alike.
+    if ('expert' in overlay && packet.expert === undefined) delete packet.expert;
+    if ('tsPrecision' in overlay && packet.tsPrecision === undefined) delete packet.tsPrecision;
+    if ('tsNanos' in overlay && packet.tsNanos === undefined) delete packet.tsNanos;
+  }
+
+  const patchCount = src.u32();
+  const patchStrings = readTable(src);
+  for (let k = 0; k < patchCount; k++) {
+    const row = src.u16();
+    if (row >= frameCount) throw new Error(`decodeChunk: a patch for row ${row} of ${frameCount}`);
+    // Every row here was decoded just now and is nobody else's, so the patch
+    // may write into its field bag instead of copying it.
+    applyInfoPatch(packets[row], readPatch(src, patchStrings), true);
+  }
+
+  if (src.offset !== summary.length) {
+    throw new Error(`decodeChunk: ${summary.length - src.offset} bytes after the last section`);
+  }
+  return packets;
+}
+
+const OV_FIELDS = 1, OV_EXPERT = 2, OV_PRECISION = 4, OV_NANOS = 8;
+
+function writeOverlays(out: Sink, entries: readonly (readonly [number, RowOverlay])[]): void {
+  const strings = new Interner();
+  const body = new Sink(1024);
+  for (const [row, overlay] of entries) {
+    body.u16(row);
+    // Presence, not value: a member that is present and undefined clears the key.
+    let flags = 0;
+    if (overlay.fields !== undefined) flags |= OV_FIELDS;
+    if ('expert' in overlay) flags |= OV_EXPERT;
+    if ('tsPrecision' in overlay) flags |= OV_PRECISION;
+    if ('tsNanos' in overlay) flags |= OV_NANOS;
+    body.u8(flags);
+    if (overlay.fields !== undefined) {
+      const keys = Object.keys(overlay.fields);
+      body.u16(keys.length);
+      for (const key of keys) {
+        body.u32(strings.id(key));
+        const value = overlay.fields[key];
+        if (typeof value === 'number') { body.u8(0); body.f64(value); }
+        else { body.u8(1); body.u32(strings.id(value)); }
+      }
+    }
+    if (flags & OV_EXPERT) {
+      const expert = overlay.expert;
+      body.u16(expert === undefined ? ABSENT : expert.length);
+      for (const finding of expert ?? []) {
+        body.u32(strings.id(finding.message));
+        body.u32(finding.category === undefined ? 0xffffffff : strings.id(finding.category));
+      }
+    }
+    if (flags & OV_PRECISION) body.u16(overlay.tsPrecision === undefined ? 0xffff : overlay.tsPrecision);
+    if (flags & OV_NANOS) writeNanos(body, overlay.tsNanos);
+  }
+  out.u32(entries.length);
+  writeTable(out, strings.table);
+  out.raw(body.bytes());
+}
+
+function readOverlay(src: Source, table: readonly string[]): RowOverlay {
+  const flags = src.u8();
+  const overlay: RowOverlay = {};
+  if (flags & OV_FIELDS) {
+    const fields: Record<string, string | number> = {};
+    const count = src.u16();
+    for (let k = 0; k < count; k++) {
+      const key = tableString(table, src.u32());
+      fields[key] = src.u8() === 0 ? src.f64() : tableString(table, src.u32());
+    }
+    overlay.fields = fields;
+  }
+  if (flags & OV_EXPERT) {
+    const count = src.u16();
+    if (count === ABSENT) {
+      overlay.expert = undefined;
+    } else {
+      const expert: ExpertInfo[] = new Array(count);
+      for (let k = 0; k < count; k++) {
+        const message = tableString(table, src.u32());
+        const categoryId = src.u32();
+        expert[k] = categoryId === 0xffffffff
+          ? { message }
+          : { message, category: tableString(table, categoryId) as ExpertCategory };
+      }
+      overlay.expert = expert;
+    }
+  }
+  if (flags & OV_PRECISION) {
+    const v = src.u16();
+    overlay.tsPrecision = v === 0xffff ? undefined : v;
+  }
+  if (flags & OV_NANOS) overlay.tsNanos = readNanos(src);
+  return overlay;
+}
+
+const PT_SUFFIX = 1, PT_LABEL = 2, PT_RESPONSE = 4, PT_LINKS = 8;
+
+function writePatches(out: Sink, entries: readonly (readonly [number, InfoPatch])[]): void {
+  const strings = new Interner();
+  const body = new Sink(1024);
+  for (const [row, patch] of entries) {
+    body.u16(row);
+    body.u32(patch.frameId >>> 0);
+    let flags = 0;
+    if (patch.suffix !== undefined) flags |= PT_SUFFIX;
+    if (patch.protocolLabel !== undefined) flags |= PT_LABEL;
+    if (patch.responseInFrame !== undefined) flags |= PT_RESPONSE;
+    if (patch.links !== undefined) flags |= PT_LINKS;
+    body.u8(flags);
+    if (patch.suffix !== undefined) body.u32(strings.id(patch.suffix));
+    if (patch.protocolLabel !== undefined) body.u32(strings.id(patch.protocolLabel));
+    if (patch.responseInFrame !== undefined) body.f64(patch.responseInFrame);
+    if (patch.links !== undefined) {
+      const keys = Object.keys(patch.links);
+      body.u16(keys.length);
+      for (const key of keys) { body.u32(strings.id(key)); body.f64(patch.links[key]); }
+    }
+  }
+  out.u32(entries.length);
+  writeTable(out, strings.table);
+  out.raw(body.bytes());
+}
+
+function readPatch(src: Source, table: readonly string[]): InfoPatch {
+  const frameId = src.u32();
+  const flags = src.u8();
+  const patch: InfoPatch = { frameId };
+  if (flags & PT_SUFFIX) patch.suffix = tableString(table, src.u32());
+  if (flags & PT_LABEL) patch.protocolLabel = tableString(table, src.u32());
+  if (flags & PT_RESPONSE) patch.responseInFrame = src.f64();
+  if (flags & PT_LINKS) {
+    const links: Record<string, number> = {};
+    const count = src.u16();
+    for (let k = 0; k < count; k++) {
+      const key = tableString(table, src.u32());
+      links[key] = src.f64();
+    }
+    patch.links = links;
+  }
+  return patch;
+}
+
+/** A row held in a shard's pack, as the writer stages it. */
+export interface PackedChunkSlot {
+  pack: RowPack;
+  /** The row's position in the pack. */
+  index: number;
+  /** What the merge wrote to the row after the shard packed it. */
+  overlay: RowOverlay | null;
+  /**
+   * The row's frame id. Carried beside the pack rather than read out of it: the
+   * directory lanes are built from the writer's own ids and its own captured
+   * lengths, and copying them from a pack would let a pack's idea of either
+   * into the capture's.
+   */
+  id: number;
+}
+
+/** One frame of a chunk: a row the writer holds, or one it holds still packed. */
+export type ChunkSlot = Packet | PackedChunkSlot;
+
+/**
+ * The capture time of a packed row, from its pack's prefix record: what the
+ * writer ages a frame by when the frame's bytes arrive with its row. The merge's
+ * overlay never writes the timestamp, so the record is the whole answer.
+ */
+export function packedSlotTsUs(slot: PackedChunkSlot): number {
+  const from = slot.index * PREFIX_BYTES;
+  const prefix = slot.pack.prefix;
+  if (!Number.isInteger(slot.index) || slot.index < 0 || from + PREFIX_BYTES > prefix.length) {
+    throw new Error(`packedSlotTsUs: pack ${slot.pack.key} has no prefix record for row ${slot.index}`);
+  }
+  return new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getFloat64(from + OFF_TS_US, true);
+}
+
+interface PackGroup {
+  pack: RowPack;
+  /** The pack rows this chunk holds, ascending. */
+  indices: number[];
+  /** The segment carrying them, or -1 when they were demoted into the run. */
+  segment: number;
+  demoted: Packet[] | null;
+  nextDemoted: number;
+}
+
+/**
+ * Encodes a chunk that holds packed rows as a version-3 container.
+ *
+ * `slots` are in ascending id order. `patches[i]` are the info patches that
+ * reached slot `i`, in arrival order, whatever kind of slot it is: they ride
+ * in the patch section and are applied by the decoder after the overlays.
+ * The returned prefix block is the one `encodeChunk` would have written for the
+ * same rows with overlays and patches already applied - byte for byte, which
+ * `scripts/capture/chunk-codec.ts` holds it to.
+ */
+export function encodePackedChunk(
+  slots: readonly ChunkSlot[],
+  capLengths: readonly number[],
+  patches: readonly (readonly InfoPatch[] | null)[],
+): EncodedChunk {
+  const count = slots.length;
+  if (count === 0) throw new Error('encodePackedChunk: empty chunk');
+  if (count > CHUNK_FRAMES) {
+    throw new Error(`encodePackedChunk: ${count} frames exceeds CHUNK_FRAMES (${CHUNK_FRAMES})`);
+  }
+  if (capLengths.length !== count) throw new Error(`encodePackedChunk: ${capLengths.length} lengths for ${count} frames`);
+  if (patches.length !== count) throw new Error(`encodePackedChunk: ${patches.length} patch lists for ${count} frames`);
+
+  const prefix = new Uint8Array(prefixBlockBytes(count));
+  const prefixView = new DataView(prefix.buffer);
+  const directoryAt = count * PREFIX_BYTES;
+
+  const groups = new Map<number, PackGroup>();
+  const groupOf: (PackGroup | null)[] = new Array(count);
+  const overlays: [number, RowOverlay][] = [];
+  const patchEntries: [number, InfoPatch][] = [];
+
+  let previousId = -1;
+  for (let i = 0; i < count; i++) {
+    const slot = slots[i];
+    const at = i * PREFIX_BYTES;
+    if (slot.id <= previousId) throw new Error(`encodePackedChunk: id ${slot.id} after ${previousId}`);
+    prefixView.setUint32(directoryAt + i * 4, (i === 0 ? slot.id : slot.id - previousId) >>> 0, true);
+    prefixView.setUint32(directoryAt + count * 4 + i * 4, capLengths[i] >>> 0, true);
+    previousId = slot.id;
+
+    if ('pack' in slot) {
+      let group = groups.get(slot.pack.key);
+      if (group === undefined) {
+        group = { pack: slot.pack, indices: [], segment: -1, demoted: null, nextDemoted: 0 };
+        groups.set(slot.pack.key, group);
+      } else if (group.pack !== slot.pack) {
+        throw new Error(`encodePackedChunk: two different packs under key ${slot.pack.key}`);
+      }
+      const last = group.indices.length === 0 ? -1 : group.indices[group.indices.length - 1];
+      if (!Number.isInteger(slot.index) || slot.index <= last || slot.index >= slot.pack.count) {
+        throw new Error(`encodePackedChunk: row ${slot.index} of pack ${slot.pack.key} (${slot.pack.count} rows) after ${last}`);
+      }
+      group.indices.push(slot.index);
+      groupOf[i] = group;
+
+      // The pack's record is already what `encodeChunk` would write for the
+      // row, except where the overlay changed something the record encodes.
+      // That is the nanosecond remainder and nothing else: the record holds no
+      // `tsPrecision`, no `expert`, no field, and the merge never touches the
+      // timestamp, length, status or stream. A patch writes Info, the label and
+      // fields, none of which are in it either.
+      const from = slot.index * PREFIX_BYTES;
+      if (from + PREFIX_BYTES > slot.pack.prefix.length) {
+        throw new Error(`encodePackedChunk: pack ${slot.pack.key} has no prefix record for row ${slot.index}`);
+      }
+      prefix.set(slot.pack.prefix.subarray(from, from + PREFIX_BYTES), at);
+      if (slot.overlay !== null) {
+        overlays.push([i, slot.overlay]);
+        if ('tsNanos' in slot.overlay) {
+          prefixView.setUint16(at + OFF_NANOS_REM, nanosRemainderOf(slot.overlay.tsNanos), true);
+        }
+      }
+    } else {
+      groupOf[i] = null;
+      writePrefixRecord(prefix, prefixView, at, slot);
+    }
+
+    for (const patch of patches[i] ?? []) patchEntries.push([i, patch]);
+  }
+
+  // Which packs travel as segments, and which are too thin to.
+  const segments: { kind: number; bytes: Uint8Array }[] = [];
+  for (const group of groups.values()) {
+    if (group.indices.length === group.pack.count) {
+      const bytes = group.pack.summary;
+      if (bytes.length < 6 || bytes[4] !== ROW_LAYOUT_VERSION || bytes[5] !== 0) {
+        throw new Error(`encodePackedChunk: pack ${group.pack.key} is not a version-2 summary`);
+      }
+      group.segment = segments.length;
+      segments.push({ kind: SEGMENT_PACK, bytes });
+    } else if (group.indices.length >= SELECT_MIN_ROWS) {
+      group.segment = segments.length;
+      segments.push({ kind: SEGMENT_PACK, bytes: selectRows(group.pack.summary, group.indices) });
+    } else {
+      group.demoted = decodeSummary(selectRows(group.pack.summary, group.indices), false);
+    }
+  }
+
+  // The run: objects, placeholders and demoted rows, in id order.
+  const runIndex = segments.length;
+  const lane = new Uint16Array(count);
+  const run: Packet[] = [];
+  const runLengths: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const slot = slots[i];
+    const group = groupOf[i];
+    if (group === null && !('pack' in slot)) {
+      run.push(slot);
+    } else if (group !== null && group.demoted !== null) {
+      run.push(group.demoted[group.nextDemoted++]);
+    } else if (group !== null) {
+      lane[i] = group.segment;
+      continue;
+    } else {
+      throw new Error('encodePackedChunk: a slot with no segment');
+    }
+    lane[i] = runIndex;
+    runLengths.push(capLengths[i]);
+  }
+  if (run.length > 0) segments.push({ kind: SEGMENT_RUN, bytes: encodeChunk(run, runLengths).summary });
+
+  let size = 4096 + count * 2;
+  for (const s of segments) size += 5 + s.bytes.length;
+  const out = new Sink(size);
+  out.u32(CHUNK_MAGIC);
+  out.u16(CHUNK_VERSION);
+  out.u16(0);                                  // flags, reserved
+  out.u32(count);
+  out.u16(segments.length);
+  for (const s of segments) {
+    out.u8(s.kind);
+    out.u32(s.bytes.length);
+    out.raw(s.bytes);
+  }
+  for (let i = 0; i < count; i++) out.u16(lane[i]);
+  writeOverlays(out, overlays);
+  writePatches(out, patchEntries);
+
+  return {
+    prefix,
+    summary: out.bytes(),
+    frameCount: count,
+    firstId: slots[0].id,
+    lastId: slots[count - 1].id,
+    firstTsUs: prefixView.getFloat64(OFF_TS_US, true),
+    lastTsUs: prefixView.getFloat64((count - 1) * PREFIX_BYTES + OFF_TS_US, true),
+  };
+}
+
+/** Moves string ids from one table to a smaller one, copying each entry as the bytes it is. */
+class IdRemap {
+  private readonly to: Int32Array;
+  readonly kept: Uint8Array[] = [];
+
+  constructor(private readonly entries: readonly Uint8Array[]) {
+    this.to = new Int32Array(entries.length).fill(-1);
+  }
+
+  map(old: number): number {
+    if (old >= this.entries.length) throw new Error(`selectRows: string id ${old} past the table`);
+    let n = this.to[old];
+    if (n < 0) { n = this.kept.length; this.to[old] = n; this.kept.push(this.entries[old]); }
+    return n;
+  }
+}
+
+/** Reads `n` bytes and, if `dst` is given, writes them. */
+function copyBytes(src: Source, dst: Sink | null, n: number): void {
+  const bytes = src.raw(n);
+  if (bytes.length !== n) throw new Error('selectRows: the summary ends inside a row');
+  if (dst !== null) dst.raw(bytes);
+}
+
+/** Reads a string id and, if `dst` is given, writes it under its new number. */
+function copyId(src: Source, dst: Sink | null, ids: IdRemap): void {
+  const old = src.u32();
+  if (dst !== null) dst.u32(ids.map(old));
+}
+
+/** As `copyId`, for an id that may be the 0xffffffff "none". */
+function copyOptionalId(src: Source, dst: Sink | null, ids: IdRemap): void {
+  const old = src.u32();
+  if (dst !== null) dst.u32(old === 0xffffffff ? old : ids.map(old));
+}
+
+/**
+ * Walks one version-2 row, writing it to `dst` with its string ids remapped, or
+ * only reading it when `dst` is null. The shape is `encodeChunk`'s, in the
+ * order it writes it; a change to that layout is a change here.
+ */
+function copyRow(src: Source, dst: Sink | null, ids: IdRemap): void {
+  copyBytes(src, dst, 4);                        // id
+  copyId(src, dst, ids);                         // source
+  copyId(src, dst, ids);                         // destination
+  copyId(src, dst, ids);                         // protocol
+  copyOptionalId(src, dst, ids);                 // protocol label
+  copyId(src, dst, ids);                         // info
+  copyId(src, dst, ids);                         // interface
+  copyBytes(src, dst, 16);                       // relativeTime, timeDelta
+  copyBytes(src, dst, 12);                       // ports, direction
+  copyBytes(src, dst, 2);                        // tsPrecision
+  const hasNanos = src.u8();
+  if (dst !== null) dst.u8(hasNanos);
+  if (hasNanos !== 0) copyBytes(src, dst, 8);
+  copyBytes(src, dst, 2);                        // linkType
+
+  for (let list = 0; list < 2; list++) {         // frameProtocols, analysisFlags
+    const n = src.u16();
+    if (dst !== null) dst.u16(n);
+    for (let k = 0, m = n === ABSENT ? 0 : n; k < m; k++) copyId(src, dst, ids);
+  }
+
+  const expertCount = src.u16();
+  if (dst !== null) dst.u16(expertCount);
+  for (let k = 0, m = expertCount === ABSENT ? 0 : expertCount; k < m; k++) {
+    copyId(src, dst, ids);                       // message
+    copyOptionalId(src, dst, ids);               // category
+  }
+
+  const resolvedCount = src.u16();
+  if (dst !== null) dst.u16(resolvedCount);
+  for (let k = 0, m = resolvedCount === ABSENT ? 0 : resolvedCount; k < m; k++) {
+    copyId(src, dst, ids);                       // name
+    const addresses = src.u16();
+    if (dst !== null) dst.u16(addresses);
+    for (let a = 0; a < addresses; a++) copyId(src, dst, ids);
+  }
+
+  const entryCount = src.u16();
+  if (dst !== null) dst.u16(entryCount);
+  for (let k = 0, m = entryCount === ABSENT ? 0 : entryCount; k < m; k++) {
+    copyId(src, dst, ids);                       // key
+    const kind = src.u8();
+    if (dst !== null) dst.u8(kind);
+    if (kind === 0) copyBytes(src, dst, 8); else copyId(src, dst, ids);
+  }
+}
+
+/**
+ * A version-2 summary of just the rows at `indices` (ascending, in range).
+ *
+ * The rows are copied as bytes: no string is decoded and no row is built. Only
+ * the string ids change, renumbered in first-use order into a table of just the
+ * strings those rows use, so what comes out is the summary `encodeChunk` would
+ * write for the same rows.
+ */
+export function selectRows(summary: Uint8Array, indices: readonly number[]): Uint8Array {
+  if (indices.length === 0) throw new Error('selectRows: no rows');
+  const src = new Source(summary);
+  const magic = src.u32();
+  if (magic !== CHUNK_MAGIC) throw new Error(`selectRows: bad magic 0x${magic.toString(16)}`);
+  const version = src.u16();
+  if (version !== ROW_LAYOUT_VERSION) throw new Error(`selectRows: version ${version} is not a flat version-2 summary`);
+  src.u16();                                    // flags
+  const frameCount = src.u32();
+  let previous = -1;
+  for (const index of indices) {
+    if (!Number.isInteger(index) || index <= previous || index >= frameCount) {
+      throw new Error(`selectRows: row ${index} of ${frameCount} after ${previous}`);
+    }
+    previous = index;
+  }
+
+  const tableLength = src.u32();
+  const entries: Uint8Array[] = new Array(tableLength);
+  for (let i = 0; i < tableLength; i++) {
+    const length = src.u32();
+    const bytes = src.raw(length);
+    if (bytes.length !== length) throw new Error('selectRows: the string table is cut short');
+    entries[i] = bytes;
+  }
+
+  const ids = new IdRemap(entries);
+  const body = new Sink(indices.length * 256);
+  let want = 0;
+  for (let row = 0; want < indices.length; row++) {
+    const keep = row === indices[want];
+    copyRow(src, keep ? body : null, ids);
+    if (keep) want++;
+  }
+
+  const rows = body.bytes();
+  const out = new Sink(rows.length + 4096);
+  out.u32(CHUNK_MAGIC);
+  out.u16(ROW_LAYOUT_VERSION);
+  out.u16(0);                                   // flags, reserved
+  out.u32(indices.length);
+  out.u32(ids.kept.length);
+  for (const entry of ids.kept) { out.u32(entry.length); out.raw(entry); }
+  out.raw(rows);
+  return out.bytes();
+}
+
 const EMPTY_BYTES = new Uint8Array(0);
 
 /**
@@ -684,12 +1322,24 @@ const ABSENT = 0xffff;
  * Split out because the two blocks are read independently: a filter reads the
  * prefix alone, and only a row that is actually going to be shown pays for the
  * summary. This is what joins them when both are in hand.
+ *
+ * A block that carries the byte directory has the writer's own ids, so the
+ * join checks each row against it and throws on the first that disagrees: a
+ * version 3 lane that ascends but picked the wrong rows would otherwise put a
+ * confident wrong Info line under another frame's ordinal.
  */
 export function applyPrefixes(packets: Packet[], prefix: Uint8Array): void {
   const view = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength);
+  const directoryAt = prefix.byteLength === prefixBlockBytes(packets.length) ? packets.length * PREFIX_BYTES : -1;
+  let id = 0;
   for (let i = 0; i < packets.length; i++) {
     const at = i * PREFIX_BYTES;
     const p = packets[i];
+    if (directoryAt >= 0) {
+      const gap = view.getUint32(directoryAt + i * 4, true);
+      id = i === 0 ? gap : id + gap;
+      if (p.id !== id) throw new Error(`applyPrefixes: row ${i} is frame ${p.id}, the directory says ${id}`);
+    }
     p.tsUs = view.getFloat64(at + OFF_TS_US, true);
     p.length = view.getUint32(at + OFF_LENGTH, true);
     p.status = STATUS_ORDER[prefix[at + OFF_STATUS]] ?? 'ok';

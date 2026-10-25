@@ -10,6 +10,7 @@ import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
 import type { RawFrame, WriterStats } from './captureWriter';
 import type { StreamSummary } from '../conversation/streamDigest';
+import type { PackedRows } from '../pipeline/rowPack';
 
 export type ToCapture =
   /**
@@ -69,6 +70,19 @@ export type ToCapture =
    * does, for the reason `appendBytes` below gives.
    */
   | { type: 'append'; packets: Packet[]; bytesSent?: true }
+  /**
+   * The same rows as `append`, in the pipeline Worker's order, with a shard's
+   * rows as the pack the shard encoded (`services/pipeline/rowPack.ts`).
+   *
+   * Only the Worker sends it. `sent` is `bytesSent` said row by row, in the
+   * rows' order: 1 for a row whose bytes the Worker wrote ahead of it on this
+   * port, which is attached; 0 for one that goes as an `append` would, with
+   * whatever bytes it carries. Said rather than read off an empty `rawBytes`,
+   * because an agent's metadata-only frame has none either and was never sent
+   * ahead. The host reads every message, even with no capture open, because
+   * its cache of half-read packs must count every row it was sent.
+   */
+  | { type: 'appendPacked'; rows: PackedRows; sent: Uint8Array }
   /**
    * Frames as they arrived, before anything dissected them.
    *

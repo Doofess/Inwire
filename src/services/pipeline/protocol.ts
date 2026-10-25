@@ -25,6 +25,7 @@ import type { NetworkFacts } from '../networkFacts';
 import type { StreamSeeds } from './replay';
 import type { InfoPatch } from '../pcapParser';
 import type { DissectionThreads } from './threads';
+import type { PackedRows } from './rowPack';
 
 /** Where a connection stands, in the terms `agentHealth.ts` diagnoses from. */
 export type PipelineStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -243,10 +244,14 @@ export type FromPipeline =
    * about an EARLIER one - a ping's reply, a reassembled PDU's segments - and
    * are applied by the caller over one pass of the buffer rather than by
    * mapping it per fact.
+   *
+   * The rows are `PackedRows` (`rowPack.ts`): a shard's rows travel as the
+   * pack the shard encoded, once, and `PipelineClient` unpacks them before
+   * the caller sees a `FrameBatch`.
    */
   | {
       type: 'frames';
-      packets: Packet[];
+      rows: PackedRows;
       icmpReplies: { requestFrameId: number; replyId: number }[];
       infoPatches: InfoPatch[];
       /** Frames released behind one that had already left the ordering window. */

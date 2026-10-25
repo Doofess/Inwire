@@ -50,7 +50,12 @@ import { deflateSync } from 'fflate';
 import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
 import { applyInfoPatch } from '../dissect/infoPatch';
-import { encodeChunk, CHUNK_FRAMES } from './chunkCodec';
+import {
+  encodeChunk, encodePackedChunk, packedSlotTsUs, CHUNK_FRAMES,
+  type ChunkSlot, type EncodedChunk, type PackedChunkSlot,
+} from './chunkCodec';
+import { unpackRows, type RowPack } from '../pipeline/rowPack';
+import { applyOverlay } from '../pipeline/rowOverlay';
 import {
   encodeChunkRecord, writeIndexHeader, indexVersionOf, encodeIndexFloor, CaptureIndex,
   INDEX_HEADER_BYTES, INDEX_FLOOR_OFFSET, INDEX_VERSION, type ChunkRecord,
@@ -149,6 +154,38 @@ export interface WriterOptions {
   resumeFrom?: readonly ChunkRecord[];
   /** The first of those chunks still held - the index's floor. */
   floorChunk?: number;
+  /**
+   * Whether a chunk holding packed rows is written as a version-3 container that
+   * keeps their packs (`encodePackedChunk`). On by default; off, a packed slot is
+   * decoded at the seal and the chunk is written exactly as one of plain rows -
+   * the kill switch ADR 0053 phase 6 keeps. A chunk with no packed slot is a
+   * version-2 chunk either way.
+   */
+  packNative?: boolean;
+}
+
+/** The options a writer takes, under the name the store's tests use. */
+export type CaptureWriterOptions = WriterOptions;
+
+/**
+ * A row still held in the shard's pack, as the writer is handed it. `rawBytes`
+ * is present when the frame's bytes travel with its row (a frame no `appendBytes`
+ * has staged) and absent when they went ahead.
+ */
+export type PackedRowIn = PackedChunkSlot & { rawBytes?: Uint8Array };
+
+/** What `append` and `attachRows` take for one frame. */
+export type RowIn = Packet | PackedRowIn;
+
+function isPacked<T extends Packet | PackedChunkSlot>(row: T): row is Extract<T, PackedChunkSlot> {
+  return 'pack' in row;
+}
+
+/** The slot without its bytes: the writer holds the pack, and the bytes are already on disk. */
+function slotOf(row: PackedRowIn): PackedChunkSlot {
+  return row.rawBytes === undefined
+    ? row
+    : { pack: row.pack, index: row.index, overlay: row.overlay, id: row.id };
 }
 
 const DEFAULT_HORIZON_US = 2_000_000;
@@ -165,6 +202,14 @@ const DEFAULT_FLUSH_EVERY_CHUNKS = 8;
  * nothing to it.
  */
 const MAX_MISSED_PATCH_SAMPLE = 256;
+
+/**
+ * The most bytes `stageBytes` gathers before writing them.
+ *
+ * A live batch is a few thousand frames, a few megabytes, so this is one
+ * write a batch; the bound is what the reused buffer can grow to.
+ */
+const STAGE_WRITE_MAX = 4 * 1024 * 1024;
 
 /** Raw DEFLATE, the same format `node:zlib`'s `deflateRawSync` produces. */
 const defaultDeflate = (bytes: Uint8Array): Uint8Array => deflateSync(bytes, { level: 6 });
@@ -189,8 +234,23 @@ interface Staged {
    * and the row catches up when the dissector gets to it. A slot still holding
    * `null` when its chunk seals is written as a placeholder rather than
    * holding the chunk back - see `placeholderRow`.
+   *
+   * It may also be a **packed slot**: a row still inside the shard's pack
+   * (`rowPack.ts`), with the merge's overlay beside it. Nothing is decoded until
+   * the row is asked for (`stagedFrame`) or the chunk is written without its
+   * packs (`packNative` off). The slot holds a reference to its WHOLE pack - up
+   * to 384 rows' bytes for one - not a copy of its own row, so what the staging
+   * ring pins is bounded by the horizon times the pack size, and no pack bytes
+   * are copied per slot.
    */
-  packet: Packet | null;
+  packet: Packet | PackedChunkSlot | null;
+  /**
+   * The patches that reached a packed slot's row, in arrival order. A plain row
+   * takes its patches at once, as a copy, and keeps none here; a packed one
+   * keeps the list and the seal hands it to the codec. Null with the row, and
+   * dropped by an attach, as a patched plain row is replaced by the new one.
+   */
+  patches: InfoPatch[] | null;
   /**
    * The frame's record, from the pipeline Worker, which dissects it. Like the
    * row it may arrive before or after the bytes; a slot sealed without one is
@@ -307,6 +367,15 @@ export class CaptureWriter {
   private readonly horizonFrames: number;
   private readonly flushEveryChunks: number;
   private readonly deflate: (bytes: Uint8Array) => Uint8Array;
+  private readonly packNative: boolean;
+  /**
+   * The last pack `stagedFrame` decoded, and its rows. A revisit asks for one
+   * frame at a time and a pack holds up to 384, so the decode is kept for the
+   * next ask. Never handed out: a row built from it is a copy. Released by
+   * `finish()`.
+   */
+  private decodedPack: RowPack | null = null;
+  private decodedRows: Packet[] = [];
 
   private readonly staged: Staged[] = [];
   /** Frame id to its position in `staged`, so a patch is a lookup not a scan. */
@@ -318,7 +387,7 @@ export class CaptureWriter {
    * but two channels into one process have no ordering guarantee between them,
    * and holding is the only answer that cannot lose a row.
    */
-  private readonly orphanRows = new Map<number, Packet>();
+  private readonly orphanRows = new Map<number, Packet | PackedChunkSlot>();
   private readonly orphanRecords = new Map<number, Uint8Array>();
   /**
    * The highest frame id whose bytes this writer has staged.
@@ -340,6 +409,14 @@ export class CaptureWriter {
   private data: DataFiles;
   /** Whether that segment holds a frame yet. An empty one is not left for another. */
   private segmentUsed = false;
+  /**
+   * The run of frames `stageBytes` is gathering for one write: which file, from
+   * where, and the bytes. Empty between calls - nothing is held unwritten.
+   */
+  private pendingFile: BlockFile | null = null;
+  private pendingAt = 0;
+  private pendingLength = 0;
+  private pendingBytes = new Uint8Array(1 << 16);
   /** The number the next segment takes. */
   private nextSegment = 1;
   /** The ring file the current segment follows, when it follows one. */
@@ -394,6 +471,7 @@ export class CaptureWriter {
     this.horizonFrames = options.horizonFrames ?? DEFAULT_HORIZON_FRAMES;
     this.flushEveryChunks = options.flushEveryChunks ?? DEFAULT_FLUSH_EVERY_CHUNKS;
     this.deflate = options.deflate ?? defaultDeflate;
+    this.packNative = options.packNative ?? true;
     // The file's own version, when it has one: a capture written by an older
     // build is continued in its own format, because a file's stride is fixed by
     // its header. A new file is written at this build's version.
@@ -555,7 +633,7 @@ export class CaptureWriter {
    * Bytes go to disk here and now; the row waits. Frames must arrive in
    * ascending id order, which is what the ordering window already guarantees.
    */
-  append(packets: readonly Packet[]): void {
+  append(rows: readonly RowIn[]): void {
     // **The writer decides whether these bytes are already down, and that is
     // what keeps the app out of it entirely.**
     //
@@ -566,7 +644,7 @@ export class CaptureWriter {
     // and choose a message - three states, two of them invisible from the
     // renderer, and getting it wrong writes every frame's bytes twice or not
     // at all. Here it is one question with a local answer: do I have a slot?
-    const fresh = packets.filter((packet) => !this.hasSlot(packet.id));
+    const fresh = rows.filter((row) => !this.hasSlot(row.id));
     if (fresh.length > 0) {
       // **Staged without draining, then the rows attached, then drained once.**
       // Calling `appendBytes` here instead would drain with no rows attached
@@ -574,13 +652,18 @@ export class CaptureWriter {
       // - a row arriving in the same call would already be too late. Caught by
       // `scripts/capture/writer.ts`, which had asserted the patched row reaches
       // disk since before the split existed.
-      this.stageBytes(fresh.map((packet) => ({
-        id: packet.id,
-        tsUs: packet.tsUs,
-        bytes: packet.rawBytes,
-      })));
+      this.stageBytes(fresh.map((row) => {
+        if (!isPacked(row)) return { id: row.id, tsUs: row.tsUs, bytes: row.rawBytes };
+        // A packed row's bytes are not in its pack, so a frame whose bytes have
+        // not been staged can only be written if the row brought them. The
+        // capture time is the pack's own record of it.
+        if (row.rawBytes === undefined) {
+          throw new Error(`captureWriter: packed row ${row.id} has no bytes and its frame is not staged`);
+        }
+        return { id: row.id, tsUs: packedSlotTsUs(row), bytes: row.rawBytes };
+      }));
     }
-    this.attachRows(packets);
+    this.attachRows(rows);
   }
 
   /**
@@ -613,37 +696,85 @@ export class CaptureWriter {
     this.drainReady();
   }
 
-  /** Writes the bytes and opens a slot for each, without sealing anything. */
+  /**
+   * Writes the bytes and opens a slot for each, without sealing anything.
+   *
+   * One write a run of frames, not one a frame: a `writeSync` per frame was a
+   * quarter of the store's thread at 60k frames a second, and copying into a
+   * reused buffer costs a tenth of that (`scripts/perf/store-boundary.ts`). A
+   * run ends where `follow` moves to another segment's file and at
+   * `STAGE_WRITE_MAX`, and every byte is written before this returns - also
+   * when a frame throws partway, so the ones staged before it are on disk.
+   */
   private stageBytes(frames: readonly RawFrame[]): void {
-    for (const frame of frames) {
-      this.follow(frame.ring);
-      const at = append(this.data.byt, frame.bytes);
-      this.dirty.add(this.data);
-      this.segmentUsed = true;
-      this.counters.bytesWritten += frame.bytes.length;
-      this.stagedAt.set(frame.id, this.staged.length);
-      // A row that overtook its bytes is already waiting. Claimed here rather
-      // than left in the map, so the map holds only what is genuinely early.
-      const early = this.orphanRows.get(frame.id) ?? null;
-      if (early !== null) this.orphanRows.delete(frame.id);
-      const earlyRecord = this.orphanRecords.get(frame.id) ?? null;
-      if (earlyRecord !== null) {
-        this.orphanRecords.delete(frame.id);
-        this.counters.recordsAttached += 1;
+    try {
+      for (const frame of frames) {
+        this.follow(frame.ring);
+        const at = this.place(frame.bytes);
+        this.dirty.add(this.data);
+        this.segmentUsed = true;
+        this.counters.bytesWritten += frame.bytes.length;
+        this.stagedAt.set(frame.id, this.staged.length);
+        // A row that overtook its bytes is already waiting. Claimed here rather
+        // than left in the map, so the map holds only what is genuinely early.
+        const early = this.orphanRows.get(frame.id) ?? null;
+        if (early !== null) this.orphanRows.delete(frame.id);
+        const earlyRecord = this.orphanRecords.get(frame.id) ?? null;
+        if (earlyRecord !== null) {
+          this.orphanRecords.delete(frame.id);
+          this.counters.recordsAttached += 1;
+        }
+        if (frame.id > this.highestStagedId) this.highestStagedId = frame.id;
+        this.staged.push({
+          id: frame.id,
+          tsUs: frame.tsUs,
+          packet: early,
+          patches: null,
+          record: earlyRecord,
+          bytOffset: at,
+          bytLength: frame.bytes.length,
+          segment: this.segment,
+        });
+        this.counters.framesStaged += 1;
+        if (frame.tsUs > this.newestTsUs) this.newestTsUs = frame.tsUs;
       }
-      if (frame.id > this.highestStagedId) this.highestStagedId = frame.id;
-      this.staged.push({
-        id: frame.id,
-        tsUs: frame.tsUs,
-        packet: early,
-        record: earlyRecord,
-        bytOffset: at,
-        bytLength: frame.bytes.length,
-        segment: this.segment,
-      });
-      this.counters.framesStaged += 1;
-      if (frame.tsUs > this.newestTsUs) this.newestTsUs = frame.tsUs;
+    } finally {
+      this.writePending();
     }
+  }
+
+  /** Puts a frame's bytes at the end of the pending run for the current data file, and says where. */
+  private place(bytes: Uint8Array): number {
+    const file = this.data.byt;
+    if (file !== this.pendingFile || this.pendingLength + bytes.length > STAGE_WRITE_MAX) {
+      this.writePending();
+      this.pendingFile = file;
+      this.pendingAt = file.size();
+    }
+    const at = this.pendingAt + this.pendingLength;
+    if (bytes.length > STAGE_WRITE_MAX) {
+      file.write(at, bytes);
+      this.pendingFile = null;
+      return at;
+    }
+    if (this.pendingBytes.length < this.pendingLength + bytes.length) {
+      const grown = new Uint8Array(Math.min(STAGE_WRITE_MAX,
+        Math.max(this.pendingBytes.length * 2, this.pendingLength + bytes.length)));
+      grown.set(this.pendingBytes.subarray(0, this.pendingLength));
+      this.pendingBytes = grown;
+    }
+    this.pendingBytes.set(bytes, this.pendingLength);
+    this.pendingLength += bytes.length;
+    return at;
+  }
+
+  /** Writes the run `place` gathered. */
+  private writePending(): void {
+    if (this.pendingFile !== null && this.pendingLength > 0) {
+      this.pendingFile.write(this.pendingAt, this.pendingBytes.subarray(0, this.pendingLength));
+    }
+    this.pendingFile = null;
+    this.pendingLength = 0;
   }
 
   /**
@@ -660,26 +791,33 @@ export class CaptureWriter {
    * whose bytes never arrive is a frame that never arrived, and
    * `clearOrphans()` is called when a capture ends.
    */
-  attachRows(packets: readonly Packet[]): void {
-    for (const packet of packets) {
-      const index = this.stagedAt.get(packet.id);
+  attachRows(rows: readonly RowIn[]): void {
+    for (const row of rows) {
+      const index = this.stagedAt.get(row.id);
       const sealed = index !== undefined
         ? index < this.drained
         // Not in the map. Either its slot was sealed and removed, or its bytes
         // have not arrived - and `highestStagedId` is the only thing that can
         // tell those apart, because ids ascend.
-        : packet.id <= this.highestStagedId;
+        : row.id <= this.highestStagedId;
       if (sealed) {
         // Too late to be written: a sealed chunk is deflated and appended, and
         // rewriting it would undo the append-only property recovery depends on.
         this.counters.rowsMissed += 1;
         continue;
       }
+      // A carrying row's bytes were staged above (or are down already); the
+      // slot keeps the pack and not the bytes.
+      const held = isPacked(row) ? slotOf(row) : row;
       if (index === undefined) {
-        this.orphanRows.set(packet.id, packet);
+        this.orphanRows.set(row.id, held);
         continue;
       }
-      this.staged[index].packet = packet;
+      // A row that replaces another brings its own history: the patches the
+      // earlier one took were applied to it, not to this.
+      const entry = this.staged[index];
+      entry.packet = held;
+      entry.patches = null;
       this.counters.rowsAttached += 1;
     }
     // Attaching a row can make a chunk sealable that was not before, because
@@ -736,7 +874,55 @@ export class CaptureWriter {
       bytes = new Uint8Array(entry.bytLength);
       byt.read(entry.bytOffset, bytes);
     }
-    return { record: entry.record, packet: entry.packet, bytes };
+    const row = entry.packet;
+    const packet = row === null || !isPacked(row)
+      ? row
+      : this.rowOfSlot(row, entry.patches, (pack) => this.decodeCached(pack));
+    return { record: entry.record, packet, bytes };
+  }
+
+  /** The rows of a pack, decoded once for as long as it is the one asked about. */
+  private decodeCached(pack: RowPack): Packet[] {
+    if (this.decodedPack !== pack) {
+      this.decodedRows = unpackRows(pack);
+      this.decodedPack = pack;
+    }
+    return this.decodedRows;
+  }
+
+  /**
+   * The row a packed slot stands for: the pack's row, the merge's overlay over
+   * it, then each patch in the order it arrived - the row a plain-row slot would
+   * hold, built on request.
+   *
+   * **Always a copy.** `rowsOf` hands back rows other slots and later calls will
+   * read, so the row, its field bag and its layers are copied before anything is
+   * written to them, and a caller that changes what it gets changes nothing here.
+   */
+  private rowOfSlot(
+    slot: PackedChunkSlot,
+    patches: readonly InfoPatch[] | null,
+    rowsOf: (pack: RowPack) => Packet[],
+  ): Packet {
+    const base = rowsOf(slot.pack)[slot.index];
+    if (base === undefined) throw new Error(`captureWriter: pack ${slot.pack.key} has no row ${slot.index}`);
+    let row: Packet = { ...base, layers: base.layers.slice() };
+    if (row.fields !== undefined) row.fields = { ...row.fields };
+    const overlay = slot.overlay;
+    if (overlay !== null) {
+      applyOverlay(row, overlay);
+      // `applyOverlay` assigns undefined for a member that clears its key; a
+      // chunk stores that as no key at all, and the two must read alike.
+      if ('expert' in overlay && row.expert === undefined) delete row.expert;
+      if ('tsPrecision' in overlay && row.tsPrecision === undefined) delete row.tsPrecision;
+      if ('tsNanos' in overlay && row.tsNanos === undefined) delete row.tsNanos;
+    }
+    for (const patch of patches ?? []) {
+      const copy = { ...row };
+      applyInfoPatch(copy, patch);
+      row = copy;
+    }
+    return row;
   }
 
   /**
@@ -771,9 +957,15 @@ export class CaptureWriter {
         this.noteMissed(patch);
         continue;
       }
-      const copy = { ...entry.packet };
-      applyInfoPatch(copy, patch);
-      entry.packet = copy;
+      if (isPacked(entry.packet)) {
+        // Kept, not applied: the row is still inside its pack, and the codec
+        // writes the patch beside it for the reader to apply after the overlay.
+        (entry.patches ??= []).push(patch);
+      } else {
+        const copy = { ...entry.packet };
+        applyInfoPatch(copy, patch);
+        entry.packet = copy;
+      }
       this.counters.patchesApplied += 1;
     }
   }
@@ -833,6 +1025,8 @@ export class CaptureWriter {
     this.staged.length = 0;
     this.drained = 0;
     this.clearOrphans();
+    this.decodedPack = null;
+    this.decodedRows = [];
   }
 
   private sealChunk(count: number): void {
@@ -841,16 +1035,45 @@ export class CaptureWriter {
     // chunk back. Holding it back would make a slow dissector stall the
     // capture's write path, which is the coupling being removed; the frame's
     // bytes are on disk either way and are the source of truth.
-    const packets = entries.map((e) => {
-      if (e.packet !== null) return e.packet;
-      this.counters.framesSealedWithoutRow += 1;
-      return placeholderRow(e.id, e.tsUs, e.bytLength);
-    });
+    const slots: ChunkSlot[] = [];
+    const patches: (InfoPatch[] | null)[] = [];
+    let packed = false;
+    for (const e of entries) {
+      if (e.packet === null) {
+        this.counters.framesSealedWithoutRow += 1;
+        slots.push(placeholderRow(e.id, e.tsUs, e.bytLength));
+        patches.push(null);
+        continue;
+      }
+      if (isPacked(e.packet)) packed = true;
+      slots.push(e.packet);
+      patches.push(e.patches);
+    }
     // The lengths recorded when the bytes were appended, not the lengths the
     // packets report now - `evictOldBytes` may have emptied `rawBytes` in
     // place on any frame already sealed, and nothing stops it reaching one
-    // still staged if the horizon ever outgrows the resident window.
-    const encoded = encodeChunk(packets, entries.map((e) => e.bytLength));
+    // still staged if the horizon ever outgrows the resident window. For a
+    // packed slot they are the only source: the codec never copies a length
+    // out of a pack.
+    const lengths = entries.map((e) => e.bytLength);
+    let encoded: EncodedChunk;
+    if (packed && this.packNative) {
+      encoded = encodePackedChunk(slots, lengths, patches);
+    } else {
+      // Written as plain rows. Packed slots are decoded here, each pack once for
+      // this chunk: shards interleave frame by frame, so a one-pack cache would
+      // decode a pack for every row.
+      const decoded = new Map<RowPack, Packet[]>();
+      const rowsOf = (pack: RowPack): Packet[] => {
+        let rows = decoded.get(pack);
+        if (rows === undefined) { rows = unpackRows(pack); decoded.set(pack, rows); }
+        return rows;
+      };
+      encoded = encodeChunk(
+        slots.map((slot, i) => (isPacked(slot) ? this.rowOfSlot(slot, patches[i], rowsOf) : slot)),
+        lengths,
+      );
+    }
 
     // The segment its bytes went to; `runLength` never hands over a chunk that
     // spans two.

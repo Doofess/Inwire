@@ -215,6 +215,12 @@ export interface NameLookup {
  * never changes - and a memo keyed on it would never notice the capture
  * learning a new name. This is O(1) and changes identity per tick, which is
  * what a `useMemo` dependency needs to mean anything.
+ *
+ * It reads through to the map, and that is sound only because the map never
+ * takes a name back: the fold gives it no `drop` that forgets, a name is
+ * replaced by a new `ResolvedHost` rather than edited, and `entries()` returns
+ * a fresh array. What a consumer was handed is never altered; the handle may
+ * simply know more names when it is asked again.
  */
 export function snapshot(map: NameResolutionMap): NameLookup {
   return {

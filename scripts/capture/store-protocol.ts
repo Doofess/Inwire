@@ -42,6 +42,12 @@ import { compile } from '../../src/services/filter/compile';
 import { plainForStore } from '../../src/services/capture/storePacket';
 import { FieldBlock } from '../../src/services/dissect/fieldBlock';
 import { DENSE_FIELDS } from '../../src/services/dissect/denseFields';
+import { PackSender, PackedFlush, packRows, type PackedRows, type RowPack } from '../../src/services/pipeline/rowPack';
+import { CaptureIndex } from '../../src/services/capture/captureIndex';
+import { readExact } from '../../src/services/capture/blockFile';
+import { decodeDigest } from '../../src/services/conversation/digestCodec';
+import type { RowOverlay } from '../../src/services/pipeline/rowOverlay';
+import { inflateSync } from 'fflate';
 import { serialize, deserialize } from 'node:v8';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { Packet } from '../../src/types/packet';
@@ -609,6 +615,367 @@ console.log('\n--- rows from the Worker that wrote their bytes (bytesSent) ---\n
   check('...and nothing failed', split.of('failure').length, 0);
   withBytes.store.close();
   split.store.close();
+}
+
+console.log('\n--- packed rows from the Worker (appendPacked) ---\n');
+
+{
+  // A shard's rows reach the store as the pack the shard encoded, a flush at a
+  // time, with one pack read across two messages. The rows on disk and the
+  // frames beside them must be those an `append` with bytes writes, and a row
+  // that came without bytes must never be written as an empty frame.
+  const PACK_ROWS = 400;
+  const GROUP = 700;
+  const packets = traffic(5000);
+  const outside = frame(9_999);
+  const reference = host();
+  await fill(reference, 'cap-20261024-010000-0001', [...packets, outside]);
+
+  const packed = host();
+  packed.send({ type: 'open', captureId: 'cap-20261024-010000-0002' });
+  const bare = (p: Packet): Packet => ({ ...p, rawBytes: new Uint8Array(0) });
+  const packs: RowPack[] = [];
+  for (let i = 0; i < packets.length; i += PACK_ROWS) {
+    const rows = packets.slice(i, i + PACK_ROWS).map(bare);
+    packs.push(packRows(packs.length, rows, rows.map(() => 8)));
+  }
+  // The Worker's own sender, so a pack goes once and a later message names it only by key.
+  const sender = new PackSender();
+  const sent: PackedRows[] = [];
+  // `ahead`: whether the Worker wrote these rows' bytes ahead of them on this port.
+  const post = (flush: PackedFlush, ahead: boolean) => {
+    const rows = deserialize(serialize(sender.seal(flush))) as PackedRows;
+    sent.push(rows);
+    packed.send({ type: 'appendPacked', rows, sent: new Uint8Array(rows.order.length / 2).fill(ahead ? 1 : 0) });
+  };
+  for (let i = 0; i < packets.length; i += GROUP) {
+    const group = packets.slice(i, i + GROUP);
+    packed.send({ type: 'appendBytes', frames: group.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes })) });
+    const flush = new PackedFlush();
+    for (const p of group) flush.packed(packs[Math.floor((p.id - 1) / PACK_ROWS)], (p.id - 1) % PACK_ROWS, null, null);
+    post(flush, true);
+  }
+  // A row whose bytes never came, and which brings none: held, never written as a frame.
+  const lost = new PackedFlush();
+  lost.packed(packRows(packs.length, [bare(frame(9_998))], [8]), 0, null, null);
+  post(lost, true);
+  // Outside the run: nobody wrote this frame's bytes ahead, so the row brings them.
+  const odd = new PackedFlush();
+  odd.packed(packRows(packs.length + 1, [bare(outside)], [8]), 0, outside.rawBytes, null);
+  post(odd, false);
+  packed.send({ type: 'finish' });
+  await packed.store.drain();
+
+  checkTrue('a pack was read across two messages (400 rows against groups of 700)',
+    sent[0].packs.some((p) => p.key === 1) && !sent[1].packs.some((p) => p.key === 1)
+    && Array.from(sent[1].order).some((v, at) => at % 2 === 0 && v === 1));
+  for (const h of [reference, packed]) {
+    h.send({ type: 'chunk', requestId: 1, chunk: 0 });
+    h.send({ type: 'chunk', requestId: 2, chunk: 1 });
+    h.send({ type: 'read', requestId: 3, ids: [1, 4097, 5000, 9_999] });
+    h.send({ type: 'locate', requestId: 4, id: 9_999 });
+    h.send({ type: 'locate', requestId: 5, id: 9_998 });
+    h.send({ type: 'stats' });
+  }
+  await reference.store.drain();
+  await packed.store.drain();
+  const rowsOf = (h: ReturnType<typeof host>) => h.of('rows').flatMap((m) => m.packets);
+  check('the rows on disk are the rows an append with bytes writes',
+    JSON.stringify(rowsOf(packed)), JSON.stringify(rowsOf(reference)));
+  check('...5,001 of them', rowsOf(packed).length, 5001);
+  check('a row whose bytes never came is not stored as a frame', packed.of('located')[1]?.ordinal, -1);
+  check('...and the bytes are the bytes',
+    packed.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]),
+    reference.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]));
+  checkTrue('...none of them empty', (packed.of('bytes')[0]?.frames ?? []).every(([, b]) => b.length === 8));
+  check('the row outside the run is stored, with its frame',
+    packed.of('located')[0]?.ordinal, reference.of('located')[0]?.ordinal);
+  check('...and the frames written are those an append writes',
+    packed.of('stats').at(-1)?.stats.framesWritten, reference.of('stats').at(-1)?.stats.framesWritten);
+  check('...and nothing failed', packed.of('failure').length, 0);
+  reference.store.close();
+  packed.store.close();
+}
+
+{
+  // An agent's metadata-only frame rides beside packed rows as an object with no
+  // bytes, which nobody wrote ahead of it. It must be stored as a plain `append`
+  // stores it - not taken for a row whose bytes went ahead and then counted missed
+  // when they never arrive. Which rows had their bytes sent is the Worker's to
+  // say; the store cannot tell from an empty `rawBytes`.
+  const meta: Packet = { ...frame(7), rawBytes: new Uint8Array(0) };
+  const plain = host();
+  plain.send({ type: 'open', captureId: 'cap-20261024-020000-0001' });
+  plain.send({ type: 'append', packets: [deserialize(serialize(meta)) as Packet] });
+  plain.send({ type: 'finish' });
+  const packed = host();
+  packed.send({ type: 'open', captureId: 'cap-20261024-020000-0002' });
+  const flush = new PackedFlush();
+  flush.object(meta);
+  const rows = deserialize(serialize(new PackSender().seal(flush))) as PackedRows;
+  packed.send({ type: 'appendPacked', rows, sent: new Uint8Array([0]) });
+  packed.send({ type: 'finish' });
+  for (const h of [plain, packed]) {
+    h.send({ type: 'locate', requestId: 1, id: 7 });
+    h.send({ type: 'stats' });
+  }
+  await plain.store.drain();
+  await packed.store.drain();
+  checkTrue('...a metadata-only frame beside packed rows is stored as an append stores it',
+    plain.of('located')[0]?.ordinal !== undefined && plain.of('located')[0]?.ordinal !== -1
+    && packed.of('located')[0]?.ordinal === plain.of('located')[0]?.ordinal);
+  check('...with the same frames written', packed.of('stats').at(-1)?.stats.framesWritten,
+    plain.of('stats').at(-1)?.stats.framesWritten);
+  plain.store.close();
+  packed.store.close();
+}
+
+console.log('\n--- packed rows kept in their packs, and decoded (packNative) ---\n');
+
+{
+  // The same appendPacked flows into two hosts, one writing a shard's rows as
+  // version-3 chunks that keep their packs (`packNative`, the default) and one
+  // decoding them at the seal (the kill switch). Everything a reader can ask
+  // must agree: the rows, the scans, the digest, the writer's counters. And the
+  // first host must really have written version 3, or this proves nothing.
+  const PACK = 400;
+  const GROUP = 700;
+
+  /** A bigint-safe structural form: sorted keys, no undefined, typed arrays as lists. */
+  const canon = (value: unknown): unknown => {
+    if (typeof value === 'bigint') return { big: value.toString() };
+    if (value instanceof Uint8Array || value instanceof Int32Array) return Array.from(value);
+    if (Array.isArray(value)) return value.map(canon);
+    if (value instanceof Map) return { map: [...value.entries()].map(([k, v]) => [canon(k), canon(v)]) };
+    if (value !== null && typeof value === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(value).sort()) {
+        const v = (value as Record<string, unknown>)[key];
+        if (v !== undefined) out[key] = canon(v);
+      }
+      return out;
+    }
+    return value;
+  };
+  const cross = <T>(message: T): T => deserialize(serialize(message)) as T;
+
+  const rowOf = (id: number): Packet => frame(id, {
+    streamId: 1 + (id % 6),
+    ...(id % 9 === 0 ? { protocol: 'UDP', frameProtocols: ['frame', 'eth', 'ip', 'udp'], destPort: 53 } : {}),
+    fields: {
+      'tcp.seq': id, 'tcp.len': id % 50, 'tcp.flags.syn': id % 6 === 1 ? 1 : 0,
+      'tcp.flags.ack': 1, 'tcp.flags.fin': 0, 'tcp.flags.reset': 0,
+    },
+    // Present on some rows, so an overlay that clears them has something to clear.
+    ...(id % 5 === 0 ? { expert: [{ message: `orig ${id}` }], tsNanos: BigInt(id) * 1000n, tsPrecision: 9 } : {}),
+  });
+  const bareOf = (id: number): Packet => ({ ...rowOf(id), rawBytes: new Uint8Array(0) });
+  /** All four members of a `RowOverlay`, including the two that clear a key. */
+  const overlayOf = (id: number): RowOverlay | null => {
+    if (id % 11 !== 0) return null;
+    switch ((id / 11) % 4) {
+      case 0: return { fields: { 'tls.stream': id, 'inwire.process.name': 'tool.exe' } };
+      case 1: return { expert: [{ message: `gap ${id}` }, { message: 'second' }] };
+      case 2: return { tsPrecision: 6, tsNanos: BigInt(id) * 1000n + 123n };
+      default: return { expert: undefined, tsNanos: undefined, tsPrecision: 3 };
+    }
+  };
+
+  const phost = (packNative: boolean) => {
+    const volume = new MemoryVolume();
+    const said: FromCapture[] = [];
+    const store = new CaptureHost(volume, (message) => said.push(message), { writer: { packNative } });
+    return {
+      volume, said, store,
+      send: (message: ToCapture) => store.receive(message),
+      of<T extends FromCapture['type']>(type: T): Extract<FromCapture, { type: T }>[] {
+        return said.filter((m) => m.type === type) as Extract<FromCapture, { type: T }>[];
+      },
+      /** The packs the host's reader still holds. */
+      held: () => (store as unknown as { packs: { held: number } }).packs.held,
+    };
+  };
+  type PHost = ReturnType<typeof phost>;
+
+  /** One capture of `n` frames: a seventh are objects, the rest packed over two interleaved lanes. */
+  function drive(h: PHost, captureId: string, n: number, sender: PackSender, tail: boolean): void {
+    h.send({ type: 'open', captureId });
+    const isObject = (id: number) => id % 7 === 0;
+    // The last rows of each flush bring their own bytes, as rows outside the run
+    // do: after the bytes of the rest, never before a lower id's.
+    const carries = (id: number) => (id - 1) % GROUP >= GROUP - 5;
+    const lanes: Packet[][] = [[], []];
+    const at = new Map<number, { lane: number; k: number }>();
+    for (let id = 1; id <= n; id++) {
+      if (isObject(id)) continue;
+      const lane = id % 2;
+      at.set(id, { lane, k: lanes[lane].length });
+      lanes[lane].push(bareOf(id));
+    }
+    const packOf = new Map<string, RowPack>();
+    let key = 0;
+    for (let lane = 0; lane < 2; lane++) {
+      for (let s = 0; s < lanes[lane].length; s += PACK) {
+        const rows = lanes[lane].slice(s, s + PACK);
+        packOf.set(`${lane}:${s / PACK}`, packRows(key++, rows, rows.map(() => 8)));
+      }
+    }
+    const post = (flush: PackedFlush, flags: number[]) => {
+      h.send(cross({ type: 'appendPacked', rows: sender.seal(flush), sent: Uint8Array.from(flags) }) as ToCapture);
+    };
+    for (let from = 1; from <= n; from += GROUP) {
+      const ids = Array.from({ length: Math.min(GROUP, n - from + 1) }, (_, i) => from + i);
+      h.send(cross({
+        type: 'appendBytes',
+        frames: ids.filter((id) => !carries(id)).map((id) => {
+          const p = rowOf(id);
+          return { id, tsUs: p.tsUs, bytes: p.rawBytes };
+        }),
+      }));
+      const flush = new PackedFlush();
+      const flags: number[] = [];
+      for (const id of ids) {
+        if (isObject(id)) {
+          flush.object(carries(id) ? rowOf(id) : bareOf(id));
+        } else {
+          const { lane, k } = at.get(id)!;
+          flush.packed(packOf.get(`${lane}:${Math.floor(k / PACK)}`)!, k % PACK, carries(id) ? rowOf(id).rawBytes : null, overlayOf(id));
+        }
+        flags.push(carries(id) ? 0 : 1);
+      }
+      post(flush, flags);
+      // Patches after the rows: two on one row (arrival order), a relabel, one for a
+      // row long sealed, and one for a row that has not arrived yet (both missed).
+      h.send(cross({
+        type: 'patches',
+        patches: [
+          { frameId: from + 3, suffix: ' [a]' },
+          { frameId: from + 5, suffix: ' [b]', protocolLabel: 'TLSv1.3' },
+          { frameId: from + 3, suffix: ' [c]' },
+          { frameId: from + 10, suffix: ' [d]' },
+          { frameId: from - 2500, suffix: ' [old]' },
+          { frameId: from + GROUP + 2, suffix: ' [early]' },
+        ],
+      }));
+    }
+    if (tail) {
+      // A pack read only in part and then left, as a stopped capture leaves one.
+      const rows = Array.from({ length: 50 }, (_, i) => bareOf(n + 1 + i));
+      const pack = packRows(9000, rows, rows.map(() => 8));
+      const flush = new PackedFlush();
+      for (let i = 0; i < 10; i++) flush.packed(pack, i, rowOf(n + 1 + i).rawBytes, null);
+      post(flush, new Array(10).fill(0));
+    }
+    h.send({ type: 'finish' });
+  }
+
+  /** Everything a reader can ask of the finished capture. */
+  async function collect(h: PHost, captureId: string, base: number) {
+    await h.store.drain();
+    h.send({ type: 'stats' });
+    await h.store.drain();
+    const stats = h.of('stats').at(-1)!.stats;
+    const rows: Packet[] = [];
+    for (let c = 0; c < stats.chunksWritten; c++) {
+      h.send({ type: 'chunk', requestId: base + c, chunk: c });
+      await h.store.drain();
+      rows.push(...h.of('rows').find((m) => m.requestId === base + c)!.packets);
+    }
+    const scans: unknown[] = [];
+    const filters = ['tcp', 'udp', 'tls.stream == 44', 'tcp.seq > 3000 && tcp.seq < 3900', 'frame.number > 8000'];
+    for (let i = 0; i < filters.length; i++) {
+      h.send({ type: 'scan', requestId: base + 500 + i, filter: filters[i] });
+      await untilScanDone(h.said, base + 500 + i);
+      const done = h.of('scanDone').find((m) => m.requestId === base + 500 + i)!;
+      scans.push({ message: done.message, count: done.bits === null ? null : done.bits.reduce((a, b) => a + popcount(b), 0), bits: done.bits });
+    }
+    h.send({ type: 'read', requestId: base + 900, ids: [1, 2, 13, 14, 4097, 4098, 8999] });
+    await h.store.drain();
+    const bytes = h.of('bytes').find((m) => m.requestId === base + 900)!.frames;
+
+    const files = h.volume.open(captureId);
+    const indexBytes = new Uint8Array(files.index.size());
+    files.index.read(0, indexBytes);
+    const index = CaptureIndex.parse(indexBytes);
+    const versions: number[] = [];
+    for (let c = 0; c < index.chunkCount; c++) {
+      const r = index.record(c);
+      const summary = inflateSync(readExact(files.sum, r.sumOffset, r.sumLength));
+      versions.push(summary[4] | (summary[5] << 8));
+    }
+    const digest = decodeDigest(readExact(files.digest, 0, files.digest.size()), inflateSync);
+    files.close();
+    return { stats, rows, scans, bytes, versions, digest };
+  }
+  const popcount = (b: number) => { let c = 0; for (; b; b &= b - 1) c++; return c; };
+
+  const run = async (packNative: boolean) => {
+    const h = phost(packNative);
+    // Nothing open: read before anything else, said once, and no pack left held.
+    for (const key of [5, 6]) {
+      const stray = new PackedFlush();
+      const pack = packRows(key, [bareOf(1), bareOf(2)], [8, 8]);
+      stray.packed(pack, 0, null, null);
+      stray.packed(pack, 1, null, null);
+      h.send(cross({ type: 'appendPacked', rows: new PackSender().seal(stray), sent: new Uint8Array([1, 1]) }) as ToCapture);
+    }
+    await h.store.drain();
+    const orphan = { held: h.held(), failures: h.of('failure').map((m) => m.message) };
+
+    const sender = new PackSender();
+    drive(h, 'cap-20261025-010000-0001', 9000, sender, true);
+    const first = await collect(h, 'cap-20261025-010000-0001', 1000);
+    const heldAfterFirst = h.held();
+
+    // A new capture: the Worker's sender starts over and says so.
+    const second = new PackSender();
+    drive(h, 'cap-20261025-010000-0002', 900, second, false);
+    const next = await collect(h, 'cap-20261025-010000-0002', 3000);
+    const failures = h.of('failure').map((m) => m.message);
+    const heldAfterSecond = h.held();
+    h.store.close();
+    return { orphan, first, heldAfterFirst, next, heldAfterSecond, failures };
+  };
+
+  const native = await run(true);
+  const decoded = await run(false);
+
+  checkTrue('an appendPacked with no capture open fails once, with the same message, and leaves no pack held',
+    native.orphan.failures.length === 1 && native.orphan.failures[0].includes('before a capture was opened') && native.orphan.held === 0);
+  check('...for both hosts', canon(native.orphan), canon(decoded.orphan));
+  checkTrue('...and nothing else failed', native.failures.length === 1 && decoded.failures.length === 1);
+
+  for (const [label, a, b] of [['first capture', native.first, decoded.first], ['second capture', native.next, decoded.next]] as const) {
+    checkTrue(`${label}: rows were read back (${a.rows.length})`, a.rows.length >= (label === 'first capture' ? 9000 : 900));
+    check(`${label}: ${a.rows.length} rows read back are the rows packNative off reads back`, canon(a.rows), canon(b.rows));
+    check(`${label}: the scans answer alike`, canon(a.scans), canon(b.scans));
+    checkTrue(`${label}: ...and they found something (${a.scans.map((s) => (s as { count: number }).count).join(', ')})`,
+      a.scans.slice(0, 3).every((s) => ((s as { count: number | null }).count ?? 0) > 0));
+    check(`${label}: the bytes read are alike`, canon(a.bytes), canon(b.bytes));
+    check(`${label}: the digest snapshot is the same`, canon(a.digest), canon(b.digest));
+    checkTrue(`${label}: ...and holds streams`, (a.digest?.entries.length ?? 0) > 0);
+    check(`${label}: the writer's counters are the same`, canon(a.stats), canon(b.stats));
+    checkTrue(`${label}: ...patches both applied and missed (${a.stats.patchesApplied}/${a.stats.patchesMissed})`,
+      a.stats.patchesApplied > 0 && a.stats.patchesMissed > 0);
+    checkTrue(`${label}: packNative wrote a version 3 chunk (${a.versions.join(',')})`, a.versions.some((v) => v === 3));
+    checkTrue(`${label}: ...and packNative off wrote only version 2 (${b.versions.join(',')})`, b.versions.every((v) => v === 2));
+  }
+  // Agreement between the hosts cannot see a loss both share (an overlay dropped
+  // before the writer is handed the slot is dropped by both), so the writes are
+  // also read off the rows by name, in each host.
+  for (const [label, rows] of [['packNative', native.first.rows], ['decoded', decoded.first.rows]] as const) {
+    const byId = (id: number) => rows.find((r) => r.id === id)!;
+    check(`${label}: an overlay's fields reach the stored row`,
+      [byId(44).fields?.['tls.stream'], byId(44).fields?.['inwire.process.name']], [44, 'tool.exe']);
+    check(`${label}: ...its expert list`, byId(55).expert?.map((e) => e.message), ['gap 55', 'second']);
+    check(`${label}: ...its clock`, [byId(66).tsPrecision, String(byId(66).tsNanos)], [6, '66123']);
+    check(`${label}: ...and one that clears expert and tsNanos clears them`,
+      [byId(165).expert, byId(165).tsNanos === undefined, byId(165).tsPrecision, 'expert' in byId(165)], [undefined, true, 3, false]);
+    checkTrue(`${label}: patches land on a packed row in arrival order (${byId(4).info})`,
+      byId(4).info.indexOf('[a]') >= 0 && byId(4).info.indexOf('[a]') < byId(4).info.indexOf('[c]'));
+  }
+  check('the first capture leaves its half-read pack held, as expected', [native.heldAfterFirst, decoded.heldAfterFirst], [1, 1]);
+  check('a new capture drops it (packsReset) and reads its own packs to the end', [native.heldAfterSecond, decoded.heldAfterSecond], [0, 0]);
 }
 
 console.log('\n--- progress ---\n');

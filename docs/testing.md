@@ -105,6 +105,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | A capture is deleted only when the user asks; `planPrune` removes only `CAPTURE_ID_PATTERN` directories (ADR 0012) | `scripts/capture/prune-guard.ts` |
 | Exception: a capture following the agent's ring loses a segment when the agent deletes its file, floor first (ADR 0052) | `scripts/capture/segment-guard.ts` |
 | A torn trailing chunk loses only that chunk | `scripts/capture/recovery-on-disk.ts` |
+| Pack-native (version 3) chunks give the same prefix, bytes and records files, rows, digest and counters as re-encoded ones, across the fixtures and 1, 2 and 7 shards, survive a reopen, and lose only a torn last chunk | `scripts/capture/pack-native-equality.ts` (`inwire`, `bulk`, `keyLog` skip when absent; a synthetic capture always runs) |
 | `NodeBlockFile` loops short reads and writes | `scripts/capture/block-file.ts` |
 | `append` cannot overtake an async `open` | `scripts/capture/serial-queue.ts` |
 | No captured frame crosses the renderer's main thread (ADR 0007) | Unenforced: nothing fails if a frame-carrying message joins `FromPipeline` |
@@ -115,10 +116,13 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | The store stops whole at its heap ceiling | `scripts/capture/heap-guard.ts` |
 | Native zlib output and `fflate` read each other | `scripts/capture/native-zlib.ts` |
 | Buffer trim is reachable before auto-pause | `scripts/session/buffer-budget.ts` |
+| A window trim does not refold the window: the expert log subtracts the trimmed frames and equals a rebuild (groups, frames, counts, categories), and names stay learned (ADR 0053 phase 6) | `scripts/expert/trim.ts` |
 | An import matches the whole-array result with the patch window forced small | `scripts/capture/import-stream.ts` |
 | Trackers keep nothing a transfer detaches | `scripts/pipeline/moved-bytes.ts`, `scripts/pipeline/arrival.ts` |
 | Catch-up from the agent's file equals an uninterrupted run | `scripts/pipeline/catch-up.ts` |
 | Parallel dissection equals the single Worker | `scripts/pipeline/parallel.ts` |
+| The shard's row steps plus the merge from a side record equal `ingest`'s order (process, gap, fingerprint, network facts) | `scripts/pipeline/row-steps.ts` |
+| Every key a merge step writes to a shard row is in its overlay, so the window and the disk keep it | `scripts/pipeline/row-overlay.ts` runs a copy of the merge steps, as `parallel.ts` and `pack-native-equality.ts` copy the Worker's emit; a new write in `emitMerged` itself is unenforced until it is copied there |
 | Every frame's tree is rebuilt from its record | `scripts/pipeline/revisit.ts` |
 | No Node in the renderer; the preload imports only `electron` (reads the built bundle) | `scripts/electron/preload-sandbox.ts` |
 | `src/services/` and `src/lib/` import no Electron or `node:*`; `nodeBlockFile.ts` is unreachable from `src/main.tsx` (import-graph walk) | `scripts/capture/node-safe.ts` |

@@ -30,10 +30,15 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { inflateRawSync } from 'node:zlib';
 import { deflateRawSync } from 'node:zlib';
-import { CaptureWriter, type CaptureFiles } from '../../src/services/capture/captureWriter';
-import { MemoryBlockFile, readExact } from '../../src/services/capture/blockFile';
+import {
+  CaptureWriter, dataFilesOf, type CaptureFiles, type DataFiles, type SegmentFiles,
+  type PackedRowIn, type WriterOptions, type WriterStats, type RawFrame,
+} from '../../src/services/capture/captureWriter';
+import { MemoryBlockFile, readExact, type BlockFile } from '../../src/services/capture/blockFile';
 import { CaptureIndex, recoverIndex } from '../../src/services/capture/captureIndex';
-import { decodeChunk, applyPrefixes, CHUNK_FRAMES } from '../../src/services/capture/chunkCodec';
+import { decodeChunk, encodeChunk, applyPrefixes, CHUNK_FRAMES } from '../../src/services/capture/chunkCodec';
+import { packRows, unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
+import { applyOverlay, type RowOverlay } from '../../src/services/pipeline/rowOverlay';
 import {
   PcapService, decodeRawEthernetPacket, applyInfoPatchesInPlace, type InfoPatch,
 } from '../../src/services/pcapParser';
@@ -79,8 +84,9 @@ function readAll(f: CaptureFiles): Packet[] {
   const out: Packet[] = [];
   for (let c = 0; c < index.chunkCount; c++) {
     const r = index.record(c);
-    const summary = inflateRawSync(readExact(f.sum, r.sumOffset, r.sumLength));
-    const prefix = inflateRawSync(readExact(f.pfx, r.pfxOffset, r.pfxLength));
+    const data = dataFilesOf(f, r.segment) ?? f;
+    const summary = inflateRawSync(readExact(data.sum, r.sumOffset, r.sumLength));
+    const prefix = inflateRawSync(readExact(data.pfx, r.pfxOffset, r.pfxLength));
     const packets = decodeChunk(new Uint8Array(summary));
     applyPrefixes(packets, new Uint8Array(prefix));
     out.push(...packets);
@@ -423,6 +429,39 @@ const raw = (id: number, size = 20) => ({
 }
 
 {
+  // **A batch's bytes are one write, not one a frame.** A `writeSync` per frame
+  // was a quarter of the store's thread at 60k frames a second (ADR 0053 phase
+  // 6, `scripts/perf/store-boundary.ts`). The bytes, and where each frame says
+  // its bytes are, must be exactly what writing them one at a time produced.
+  class CountingFile extends MemoryBlockFile {
+    writes = 0;
+    override write(offset: number, from: Uint8Array): void {
+      this.writes++;
+      super.write(offset, from);
+    }
+  }
+  const byt = new CountingFile();
+  const f = { ...files(), byt };
+  const writer = new CaptureWriter(f, { deflate: (b) => new Uint8Array(deflateRawSync(b)) });
+  const batch = [];
+  for (let id = 1; id <= 50; id++) batch.push(raw(id, 20 + (id % 7)));
+  writer.appendBytes(batch);
+  check('a batch of frames is one write to frames.iwbyt', byt.writes, 1);
+  let at = 0;
+  const placed = batch.every((frame) => {
+    const back = readExact(byt, at, frame.bytes.length);
+    at += frame.bytes.length;
+    return back.every((v, i) => v === frame.bytes[i]);
+  });
+  checkTrue('...holding every frame\'s bytes, in order, end to end', placed && at === byt.size());
+  writer.appendBytes([raw(51), raw(52)]);
+  check('...and the next batch appends after it', byt.size(), at + 40);
+  writer.finish();
+  const index = new CaptureIndex(recoverIndex(f.index, f.pfx, f.sum, f.byt).records);
+  check('the chunk covers both batches', index.record(0).bytLength, at + 40);
+}
+
+{
   // `append` still does both in one call, because the import path has bytes and
   // rows at the same moment and has no reason to split them. It must stage and
   // attach BEFORE draining: draining first seals the whole batch as
@@ -489,6 +528,480 @@ const raw = (id: number, size = 20) => ({
   writer.finish();
   check('...with no placeholders', writer.stats.framesSealedWithoutRow, 0);
   check('...and the rows intact', readAll(f).map((p) => p.id), [1, 2, 3]);
+}
+
+console.log('\n--- shard rows staged as packed slots (ADR 0053 phase 6) ---\n');
+
+/**
+ * Structural equality, written out because the usual shortcuts both lie here:
+ * `JSON.stringify` throws on a bigint and drops a key whose value is undefined,
+ * and a key that is present but undefined is exactly the bug an overlay that
+ * clears `expert` or `tsNanos` must not cause.
+ */
+function firstDifference(a: unknown, b: unknown, path = ''): string | null {
+  if (typeof a === 'bigint' || typeof b === 'bigint') return a === b ? null : `${path}: bigint ${String(a)} vs ${String(b)}`;
+  if (a instanceof Uint8Array || b instanceof Uint8Array) {
+    if (!(a instanceof Uint8Array && b instanceof Uint8Array)) return `${path}: bytes vs not bytes`;
+    if (a.length !== b.length) return `${path}: ${a.length} bytes vs ${b.length}`;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return `${path}[${i}]: byte differs`;
+    return null;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return `${path}: array vs not an array`;
+    if (a.length !== b.length) return `${path}: length ${a.length} vs ${b.length}`;
+    for (let i = 0; i < a.length; i++) {
+      const d = firstDifference(a[i], b[i], `${path}[${i}]`);
+      if (d !== null) return d;
+    }
+    return null;
+  }
+  if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+    const ka = Object.keys(a).sort();
+    const kb = Object.keys(b).sort();
+    if (ka.join('\u0000') !== kb.join('\u0000')) {
+      const only = ka.filter((k) => !kb.includes(k)).concat(kb.filter((k) => !ka.includes(k)));
+      return `${path}: keys differ (${only.join(', ')})`;
+    }
+    for (const k of ka) {
+      const d = firstDifference((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${path}.${k}`);
+      if (d !== null) return d;
+    }
+    return null;
+  }
+  return a === b || (Number.isNaN(a) && Number.isNaN(b)) ? null : `${path}: ${String(a)} vs ${String(b)}`;
+}
+
+{
+  check('the comparison sees a key that is present but undefined', firstDifference({ a: undefined }, {}) !== null, true);
+  check('...a bigint that differs', firstDifference({ a: 1n }, { a: 2n }) !== null, true);
+  check('...a byte that differs', firstDifference(new Uint8Array([1]), new Uint8Array([2])) !== null, true);
+  check('...and calls equal things equal',
+    firstDifference({ a: [1n, 'x', new Uint8Array([3])] }, { a: [1n, 'x', new Uint8Array([3])] }), null);
+}
+
+const DEFLATE = (b: Uint8Array): Uint8Array => new Uint8Array(deflateRawSync(b));
+const range = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+const oddsTo = (n: number): number[] => range(1, n).filter((i) => i % 2 === 1);
+const evensTo = (n: number): number[] => range(1, n).filter((i) => i % 2 === 0);
+const bytesOf = (id: number): Uint8Array => new Uint8Array(20).fill(id & 0xff);
+
+/** A row as a shard packs it, with a different shape for each residue so the codec's branches are on the path. */
+function shardRow(id: number): Packet {
+  return frame(id, {
+    info: `Seq=${id} Len=${id % 5}`,
+    ...(id % 5 === 0 ? { protocolLabel: 'TLSv1.3' } : {}),
+    fields: { 'tcp.srcport': 40_000 + (id % 9), 'tcp.seq': id, ...(id % 4 === 0 ? { 'dns.id': id } : {}) },
+    ...(id % 3 === 0 ? { expert: [{ message: 'Possible loss', category: 'Loss' as const }] } : {}),
+    ...(id % 4 === 0 ? { tsNanos: BigInt(1_000_000_000 + id * 1000) * 1000n + BigInt(id % 1000), tsPrecision: 9 } : {}),
+  });
+}
+
+/** What the merge wrote to a row afterwards, including the members that clear a key. */
+function overlayFor(id: number): RowOverlay | null {
+  if (id % 7 === 0) return { fields: { 'tls.stream': id } };
+  if (id % 11 === 0) return { tsNanos: BigInt(id) * 1000n + 17n, tsPrecision: 9 };
+  if (id % 13 === 0) return { expert: undefined, tsNanos: undefined };
+  return null;
+}
+
+/**
+ * The same frames two ways: as slots into packs, and as the plain rows an
+ * independent decode of those packs gives. The second is the oracle - what the
+ * object path is handed today.
+ */
+function buildWorld(groups: readonly (readonly number[])[]) {
+  const placed = new Map<number, { pack: RowPack; index: number }>();
+  const decoded = new Map<RowPack, Packet[]>();
+  groups.forEach((ids, g) => {
+    const rows = ids.map(shardRow);
+    const pack = packRows(g + 1, rows, rows.map(() => 20));
+    ids.forEach((id, index) => placed.set(id, { pack, index }));
+  });
+  return {
+    packed(id: number, carry: boolean): Packet | PackedRowIn {
+      const at = placed.get(id);
+      if (at === undefined) return frame(id);
+      return {
+        pack: at.pack, index: at.index, overlay: overlayFor(id), id,
+        ...(carry ? { rawBytes: bytesOf(id) } : {}),
+      };
+    },
+    object(id: number, carry: boolean): Packet {
+      const at = placed.get(id);
+      if (at === undefined) return frame(id);
+      let rows = decoded.get(at.pack);
+      if (rows === undefined) { rows = unpackRows(at.pack); decoded.set(at.pack, rows); }
+      const row = { ...rows[at.index] };
+      const overlay = overlayFor(id);
+      if (overlay !== null) {
+        if (overlay.fields && row.fields) row.fields = { ...row.fields };
+        applyOverlay(row, overlay);
+        if ('expert' in overlay && row.expert === undefined) delete row.expert;
+        if ('tsPrecision' in overlay && row.tsPrecision === undefined) delete row.tsPrecision;
+        if ('tsNanos' in overlay && row.tsNanos === undefined) delete row.tsNanos;
+      }
+      if (carry) row.rawBytes = bytesOf(id);
+      return row;
+    },
+  };
+}
+
+/** In-memory segment directories, for the cases that cut a chunk at a ring file. */
+function memorySegments(): SegmentFiles {
+  const open = new Map<number, DataFiles>();
+  const make = (): DataFiles => ({
+    pfx: new MemoryBlockFile(), sum: new MemoryBlockFile(), byt: new MemoryBlockFile(), rec: new MemoryBlockFile(),
+  });
+  return {
+    open(n) {
+      let d = open.get(n);
+      if (d === undefined) { d = make(); open.set(n, d); }
+      return d;
+    },
+    find: (n) => open.get(n) ?? null,
+    remove(n) { open.delete(n); },
+    list: () => [...open.keys()].sort((a, b) => a - b),
+  };
+}
+
+interface Ctx {
+  w: CaptureWriter;
+  /** Frame `id` as a row the writer is handed: a pack slot, or its plain-row twin. */
+  slot(id: number, carry?: boolean): Packet | PackedRowIn;
+  raws(from: number, to: number, ring?: (id: number) => RawFrame['ring']): RawFrame[];
+  /** Records what `stagedFrame` answers now. */
+  observe(id: number): void;
+  /** Records the counters and the staged count now. */
+  snapshot(): void;
+}
+
+interface Scenario {
+  name: string;
+  /** Each is one shard pack's ids, ascending. Frames in none are plain rows. */
+  groups: number[][];
+  options?: WriterOptions;
+  rings?: boolean;
+  drive(ctx: Ctx): void;
+  /** Checks on the pack-native run, against numbers worked out by hand. */
+  expect?(native: Outcome): void;
+}
+
+interface Outcome {
+  rows: Packet[];
+  stats: WriterStats;
+  missed: InfoPatch[];
+  observed: unknown[];
+  layout: Record<string, number>[];
+  pfx: Uint8Array[];
+  byt: Uint8Array[];
+  sum: Uint8Array[];
+  versions: number[];
+}
+
+type Variant = 'native' | 'decoded' | 'objects';
+
+function allBytes(file: BlockFile): Uint8Array { return readExact(file, 0, file.size()); }
+
+function run(sc: Scenario, variant: Variant): Outcome {
+  const world = buildWorld(sc.groups);
+  const f: CaptureFiles = { ...files(), ...(sc.rings ? { segments: memorySegments() } : {}) };
+  const w = new CaptureWriter(f, { deflate: DEFLATE, ...sc.options, packNative: variant !== 'decoded' });
+  const observed: unknown[] = [];
+  sc.drive({
+    w,
+    slot: (id, carry = false) => (variant === 'objects' ? world.object(id, carry) : world.packed(id, carry)),
+    raws: (from, to, ring) => range(from, to).map((id) => ({ ...raw(id), ...(ring ? { ring: ring(id) } : {}) })),
+    // Without `rawBytes`: a plain row that carried its bytes still holds them,
+    // and a packed one never does - the bytes are on disk, and `stagedFrame`
+    // answers them as `bytes`.
+    observe: (id) => {
+      const packet = w.stagedFrame(id)?.packet;
+      if (packet === undefined || packet === null) { observed.push(null); return; }
+      const { rawBytes: _bytes, ...rest } = packet;
+      observed.push(rest);
+    },
+    snapshot: () => { observed.push({ ...w.stats, staged: w.stagedCount }); },
+  });
+  w.finish();
+
+  const indexBytes = new Uint8Array(f.index.size());
+  f.index.read(0, indexBytes);
+  const index = CaptureIndex.parse(indexBytes);
+  const layout: Record<string, number>[] = [];
+  const versions: number[] = [];
+  const sum: Uint8Array[] = [];
+  for (let c = 0; c < index.chunkCount; c++) {
+    const r = index.record(c);
+    const data = dataFilesOf(f, r.segment) ?? f;
+    layout.push({
+      firstId: r.firstId, lastId: r.lastId, frameCount: r.frameCount, firstOrdinal: r.firstOrdinal,
+      pfxOffset: r.pfxOffset, pfxLength: r.pfxLength, bytOffset: r.bytOffset, bytLength: r.bytLength,
+      firstTsUs: r.firstTsUs, segment: r.segment,
+    });
+    sum.push(readExact(data.sum, r.sumOffset, r.sumLength));
+    const inflated = inflateRawSync(sum[c]);
+    versions.push(inflated[4] | (inflated[5] << 8));
+  }
+  const datas: DataFiles[] = [f, ...(f.segments?.list() ?? []).map((n) => f.segments!.find(n)!)];
+  return {
+    rows: readAll(f), stats: { ...w.stats }, missed: [...w.missedPatches], observed, layout, sum, versions,
+    pfx: datas.map((d) => allBytes(d.pfx)), byt: datas.map((d) => allBytes(d.byt)),
+  };
+}
+
+function sameOutcome(name: string, a: Outcome, b: Outcome): void {
+  const parts: [string, unknown, unknown][] = [
+    ['rows', a.rows, b.rows], ['counters', a.stats, b.stats], ['missed patches', a.missed, b.missed],
+    ['staged answers', a.observed, b.observed], ['index records', a.layout, b.layout],
+    ['prefix files', a.pfx, b.pfx], ['byte files', a.byt, b.byt],
+  ];
+  let first: string | null = null;
+  for (const [label, x, y] of parts) {
+    first = firstDifference(x, y, label);
+    if (first !== null) break;
+  }
+  check(name, first, null);
+}
+
+/** Runs a scenario three ways: pack-native, decoded at seal, and as plain rows. */
+function scenario(sc: Scenario): Outcome {
+  const native = run(sc, 'native');
+  const decoded = run(sc, 'decoded');
+  const objects = run(sc, 'objects');
+  sameOutcome(`${sc.name}: pack-native chunks read back what plain rows wrote`, native, objects);
+  sameOutcome(`${sc.name}: ...and so do rows decoded at seal (packNative off)`, decoded, objects);
+  check(`${sc.name}: only the pack-native run wrote a version 3 chunk, and only for packed rows`,
+    [native.versions.some((v) => v === 3), [...decoded.versions, ...objects.versions].every((v) => v === 2)],
+    [sc.groups.length > 0, true]);
+  sc.expect?.(native);
+  return native;
+}
+
+const infoOf = (o: Outcome, id: number): string | undefined => o.rows.find((p) => p.id === id)?.info;
+const pair = (o: Outcome): number[] => [o.stats.patchesApplied, o.stats.patchesMissed];
+
+scenario({
+  name: 'a patch before its row',
+  groups: [oddsTo(40), evensTo(40)],
+  drive({ w, slot, raws, observe }) {
+    w.appendBytes(raws(1, 40));
+    w.applyPatches([{ frameId: 5, suffix: ' [early]' }]);
+    w.attachRows(range(1, 40).map((id) => slot(id)));
+    w.applyPatches([{ frameId: 6, suffix: ' [late]' }, { frameId: 6, protocolLabel: 'TLSv1.2' }]);
+    observe(5);
+    observe(6);
+  },
+  expect(o) {
+    check('  a patch for a slot with no row is missed', pair(o), [2, 1]);
+    check('  ...and the row that arrives is not patched', infoOf(o, 5), 'Seq=5 Len=0');
+    check('  a patch after the row lands in it', [infoOf(o, 6), o.rows[5].protocolLabel], ['Seq=6 Len=1 [late]', 'TLSv1.2']);
+    check('  ...and the staged answer shows it before the seal', (o.observed[1] as Packet).info, 'Seq=6 Len=1 [late]');
+  },
+});
+
+scenario({
+  name: 'a patch, then a second attach',
+  groups: [oddsTo(40), evensTo(40)],
+  drive({ w, slot, raws, observe }) {
+    w.appendBytes(raws(1, 40));
+    w.attachRows(range(1, 40).map((id) => slot(id)));
+    w.applyPatches([
+      { frameId: 5, suffix: ' [a]' }, { frameId: 5, suffix: ' [b]' },
+      { frameId: 9, responseInFrame: 12 }, { frameId: 10, protocolLabel: 'TLSv1.2' },
+      { frameId: 11, links: { 'tcp.reassembled_in': 20 } },
+    ]);
+    observe(5);
+    w.attachRows([slot(5)]);
+    observe(5);
+    w.applyPatches([{ frameId: 5, suffix: ' [c]' }]);
+    observe(5);
+    observe(7);
+  },
+  expect(o) {
+    check('  every patch was applied', [pair(o), o.stats.rowsAttached], [[6, 0], 41]);
+    check('  the staged row carries both patches', (o.observed[0] as Packet).info, 'Seq=5 Len=0 [a] [b]');
+    check('  a second attach drops them', (o.observed[1] as Packet).info, 'Seq=5 Len=0');
+    check('  ...and a patch after that lands on the new row', infoOf(o, 5), 'Seq=5 Len=0 [c]');
+    check('  a response patch reaches the field', o.rows[8].fields?.['dns.response_in'], 12);
+    check('  a label patch reaches the row', o.rows[9].protocolLabel, 'TLSv1.2');
+    check('  a link patch reaches the field', o.rows[10].fields?.['tcp.reassembled_in'], 20);
+    check('  an overlay shows in the staged row', (o.observed[3] as Packet).fields?.['tls.stream'], 7);
+  },
+});
+
+scenario({
+  name: 'a patch after the seal, and packed rows that carry their bytes',
+  groups: [oddsTo(4106), evensTo(4106)],
+  options: { horizonUs: 0 },
+  drive({ w, slot, snapshot, observe }) {
+    w.append(range(1, 4106).map((id) => slot(id, true)));
+    snapshot();
+    w.applyPatches([{ frameId: 5, suffix: ' [too late]' }, { frameId: 4100, suffix: ' [in time]' }]);
+    observe(4100);
+    observe(5);
+  },
+  expect(o) {
+    check('  the full chunk sealed with its rows, ten are still staged',
+      [(o.observed[0] as { chunksWritten: number }).chunksWritten, (o.observed[0] as { staged: number }).staged,
+        (o.observed[0] as { framesSealedWithoutRow: number }).framesSealedWithoutRow], [1, 10, 0]);
+    check('  a patch past the seal is missed, one inside the horizon applied', pair(o), [1, 1]);
+    check('  ...and the missed one is kept in the sample', o.missed.map((p) => p.frameId), [5]);
+    check('  the sealed row is unpatched', infoOf(o, 5), 'Seq=5 Len=0');
+    check('  the staged one is patched', infoOf(o, 4100), 'Seq=4100 Len=0 [in time]');
+    check('  a sealed frame has no staged answer', o.observed[2], null);
+    check('  the bytes came from the carrying rows, once', [o.stats.bytesWritten, o.stats.rowsAttached], [4106 * 20, 4106]);
+  },
+});
+
+scenario({
+  name: 'a row before its bytes',
+  groups: [oddsTo(40), evensTo(40), [999]],
+  drive({ w, slot, raws, snapshot }) {
+    w.attachRows([...range(1, 40), 999].map((id) => slot(id)));
+    snapshot();
+    w.applyPatches([{ frameId: 7, suffix: ' [orphan]' }]);
+    w.appendBytes(raws(1, 40));
+    snapshot();
+  },
+  expect(o) {
+    check('  an early row is held, not counted', [(o.observed[0] as WriterStats).rowsMissed, (o.observed[0] as WriterStats).rowsAttached], [0, 0]);
+    check('  a patch for it is missed', pair(o), [0, 1]);
+    check('  its bytes claim it, so nothing is a placeholder', o.stats.framesSealedWithoutRow, 0);
+    check('  the row whose bytes never came is counted at the end', o.stats.rowsMissed, 1);
+    check('  the claimed rows are the dissected ones', [infoOf(o, 7), infoOf(o, 40)], ['Seq=7 Len=2', 'Seq=40 Len=0']);
+  },
+});
+
+scenario({
+  name: 'a placeholder at the seal',
+  groups: [oddsTo(40), evensTo(40)],
+  drive({ w, slot, raws }) {
+    w.appendBytes(raws(1, 40));
+    // The odd pack whole, five rows of the even one: the even pack's rows in this
+    // chunk are too few to travel as a segment, and fifteen frames never got a row.
+    w.attachRows([...oddsTo(40), 2, 4, 6, 8, 10].sort((a, b) => a - b).map((id) => slot(id)));
+    w.applyPatches([{ frameId: 3, suffix: ' [x]' }, { frameId: 12, suffix: ' [no row]' }]);
+  },
+  expect(o) {
+    check('  frames with no row are written as placeholders', o.stats.framesSealedWithoutRow, 15);
+    check('  ...and say so', infoOf(o, 12), 'Not dissected - frame bytes are on disk');
+    check('  ...with the captured length the writer recorded', o.rows[11].length, 20);
+    check('  the patches follow the same rule', pair(o), [1, 1]);
+    check('  the five even rows kept their own text', infoOf(o, 10), 'Seq=10 Len=0');
+  },
+});
+
+scenario({
+  name: 'horizon cuts through packs',
+  // One pack of 4090 rows, one of 100 and one of 10: the chunk boundary at 4096
+  // leaves six rows of the second pack in the first chunk (too few to travel as
+  // a segment) and 94 in the second (enough).
+  groups: [range(1, 4090), range(4091, 4190), range(4191, 4200)],
+  options: { horizonUs: 60_000_000, horizonFrames: 1_000_000 },
+  drive({ w, slot, raws, observe, snapshot }) {
+    w.appendBytes(raws(1, 4200));
+    snapshot();
+    w.attachRows(range(1, 4200).map((id) => slot(id)));
+    w.applyPatches([100, 4093, 4150, 4195].map((frameId) => ({ frameId, suffix: ' [p]' })));
+    observe(4093);
+    snapshot();
+  },
+  expect(o) {
+    check('  nothing sealed before finish, then two chunks', [(o.observed[0] as WriterStats).chunksWritten, o.stats.chunksWritten], [0, 2]);
+    check('  every patch applied', pair(o), [4, 0]);
+    check('  the chunk boundaries are the chunk size', o.layout.map((r) => r.frameCount), [4096, 104]);
+    check('  both chunks are pack-native', o.versions, [3, 3]);
+    check('  patches land on both sides of the cut', [4093, 4150, 100, 4195].map((id) => infoOf(o, id)),
+      ['Seq=4093 Len=3 [p]', 'Seq=4150 Len=0 [p]', 'Seq=100 Len=0 [p]', 'Seq=4195 Len=0 [p]']);
+  },
+});
+
+{
+  const ring = (id: number): RawFrame['ring'] => ({ epoch: 1, file: id <= 40 ? 1 : id <= 90 ? 2 : 3, seq: id });
+  scenario({
+    name: 'ring-segment cuts through packs',
+    // Files of 40, 50 and 10 frames. Both packs have 20, 25 and 5 rows in them.
+    groups: [oddsTo(100), evensTo(100)],
+    rings: true,
+    options: { horizonUs: 60_000_000, horizonFrames: 1_000_000 },
+    drive({ w, slot, raws }) {
+      w.appendBytes(raws(1, 100, ring));
+      w.attachRows(range(1, 100).map((id) => slot(id)));
+      w.applyPatches([{ frameId: 45, suffix: ' [mid]' }, { frameId: 95, suffix: ' [end]' }]);
+    },
+    expect(o) {
+      check('  a chunk per ring file', o.layout.map((r) => [r.segment, r.frameCount]), [[1, 40], [2, 50], [3, 10]]);
+      check('  all three are pack-native', o.versions, [3, 3, 3]);
+      check('  patches reach rows in the later segments', [pair(o), infoOf(o, 45), infoOf(o, 95)],
+        [[2, 0], 'Seq=45 Len=0 [mid]', 'Seq=95 Len=0 [end]']);
+    },
+  });
+}
+
+scenario({
+  name: 'packs under sixteen rows, beside plain rows',
+  groups: [range(1, 5), range(6, 10), [12]],
+  drive({ w, slot, raws }) {
+    w.appendBytes(raws(1, 20));
+    w.attachRows(range(1, 20).map((id) => slot(id)));
+    w.applyPatches([3, 11, 12, 18].map((frameId) => ({ frameId, suffix: ' [t]' })));
+  },
+  expect(o) {
+    check('  patches reach packed and plain rows alike', [pair(o), [3, 11, 12, 18].map((id) => infoOf(o, id))],
+      [[4, 0], ['Seq=3 Len=3 [t]', 'frame 11 [t]', 'Seq=12 Len=2 [t]', 'frame 18 [t]']]);
+  },
+});
+
+{
+  // With no packed slot nothing changes: packNative on writes the chunk packNative
+  // off writes, which is the chunk `encodeChunk` made before packed slots existed.
+  const sc: Scenario = {
+    name: 'no packed slot',
+    groups: [],
+    drive({ w, slot }) {
+      w.append(range(1, 50).map((id) => slot(id)));
+      w.applyPatches([{ frameId: 7, suffix: ' [s]' }]);
+    },
+  };
+  const native = scenario(sc);
+  const direct = encodeChunk(range(1, 50).map((id) => frame(id, id === 7 ? { info: 'frame 7 [s]' } : {})), range(1, 50).map(() => 20));
+  const off = run(sc, 'decoded');
+  check('no packed slot: the chunk is version 2', native.versions, [2]);
+  check('...byte for byte what packNative off writes', firstDifference(native.sum, off.sum), null);
+  check('...and what encodeChunk makes of the same rows', firstDifference(native.sum[0], DEFLATE(direct.summary)), null);
+}
+
+for (const variant of ['native', 'decoded'] as const) {
+  // A caller that changes what `stagedFrame` hands it must not change the row
+  // that is written, nor what the next call answers: the answer is built on
+  // request from a pack other slots share.
+  const make = (mutate: boolean): Scenario => ({
+    name: `staged answers (${variant})`,
+    groups: [oddsTo(40), evensTo(40)],
+    drive({ w, slot, raws, observe }) {
+      w.appendBytes(raws(1, 40));
+      w.attachRows(range(1, 40).map((id) => slot(id)));
+      w.applyPatches([{ frameId: 5, suffix: ' [a]' }, { frameId: 7, suffix: ' [b]' }]);
+      observe(5);
+      observe(7);
+      if (mutate) {
+        for (const id of [5, 7]) {
+          const staged = w.stagedFrame(id)!.packet!;
+          staged.info = 'MUTATED';
+          staged.fields!['tls.stream'] = 999;
+          staged.fields!['injected'] = 1;
+          staged.layers.push({ name: 'x', fields: [] } as unknown as Packet['layers'][number]);
+        }
+      }
+      observe(5);
+      observe(7);
+    },
+  });
+  const clean = run(make(false), variant);
+  const mutated = run(make(true), variant);
+  sameOutcome(`staged answers (${variant}): changing one leaves the next answer and the written rows alone`, mutated, clean);
+  check(`staged answers (${variant}): ...and the answer is the patched, overlaid row`,
+    [(clean.observed[1] as Packet).info, (clean.observed[1] as Packet).fields?.['tls.stream']], ['Seq=7 Len=2 [b]', 7]);
 }
 
 console.log('\n--- against real frames, and how far patches really reach ---\n');

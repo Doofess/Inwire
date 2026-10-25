@@ -34,6 +34,13 @@ import {
  * cached per tick and would otherwise be handed back stale. The rule is the
  * familiar one: if the callbacks read it and it can change, list it.
  *
+ * `drop` is optional: fold ONE packet back out, in place, when the buffer's head
+ * moved past it. With it, a trim costs the frames trimmed; without it, a trim
+ * rebuilds the accumulator from the whole buffer. A `drop` that does nothing
+ * keeps what the trimmed frames taught. It must undo exactly what `add` did
+ * from fields a patch cannot change, because the packet it receives may be a
+ * patched copy of the one `add` saw (`foldIncrementally`).
+ *
  * The returned value keeps its identity while the packets and deps keep theirs,
  * so it is safe to put in a `useMemo` dependency list or an effect's.
  */
@@ -43,16 +50,20 @@ export function useIncrementalAggregate<A, R>(
   add: (accumulator: A, packet: Packet) => void,
   finalize: (accumulator: A) => R,
   deps: readonly unknown[] = [],
+  drop?: (accumulator: A, packet: Packet) => void,
 ): R {
   // Written during render rather than in an effect, because the component is
   // rendering the result NOW - an effect would paint one frame of nothing and
   // then correct it, ten times a second. The same trade, for the same reason,
   // is documented on `filterIncrementally`. It is sound here because the only
-  // state carried across renders is a fold whose input is append-only: a render
-  // React discards leaves the cache holding a prefix of what the next render
-  // passes, which is exactly the case the fold is built to extend. A repeat
-  // render with the identical array returns the identical result without
-  // touching the accumulator at all.
+  // state carried across renders is a fold whose input only grows at the tail
+  // and shrinks at the head: the accumulator and the cache's `source` are
+  // advanced together, in one render, so a render React discards leaves them
+  // describing the same array, and whatever the next render passes is either
+  // that array grown, trimmed and grown (which the fold extends, dropping the
+  // trimmed head) or something `prefixShift` cannot prove to be - an older
+  // array, a replacement - which rebuilds. A repeat render with the identical
+  // array returns the identical result without touching the accumulator at all.
   const ref = useRef<{ cache: AggregateCache<A>; result: R } | null>(null);
   const previous = ref.current;
 
@@ -60,7 +71,7 @@ export function useIncrementalAggregate<A, R>(
     return previous.result;
   }
 
-  const cache = foldIncrementally(packets, create, add, deps, previous?.cache ?? null);
+  const cache = foldIncrementally(packets, create, add, deps, previous?.cache ?? null, drop);
   const result = finalize(cache.acc);
   ref.current = { cache, result };
   return result;

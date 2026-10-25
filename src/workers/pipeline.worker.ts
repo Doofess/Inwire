@@ -56,7 +56,10 @@ import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
-import { Coordinator, WatchedTcpOrder, type Merged } from '../services/pipeline/coordinator';
+import { Coordinator, WatchedTcpOrder, type Merged, type PackedRef } from '../services/pipeline/coordinator';
+import { PackSender, PackedFlush } from '../services/pipeline/rowPack';
+import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
+import { mergeRowSide } from '../services/pipeline/rowSteps';
 import { shardEnv } from '../services/pipeline/shard';
 import { FifoMap } from '../services/pipeline/fifoMap';
 import type { FromShard, ToShard } from '../services/pipeline/shardProtocol';
@@ -346,7 +349,47 @@ function stopCatchUp(): void {
   router.stop();
 }
 
-let pendingPackets: Packet[] = [];
+/**
+ * What the flush needs of a row it forwards as the pack the shard made: its
+ * id and its bytes. A shard row that was never decoded here is only this.
+ */
+type RowStub = Pick<Packet, 'id' | 'rawBytes'>;
+let pendingPackets: (Packet | RowStub)[] = [];
+/**
+ * Beside `pendingPackets`, one per row: where a shard's row sits in the pack
+ * it came in (null for a row this Worker built, which is always a whole
+ * `Packet`), and what the merge wrote to it since. The flush forwards the pack
+ * rather than the decoded row (`rowPack.ts`). With more than one interface the
+ * coordinator decodes every row, so `pendingPackets` is whole when `duplicates`
+ * reads it.
+ */
+let pendingRefs: (PackedRef | null)[] = [];
+let pendingOverlays: (RowOverlay | null)[] = [];
+/** What each receiver has been sent, and whether it is to forget the last capture's packs. */
+const windowSender = new PackSender();
+const storeSender = new PackSender();
+
+function isWholePacket(row: Packet | RowStub): row is Packet {
+  return 'layers' in row;
+}
+
+/** A row this Worker built, which is never a stub: the only rows with no pack to go on in. */
+function wholeRow(row: Packet | RowStub): Packet {
+  if (!isWholePacket(row)) throw new Error('a row with no pack to travel in was queued without its fields');
+  return row;
+}
+
+function queueRow(packet: Packet | RowStub, ref: PackedRef | null = null, overlay: RowOverlay | null = null): void {
+  pendingPackets.push(packet);
+  pendingRefs.push(ref);
+  pendingOverlays.push(overlay);
+}
+
+function clearPendingRows(): void {
+  pendingPackets = [];
+  pendingRefs = [];
+  pendingOverlays = [];
+}
 let pendingIcmpReplies: { requestFrameId: number; replyId: number }[] = [];
 let pendingInfoPatches: InfoPatch[] = [];
 /** This flush's frame records, for the store. */
@@ -390,6 +433,14 @@ const keyLogTexts: string[] = [];
 /** Detail requests a shard is answering, by request id. */
 const shardDetails = new Map<number, (layers: ProtocolLayer[] | null) => void>();
 let nextShardDetail = 1;
+/**
+ * The last socket table, and the time it was applied at, since the annotations
+ * were last cleared: for shards started after it arrived, which would
+ * otherwise annotate nothing the single Worker would have. Only the last table
+ * is kept, so a flow an earlier table listed and the last no longer does is
+ * lost to those shards.
+ */
+let lastFlows: Extract<ToShard, { type: 'flows' }> | null = null;
 /** Frames in flight past which the flush stops handing the coordinator more. */
 const PARALLEL_BACKLOG = 65_536;
 /** Trees each shard keeps for the detail pane: lane 0 keeps its own `DETAIL_CACHE_FRAMES`. */
@@ -417,7 +468,13 @@ function hostMessage(): ToShard {
 }
 
 function interfacesMessage(): ToShard {
-  return { type: 'interfaces', interfaces: [...interfaceById.entries()] };
+  return {
+    type: 'interfaces',
+    interfaces: [...interfaceById.entries()].map(([id, record]) => {
+      const tsPrecision = tsPrecisionById.get(id);
+      return [id, tsPrecision === undefined ? record : { ...record, tsPrecision }];
+    }),
+  };
 }
 
 function stopParallel(): void {
@@ -431,6 +488,9 @@ function stopParallel(): void {
 /** The shards the setting asks for, started - or none, and the single Worker. */
 function startParallel(shards: number): void {
   stopParallel();
+  // A new coordinator numbers its packs from zero again.
+  windowSender.reset();
+  storeSender.reset();
   if (shards < 1) return;
   const workers: Worker[] = [];
   const lane = laneZero();
@@ -446,6 +506,9 @@ function startParallel(shards: number): void {
     emit: (merged) => emitMerged(merged),
   });
   coordinator.lane0.host = host;
+  // With more than one interface `duplicates.scan` reads every row, so each
+  // one is decoded here; otherwise the merge works from the side records.
+  coordinator.decodeRows = interfaces.length > 1;
   for (let s = 0; s < shards; s++) {
     // The same script, in its shard role (`shardRole.ts`).
     const worker = new Worker(self.location.href, { type: 'module', name: `${SHARD_NAME}${s}` });
@@ -461,6 +524,7 @@ function startParallel(shards: number): void {
   coordinator.broadcast(hostMessage());
   coordinator.broadcast(interfacesMessage());
   for (const text of keyLogTexts) coordinator.broadcast({ type: 'keylog', text });
+  if (lastFlows !== null) coordinator.broadcast(lastFlows);
 }
 
 function shardDown(shard: number, reason: string): void {
@@ -503,35 +567,56 @@ function treeFromShard(shard: number, id: number): Promise<ProtocolLayer[] | nul
  * One frame merged back into order - what `ingest` does after its dissection,
  * for a frame any lane dissected. The rows the process, a live gap and a
  * fingerprint add go to the Frame layer of whichever tree the frame has: here
- * for lane 0, on the shard for the others.
+ * for lane 0, on the shard for the others. A shard annotates and marks its
+ * own rows, so only lane 0's are done here; the order-dependent steps -
+ * fingerprints, network facts - run here for all of them, from the packet
+ * when it was decoded and from the shard's side record when it was not.
  */
 function emitMerged(merged: Merged): void {
   const frame = merged.meta as LiveFrame;
   flow.frameDone(frame.batch);
-  if (merged.error !== undefined || merged.packet === undefined) {
+  if (merged.error !== undefined || (merged.packet === undefined && merged.packed === undefined)) {
     post({ type: 'failure', message: merged.error ?? 'failed to dissect a captured frame' });
     return;
   }
   const id = merged.id;
-  const packet = merged.packet;
-  const precision = tsPrecisionById.get(frame.iface) ?? 6;
-  packet.tsPrecision = precision;
-  if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.tsNsRem);
   if (merged.record !== undefined) pendingRecords.push({ id, record: merged.record });
   if (merged.derived) derivedStore.set(id, merged.derived);
 
-  const tree = merged.lane === 0 ? packet.layers : null;
-  const stub: ProtocolLayer = { name: 'Frame', summary: '', fields: [] };
-  packet.layers = tree ?? [stub];
-  annotatePacket(packet, flowAnnotations);
-  if (frame.holeBefore !== undefined) markLiveGap(packet, frame.holeBefore);
-  learnOrLabelFingerprint(packet.fields, clientFingerprints, packet.layers);
-  networkFacts.observe(packet, host);
-  if (tree !== null) cacheTree(id, tree);
-  else parallel?.coordinator.frameRows(merged.lane, id, stub.fields);
-  packet.layers = [];
+  const packet = merged.packet;
+  if (packet === undefined) {
+    // A light row: it stays in the pack the shard made, and the overlay says
+    // what the merge adds to it. The shard has put the clock in the pack by the
+    // same rule as below.
+    const { overlay, frameRows } = mergeRowSide(
+      merged.side, { fingerprints: clientFingerprints, facts: networkFacts, host }, merged.overlay ?? null,
+    );
+    if (frameRows.length > 0) parallel?.coordinator.frameRows(merged.lane, id, frameRows);
+    queueRow({ id, rawBytes: merged.bytes ?? NO_ROW_BYTES }, merged.packed ?? null, overlay);
+  } else {
+    const precision = tsPrecisionById.get(frame.iface) ?? 6;
+    packet.tsPrecision = precision;
+    if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.tsNsRem);
 
-  pendingPackets.push(packet);
+    const tree = merged.lane === 0 ? packet.layers : null;
+    const stub: ProtocolLayer = { name: 'Frame', summary: '', fields: [] };
+    packet.layers = tree ?? [stub];
+    // A shard did both of these to its row before packing it; a second
+    // `annotatePacket` would add a second Process row.
+    if (merged.lane === 0) {
+      annotatePacket(packet, flowAnnotations);
+      if (frame.holeBefore !== undefined) markLiveGap(packet, frame.holeBefore);
+    }
+    learnOrLabelFingerprint(packet.fields, clientFingerprints, packet.layers);
+    networkFacts.observe(packet, host);
+    if (tree !== null) cacheTree(id, tree);
+    else parallel?.coordinator.frameRows(merged.lane, id, stub.fields);
+    packet.layers = [];
+
+    // After the last write to the row, so the overlay carries every one of them.
+    // The mark it is compared with was taken when the coordinator unpacked the row.
+    queueRow(packet, merged.packed ?? null, merged.packed?.mark === undefined ? null : overlayOf(packet, merged.packed.mark));
+  }
   if (merged.icmpMatchedRequestFrameId !== undefined) {
     pendingIcmpReplies.push({ requestFrameId: merged.icmpMatchedRequestFrameId, replyId: id });
   }
@@ -627,9 +712,12 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   treeCache.clear();
   revisitedTrees.clear();
   derivedStore.clear();
-  pendingPackets = [];
+  clearPendingRows();
   pendingIcmpReplies = [];
   pendingInfoPatches = [];
+  // Rows of the capture before this one may still be half read at either end.
+  windowSender.reset();
+  storeSender.reset();
   capturedSinceReset = false;
   pendingRecords = [];
   // A restored session hands back the capture it is continuing (`resumeLive`).
@@ -797,7 +885,7 @@ function ingest(frame: LiveFrame, id: number): void {
     cacheTree(id, packet.layers);
     packet.layers = [];
 
-    pendingPackets.push(packet);
+    queueRow(packet);
     if (decoded.icmpMatchedRequestFrameId !== undefined) {
       pendingIcmpReplies.push({ requestFrameId: decoded.icmpMatchedRequestFrameId, replyId: id });
     }
@@ -995,7 +1083,7 @@ function flush(): void {
       return {
         id, bytes: frame.bytes, tsUs: frame.tsUs, relativeTime, timeDelta, origLen: frame.origLen,
         linktype: linkTypeFor(frame.iface), iface: frame.iface,
-        facts: { nanosRemainder: precision > 6 ? frame.tsNsRem : undefined },
+        facts: { nanosRemainder: precision > 6 ? frame.tsNsRem : undefined, holeBefore: frame.holeBefore },
         meta: frame,
       };
     }));
@@ -1043,7 +1131,14 @@ function postFlushed(): void {
   // rather than per frame because a duplicate is a relationship BETWEEN
   // frames, and the two copies routinely land in one flush.
   if (interfaces.length > 1 && pendingPackets.length > 0) {
-    for (const mark of duplicates.scan(pendingPackets)) {
+    // Whole, because the coordinator decodes every row with more than one
+    // interface. A stub here means the interfaces changed under rows already
+    // merged; they are left out of the scan, and said so.
+    const whole = pendingPackets.filter(isWholePacket);
+    if (whole.length !== pendingPackets.length) {
+      post({ type: 'failure', message: 'duplicate frames were not looked for in some rows: the adapters changed while they were being dissected' });
+    }
+    for (const mark of duplicates.scan(whole)) {
       pendingInfoPatches.push({ frameId: mark.frameId, suffix: duplicateSuffix(mark) });
     }
   }
@@ -1060,9 +1155,11 @@ function postFlushed(): void {
     return;
   }
   const packets = pendingPackets;
+  const refs = pendingRefs;
+  const overlays = pendingOverlays;
   const icmpReplies = pendingIcmpReplies;
   const infoPatches = pendingInfoPatches;
-  pendingPackets = [];
+  clearPendingRows();
   pendingIcmpReplies = [];
   pendingInfoPatches = [];
 
@@ -1110,13 +1207,50 @@ function postFlushed(): void {
   // for its whole patch horizon. A row whose id is in the run this Worker sent
   // goes as a row and nothing else (`bytesSent`); any other - an agent's
   // metadata-only frame - carries its bytes, as the window's always did.
+  //
+  // **A shard's rows go on as the pack the shard made** (`rowPack.ts`), to the
+  // window and, separately, to the store; both get the same order, so the
+  // store's digest, which drops an id at or below the last it folded, sees
+  // rows as it always did. The window's copy of each pack is cloned, never
+  // moved: a later flush, or a store port that arrives mid-capture, may need a
+  // pack this flush already sent.
   const stored = storePort !== null;
+  const windowRows = new PackedFlush();
+  const storeRows = storePort !== null ? new PackedFlush() : null;
+  const storeObjects: Packet[] = [];
+  // Every row, when none went as a pack; then `postRows` sends them whole.
+  const wholeRows: Packet[] = [];
+  let storePacked = false;
+  for (let i = 0; i < packets.length; i++) {
+    const packet = packets[i];
+    const ref = refs[i];
+    if (ref === null) {
+      const whole = wholeRow(packet);
+      wholeRows.push(whole);
+      windowRows.object(whole);
+      if (storeRows !== null) {
+        storeRows.object(whole);
+        if (inSentRun(whole)) storeObjects.push(whole);
+      }
+      continue;
+    }
+    windowRows.packed(ref.pack, ref.index, packet.rawBytes, overlays[i]);
+    if (storeRows !== null) {
+      storeRows.packed(ref.pack, ref.index, inSentRun(packet) ? null : packet.rawBytes, overlays[i]);
+      storePacked = true;
+    }
+  }
   if (storePort !== null) {
-    if (packets.length > 0) postRows(storePort, packets);
+    if (storeRows !== null && storePacked) {
+      // Before `postPackedRows` swaps any bytes out: `inSentRun` reads their length.
+      postPackedRows(storePort, storeRows, Uint8Array.from(packets, (p) => (inSentRun(p) ? 1 : 0)), storeObjects);
+    } else if (wholeRows.length > 0) postRows(storePort, wholeRows);
     if (infoPatches.length > 0) storePort.postMessage({ type: 'patches', patches: infoPatches });
   }
 
-  post({ type: 'frames', packets, icmpReplies, infoPatches, lateCount: ordering.lateCount, stored }, transfer);
+  post({
+    type: 'frames', rows: windowSender.seal(windowRows), icmpReplies, infoPatches, lateCount: ordering.lateCount, stored,
+  }, transfer);
   // Owed until the app says it committed them (`rowsTaken`).
   flow.rowsPosted(packets.length);
   lastPostedAt = performance.now();
@@ -1124,6 +1258,29 @@ function postFlushed(): void {
 
 /** An empty view, for a row whose bytes stay behind; never detached, never written. */
 const NO_ROW_BYTES = new Uint8Array(0);
+
+/** Whether this Worker already posted the row's bytes to the store, so the row travels without them. */
+function inSentRun(packet: RowStub): boolean {
+  return packet.id >= bytesSentFrom && packet.id <= bytesSentThrough && packet.rawBytes.byteLength > 0;
+}
+
+/**
+ * A flush that holds packed rows, to the store as one message in merged order.
+ * `sent` says, row by row, which rows' bytes went ahead (`inSentRun`) - the
+ * store cannot tell from an empty `rawBytes`, which an agent's metadata-only
+ * frame also has. A packed row in the run was sealed with no bytes, and an
+ * object in the run has its `rawBytes` swapped out for the synchronous clone,
+ * as `postRows` does.
+ */
+function postPackedRows(port: MessagePort, flush: PackedFlush, sent: Uint8Array, inRun: readonly Packet[]): void {
+  const bytes = inRun.map((packet) => packet.rawBytes);
+  for (const packet of inRun) packet.rawBytes = NO_ROW_BYTES;
+  try {
+    port.postMessage({ type: 'appendPacked', rows: storeSender.seal(flush), sent });
+  } finally {
+    for (let i = 0; i < inRun.length; i++) inRun[i].rawBytes = bytes[i];
+  }
+}
 
 /**
  * A flush's rows to the store: those whose bytes went out on this port as rows
@@ -1136,7 +1293,7 @@ function postRows(port: MessagePort, packets: readonly Packet[]): void {
   const rows: Packet[] = [];
   const withBytes: Packet[] = [];
   for (const packet of packets) {
-    if (packet.id >= bytesSentFrom && packet.id <= bytesSentThrough && packet.rawBytes.byteLength > 0) rows.push(packet);
+    if (inSentRun(packet)) rows.push(packet);
     else withBytes.push(packet);
   }
   if (rows.length > 0) {
@@ -1312,8 +1469,12 @@ function receiveControl(text: string): void {
     // from now on is annotated as it is built. It is forwarded as well: the
     // main thread keeps its own copy of the store to re-annotate frames that
     // were already dissected before this table arrived - the same split
-    // `keyLog` has, for the same reason.
-    flowAnnotations.apply(message, Date.now() * 1000);
+    // `keyLog` has, for the same reason. The shards get it too, ahead of any
+    // frame dispatched after this point.
+    const nowUs = Date.now() * 1000;
+    flowAnnotations.apply(message, nowUs);
+    lastFlows = { type: 'flows', table: message, nowUs };
+    parallel?.coordinator.broadcast(lastFlows);
     post({ type: 'agent', message });
     return;
   }
@@ -1356,7 +1517,7 @@ function receiveControl(text: string): void {
   } else {
     // Metadata only, from an agent that sent no bytes. Nothing is fabricated:
     // the frame is what the agent said it was and no more.
-    pendingPackets.push(buildFallbackPacket({
+    queueRow(buildFallbackPacket({
       id: nextId++,
       tsUs,
       relativeTime: frameClock().liveStartUs === null ? 0 : (tsUs - frameClock().liveStartUs!) / 1_000_000,
@@ -1404,6 +1565,8 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       if (!port) break;
       storePort = port;
       bytesSentFrom = bytesSentThrough = -1;
+      // A new store has been sent no pack, and its reader holds none.
+      storeSender.reset();
       // Frames and records go out on it; the one thing that comes back is a
       // revisit kit this Worker asked for (ADR 0049). Everything else the store
       // says goes to the app's own port - `entry.ts` keeps them apart.
@@ -1522,7 +1685,10 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
     case 'interfaces':
       interfaces = command.interfaces;
       rebuildInterfaceIndex();
-      parallel?.coordinator.broadcast(interfacesMessage());
+      if (parallel !== null) {
+        parallel.coordinator.decodeRows = interfaces.length > 1;
+        parallel.coordinator.broadcast(interfacesMessage());
+      }
       break;
 
     case 'host':
@@ -1546,6 +1712,8 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       // let a port reused since then be attributed to the process that held
       // it during a capture that is no longer on screen.
       flowAnnotations.clear();
+      lastFlows = null;
+      parallel?.coordinator.broadcast({ type: 'flowsClear' });
       // Fingerprints are learned from THIS capture's attributions. Carrying
       // them into the next one would keep applying a label whose evidence has
       // been discarded.

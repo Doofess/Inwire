@@ -2000,12 +2000,19 @@ export default function App() {
    * taught in frame 12 has to keep naming its address after a filter has
    * hidden frame 12. Folded one packet at a time, because a full pass over
    * 50,000 frames ten times a second is the thing this hook exists to avoid.
+   *
+   * A trim of the window's head does not refold it: `drop` does nothing, so a
+   * name taught by a frame that has since left RAM keeps naming its address
+   * (the capture said so). The map is bounded by its own entry cap, not by the
+   * window.
    */
   const nameMap = useIncrementalAggregate(
     packets,
     () => new NameResolutionMap(),
     (map, packet) => map.learnFromPacket(packet),
     (map) => nameSnapshot(map),
+    [],
+    () => {},
   );
 
   /**
@@ -2015,12 +2022,17 @@ export default function App() {
    * Expert Information list is what a filter gets narrowed FROM, and one that
    * shrank as the filter tightened could never be used to find the thing worth
    * filtering on.
+   *
+   * A trim of the window's head takes the trimmed frames back out, so the log
+   * stays the window's and a trim costs the frames it removes.
    */
   const expertLog = useIncrementalAggregate(
     packets,
     () => new ExpertLog(),
     (log, packet) => log.add(packet),
     (log) => expertSnapshot(log),
+    [],
+    (log, packet) => log.remove(packet),
   );
 
 

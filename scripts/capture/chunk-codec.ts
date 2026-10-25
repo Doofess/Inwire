@@ -28,12 +28,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import {
   encodeChunk, decodeChunk, applyPrefixes, PrefixBlock, ChunkDirectory, chunkStoresLinkType, CHUNK_VERSION,
+  ROW_LAYOUT_VERSION, CHUNK_MAGIC, encodePackedChunk, selectRows, type ChunkSlot,
   DIRECTORY_BYTES, prefixBlockBytes,
   CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND, LAYER_BIT_ORDER,
 } from '../../src/services/capture/chunkCodec';
 import { LAYERS } from '../../src/services/dissect/fieldRegistry';
 import { PcapService } from '../../src/services/pcapParser';
 import { fieldEntries } from '../../src/services/dissect/fieldAccess';
+import { packRows, unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
+import { applyOverlay, type RowOverlay } from '../../src/services/pipeline/rowOverlay';
+import { applyInfoPatch } from '../../src/services/dissect/infoPatch';
+import type { InfoPatch } from '../../src/services/dissect/types';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -365,6 +370,410 @@ console.log('\n--- refusals ---\n');
     () => decodeChunk(new Uint8Array([...encoded.summary, 0])));
 }
 
+{
+  // The container is one version above what a row is laid out in. Writers go on
+  // writing rows as version 2; only a chunk of packs is a version-3 container.
+  check('the row layout is 2 and the newest readable container is 3', [ROW_LAYOUT_VERSION, CHUNK_VERSION], [2, 3]);
+  const encoded = encodeChunk([frame()], [0]);
+  check('encodeChunk writes the row layout by default', encoded.summary[4], ROW_LAYOUT_VERSION);
+  checkThrows('a version above the newest container is refused',
+    () => { const bad = encoded.summary.slice(); bad[4] = CHUNK_VERSION + 1; return decodeChunk(bad); });
+}
+
+console.log('\n--- chunk version 3: shard packs as segments ---\n');
+
+/**
+ * Structural equality, written out because the two usual shortcuts both lie
+ * here: `JSON.stringify` throws on a bigint and drops a key whose value is
+ * undefined, and a key that is present with value undefined is exactly the
+ * bug the overlay's undefined `expert` / `tsNanos` must not cause.
+ */
+function firstDifference(a: unknown, b: unknown, path = ''): string | null {
+  if (typeof a === 'bigint' || typeof b === 'bigint') return a === b ? null : `${path}: bigint ${String(a)} vs ${String(b)}`;
+  if (a instanceof Uint8Array || b instanceof Uint8Array) {
+    if (!(a instanceof Uint8Array && b instanceof Uint8Array)) return `${path}: bytes vs not bytes`;
+    if (a.length !== b.length) return `${path}: ${a.length} bytes vs ${b.length}`;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return `${path}[${i}]: byte differs`;
+    return null;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return `${path}: array vs not an array`;
+    if (a.length !== b.length) return `${path}: length ${a.length} vs ${b.length}`;
+    for (let i = 0; i < a.length; i++) {
+      const d = firstDifference(a[i], b[i], `${path}[${i}]`);
+      if (d !== null) return d;
+    }
+    return null;
+  }
+  if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+    const ka = Object.keys(a).sort();
+    const kb = Object.keys(b).sort();
+    if (ka.join('\u0000') !== kb.join('\u0000')) {
+      const only = ka.filter((k) => !kb.includes(k)).concat(kb.filter((k) => !ka.includes(k)));
+      return `${path}: keys differ (${only.join(', ')})`;
+    }
+    for (const k of ka) {
+      const d = firstDifference((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${path}.${k}`);
+      if (d !== null) return d;
+    }
+    return null;
+  }
+  return a === b || (Number.isNaN(a) && Number.isNaN(b)) ? null : `${path}: ${String(a)} vs ${String(b)}`;
+}
+
+function sameRows(name: string, actual: readonly Packet[], expected: readonly Packet[]): void {
+  let bad = actual.length === expected.length ? 0 : 1;
+  let first: string | null = actual.length === expected.length ? null : `length ${actual.length} vs ${expected.length}`;
+  for (let i = 0; i < Math.min(actual.length, expected.length); i++) {
+    const d = firstDifference(actual[i], expected[i], `row ${i}`);
+    if (d !== null) { bad++; first ??= d; }
+  }
+  check(name, bad, 0);
+  if (first !== null) console.log(`        first difference: ${first}`);
+}
+
+function sameBytes(name: string, actual: Uint8Array, expected: Uint8Array): void {
+  let at = -1;
+  if (actual.length !== expected.length) at = Math.min(actual.length, expected.length);
+  else for (let i = 0; i < actual.length; i++) if (actual[i] !== expected[i]) { at = i; break; }
+  check(name, at, -1);
+  if (at >= 0) console.log(`        first differing byte ${at} (row ${Math.floor(at / PREFIX_BYTES)}, offset ${at % PREFIX_BYTES})`);
+}
+
+{
+  check('the comparison sees a key that is present but undefined', firstDifference({ a: undefined }, {}) !== null, true);
+  check('...a bigint that differs', firstDifference({ a: 1n }, { a: 2n }) !== null, true);
+  check('...a byte that differs', firstDifference(new Uint8Array([1]), new Uint8Array([2])) !== null, true);
+  check('...and calls equal things equal', firstDifference({ a: [1n, 'x', new Uint8Array([3])] }, { a: [1n, 'x', new Uint8Array([3])] }), null);
+}
+
+/** A row with a different shape for each residue, so every branch of the codec is on the path. */
+function mk(id: number): Packet {
+  const k = id % 7;
+  const tsUs = 1_788_477_971_000_000 + id * 1_000;
+  return frame({
+    id,
+    tsUs,
+    length: 60 + (id % 1400),
+    relativeTime: id * 0.001,
+    timeDelta: k * 0.0001,
+    source: k === 3 ? '2606:2800:220:1::1' : k === 5 ? 'router.local' : `10.0.${(id >> 8) & 255}.${id & 255}`,
+    destination: k === 3 ? 'fe80::1' : k === 6 ? '00:1a:2b:3c:4d:5e' : '93.184.216.34',
+    protocol: k === 2 ? 'UDP' : 'TCP',
+    info: `Seq=${id} Len=${k}`,
+    status: k === 4 ? 'warning' : k === 6 ? 'retransmit' : 'ok',
+    ...(k === 1 ? { protocolLabel: 'TLSv1.3', direction: 3 } : {}),
+    ...(k < 5 ? { sourcePort: 40_000 + k, destPort: 443 } : {}),
+    ...(id % 3 === 0 ? { streamId: id } : {}),
+    ...(k % 2 === 0 ? { tsNanos: BigInt(tsUs) * 1000n + BigInt(id % 1000), tsPrecision: 9 } : {}),
+    ...(id % 5 === 0 ? { linkType: 101 } : {}),
+    ...(k !== 3 ? { frameProtocols: ['frame', 'eth', 'ip', 'tcp'] } : {}),
+    ...(k === 4 ? { analysisFlags: ['retransmission'] } : k === 0 ? {} : { analysisFlags: [] }),
+    ...(k === 2 ? { expert: [{ message: 'Possible loss', category: 'Loss' as const }, { message: 'Bare finding' }] } : {}),
+    ...(k === 5 ? { resolved: [{ name: 'router.local', addresses: ['10.0.0.1', 'fe80::1'] }] } : {}),
+    ...(k === 0 ? {} : k === 1 ? { fields: {} } : { fields: { 'tcp.srcport': 40_000 + k, 'http.host': `h${k}.example`, 'tcp.seq': id } }),
+  });
+}
+
+const OVERLAYS: RowOverlay[] = [
+  { fields: { 'tls.stream': 3 } },
+  { fields: { 'inwire.process.name': 'curl.exe', 'inwire.process.pid': 4242, 'tls.stream': 9 } },
+  { fields: {} },
+  { expert: [{ message: 'Live gap', category: 'CaptureGap' }, { message: 'Bare' }] },
+  { expert: undefined },
+  { expert: [] },
+  { tsPrecision: 9 },
+  { tsPrecision: undefined },
+  { tsNanos: 1_788_477_971_653_284_512n },
+  { tsNanos: undefined },
+  { tsNanos: 5n },
+  { tsNanos: 7_000n },
+  { fields: { 'inwire.live.skipped': 12 }, expert: [{ message: 'Skipped' }], tsPrecision: 6, tsNanos: 1_788_477_971_000_000_999n },
+  { expert: undefined, tsPrecision: undefined, tsNanos: undefined },
+  {},
+];
+
+const PATCHES: (InfoPatch[] | null)[] = [
+  [{ frameId: 0, suffix: ' [TCP PDU reassembled in 99]' }],
+  [{ frameId: 0, protocolLabel: 'TLSv1.2' }],
+  [{ frameId: 0, responseInFrame: 77 }],
+  [{ frameId: 0, links: { 'tcp.reassembled_in': 12, 'ip.reassembled_in': 13 } }],
+  [{ frameId: 0, suffix: '[A]', protocolLabel: 'L', responseInFrame: 5, links: { 'icmp.resp_in': 9 } }],
+  [{ frameId: 0, suffix: '' }],
+  [{ frameId: 0, suffix: ' [one]' }, { frameId: 0, links: { 'tcp.reassembled_in': 4 }, suffix: ' [two]' }],
+  null,
+];
+
+/** What the writer does today: the unpacked row, its overlay, then each patch on a copy. */
+function v2Rows(slots: readonly ChunkSlot[], patches: readonly (readonly InfoPatch[] | null)[]): Packet[] {
+  const unpacked = new Map<number, Packet[]>();
+  return slots.map((slot, i) => {
+    let row: Packet;
+    if ('pack' in slot) {
+      let rows = unpacked.get(slot.pack.key);
+      if (rows === undefined) { rows = unpackRows(slot.pack); unpacked.set(slot.pack.key, rows); }
+      row = rows[slot.index];
+      if (slot.overlay !== null) applyOverlay(row, slot.overlay);
+    } else {
+      row = { ...slot };
+    }
+    for (const patch of patches[i] ?? []) {
+      const copy = { ...row };
+      applyInfoPatch(copy, patch);
+      row = copy;
+    }
+    return row;
+  });
+}
+
+function bothWays(slots: readonly ChunkSlot[], patches: readonly (readonly InfoPatch[] | null)[], caps: number[]) {
+  const v2 = encodeChunk(v2Rows(slots, patches), caps);
+  const expected = decodeChunk(v2.summary);
+  applyPrefixes(expected, v2.prefix);
+  const v3 = encodePackedChunk(slots, caps, patches);
+  const actual = decodeChunk(v3.summary);
+  applyPrefixes(actual, v3.prefix);
+  return { v2, v3, expected, actual };
+}
+
+/** Reads a version-3 container's layout, independently of the decoder. */
+function parseContainer(s: Uint8Array) {
+  const v = new DataView(s.buffer, s.byteOffset, s.byteLength);
+  const frameCount = v.getUint32(8, true);
+  const segCount = v.getUint16(12, true);
+  const segments: { kind: number; bytes: Uint8Array }[] = [];
+  let at = 14;
+  for (let i = 0; i < segCount; i++) {
+    const len = v.getUint32(at + 1, true);
+    segments.push({ kind: s[at], bytes: s.subarray(at + 5, at + 5 + len) });
+    at += 5 + len;
+  }
+  return { version: v.getUint16(4, true), frameCount, segCount, segments, laneAt: at, tailAt: at + frameCount * 2 };
+}
+
+const EMPTY_SECTIONS = new Uint8Array(16);
+
+/** A container written by hand, so a malformed one can be made on purpose. */
+function container(segments: { kind: number; bytes: Uint8Array }[], lane: number[], tail: Uint8Array = EMPTY_SECTIONS): Uint8Array {
+  const total = 14 + segments.reduce((n, s) => n + 5 + s.bytes.length, 0) + lane.length * 2 + tail.length;
+  const out = new Uint8Array(total);
+  const v = new DataView(out.buffer);
+  v.setUint32(0, CHUNK_MAGIC, true);
+  v.setUint16(4, 3, true);
+  v.setUint32(8, lane.length, true);
+  v.setUint16(12, segments.length, true);
+  let at = 14;
+  for (const s of segments) {
+    out[at] = s.kind;
+    v.setUint32(at + 1, s.bytes.length, true);
+    out.set(s.bytes, at + 5);
+    at += 5 + s.bytes.length;
+  }
+  for (const l of lane) { v.setUint16(at, l, true); at += 2; }
+  out.set(tail, at);
+  return out;
+}
+
+{
+  // Four shards' worth of packs, interleaved the way a flush interleaves them,
+  // with id holes, objects and placeholders between them.
+  const SCHEDULE = ['P1', 'P2', 'P2', 'O', 'P3', 'P2', 'P1', 'P4', 'P2', 'PH'] as const;
+  const lanes: Record<string, Packet[]> = { P1: [], P2: [], P3: [], P4: [], O: [], PH: [] };
+  for (let id = 1, n = 0; n < 400; id++) {
+    if (id % 17 === 0) continue;                     // a frame that failed to dissect burns its id
+    const lane = SCHEDULE[n++ % SCHEDULE.length];
+    lanes[lane].push(lane === 'PH'
+      ? frame({ id, source: '', destination: '', info: '', status: 'dropped', length: 0, tsUs: 1_788_477_971_000_000 + id * 1_000 })
+      : mk(id));
+  }
+  const packs: Record<string, RowPack> = {};
+  let key = 1;
+  for (const name of ['P1', 'P2', 'P3', 'P4']) {
+    // The pack's own directory lanes use lengths the chunk never sees.
+    packs[name] = packRows(key++, lanes[name], lanes[name].map((_, i) => 9000 + i));
+  }
+  const used: Record<string, number[]> = {
+    P1: lanes.P1.map((_, i) => i),                              // every row: the summary goes in verbatim
+    P2: Array.from({ length: 60 }, (_, i) => i + 20),           // 60 of 160: a selection
+    P3: [0, 8, 16, 24, 32],                                     // 5 of 40: under 16, so re-encoded
+    P4: lanes.P4.map((_, i) => i),
+  };
+  const entries: { id: number; slot: ChunkSlot }[] = [];
+  for (const name of ['P1', 'P2', 'P3', 'P4']) {
+    for (const index of used[name]) {
+      const id = lanes[name][index].id;
+      entries.push({ id, slot: { pack: packs[name], index, overlay: id % 3 === 0 ? OVERLAYS[id % OVERLAYS.length] : null, id } });
+    }
+  }
+  for (const name of ['O', 'PH']) for (const p of lanes[name]) entries.push({ id: p.id, slot: p });
+  entries.sort((a, b) => a.id - b.id);
+  const slots = entries.map((e) => e.slot);
+  const patches = slots.map((_, i) => {
+    if (i % 5 !== 0) return null;
+    const list = PATCHES[(i / 5) % PATCHES.length];
+    return list === null ? null : list.map((p) => ({ ...p, frameId: entries[i].id }));
+  });
+  const caps = slots.map((_, i) => 100 + (i % 37) * 3);
+
+  const { v2, v3, expected, actual } = bothWays(slots, patches, caps);
+  const layout = parseContainer(v3.summary);
+  check('a chunk of packs is a version-3 container', layout.version, 3);
+  check('...of three pack segments and one run', layout.segments.map((s) => s.kind), [0, 0, 0, 1]);
+  // Segments are in the order the chunk first meets each pack; P2's first row here is its 21st.
+  sameBytes('a whole pack goes in as its own bytes', layout.segments[0].bytes, packs.P1.summary);
+  sameBytes('...and so does another used in full', layout.segments[1].bytes, packs.P4.summary);
+  check('...a split pack as a selection of its rows', decodeChunk(layout.segments[2].bytes).length, 60);
+  check('...and the run holds the objects, the placeholders and the demoted pieces',
+    decodeChunk(layout.segments[3].bytes).length, lanes.O.length + lanes.PH.length + 5);
+  check('the chunk has all its rows', [slots.length, actual.length], [slots.length, expected.length]);
+
+  sameRows('(a) packed slots decode to what re-encoding the same rows decodes to', actual, expected);
+  sameBytes('(b) the prefix block is byte-identical to the re-encoded one', v3.prefix, v2.prefix);
+  check('...and so are its first and last ids and timestamps',
+    [v3.frameCount, v3.firstId, v3.lastId, v3.firstTsUs, v3.lastTsUs],
+    [v2.frameCount, v2.firstId, v2.lastId, v2.firstTsUs, v2.lastTsUs]);
+  const dir = new ChunkDirectory(v3.prefix, slots.length);
+  check('the directory lanes come from the slots, not from the packs',
+    [dir.id(0), dir.id(slots.length - 1), dir.capLength(0), dir.capLength(3), dir.totalBytes],
+    [entries[0].id, entries[slots.length - 1].id, caps[0], caps[3], caps.reduce((a, b) => a + b, 0)]);
+  check('a v3 summary says its rows record a link type', chunkStoresLinkType(v3.summary), true);
+}
+
+{
+  // (c) A selection decodes to the rows chosen, with their strings remapped.
+  const rows = Array.from({ length: 64 }, (_, i) => mk(i + 1));
+  const pack = packRows(1, rows, rows.map((_, i) => i));
+  const decodedAll = unpackRows(pack);
+  const sets: number[][] = [[0], [63], [3, 5, 6, 40], rows.map((_, i) => i), rows.map((_, i) => i).filter((i) => i % 2 === 1)];
+  for (const idx of sets) {
+    const selected = selectRows(pack.summary, idx);
+    const got = decodeChunk(selected);
+    const want = decodeChunk(encodeChunk(idx.map((i) => decodedAll[i]), idx.map(() => 0)).summary);
+    sameRows(`(c) selectRows of ${idx.length} row(s) decodes to the same rows as encoding them`, got, want);
+    sameBytes(`...and is the same bytes (${idx.length})`, selected, encodeChunk(idx.map((i) => decodedAll[i]), idx.map(() => 0)).summary);
+  }
+  checkThrows('selecting no rows is refused', () => selectRows(pack.summary, []));
+  checkThrows('selecting a row past the end is refused', () => selectRows(pack.summary, [64]));
+  checkThrows('selecting out of order is refused', () => selectRows(pack.summary, [5, 3]));
+  checkThrows('selecting a row twice is refused', () => selectRows(pack.summary, [3, 3]));
+  checkThrows('selecting from a container is refused', () => selectRows(container([{ kind: 0, bytes: pack.summary }], rows.map(() => 0)), [0]));
+}
+
+{
+  // (d) Every kind of overlay, with every kind of patch, on every shape of row.
+  const rows = Array.from({ length: 28 }, (_, i) => mk(i + 1));
+  const pack = packRows(1, rows, rows.map(() => 0));
+  let bad = 0;
+  let first = '';
+  OVERLAYS.forEach((overlay, c) => {
+    const slots: ChunkSlot[] = rows.map((r, index) => ({ pack, index, overlay, id: r.id }));
+    const patches = rows.map((r, i) => {
+      const list = PATCHES[(i + c) % PATCHES.length];
+      return list === null ? null : list.map((p) => ({ ...p, frameId: r.id }));
+    });
+    const { v2, v3, expected, actual } = bothWays(slots, patches, rows.map((_, i) => 60 + i));
+    const d = firstDifference(actual, expected, `overlay ${c}`);
+    if (d !== null) { bad++; first ||= d; }
+    if (Buffer.compare(Buffer.from(v3.prefix), Buffer.from(v2.prefix)) !== 0) { bad++; first ||= `overlay ${c}: prefix differs`; }
+    if ('expert' in overlay && overlay.expert === undefined) {
+      if (actual.some((p) => 'expert' in p)) { bad++; first ||= `overlay ${c}: an undefined expert left a key behind`; }
+    }
+    if ('tsNanos' in overlay && overlay.tsNanos === undefined) {
+      if (actual.some((p) => 'tsNanos' in p)) { bad++; first ||= `overlay ${c}: an undefined tsNanos left a key behind`; }
+    }
+    if ('tsPrecision' in overlay && overlay.tsPrecision === undefined) {
+      if (actual.some((p) => 'tsPrecision' in p)) { bad++; first ||= `overlay ${c}: an undefined tsPrecision left a key behind`; }
+    }
+  });
+  check(`(d) ${OVERLAYS.length} overlays x ${PATCHES.length} patch shapes x 28 row shapes decode as the re-encoded path does`, bad, 0);
+  if (first) console.log(`        first difference: ${first}`);
+
+  // The nanosecond remainder is the one prefix field an overlay can change.
+  // Row 1 (id 2) carries a remainder of 2 in its pack; the overlay says 123.
+  const remainder = (overlay: RowOverlay | null): number => {
+    const { prefix } = encodePackedChunk([{ pack, index: 1, overlay, id: rows[1].id }], [0], [null]);
+    return new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getUint16(64, true);
+  };
+  check('(d) an overlay that sets tsNanos rewrites the prefix remainder, and none leaves the pack\'s',
+    [remainder({ tsNanos: 1_788_477_971_000_000_123n }), remainder(null), remainder({ tsNanos: undefined })], [123, 2, 0]);
+}
+
+{
+  // (e) Older summaries still decode, and a row written today is still version 2.
+  const rows = [mk(1), mk(2), mk(3)];
+  const v1 = encodeChunk(rows, [0, 0, 0], 1);
+  const v1Back = decodeChunk(v1.summary);
+  check('(e) a version-1 chunk still decodes', v1Back.map((p) => p.id), [1, 2, 3]);
+  check('...and has no link type', v1Back.some((p) => 'linkType' in p), false);
+  const v2 = encodeChunk(rows, [0, 0, 0]);
+  check('...a version-2 chunk decodes to its rows', roundTrip(rows).map(shapeOf), rows.map(shapeOf));
+  check('...and is version 2', v2.summary[4], 2);
+}
+
+{
+  // (f) A container that does not add up is refused, never partly decoded.
+  const a = encodeChunk([mk(1), mk(3), mk(5)], [0, 0, 0]).summary;
+  const b = encodeChunk([mk(2), mk(4), mk(6)], [0, 0, 0]).summary;
+  const segs = [{ kind: 0, bytes: a }, { kind: 0, bytes: b }];
+  check('(f) a well-formed container decodes in lane order', decodeChunk(container(segs, [0, 1, 0, 1, 0, 1])).map((p) => p.id), [1, 2, 3, 4, 5, 6]);
+  checkThrows('(f) a lane naming a segment that is not there', () => decodeChunk(container(segs, [0, 1, 0, 1, 0, 2])));
+  checkThrows('...two rows swapped across segments, so ids fall', () => decodeChunk(container(segs, [1, 0, 0, 1, 0, 1])));
+  checkThrows('...a lane that leaves a segment row unplaced', () => decodeChunk(container(segs, [0, 1, 0, 1, 0, 0])));
+  checkThrows('...a lane that asks a segment for a row it has not got', () => decodeChunk(container(segs, [0, 0, 0, 0, 1, 1])));
+  checkThrows('...ids out of order across segments', () => decodeChunk(container(segs, [0, 0, 0, 1, 1, 1])));
+  const low = encodeChunk([mk(1), mk(2), mk(3)], [0, 0, 0]).summary;
+  const high = encodeChunk([mk(4), mk(5), mk(6)], [0, 0, 0]).summary;
+  check('...while the same lane over segments that ascend is fine',
+    decodeChunk(container([{ kind: 0, bytes: low }, { kind: 1, bytes: high }], [0, 0, 0, 1, 1, 1])).map((p) => p.id),
+    [1, 2, 3, 4, 5, 6]);
+
+  // A lane can ascend and still be wrong: rows that are all the container's, in
+  // order, but not the ones the chunk was written with. The prefix's id lane is
+  // the writer's own, so joining the blocks checks one against the other.
+  const right = encodeChunk([mk(1), mk(2), mk(3), mk(4), mk(5), mk(7)], [0, 0, 0, 0, 0, 0]);
+  const wrongRows = decodeChunk(container([{ kind: 0, bytes: low }, { kind: 1, bytes: high }], [0, 0, 0, 1, 1, 1]));
+  checkThrows('(f) rows whose ids disagree with the prefix\'s directory are refused when the blocks are joined',
+    () => applyPrefixes(wrongRows, right.prefix));
+  const rightRows = decodeChunk(right.summary);
+  applyPrefixes(rightRows, right.prefix);
+  check('...while the rows the prefix was written with join it', rightRows.map((p) => p.id), [1, 2, 3, 4, 5, 7]);
+}
+
+{
+  // Truncation anywhere, and bytes past the end, on a container with every section in use.
+  const rows = Array.from({ length: 24 }, (_, i) => mk(i + 1));
+  const pack = packRows(1, rows, rows.map(() => 0));
+  const slots: ChunkSlot[] = rows.map((r, index) => ({ pack, index, overlay: OVERLAYS[index % OVERLAYS.length], id: r.id }));
+  const patches = rows.map((r, i) => {
+    const list = PATCHES[i % PATCHES.length];
+    return list === null ? null : list.map((p) => ({ ...p, frameId: r.id }));
+  });
+  const { summary } = encodePackedChunk(slots, rows.map(() => 0), patches);
+  decodeChunk(summary);
+  let accepted = 0;
+  for (let cut = 0; cut < summary.length; cut++) {
+    try { decodeChunk(summary.subarray(0, cut)); accepted++; } catch { /* refused, as it must be */ }
+  }
+  check(`(f) every one of the ${summary.length} truncations of a container is refused`, accepted, 0);
+  checkThrows('(f) a byte after the last section is refused', () => decodeChunk(new Uint8Array([...summary, 0])));
+  const nested = encodePackedChunk(slots.slice(0, 3), [0, 0, 0], [null, null, null]).summary;
+  checkThrows('(f) a container nested inside a segment is refused',
+    () => decodeChunk(container([{ kind: 0, bytes: nested }], [0, 0, 0])));
+  checkThrows('(f) a segment that is not a version-2 summary is refused',
+    () => decodeChunk(container([{ kind: 0, bytes: encodeChunk([mk(1)], [0], 1).summary }], [0])));
+  checkThrows('(f) a segment length that runs past the end is refused',
+    () => { const bad = summary.slice(); new DataView(bad.buffer).setUint32(15, 0x7fffffff, true); return decodeChunk(bad); });
+  checkThrows('(f) an unknown segment kind is refused',
+    () => { const bad = summary.slice(); bad[14] = 9; return decodeChunk(bad); });
+  checkThrows('encodePackedChunk refuses a row index outside its pack',
+    () => encodePackedChunk([{ pack, index: 24, overlay: null, id: 99 }], [0], [null]));
+  checkThrows('...ids that do not ascend',
+    () => encodePackedChunk([{ pack, index: 1, overlay: null, id: 5 }, { pack, index: 2, overlay: null, id: 5 }], [0, 0], [null, null]));
+  checkThrows('...a pack index that does not ascend',
+    () => encodePackedChunk([{ pack, index: 3, overlay: null, id: 4 }, { pack, index: 2, overlay: null, id: 5 }], [0, 0], [null, null]));
+  checkThrows('...an empty chunk', () => encodePackedChunk([], [], []));
+}
+
 console.log('\n--- against real frames ---\n');
 
 const FIXTURES: Record<string, string> = {
@@ -430,7 +839,7 @@ async function realFrames(): Promise<void> {
         return show(want) !== show(got);
       }).length, 0);
     check(`${name}: ...and says its rows do not record a link type`,
-      [chunkStoresLinkType(v1.summary), chunkStoresLinkType(encoded.summary), CHUNK_VERSION], [false, true, 2]);
+      [chunkStoresLinkType(v1.summary), chunkStoresLinkType(encoded.summary), ROW_LAYOUT_VERSION], [false, true, 2]);
 
     console.log(`      (${name}: prefix ${(prefixDeflated.length / sample.length).toFixed(1)}`
       + ` + summary ${(summaryDeflated.length / sample.length).toFixed(1)}`
