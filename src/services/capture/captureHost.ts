@@ -42,7 +42,7 @@
  * every handler *remaining* synchronous for ever. It costs one promise per
  * message and it is the difference between an ordering rule and a habit.
  */
-import { CaptureWriter, dataFilesOf, type CaptureFiles } from './captureWriter';
+import { CaptureWriter, dataFilesOf, type CaptureFiles, type CaptureWriterOptions, type RowIn } from './captureWriter';
 import { CaptureReader } from './captureReader';
 import { recoverCapture, type CaptureIndex } from './captureIndex';
 import { planPrune } from './captureDirectory';
@@ -204,6 +204,13 @@ export interface CaptureHostOptions {
   streamOrdinalChunks?: number;
   /** Rows held back while a rebuild runs. Default `DIGEST_DEFERRED_MAX`. Settable so a test can overflow it. */
   digestDeferredMax?: number;
+  /**
+   * Options for every writer this host creates, a continued capture's included.
+   * A test seam (`packNative`, the horizons): production passes nothing, so the
+   * writer's defaults apply. Spread last, but `resumeFrom` and `floorChunk` are
+   * recovery's and are not meant to be given here.
+   */
+  writer?: Partial<CaptureWriterOptions>;
 }
 
 export class CaptureHost {
@@ -229,6 +236,7 @@ export class CaptureHost {
   private readonly deflate: ((bytes: Uint8Array) => Uint8Array) | undefined;
   private readonly inflate: (bytes: Uint8Array) => Uint8Array;
   private readonly streamOrdinalChunks: number;
+  private readonly writerOptions: Partial<CaptureWriterOptions>;
 
   constructor(
     private readonly volume: CaptureVolume,
@@ -240,6 +248,7 @@ export class CaptureHost {
     this.inflate = options.inflate ?? inflateSync;
     this.streamOrdinalChunks = options.streamOrdinalChunks ?? 32;
     this.digestDeferredMax = options.digestDeferredMax ?? DIGEST_DEFERRED_MAX;
+    this.writerOptions = options.writer ?? {};
   }
 
   /**
@@ -446,6 +455,7 @@ export class CaptureHost {
       resumeFrom: records.slice(0, plan.keepRecords),
       floorChunk: plan.floorChunk,
       ...(this.deflate !== undefined ? { deflate: this.deflate } : {}),
+      ...this.writerOptions,
     });
     // The reader shares the writer's index, so a chunk is readable the moment
     // its record is appended rather than only after the file is re-read.
@@ -570,10 +580,12 @@ export class CaptureHost {
    * message it skipped would leave one held for ever.
    */
   private onAppendPacked(message: Extract<ToCapture, { type: 'appendPacked' }>): void {
-    const rows = this.packs.read(message.rows);
-    const sent: Packet[] = [];
-    const carrying: Packet[] = [];
-    for (let i = 0; i < rows.length; i++) (message.sent[i] === 1 ? sent : carrying).push(rows[i]);
+    // `rows` feed the digest, decoded; `slots` are what the writer stages - a
+    // shard's row stays in its pack there, and is decoded only if it must be.
+    const { rows, slots } = this.packs.readSlots(message.rows);
+    const sent: RowIn[] = [];
+    const carrying: RowIn[] = [];
+    for (let i = 0; i < slots.length; i++) (message.sent[i] === 1 ? sent : carrying).push(slots[i]);
     this.appendRows(rows, sent, carrying);
   }
 
@@ -581,8 +593,9 @@ export class CaptureHost {
    * `rows` in the order they arrived, split into `sent` (their bytes went ahead
    * on this port) and `carrying` (they bring their own). The digest takes them
    * in arrival order, not the split's: it drops an id at or below the last.
+   * The split holds what the writer takes: the same rows, or their pack slots.
    */
-  private appendRows(rows: readonly Packet[], sent: readonly Packet[], carrying: readonly Packet[]): void {
+  private appendRows(rows: readonly Packet[], sent: readonly RowIn[], carrying: readonly RowIn[]): void {
     if (this.open === null) {
       // Ordering is guaranteed by the queue, so this can only mean the app
       // appended without starting - a wiring error rather than a race. It was

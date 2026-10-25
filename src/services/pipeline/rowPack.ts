@@ -23,6 +23,7 @@
  */
 import type { Packet } from '../../types/packet';
 import { applyPrefixes, decodeChunk, encodeChunk } from '../capture/chunkCodec';
+import type { PackedRowIn, RowIn } from '../capture/captureWriter';
 import { applyOverlay, type RowOverlay } from './rowOverlay';
 
 export interface RowPack {
@@ -131,6 +132,7 @@ export class PackSender {
 }
 
 interface Held {
+  pack: RowPack;
   rows: Packet[];
   left: number;
 }
@@ -141,8 +143,28 @@ export class PackReader {
 
   /** Every row of the flush, in order, with its bytes and overlay applied. */
   read(flush: PackedRows): Packet[] {
+    return this.take(flush, null);
+  }
+
+  /**
+   * The flush twice over, from one pass: `rows` exactly as `read` returns them
+   * (decoded, bytes set, overlays applied: what the digest folds), and `slots`,
+   * the same rows in the same order as the store's writer is handed them. A
+   * packed row's slot keeps the pack, the position, the flush's overlay for it
+   * (or null) and its id, and carries `rawBytes` only when the flush brought
+   * some; an object row is the object itself. The writer holds the pack beyond
+   * this reader's `left` count, which is the reader's own bookkeeping.
+   */
+  readSlots(flush: PackedRows): { rows: Packet[]; slots: RowIn[] } {
+    const slots: RowIn[] = new Array(flush.order.length / 2);
+    const rows = this.take(flush, slots);
+    return { rows, slots };
+  }
+
+  /** `read`'s body; with `slots` it also fills them, so the two cannot disagree. */
+  private take(flush: PackedRows, slots: RowIn[] | null): Packet[] {
     if (flush.packsReset) this.packs.clear();
-    for (const pack of flush.packs) this.packs.set(pack.key, { rows: unpackRows(pack), left: pack.count });
+    for (const pack of flush.packs) this.packs.set(pack.key, { pack, rows: unpackRows(pack), left: pack.count });
     const { order, objects, bytes } = flush;
     const out: Packet[] = new Array(order.length / 2);
     let packed = 0;
@@ -151,6 +173,7 @@ export class PackReader {
       const index = order[at + 1];
       if (key < 0) {
         out[i] = objects[index];
+        if (slots !== null) slots[i] = objects[index];
         continue;
       }
       const held = this.packs.get(key);
@@ -159,10 +182,19 @@ export class PackReader {
       const row = held.rows[index];
       const frameBytes = bytes[packed++];
       if (frameBytes !== null) row.rawBytes = frameBytes;
+      if (slots !== null) {
+        const slot: PackedRowIn = { pack: held.pack, index, overlay: null, id: row.id };
+        if (frameBytes !== null) slot.rawBytes = frameBytes;
+        slots[i] = slot;
+      }
       if (--held.left === 0) this.packs.delete(key);
       out[i] = row;
     }
-    for (const [position, overlay] of flush.overlays) applyOverlay(out[position], overlay);
+    for (const [position, overlay] of flush.overlays) {
+      applyOverlay(out[position], overlay);
+      const slot = slots?.[position];
+      if (slot !== undefined && 'pack' in slot) slot.overlay = overlay;
+    }
     return out;
   }
 
