@@ -60,6 +60,25 @@ export const HEAP_SAMPLE_MS = 2_000;
  */
 export const HEAP_USABLE_RATIO = 0.9;
 
+/**
+ * A fall between two samples at least this large is a full collection.
+ *
+ * A scavenge frees the young generation, tens of megabytes, about 1-2% of a
+ * heap near its wall. Near the limit a full collection may free under a tenth,
+ * because V8's peaks have little room above the live size there, so the line
+ * sits between the two.
+ */
+export const HEAP_COLLECTED_DROP = 0.05;
+
+/**
+ * Samples past the wall, with no collection among them, that stop a capture.
+ *
+ * The fallback for a heap that never shows a trough. 30 s: after a capture
+ * stopped at 60,000 frames a second, its garbage sat at 4.1 GB for 14 s before
+ * a collection ran (issue #15).
+ */
+export const HEAP_UNCOLLECTED_SAMPLES = 15;
+
 export type HeapVerdict =
   | { level: 'ok' }
   /** Said once. A second warning per sample would be 30 messages a minute. */
@@ -75,7 +94,8 @@ function mb(bytes: number): string {
 /**
  * Whether the renderer should say something, or stop capturing.
  *
- * @param used    Bytes of JS heap in use this sample.
+ * @param used    Bytes of JS heap judged live: what `HeapJudge` makes of the
+ *                samples, never one raw sample, which counts garbage too.
  * @param limit   V8's own limit for this isolate, or 0/null when the browser
  *                will not say. **An unknown limit is not a licence to keep
  *                going and not a reason to stop**: it returns `ok`, because a
@@ -141,6 +161,45 @@ export function readHeap(): HeapReading {
   };
 }
 
+/**
+ * Turns a run of samples into a verdict on the heap's live size.
+ *
+ * `usedJSHeapSize` counts garbage until a full collection runs, and V8 lets the
+ * heap grow to several times its live size before one. At 60,000 frames a
+ * second a live set of 1.1-1.9 GB read as a sawtooth up to 4.1 GB, and a guard
+ * on one sample stopped the capture with nothing near the wall (issue #15). So
+ * this judges a **trough**: a sample that fell by `HEAP_COLLECTED_DROP` or more
+ * from the one before, which is what a collection left plus at most one sample
+ * interval of allocation. A live set that really climbs shows it in its troughs.
+ * A heap past the wall that shows no collection for `HEAP_UNCOLLECTED_SAMPLES`
+ * is judged as it reads.
+ */
+export class HeapJudge {
+  private previous = 0;
+  private trough: number | null = null;
+  private uncollected = 0;
+  private warned = false;
+
+  judge(used: number, limit: number | null): HeapVerdict {
+    if (!limit || limit <= 0 || !Number.isFinite(used) || used <= 0) return OK;
+    const wall = Math.floor(limit * HEAP_USABLE_RATIO);
+    const collected = this.previous > 0 && used <= this.previous * (1 - HEAP_COLLECTED_DROP);
+    this.previous = used;
+    if (collected) {
+      this.trough = used;
+      this.uncollected = 0;
+    } else if (used >= wall) {
+      this.uncollected += 1;
+    } else {
+      this.uncollected = 0;
+    }
+    const live = Math.max(this.trough ?? 0, this.uncollected >= HEAP_UNCOLLECTED_SAMPLES ? used : 0);
+    const verdict = judgeRendererHeap(live, limit, this.warned);
+    if (verdict.level === 'warn') this.warned = true;
+    return verdict;
+  }
+}
+
 export interface HeapGuardHost {
   /** Called once when the heap crosses the warning line. */
   onWarn(message: string): void;
@@ -158,16 +217,15 @@ export interface HeapGuardHost {
  * puts a message on screen.
  */
 export function startRendererHeapGuard(host: HeapGuardHost): () => void {
-  let warned = false;
+  const judge = new HeapJudge();
   let stopped = false;
 
   const timer = setInterval(() => {
     if (stopped) return;
     const { used, limit } = readHeap();
     if (used === null) return;
-    const verdict = judgeRendererHeap(used, limit, warned);
+    const verdict = judge.judge(used, limit);
     if (verdict.level === 'warn') {
-      warned = true;
       host.onWarn(verdict.message);
     } else if (verdict.level === 'stop') {
       stopped = true;

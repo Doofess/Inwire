@@ -114,6 +114,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | A message to the store is a snapshot: frames are flattened and copied | `scripts/capture/store-protocol.ts` (every appended frame goes through `v8.serialize`/`deserialize`); `scripts/electron/disk-drive.ts` (real app, past the RAM budget) |
 | The store's two ports keep their roles | `scripts/electron/store-ports.ts` |
 | The store stops whole at its heap ceiling | `scripts/capture/heap-guard.ts` |
+| The renderer stops a capture on a live heap past its wall, judged from collection troughs, and never on the garbage of the recorded 60k sawtooth | `scripts/session/renderer-heap-guard.ts` |
 | Native zlib output and `fflate` read each other | `scripts/capture/native-zlib.ts` |
 | Buffer trim is reachable before auto-pause | `scripts/session/buffer-budget.ts` |
 | A window trim does not refold the window: the expert log subtracts the trimmed frames and equals a rebuild (groups, frames, counts, categories), and names stay learned (ADR 0053 phase 6) | `scripts/expert/trim.ts` |

@@ -1,6 +1,6 @@
 # 0036 — The packet buffer sizes itself, and the renderer stands down before V8 aborts
 
-**Status:** accepted. Extends `0025` ("the capture lives on disk") — the buffer
+**Status:** accepted; **amended 2026-10-25** (the guard judges collection troughs, see the end). Extends `0025` ("the capture lives on disk") — the buffer
 is a window onto that capture, which is why a full one loses nothing. Does not
 supersede `0028`; the capture store's own guard is unchanged and is the model
 this follows.
@@ -42,7 +42,7 @@ reached the wall.
 ### 1. The ceiling is the heap, and it is enforced by a guard
 
 `src/services/rendererHeapGuard.ts` samples `performance.memory` every two
-seconds, warns once at 80% of the wall, and stops the capture at the wall. The
+seconds, warns once at 80% of the wall, and stops the capture at the wall. What it compares with the wall is the heap's live size as the samples show it, not one sample: see the amendment. The
 wall is 90% of V8's own limit, because the last tenth is where the collector is
 the whole workload — the same ratio, for the same measured reason, as the
 store's guard.
@@ -122,3 +122,51 @@ a shape and two constants' worth of reasoning, not code: one reads
 `performance.memory` in a sandboxed renderer and stops a capture. Merging them
 would mean a module importing `node:v8` reachable from `src/main.tsx`, which
 `scripts/capture/node-safe.ts` exists to refuse.
+
+## Amendment, 2026-10-25: the guard judges what a collection leaves
+
+**The guard stopped captures with nothing near the wall** (issue #15). At 60,000
+frames a second, `ui-burst-drive.ts` read the window's heap as a sawtooth: up
+about 400 MB every two seconds, then down to a trough of 1.1-1.9 GB, with peaks
+of 3.8-4.1 GB. `usedJSHeapSize` counts garbage until a full collection runs, and
+V8 lets the heap grow to several times its live size before one, up to just
+under its limit. A guard on one sample therefore fired on garbage whenever more
+than about a gigabyte was live and allocation was fast. A fixed 1 GB buffer did
+not help: the peaks were churn, not the buffer.
+
+**Decision: judge the troughs.** `HeapJudge` in `rendererHeapGuard.ts` treats a
+sample that fell by `HEAP_COLLECTED_DROP` (5%) or more from the one before as a
+collection, and its value as the live size plus at most one interval of
+allocation. It warns and stops on the latest trough against the same lines as
+before. A scavenge frees tens of megabytes, about 1-2% near the wall; a full
+collection near the limit can free under a tenth, because the peaks have little
+room above the live size there. 5% sits between them. A heap past the wall that
+shows no collection for `HEAP_UNCOLLECTED_SAMPLES` (15, 30 s) is judged as it
+reads, because a futile collection near the limit can free less than 5%. After a
+capture stopped at 60k its garbage sat at 4.1 GB for 14 s before a collection
+ran, so the fallback waits longer than that.
+
+**Rejected:** two high samples in a row, since that plateau is "sustained" and
+was garbage; and `performance.measureUserAgentSpecificMemory()`, which is exact
+but asynchronous, may wait for the next collection, and was never probed here.
+
+**Measured** (`ui-burst-drive.ts --rates 60000`, the burst, the `auto` buffer,
+three runs, a fresh build):
+
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Advanced, follow / scroll / filter (k f/s) | 50.7 / 55.1 / 52.9 | 52.8 / 57.0 / 58.0 | 57.7 / 58.6 / 53.8 |
+| Skipped | 0 | 0 | 0 |
+| Level with live after the agent stopped | 3.5 s | 3.1 s | 3.5 s |
+| Highest reading | 4,234 MB | 4,298 MB | 3,893 MB |
+| Filter-phase troughs | 2,237-2,692 MB | 2,483-2,554 MB | 2,401-2,819 MB |
+
+No run stopped or warned; under the old rule each would have stopped in its
+filter phase. Three readings were above the 4,192 MB the limit reports, with no
+abort, so `usedJSHeapSize` counts something the limit does not; the guard keeps
+the limit's 90% as its wall regardless. The troughs, 2.2-2.8 GB, are the `auto`
+budget's live size at this rate, under the 3,018 MB warning line.
+`scripts/session/renderer-heap-guard.ts` replays the recorded runs.
+
+**The store's guard is unchanged.** Its heap saws too, but in the same three
+runs it peaked at 147-230 MB against its 2,048 MB wall.

@@ -488,7 +488,8 @@ per-row work the old path had too: decoding packs (14%) and splitting fields
 limit, and the near 50,000-60,000 ceiling, are **#17**.
 
 **What phase 6 leaves for later.** #15 (the window's heap reaches the guard
-at a 1 GB buffer by the third phase of a 60,000 run), #16, #17, and the
+at a 1 GB buffer by the third phase of a 60,000 run; fixed 2026-10-25 by
+ADR 0036's amendment, a guard that judges collection troughs), #16, #17, and the
 digest's decode of every pack.
 
 **The equality tests.**
