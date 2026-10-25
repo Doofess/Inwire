@@ -105,6 +105,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | A capture is deleted only when the user asks; `planPrune` removes only `CAPTURE_ID_PATTERN` directories (ADR 0012) | `scripts/capture/prune-guard.ts` |
 | Exception: a capture following the agent's ring loses a segment when the agent deletes its file, floor first (ADR 0052) | `scripts/capture/segment-guard.ts` |
 | A torn trailing chunk loses only that chunk | `scripts/capture/recovery-on-disk.ts` |
+| Pack-native (version 3) chunks give the same prefix, bytes and records files, rows, digest and counters as re-encoded ones, across the fixtures and 1, 2 and 7 shards, survive a reopen, and lose only a torn last chunk | `scripts/capture/pack-native-equality.ts` (`inwire`, `bulk`, `keyLog` skip when absent; a synthetic capture always runs) |
 | `NodeBlockFile` loops short reads and writes | `scripts/capture/block-file.ts` |
 | `append` cannot overtake an async `open` | `scripts/capture/serial-queue.ts` |
 | No captured frame crosses the renderer's main thread (ADR 0007) | Unenforced: nothing fails if a frame-carrying message joins `FromPipeline` |
