@@ -492,6 +492,18 @@ at a 1 GB buffer by the third phase of a 60,000 run; fixed 2026-10-25 by
 ADR 0036's amendment, a guard that judges collection troughs), #16, #17, and the
 digest's decode of every pack.
 
+**#16, fixed 2026-10-25.** The window's `PackReader` hands `decodeChunk` a
+`FieldBlockWriter`, so a row's dense fields go straight into their columns as
+the pack is read. No 25-key bag is built and then walked again by `absorb`.
+`applyOverlay` writes a dense key such as the settled `tls.stream` into that
+column, not the bag, where the column would shadow it. The decoder also
+assigns optional keys instead of spreading them, and decodes short UTF-8
+table strings without TextDecoder. On the burst, per row: 2.15 µs decode plus
+1.54 µs split before, 1.2 µs after. Three 60,000 follow runs on the
+production build all kept up: advanced 57,700-58,400 against 57,800-58,200
+sent, 0 skipped, lag flat at 18,000-44,000, long tasks 3%, 6% and 3%, level
+0.5-0.6 s after the agent stopped. The store's reader is unchanged.
+
 **The equality tests.**
 - `scripts/pipeline/parallel.ts`: packed rows against the single Worker on
   every fixture and the burst.

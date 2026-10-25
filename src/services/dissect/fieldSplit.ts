@@ -26,6 +26,12 @@ const BLOCK_ROWS = 4096;
  * The bag is still built per frame and then dropped, which costs nothing new:
  * it was being built anyway, and what changes is that it stops being retained.
  *
+ * Live rows are the exception: they arrive as shard packs, and the window's
+ * reader splits them as it decodes (`claim`, `decodeChunk`), so no bag of dense
+ * keys is ever built and `absorb` passes them by (#16). The merge's overlay is
+ * applied after that and writes its dense keys into the row's column
+ * (`applyOverlay`).
+ *
  * One writer lives for a capture, not for a flush. A writer per batch would
  * mean a block per batch, and a slow capture's batches are small enough that
  * the per-block overhead would exceed what the columns save.
