@@ -74,8 +74,21 @@ export function overlayOf(packet: Packet, mark: OverlayMark): RowOverlay | null 
   return overlay;
 }
 
+/**
+ * The overlay over its row. A row the window split as it decoded already has
+ * its dense keys in a FieldBlock, and `tls.stream` is one of them: a value put
+ * in the bag instead would be shadowed by the shard's provisional one, because
+ * readers ask the block first. So a key the block has a column for goes there.
+ */
 export function applyOverlay(packet: Packet, overlay: RowOverlay): void {
-  if (overlay.fields) Object.assign(packet.fields ??= {}, overlay.fields);
+  if (overlay.fields) {
+    const block = packet.cols;
+    const row = packet.row;
+    for (const key in overlay.fields) {
+      const value = overlay.fields[key];
+      if (block === undefined || row === undefined || !block.tryWrite(row, key, value)) (packet.fields ??= {})[key] = value;
+    }
+  }
   if ('expert' in overlay) packet.expert = overlay.expert;
   if ('tsPrecision' in overlay) packet.tsPrecision = overlay.tsPrecision;
   if ('tsNanos' in overlay) packet.tsNanos = overlay.tsNanos;

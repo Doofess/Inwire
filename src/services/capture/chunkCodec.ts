@@ -77,6 +77,9 @@
  */
 import type { Packet, PacketStatus, ProtocolType, ExpertInfo, ExpertCategory } from '../../types/packet';
 import { fieldEntries } from '../dissect/fieldAccess';
+import type { FieldBlock } from '../dissect/fieldBlock';
+import type { FieldBlockWriter } from '../dissect/fieldSplit';
+import { DENSE_FIELDS } from '../dissect/denseFields';
 import { applyInfoPatch } from '../dissect/infoPatch';
 import type { InfoPatch } from '../dissect/types';
 // A type only: `rowPack.ts` imports this module as a value, and a cycle between
@@ -592,12 +595,56 @@ function nanosRemainderOf(tsNanos: bigint | undefined): number {
  * back empty for the reason ADR 0007 gives - a tree is 10.6 kB against the
  * frame's own 1.2 kB, and it is rebuilt on demand.
  */
-export function decodeChunk(summary: Uint8Array): Packet[] {
-  return decodeSummary(summary, true);
+export function decodeChunk(summary: Uint8Array, split?: FieldBlockWriter): Packet[] {
+  return decodeSummary(summary, true, split);
+}
+
+/** Each dense key's column, by its place in `DENSE_FIELDS`. */
+const DENSE_INDEX = new Map<string, number>(DENSE_FIELDS.map((k, i) => [k.abbrev, i]));
+
+const SHORT_TEXT = 64;
+const shortCodes = new Uint16Array(SHORT_TEXT);
+
+/**
+ * One string-table entry. Nearly all are short - 97% of the burst's are 64
+ * bytes or fewer - and a TextDecoder call has a fixed cost that dwarfs them:
+ * 5% of the window's main thread at 60,000 rows a second (#16). Most are not
+ * ASCII either, because an Info line's arrow is three bytes, so one- to
+ * three-byte UTF-8 is decoded here. Anything else - longer text, a four-byte
+ * character, a malformed or overlong sequence, a surrogate, a byte-order mark -
+ * goes to TextDecoder, so the answer is always the one it would give.
+ * Exported for `scripts/capture/chunk-codec.ts`, which holds it to that.
+ */
+export function decodeText(bytes: Uint8Array): string {
+  const n = bytes.length;
+  if (n > SHORT_TEXT || (n >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)) {
+    return textDecoder.decode(bytes);
+  }
+  let out = 0;
+  for (let i = 0; i < n;) {
+    const b = bytes[i];
+    if (b < 0x80) {
+      shortCodes[out++] = b;
+      i++;
+    } else if (b >= 0xc2 && b < 0xe0 && i + 1 < n && (bytes[i + 1] & 0xc0) === 0x80) {
+      shortCodes[out++] = ((b & 0x1f) << 6) | (bytes[i + 1] & 0x3f);
+      i += 2;
+    } else if (b >= 0xe0 && b < 0xf0 && i + 2 < n) {
+      const c = bytes[i + 1];
+      const d = bytes[i + 2];
+      if ((c & 0xc0) !== 0x80 || (d & 0xc0) !== 0x80) return textDecoder.decode(bytes);
+      if ((b === 0xe0 && c < 0xa0) || (b === 0xed && c >= 0xa0)) return textDecoder.decode(bytes);
+      shortCodes[out++] = ((b & 0x0f) << 12) | ((c & 0x3f) << 6) | (d & 0x3f);
+      i += 3;
+    } else {
+      return textDecoder.decode(bytes);
+    }
+  }
+  return String.fromCharCode.apply(null, shortCodes.subarray(0, out) as unknown as number[]);
 }
 
 /** `container` false is a segment: it must be a flat summary, never another container. */
-function decodeSummary(summary: Uint8Array, container: boolean): Packet[] {
+function decodeSummary(summary: Uint8Array, container: boolean, split?: FieldBlockWriter): Packet[] {
   const src = new Source(summary);
   const magic = src.u32();
   if (magic !== CHUNK_MAGIC) throw new Error(`decodeChunk: bad magic 0x${magic.toString(16)}`);
@@ -614,12 +661,19 @@ function decodeSummary(summary: Uint8Array, container: boolean): Packet[] {
   const tableLength = src.u32();
 
   const table: string[] = new Array(tableLength);
-  for (let i = 0; i < tableLength; i++) table[i] = textDecoder.decode(src.raw(src.u32()));
+  for (let i = 0; i < tableLength; i++) table[i] = decodeText(src.raw(src.u32()));
   const str = (index: number): string => {
     const s = table[index];
     if (s === undefined) throw new Error(`decodeChunk: string id ${index} past the table`);
     return s;
   };
+  // With a writer, which table entries are dense keys and which column each
+  // is: settled once a pack rather than looked up once a field.
+  let dense: Int16Array | null = null;
+  if (split !== undefined) {
+    dense = new Int16Array(tableLength);
+    for (let i = 0; i < tableLength; i++) dense[i] = DENSE_INDEX.get(table[i]) ?? -1;
+  }
 
   const packets: Packet[] = new Array(frameCount);
   for (let i = 0; i < frameCount; i++) {
@@ -667,14 +721,28 @@ function decodeSummary(summary: Uint8Array, container: boolean): Packet[] {
       resolved[k] = { name, addresses };
     }
 
+    // Split as it is read, when the window asks: the dense keys go straight
+    // into its FieldBlock and the bag gets only the rest. Building a 25-key
+    // bag and then walking it again in `absorb` was 3.7 us a row (#16).
     const fields: Record<string, string | number> = {};
     const entryCount = src.u16();
+    let block: FieldBlock | null = null;
+    let row = -1;
+    if (dense !== null && entryCount !== ABSENT) {
+      row = split!.claim();
+      block = split!.current;
+    }
     for (let k = 0; k < (entryCount === ABSENT ? 0 : entryCount); k++) {
-      const key = str(src.u32());
-      fields[key] = src.u8() === 0 ? src.f64() : str(src.u32());
+      const keyId = src.u32();
+      const value = src.u8() === 0 ? src.f64() : str(src.u32());
+      const at = dense === null ? -1 : dense[keyId];
+      if (at >= 0) block!.writeAt(row, at, value);
+      else fields[str(keyId)] = value;
     }
 
-    packets[i] = {
+    // The optional keys are assigned, not spread in: a spread builds and
+    // copies a throwaway object for each of twelve keys on every row.
+    const p = {
       id,
       source,
       destination,
@@ -690,19 +758,21 @@ function decodeSummary(summary: Uint8Array, container: boolean): Packet[] {
       status: 'ok',
       layers: [],
       rawBytes: EMPTY_BYTES,
-      ...(labelId === 0xffffffff ? {} : { protocolLabel: str(labelId) }),
-      ...(sourcePort === 0xffffffff ? {} : { sourcePort }),
-      ...(destPort === 0xffffffff ? {} : { destPort }),
-      ...(direction === 0xffffffff ? {} : { direction }),
-      ...(tsPrecision === 0xffff ? {} : { tsPrecision }),
-      ...(tsNanos === undefined ? {} : { tsNanos }),
-      ...(linkType === 0xffff ? {} : { linkType }),
-      ...(protocolCount === ABSENT ? {} : { frameProtocols: protocols }),
-      ...(flagCount === ABSENT ? {} : { analysisFlags: flags }),
-      ...(expertCount === ABSENT ? {} : { expert }),
-      ...(resolvedCount === ABSENT ? {} : { resolved }),
-      ...(entryCount === ABSENT ? {} : { fields }),
     } as Packet;
+    if (labelId !== 0xffffffff) p.protocolLabel = str(labelId);
+    if (sourcePort !== 0xffffffff) p.sourcePort = sourcePort;
+    if (destPort !== 0xffffffff) p.destPort = destPort;
+    if (direction !== 0xffffffff) p.direction = direction;
+    if (tsPrecision !== 0xffff) p.tsPrecision = tsPrecision;
+    if (tsNanos !== undefined) p.tsNanos = tsNanos;
+    if (linkType !== 0xffff) p.linkType = linkType;
+    if (protocolCount !== ABSENT) p.frameProtocols = protocols;
+    if (flagCount !== ABSENT) p.analysisFlags = flags;
+    if (expertCount !== ABSENT) p.expert = expert;
+    if (resolvedCount !== ABSENT) p.resolved = resolved;
+    if (entryCount !== ABSENT) p.fields = fields;
+    if (block !== null) { p.cols = block; p.row = row; }
+    packets[i] = p;
   }
 
   if (src.offset !== summary.length) {

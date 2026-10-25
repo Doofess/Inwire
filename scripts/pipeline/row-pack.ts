@@ -28,6 +28,9 @@ import { FrameDissector } from '../../src/services/pipeline/frameDissector';
 import {
   PackReader, PackSender, PackedFlush, packRows, unpackRows, type PackedRows, type RowPack,
 } from '../../src/services/pipeline/rowPack';
+import { FieldBlockWriter } from '../../src/services/dissect/fieldSplit';
+import { DENSE_FIELDS } from '../../src/services/dissect/denseFields';
+import { fieldEntries, fieldValue } from '../../src/services/dissect/fieldAccess';
 import type { Packet } from '../../src/types/packet';
 import { FIXTURES } from './arrival';
 import { evictionCapture } from './evictionCapture';
@@ -169,6 +172,43 @@ function overlaysAndBytes(rows: Packet[]): void {
   check('a row sent without bytes comes back with none', out[4].rawBytes.byteLength === 0);
 }
 
+/**
+ * The window's reader splits as it decodes (#16): the dense fields go into a
+ * FieldBlock and never into a bag. The merge's overlay arrives after that, and
+ * it can write a dense key - `tls.stream` settles at the merge - so it must
+ * land in the column. A bag holding a dense key is shadowed by the column,
+ * which `fieldValue` reads first: the shard's provisional stream would win.
+ */
+const DENSE = new Set(DENSE_FIELDS.map((k) => k.abbrev));
+
+function splitting(rows: Packet[]): void {
+  const lane = rows.slice(0, 384);
+  const p = pack(9, lane, lane.map(() => 60));
+  const flush = () => {
+    const builder = new PackedFlush();
+    for (let i = 0; i < lane.length; i++) builder.packed(p, i, null, null);
+    return cross(builder.seal(new Map()));
+  };
+  const plain = new PackReader().read(flush());
+  const split = new PackReader(new FieldBlockWriter()).read(flush());
+  const sorted = (row: Packet) => JSON.stringify(fieldEntries(row).sort(([a], [b]) => (a < b ? -1 : 1)));
+  const differs = split.findIndex((row, i) => sorted(row) !== sorted(plain[i]));
+  check('a reader given a field writer reads every field the plain reader does', differs === -1,
+    differs === -1 ? '' : `frame ${split[differs].id} differs`);
+  check('...with every row that has fields split, and no dense key left in a bag',
+    split.every((row) => row.fields === undefined
+      || (row.cols !== undefined && !Object.keys(row.fields).some((k) => DENSE.has(k)))));
+
+  const stub = { ...lane[0], fields: { ...lane[0].fields, 'tls.stream': -3, 'tcp.srcport': 443 } };
+  const q = pack(10, [stub], [60]);
+  const builder = new PackedFlush();
+  builder.packed(q, 0, null, { fields: { 'tls.stream': 7, 'inwire.live.skipped': 5 } });
+  const [row] = new PackReader(new FieldBlockWriter()).read(cross(builder.seal(new Map())));
+  check('an overlay\'s dense key lands in the split row\'s column', fieldValue(row, 'tls.stream') === 7
+    && row.fields?.['tls.stream'] === undefined, `read ${fieldValue(row, 'tls.stream')}, bag ${row.fields?.['tls.stream']}`);
+  check('...and its sparse key in the bag', row.fields?.['inwire.live.skipped'] === 5);
+}
+
 function reset(rows: Packet[]): void {
   const lane = rows.slice(0, 20);
   const old = pack(1, lane, lane.map(() => 60));
@@ -262,6 +302,7 @@ async function main(): Promise<void> {
   const sample = await roundTrips();
   interleaving(sample);
   overlaysAndBytes(sample);
+  splitting(sample);
   reset(sample);
   sender(sample);
   bounded(sample);

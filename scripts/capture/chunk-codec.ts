@@ -30,11 +30,12 @@ import {
   encodeChunk, decodeChunk, applyPrefixes, PrefixBlock, ChunkDirectory, chunkStoresLinkType, CHUNK_VERSION,
   ROW_LAYOUT_VERSION, CHUNK_MAGIC, encodePackedChunk, selectRows, type ChunkSlot,
   DIRECTORY_BYTES, prefixBlockBytes,
-  CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND, LAYER_BIT_ORDER,
+  CHUNK_FRAMES, PREFIX_BYTES, ADDRESS_KIND, LAYER_BIT_ORDER, decodeText,
 } from '../../src/services/capture/chunkCodec';
 import { LAYERS } from '../../src/services/dissect/fieldRegistry';
 import { PcapService } from '../../src/services/pcapParser';
 import { fieldEntries } from '../../src/services/dissect/fieldAccess';
+import { FieldBlockWriter } from '../../src/services/dissect/fieldSplit';
 import { packRows, unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
 import { applyOverlay, type RowOverlay } from '../../src/services/pipeline/rowOverlay';
 import { applyInfoPatch } from '../../src/services/dissect/infoPatch';
@@ -772,6 +773,60 @@ function container(segments: { kind: number; bytes: Uint8Array }[], lane: number
   checkThrows('...a pack index that does not ascend',
     () => encodePackedChunk([{ pack, index: 3, overlay: null, id: 4 }, { pack, index: 2, overlay: null, id: 5 }], [0, 0], [null, null]));
   checkThrows('...an empty chunk', () => encodePackedChunk([], [], []));
+}
+
+// --- the string table: every text comes back as it went, ASCII or not --------
+//
+// Short ASCII strings are decoded without TextDecoder (#16). The cut-off and
+// the ASCII test are what could go wrong, so the texts sit either side of both.
+{
+  const texts = ['', 'a', 'x'.repeat(64), 'y'.repeat(65), '\x7f', 'café', '日本', '\u{1f600}', 'tab\there',
+    '54321 → 443 [ACK] Seq=1 Ack=1 Win=512 Len=0', 'ÿࠀ￿퟿', '→'.repeat(21), '→'.repeat(22)];
+  const back = roundTrip(texts.map((info, i) => frame({ id: i + 1, info })));
+  check('every table string comes back exactly, ASCII or not, either side of 64 bytes',
+    back.map((p) => p.info), texts);
+
+  // Bytes TextEncoder never writes, as a torn or foreign file could hold: the
+  // fast path must answer exactly as TextDecoder does, replacement characters
+  // and all, which it does by handing them over.
+  const odd = [
+    [0x80], [0xc2], [0xc0, 0x80], [0xc1, 0xbf], [0xe0, 0x80, 0x80], [0xe0, 0x9f, 0xbf], [0xed, 0xa0, 0x80],
+    [0xe2, 0x86], [0xe2, 0x28, 0x92], [0xf0, 0x9f, 0x98, 0x80], [0xf8, 0x88, 0x80, 0x80, 0x80], [0xff], [0x41, 0xc3, 0x28],
+    // A leading byte-order mark, which TextDecoder drops: kept as it behaves.
+    [0xef, 0xbb, 0xbf, 0x41],
+  ].map((b) => new Uint8Array(b));
+  const reference = new TextDecoder();
+  const wrong = odd.filter((b) => decodeText(b) !== reference.decode(b)).map((b) => [...b].map((x) => x.toString(16)).join(' '));
+  check('malformed UTF-8 decodes exactly as TextDecoder decodes it', wrong, []);
+}
+
+// --- split at decode: dense fields go straight into the window's block --------
+//
+// The window used to decode a 25-key bag per row and then walk it again to
+// move the dense keys into a FieldBlock (#16). Handed the writer, the decoder
+// writes them there itself and the bag holds only the rest.
+{
+  const rows = [
+    frame({ id: 1, fields: { 'tcp.srcport': 443, 'tcp.flags.syn': 0, 'eth.src': '00:00:5e:00:53:01', 'http.host': 'example.com' } }),
+    frame({ id: 2, fields: {} }),
+    frame({ id: 3, fields: undefined }),
+    frame({ id: 4, fields: { 'tcp.len': 70_000, 'dns.qry.name': 'example.org' } }),
+  ];
+  const encoded = encodeChunk(rows, capLengths(rows));
+  const plain = decodeChunk(encoded.summary);
+  const writer = new FieldBlockWriter();
+  const split = decodeChunk(encoded.summary, writer);
+  const sorted = (p: Packet) => fieldEntries(p).sort(([a], [b]) => (a < b ? -1 : 1));
+  check('split rows read back every field the plain decode has', split.map(sorted), plain.map(sorted));
+  checkTrue('a row with fields is given a block and a row in it',
+    split[0].cols !== undefined && split[0].row !== undefined && split[3].cols !== undefined);
+  check('...and its bag keeps only the sparse keys', split[0].fields, { 'http.host': 'example.com' });
+  checkTrue('a row with an empty bag still has an empty bag', split[1].fields !== undefined
+    && Object.keys(split[1].fields).length === 0);
+  checkTrue('a row with no bag gets neither a bag nor a block', split[2].fields === undefined && split[2].cols === undefined);
+  check('a value past its column\'s width widens rather than truncates', fieldEntries(split[3]).find(([k]) => k === 'tcp.len')?.[1], 70_000);
+  writer.absorb(split);
+  check('absorb leaves a split row alone', split[0].fields, { 'http.host': 'example.com' });
 }
 
 console.log('\n--- against real frames ---\n');
