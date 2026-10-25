@@ -127,7 +127,7 @@ function interleaving(rows: Packet[]): void {
   const expected = steps.map((step) => (step.kind === 'object' ? step.row : lanes[step.lane][step.index]));
 
   const reader = new PackReader();
-  const sent = new Set<number>();
+  const sent = new Map<number, number>();
   const out: Packet[] = [];
   const firstSeen = new Map<number, number>();
   let packsCarried = 0;
@@ -163,7 +163,7 @@ function overlaysAndBytes(rows: Packet[]): void {
   for (let i = 0; i < 10; i++) {
     builder.packed(p, i, i === 4 ? null : new Uint8Array([i]), i === 6 ? { fields: { 'inwire.live.skipped': 5 }, tsPrecision: 9 } : null);
   }
-  const out = new PackReader().read(cross(builder.seal(new Set())));
+  const out = new PackReader().read(cross(builder.seal(new Map())));
   check('an overlay is applied to its own row', out[6].fields?.['inwire.live.skipped'] === 5 && out[6].tsPrecision === 9);
   check('...and to no other', out.every((row, i) => i === 6 || row.fields?.['inwire.live.skipped'] === undefined));
   check('a row sent without bytes comes back with none', out[4].rawBytes.byteLength === 0);
@@ -173,7 +173,7 @@ function reset(rows: Packet[]): void {
   const lane = rows.slice(0, 20);
   const old = pack(1, lane, lane.map(() => 60));
   const reader = new PackReader();
-  const sent = new Set<number>();
+  const sent = new Map<number, number>();
   const first = new PackedFlush();
   for (let i = 0; i < 10; i++) first.packed(old, i, null, null);
   reader.read(cross(first.seal(sent)));
@@ -183,14 +183,14 @@ function reset(rows: Packet[]): void {
   const fresh = pack(2, lane.slice(0, 5), lane.slice(0, 5).map(() => 60));
   const after = new PackedFlush();
   for (let i = 0; i < 5; i++) after.packed(fresh, i, null, null);
-  const message: PackedRows = { ...after.seal(new Set()), packsReset: true };
+  const message: PackedRows = { ...after.seal(new Map()), packsReset: true };
   const out = reader.read(cross(message));
   check('a reset drops what the last capture left half read', reader.held === 0 && out.length === 5);
 
   const stale = new PackedFlush();
   stale.packed(old, 12, null, null);
   let threw = false;
-  try { reader.read(cross(stale.seal(new Set([1])))); } catch { threw = true; }
+  try { reader.read(cross(stale.seal(new Map([[1, 10]])))); } catch { threw = true; }
   check('...and a row of a pack it no longer holds is an error, not a blank row', threw);
 }
 
@@ -233,12 +233,38 @@ function sender(rows: Packet[]): void {
   check('...and ends with held === 0 once the new capture reads its last row', reader.held === 0, `held ${reader.held}`);
 }
 
+/**
+ * A capture that runs for days sends millions of packs to each receiver. The
+ * sender must forget a pack once its last row has gone, as the reader does, or
+ * its set grows for the whole capture and reaches V8's 2^24-entry limit.
+ */
+function bounded(rows: Packet[]): void {
+  const lane = rows.slice(0, 20);
+  const sending = new PackSender();
+  const reader = new PackReader();
+  let halfway = -1;
+  for (let key = 1; key <= 500; key++) {
+    const p = pack(key, lane, lane.map(() => 60));
+    const front = new PackedFlush();
+    for (let i = 0; i < 12; i++) front.packed(p, i, null, null);
+    reader.read(cross(sending.seal(front)));
+    if (key === 250) halfway = sending.tracked;
+    const back = new PackedFlush();
+    for (let i = 12; i < 20; i++) back.packed(p, i, null, null);
+    reader.read(cross(sending.seal(back)));
+  }
+  check('a sender keeps a pack while it still has rows to send', halfway === 1, `tracked ${halfway}`);
+  check('...and keeps none once every pack\'s last row has gone', sending.tracked === 0 && reader.held === 0,
+    `tracked ${sending.tracked}, held ${reader.held}`);
+}
+
 async function main(): Promise<void> {
   const sample = await roundTrips();
   interleaving(sample);
   overlaysAndBytes(sample);
   reset(sample);
   sender(sample);
+  bounded(sample);
   console.log(failures === 0 ? '\nAll row-pack checks passed.' : `\n${failures} check(s) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

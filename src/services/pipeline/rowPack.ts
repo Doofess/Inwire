@@ -71,7 +71,8 @@ export interface PackedRows {
 export class PackedFlush {
   private readonly objects: Packet[] = [];
   private readonly order: number[] = [];
-  private readonly used = new Map<number, RowPack>();
+  /** Each pack this flush names, and how many of its rows. */
+  private readonly used = new Map<number, { pack: RowPack; rows: number }>();
   private readonly overlays: [number, RowOverlay][] = [];
   private readonly bytes: (Uint8Array | null)[] = [];
 
@@ -83,7 +84,9 @@ export class PackedFlush {
   packed(pack: RowPack, index: number, bytes: Uint8Array | null, overlay: RowOverlay | null): void {
     if (overlay !== null) this.overlays.push([this.order.length / 2, overlay]);
     this.order.push(pack.key, index);
-    this.used.set(pack.key, pack);
+    const use = this.used.get(pack.key);
+    if (use === undefined) this.used.set(pack.key, { pack, rows: 1 });
+    else use.rows++;
     this.bytes.push(bytes);
   }
 
@@ -91,13 +94,23 @@ export class PackedFlush {
     return this.order.length / 2;
   }
 
-  /** The flush; a pack goes in only if its key is not in `sent`, which it is added to. */
-  seal(sent: Set<number>): PackedRows {
+  /**
+   * The flush. `sent` maps a pack already sent to the rows it still has to
+   * send: a pack goes in only if its key is not there, and its key leaves once
+   * its last row has gone, as the reader drops it, so the map holds only the
+   * packs in flight rather than every pack of the capture.
+   */
+  seal(sent: Map<number, number>): PackedRows {
     const packs: RowPack[] = [];
-    for (const [key, pack] of this.used) {
-      if (sent.has(key)) continue;
-      sent.add(key);
-      packs.push(pack);
+    for (const [key, { pack, rows }] of this.used) {
+      let left = sent.get(key);
+      if (left === undefined) {
+        packs.push(pack);
+        left = pack.count;
+      }
+      left -= rows;
+      if (left > 0) sent.set(key, left);
+      else sent.delete(key);
     }
     return {
       packs, objects: this.objects, order: Int32Array.from(this.order), overlays: this.overlays, bytes: this.bytes,
@@ -112,7 +125,7 @@ export class PackedFlush {
  * the Worker before it. Lifted out of the Worker so a reset is testable.
  */
 export class PackSender {
-  private readonly sent = new Set<number>();
+  private readonly sent = new Map<number, number>();
   private pending = true;
 
   /** A new capture, or a coordinator reset: send every pack again, and say so. */
@@ -128,6 +141,11 @@ export class PackSender {
       this.pending = false;
     }
     return rows;
+  }
+
+  /** Packs sent with rows still to send: the ones in flight. */
+  get tracked(): number {
+    return this.sent.size;
   }
 }
 
