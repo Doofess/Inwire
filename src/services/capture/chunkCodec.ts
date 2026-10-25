@@ -1322,12 +1322,24 @@ const ABSENT = 0xffff;
  * Split out because the two blocks are read independently: a filter reads the
  * prefix alone, and only a row that is actually going to be shown pays for the
  * summary. This is what joins them when both are in hand.
+ *
+ * A block that carries the byte directory has the writer's own ids, so the
+ * join checks each row against it and throws on the first that disagrees: a
+ * version 3 lane that ascends but picked the wrong rows would otherwise put a
+ * confident wrong Info line under another frame's ordinal.
  */
 export function applyPrefixes(packets: Packet[], prefix: Uint8Array): void {
   const view = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength);
+  const directoryAt = prefix.byteLength === prefixBlockBytes(packets.length) ? packets.length * PREFIX_BYTES : -1;
+  let id = 0;
   for (let i = 0; i < packets.length; i++) {
     const at = i * PREFIX_BYTES;
     const p = packets[i];
+    if (directoryAt >= 0) {
+      const gap = view.getUint32(directoryAt + i * 4, true);
+      id = i === 0 ? gap : id + gap;
+      if (p.id !== id) throw new Error(`applyPrefixes: row ${i} is frame ${p.id}, the directory says ${id}`);
+    }
     p.tsUs = view.getFloat64(at + OFF_TS_US, true);
     p.length = view.getUint32(at + OFF_LENGTH, true);
     p.status = STATUS_ORDER[prefix[at + OFF_STATUS]] ?? 'ok';

@@ -122,6 +122,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | Catch-up from the agent's file equals an uninterrupted run | `scripts/pipeline/catch-up.ts` |
 | Parallel dissection equals the single Worker | `scripts/pipeline/parallel.ts` |
 | The shard's row steps plus the merge from a side record equal `ingest`'s order (process, gap, fingerprint, network facts) | `scripts/pipeline/row-steps.ts` |
+| Every key a merge step writes to a shard row is in its overlay, so the window and the disk keep it | `scripts/pipeline/row-overlay.ts` runs a copy of the merge steps, as `parallel.ts` and `pack-native-equality.ts` copy the Worker's emit; a new write in `emitMerged` itself is unenforced until it is copied there |
 | Every frame's tree is rebuilt from its record | `scripts/pipeline/revisit.ts` |
 | No Node in the renderer; the preload imports only `electron` (reads the built bundle) | `scripts/electron/preload-sandbox.ts` |
 | `src/services/` and `src/lib/` import no Electron or `node:*`; `nodeBlockFile.ts` is unreachable from `src/main.tsx` (import-graph walk) | `scripts/capture/node-safe.ts` |

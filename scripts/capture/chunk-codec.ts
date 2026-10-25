@@ -726,6 +726,17 @@ function container(segments: { kind: number; bytes: Uint8Array }[], lane: number
   check('...while the same lane over segments that ascend is fine',
     decodeChunk(container([{ kind: 0, bytes: low }, { kind: 1, bytes: high }], [0, 0, 0, 1, 1, 1])).map((p) => p.id),
     [1, 2, 3, 4, 5, 6]);
+
+  // A lane can ascend and still be wrong: rows that are all the container's, in
+  // order, but not the ones the chunk was written with. The prefix's id lane is
+  // the writer's own, so joining the blocks checks one against the other.
+  const right = encodeChunk([mk(1), mk(2), mk(3), mk(4), mk(5), mk(7)], [0, 0, 0, 0, 0, 0]);
+  const wrongRows = decodeChunk(container([{ kind: 0, bytes: low }, { kind: 1, bytes: high }], [0, 0, 0, 1, 1, 1]));
+  checkThrows('(f) rows whose ids disagree with the prefix\'s directory are refused when the blocks are joined',
+    () => applyPrefixes(wrongRows, right.prefix));
+  const rightRows = decodeChunk(right.summary);
+  applyPrefixes(rightRows, right.prefix);
+  check('...while the rows the prefix was written with join it', rightRows.map((p) => p.id), [1, 2, 3, 4, 5, 7]);
 }
 
 {
