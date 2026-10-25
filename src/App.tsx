@@ -870,7 +870,8 @@ export default function App() {
           //
           // The spread carries `cols` and `row` across, which is what we
           // want: the copy shares the original's block and its row, and a row
-          // is written once when the frame joins the buffer and never again,
+          // is written only before the frame joins the buffer (as its pack
+          // decodes and its overlay applies, or in `absorb`) and never after,
           // so two packets reading it see the same values. What is written
           // HERE goes to the bag, because the process fields are declared
           // post-dissection and so are never dense (`dissect/denseFields.ts`,
