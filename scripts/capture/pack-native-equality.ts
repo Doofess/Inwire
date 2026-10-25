@@ -73,6 +73,7 @@ import type { Packet } from '../../src/types/packet';
 import { Bytes, ethernet, internetChecksum, ipv4, pcapOf, udpFrameTo } from '../parity/synthetic';
 import { FIXTURES } from '../pipeline/arrival';
 import { drive, load, lopsided, scatter, type Capture, type Config } from '../pipeline/virtualShards';
+import { packFrames } from '../../src/services/capture/frameSlab';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -171,7 +172,7 @@ function storeLog(capture: Capture, config: Config, decodeRows: boolean): Log {
         ? { id: m.id, tsUs: input.tsUs, bytes: input.bytes.slice() }
         : { id: m.id, tsUs: input.tsUs, bytes: input.bytes.slice(), ring: part };
     });
-    log.messages.push({ type: 'appendBytes', frames });
+    log.messages.push({ type: 'appendBytes', slab: packFrames(frames) });
 
     const records = group.filter((m) => m.record !== undefined).map((m) => ({ id: m.id, record: m.record! }));
     if (records.length > 0) log.messages.push({ type: 'appendRecords', frames: records });

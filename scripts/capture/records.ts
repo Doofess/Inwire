@@ -37,6 +37,7 @@ import type { FromCapture, ToCapture } from '../../src/services/capture/captureP
 import { treeLinksOf } from '../../src/services/dissect/infoPatch';
 import type { Packet } from '../../src/types/packet';
 import { FIXTURES, arrive, firstDifference, render, revisit, type Arrival } from '../pipeline/arrival';
+import { packFrames } from '../../src/services/capture/frameSlab';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -126,7 +127,7 @@ async function main() {
     const to = Math.min(i + FLUSH, arrived.length);
     h.ask({
       type: 'appendBytes',
-      frames: arrived.slice(i, to).map((a) => ({ id: a.packet.id, tsUs: a.packet.tsUs, bytes: a.input.bytes })),
+      slab: packFrames(arrived.slice(i, to).map((a) => ({ id: a.packet.id, tsUs: a.packet.tsUs, bytes: a.input.bytes }))),
     });
     h.ask({ type: 'appendRecords', frames: recordsOf(i, to) });
     h.send({ type: 'append', packets: rows.slice(i, to) });

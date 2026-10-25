@@ -51,6 +51,7 @@ import { inflateSync } from 'fflate';
 import { serialize, deserialize } from 'node:v8';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { Packet } from '../../src/types/packet';
+import { packFrames } from '../../src/services/capture/frameSlab';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -586,7 +587,7 @@ console.log('\n--- rows from the Worker that wrote their bytes (bytesSent) ---\n
   split.send({ type: 'open', captureId: 'cap-20261009-010000-0002' });
   for (let i = 0; i < packets.length; i += 700) {
     const group = packets.slice(i, i + 700);
-    split.send({ type: 'appendBytes', frames: group.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes })) });
+    split.send({ type: 'appendBytes', slab: packFrames(group.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }))) });
     split.send({ type: 'append', bytesSent: true, packets: crossed(group.map((p) => ({ ...p, rawBytes: new Uint8Array(0) }))) });
   }
   // A row this sender never wrote bytes for, which must not become a frame.
@@ -650,7 +651,7 @@ console.log('\n--- packed rows from the Worker (appendPacked) ---\n');
   };
   for (let i = 0; i < packets.length; i += GROUP) {
     const group = packets.slice(i, i + GROUP);
-    packed.send({ type: 'appendBytes', frames: group.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes })) });
+    packed.send({ type: 'appendBytes', slab: packFrames(group.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }))) });
     const flush = new PackedFlush();
     for (const p of group) flush.packed(packs[Math.floor((p.id - 1) / PACK_ROWS)], (p.id - 1) % PACK_ROWS, null, null);
     post(flush, true);
@@ -827,10 +828,10 @@ console.log('\n--- packed rows kept in their packs, and decoded (packNative) ---
       const ids = Array.from({ length: Math.min(GROUP, n - from + 1) }, (_, i) => from + i);
       h.send(cross({
         type: 'appendBytes',
-        frames: ids.filter((id) => !carries(id)).map((id) => {
+        slab: packFrames(ids.filter((id) => !carries(id)).map((id) => {
           const p = rowOf(id);
           return { id, tsUs: p.tsUs, bytes: p.rawBytes };
-        }),
+        })),
       }));
       const flush = new PackedFlush();
       const flags: number[] = [];

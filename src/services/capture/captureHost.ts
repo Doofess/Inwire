@@ -49,6 +49,7 @@ import { planPrune } from './captureDirectory';
 import { serialQueue } from './serialQueue';
 import { CaptureScan, DEFAULT_SLICE_MS } from './captureScan';
 import { MatchSet } from './matchSet';
+import { unpackFrames } from './frameSlab';
 import { compile } from '../filter/compile';
 import { deflateSync, inflateSync } from 'fflate';
 import type { FromCapture, ToCapture } from './captureProtocol';
@@ -754,7 +755,7 @@ export class CaptureHost {
     reply: (message: FromCapture) => void,
   ): void {
     try {
-      if (this.open !== null) this.open.writer.appendBytes(message.frames);
+      if (this.open !== null) this.open.writer.appendBytes(unpackFrames(message.slab));
     } finally {
       // In a `finally`: a throw is reported by `handle` on the client port,
       // and the Worker must still hear that the append is no longer owed.

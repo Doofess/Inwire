@@ -50,6 +50,7 @@ import { withDissectEnv } from '../services/dissect/dissectEnv';
 import { applyInfoPatch, treeLinksOf } from '../services/dissect/infoPatch';
 import type { FromCapture } from '../services/capture/captureProtocol';
 import type { RingPart } from '../services/capture/segments';
+import { packFrames } from '../services/capture/frameSlab';
 import { RingFiling } from '../services/pipeline/ringFiling';
 import type { ProcessInfo } from '../services/flowAnnotations';
 import type {
@@ -1063,9 +1064,9 @@ function flush(): void {
     bytesSentThrough = assigned[assigned.length - 1].id;
     storePort.postMessage({
       type: 'appendBytes',
-      frames: assigned.map(({ frame, id }) => (frame.ring === undefined
+      slab: packFrames(assigned.map(({ frame, id }) => (frame.ring === undefined
         ? { id, tsUs: frame.tsUs, bytes: frame.bytes }
-        : { id, tsUs: frame.tsUs, bytes: frame.bytes, ring: frame.ring })),
+        : { id, tsUs: frame.tsUs, bytes: frame.bytes, ring: frame.ring }))),
       // Answered with `bytesTaken`; the unanswered count is the store's backlog.
       ack: flow.storeSent(assigned.length),
     });
@@ -1333,7 +1334,7 @@ function answerDrain(requestId: number): void {
   }
   const ack = flow.storeSent(0);
   drainBarriers.set(ack, requestId);
-  storePort.postMessage({ type: 'appendBytes', frames: [], ack });
+  storePort.postMessage({ type: 'appendBytes', slab: packFrames([]), ack });
   // A store that died answers nothing, and Stop must still end: the app's own
   // port is what reports that store's death.
   setTimeout(() => {
