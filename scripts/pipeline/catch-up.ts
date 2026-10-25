@@ -23,10 +23,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  CatchUp, CatchUpRouter, CaptureFiles, HEADER_READ, HOLD_MAX_FRAMES, REJOIN_WITHIN, type FileFrame, type SeqFrame,
+  CatchUp, CatchUpRouter, CaptureFiles, HEADER_READ, HOLD_MAX_FRAMES, MAX_CAPLEN, REJOIN_WITHIN, type FileFrame,
+  type SeqFrame,
 } from '../../src/services/pipeline/catchUp';
 import { PcapngTail } from '../../src/services/pipeline/pcapngTail';
 import { HOLE_MIN_FRAMES, LiveFlow } from '../../src/services/pipeline/liveFlow';
+import { MAX_SNAPLEN } from '../../src/services/captureOptions';
 import { PcapService } from '../../src/services/pcapParser';
 import { FIXTURES } from './arrival';
 import { digestCapture } from './frameDigest';
@@ -36,6 +38,8 @@ function check(name: string, ok: boolean, detail = ''): void {
   if (!ok) failures++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${!ok && detail ? `\n        ${detail}` : ''}`);
 }
+
+check('the landing bound is the agent\'s own snaplen bound',MAX_CAPLEN === MAX_SNAPLEN, `${MAX_CAPLEN} vs ${MAX_SNAPLEN}`);
 
 // --- frames and files ------------------------------------------------------------
 

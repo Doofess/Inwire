@@ -60,9 +60,16 @@
  * Pure: the Worker does the reading and the dissecting, and
  * `scripts/pipeline/catch-up.ts` drives every path here with no Worker.
  */
-import { MAX_SNAPLEN } from '../captureOptions';
 import { FrameSizes, type SizedPoint } from './frameSizes';
 import { PcapngTail, type TailFrame } from './pcapngTail';
+
+/**
+ * The longest frame the agent writes: `MAX_SNAPLEN` in `../captureOptions`,
+ * repeated rather than imported, because that module builds its preference
+ * store at load and would bring it into the Worker. `catch-up.ts` holds the
+ * two equal.
+ */
+export const MAX_CAPLEN = 262144;
 
 /** Within this many frames of live, live frames are held for the rejoin. */
 export const REJOIN_WITHIN = 20_000;
@@ -403,7 +410,7 @@ export class CatchUp<F extends SeqFrame> {
     if (head === null) return 'short';
     if (head.type === 0 && head.length === 0) return 'zeros';
     const length = cursor.landing!.length;
-    const fits = length !== null ? head.length === length : head.length >= 32 && head.length <= epbBytes(MAX_SNAPLEN) && head.length % 4 === 0;
+    const fits = length !== null ? head.length === length : head.length >= 32 && head.length <= epbBytes(MAX_CAPLEN) && head.length % 4 === 0;
     return head.type === 6 && fits ? 'ok' : 'wrong';
   }
 
