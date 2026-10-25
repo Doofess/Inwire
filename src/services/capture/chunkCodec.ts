@@ -976,6 +976,20 @@ export interface PackedChunkSlot {
 /** One frame of a chunk: a row the writer holds, or one it holds still packed. */
 export type ChunkSlot = Packet | PackedChunkSlot;
 
+/**
+ * The capture time of a packed row, from its pack's prefix record: what the
+ * writer ages a frame by when the frame's bytes arrive with its row. The merge's
+ * overlay never writes the timestamp, so the record is the whole answer.
+ */
+export function packedSlotTsUs(slot: PackedChunkSlot): number {
+  const from = slot.index * PREFIX_BYTES;
+  const prefix = slot.pack.prefix;
+  if (!Number.isInteger(slot.index) || slot.index < 0 || from + PREFIX_BYTES > prefix.length) {
+    throw new Error(`packedSlotTsUs: pack ${slot.pack.key} has no prefix record for row ${slot.index}`);
+  }
+  return new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getFloat64(from + OFF_TS_US, true);
+}
+
 interface PackGroup {
   pack: RowPack;
   /** The pack rows this chunk holds, ascending. */
