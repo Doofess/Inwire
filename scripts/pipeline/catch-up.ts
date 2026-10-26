@@ -148,6 +148,14 @@ interface Plan {
   liveDrops?: Set<number>;
   /** The view is cleared before this batch is handled, as the Worker clears it. */
   clearAtBatch?: number;
+  /**
+   * Batches whose first frame swaps places with the last of the batch before:
+   * two adapters' skew across a batch's edge, so the earlier batch ends one
+   * number ahead of the frame this one starts with (#18).
+   */
+  edgeSkew?: Set<number>;
+  /** No file to catch up from: every hole is marked. */
+  noCatchUp?: boolean;
 }
 
 interface Run {
@@ -226,7 +234,7 @@ function run(frames: Frame[], plan: Plan): Run {
     () => { released++; },
     HOLE_MIN_FRAMES,
   );
-  router.enable(true);
+  router.enable(!plan.noCatchUp);
 
   // What the agent has made visible: frames numbered below this are flushed.
   let sentSeq = 0;
@@ -301,10 +309,15 @@ function run(frames: Frame[], plan: Plan): Run {
       for (const f of order) { liveArrived++; router.arrive({ ...f, live: true }); }
     }
   };
-  let batchNo = 0;
-  for (let at = 0; at < frames.length; at += batch, batchNo++) {
-    const group = frames.slice(at, at + batch);
-    sentSeq = group[group.length - 1].seq + 1;
+  const groups: Frame[][] = [];
+  for (let at = 0; at < frames.length; at += batch) groups.push(frames.slice(at, at + batch));
+  for (const b of plan.edgeSkew ?? []) {
+    const before = groups[b - 1];
+    [before[before.length - 1], groups[b][0]] = [groups[b][0], before[before.length - 1]];
+  }
+  for (let batchNo = 0; batchNo < groups.length; batchNo++) {
+    const group = groups[batchNo];
+    sentSeq = group.reduce((max, f) => Math.max(max, f.seq + 1), 0);
     announce();
     if (plan.deleteFile && batchNo === plan.deleteFile.atBatch) {
       const file = files.get(nameOf(plan.deleteFile.index));
@@ -598,6 +611,31 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     check(`${label}: a frame the writer refused inside the hole - no frame twice, only the refused one missing`,
       diff === null && r.catchUp.stats.misaligned === 1 && r.catchUp.off === 'misaligned',
       diff ?? JSON.stringify({ got: r.delivered.length, want: want.length, stats: r.catchUp.stats }));
+  }
+  {
+    // #18: two adapters' skew at a shed batch's edge. The batch before ends
+    // `... 5998, 6000` and the shed one starts `5999, 6001, ...`, so the next
+    // number owed is 6001 while 5999 never came. It is read from the file
+    // with the rest, in the place the uninterrupted run gives it.
+    const edge = new Set([mid]);
+    for (const [kind, plan] of [
+      ['main sheds it', { mainShed: new Set([mid]), edgeSkew: edge }],
+      ['the agent\'s queue sheds it', { agentShed: new Set([mid]), edgeSkew: edge }],
+    ] as const) {
+      const r = run(frames, plan);
+      const bySeq = r.delivered.slice().sort((a, b) => a.seq - b.seq);
+      const diff = sameFrames(frames, bySeq);
+      check(`${label}: skew across the edge of a batch ${kind} - the frame before the edge is read back too`,
+        diff === null && r.holes.length === 0 && r.skipped === 0 && holdsEveryLiveFrameOnce(r),
+        diff ?? JSON.stringify({ skipped: r.skipped, holes: r.holes, stats: r.catchUp.stats }));
+    }
+    // With no file to read from, every frame skipped is marked: none goes
+    // missing with nothing saying so.
+    const r = run(frames, { mainShed: new Set([mid]), edgeSkew: edge, noCatchUp: true });
+    const marked = r.holes.reduce((sum, h) => sum + h.size, 0);
+    check(`${label}: ...and with no file, the frame before the edge is marked with the rest`,
+      r.skipped === 300 && marked === 300 && r.delivered.length === n - 300,
+      JSON.stringify({ skipped: r.skipped, marked, holes: r.holes }));
   }
   return caughtUp;
 }

@@ -62,6 +62,7 @@
  */
 import { FrameSizes, type SizedPoint } from './frameSizes';
 import { PcapngTail, type TailFrame } from './pcapngTail';
+import { LATE_WINDOW } from './liveFlow';
 
 /**
  * The longest frame the agent writes: `MAX_SNAPLEN` in `../captureOptions`,
@@ -222,6 +223,8 @@ export interface Abandoned<F> {
   held: F[];
   from: number;
   to: number;
+  /** Late frames from below the hole (#18) the file never delivered: lost, and marked. */
+  late: number;
 }
 
 export interface ReadRequest {
@@ -240,6 +243,8 @@ export interface ReadResult<F> {
   ended: ({ why: CatchUpEnd } & Abandoned<F>) | null;
   /** Nothing new in the file: ask again after this long. */
   retryMs?: number;
+  /** Late frames from below the hole the file turned out not to hold: lost, and marked. */
+  lost?: number;
 }
 
 /** Where reading a file had got to, kept between catch-ups. */
@@ -294,10 +299,20 @@ export class CatchUp<F extends SeqFrame> {
   private seekOff = false;
   /** The first frame the cursor will count whose place the sizes do not know: on to the anchor from there. */
   private gapEnd: number | null = null;
+  /**
+   * Numbers below `from` the live stream never delivered - two adapters'
+   * skew left them at the edge of the hole, in the batch that was shed - read
+   * from the file with the rest (#18). Ascending.
+   */
+  private late: number[] = [];
+  /** Late frames read before the anchor proved the count: delivered once it does. */
+  private lateRead: FileFrame[] = [];
+  /** Late frames the file delivered: a live copy after them is a duplicate. */
+  private readonly lateTaken = new Set<number>();
 
   /** Counts, for a readout and the tests. */
   readonly stats = {
-    started: 0, rejoined: 0, framesRead: 0, ended: 0, misaligned: 0, holdOverflows: 0, seeks: 0, seekMisses: 0,
+    started: 0, rejoined: 0, framesRead: 0, ended: 0, misaligned: 0, holdOverflows: 0, seeks: 0, seekMisses: 0, lateRead: 0,
   };
 
   constructor(private readonly files: CaptureFiles) {}
@@ -327,6 +342,9 @@ export class CatchUp<F extends SeqFrame> {
     this.sizes = null;
     this.seekOff = false;
     this.gapEnd = null;
+    this.late = [];
+    this.lateRead = [];
+    this.lateTaken.clear();
   }
 
   /**
@@ -376,11 +394,18 @@ export class CatchUp<F extends SeqFrame> {
     return sizes.point(anchorSeq);
   }
 
+  /** The first frame a seek must not pass: the anchor, or a late frame before it. */
+  private target(): number | null {
+    if (this.anchor === null) return null;
+    return this.late.length > 0 ? Math.min(this.late[0], this.anchor.seq) : this.anchor.seq;
+  }
+
   /** Where the cursor, counting on, will learn a run's place on its way to the anchor. */
   private findGapEnd(cursor: Cursor): void {
     const sizes = this.sizes;
-    this.gapEnd = this.anchor === null || this.seekOff || sizes === null || sizes.index !== cursor.index
-      ? null : sizes.unplacedFrom(cursor.next, this.anchor.seq);
+    const target = this.target();
+    this.gapEnd = target === null || this.seekOff || sizes === null || sizes.index !== cursor.index
+      ? null : sizes.unplacedFrom(cursor.next, target);
   }
 
   /** Read on from `point`: at once when the header is read, else after it. */
@@ -424,6 +449,11 @@ export class CatchUp<F extends SeqFrame> {
     this.seekOff = true;
     const facts = this.files.get(cursor.index);
     this.cursor = freshCursor(cursor.index, cursor.name, facts?.firstSeq ?? cursor.next);
+    // Read again from the start, with the rest.
+    if (this.lateRead.length > 0) {
+      this.late = [...this.late, ...this.lateRead.map((f) => f.seq)].sort((a, b) => a - b);
+      this.lateRead = [];
+    }
     out.retryMs = 0;
     return out;
   }
@@ -433,10 +463,12 @@ export class CatchUp<F extends SeqFrame> {
    * false when it cannot - no file says it holds those frames, or catch-up was
    * turned off for this capture - and the caller marks the hole instead.
    */
-  start(fromSeq: number, anchor: Anchor | null): boolean {
+  start(fromSeq: number, anchor: Anchor | null, late: readonly number[] = []): boolean {
     if (this.on) return true;
     if (this.disabled !== null) return false;
+    late = late.filter((n) => n < fromSeq);
     let want = anchor !== null && anchor.seq === fromSeq - 1 ? anchor.seq : fromSeq;
+    if (late.length > 0) want = Math.min(want, ...late);
     let file = this.files.holding(want);
     // A ring file deleted already: its frames are lost to the view, and the
     // catch-up begins with the next file the agent still has - the hole up
@@ -447,10 +479,10 @@ export class CatchUp<F extends SeqFrame> {
       skipped = true;
     }
     if (file === undefined || file.name === null) return false;
-    if (skipped) { want = file.firstSeq!; anchor = null; }
+    if (skipped) { want = file.firstSeq!; anchor = null; late = []; }
     // A cursor left exactly where this hole begins - the last catch-up rejoined
     // at the frame before it, which it checked - is carried on with no anchor.
-    const resume = this.cursor !== null && this.cursor.index === file.index && this.cursor.next === fromSeq;
+    const resume = late.length === 0 && this.cursor !== null && this.cursor.index === file.index && this.cursor.next === fromSeq;
     if (!resume && (this.cursor === null || this.cursor.index !== file.index || this.cursor.next > want)) {
       this.cursor = freshCursor(file.index, file.name, file.firstSeq!);
     }
@@ -458,13 +490,15 @@ export class CatchUp<F extends SeqFrame> {
     this.from = fromSeq;
     this.sessionFrom = fromSeq;
     this.anchor = !resume && anchor !== null && anchor.seq === fromSeq - 1 ? anchor : null;
+    this.late = late.slice().sort((a, b) => a - b);
+    this.lateRead = [];
     // Rather than count every frame from where the cursor is - the start of
     // the file, the first time - go to where the sizes put the anchor, which
     // then proves the landing. Only with an anchor: nothing else could.
     // (A cursor is there now: carried on, or made just above.)
     const cursor = this.cursor!;
     if (this.anchor !== null && cursor.seek === null && cursor.landing === null) {
-      const point = this.seekPoint(file, this.anchor.seq);
+      const point = this.seekPoint(file, this.target()!);
       if (point !== null && point.seq > cursor.next) this.aim(cursor, point);
     }
     this.findGapEnd(cursor);
@@ -481,6 +515,14 @@ export class CatchUp<F extends SeqFrame> {
    * the file has it.
    */
   live(frame: F): LiveVerdict {
+    if (this.lateTaken.size > 0 && this.lateTaken.delete(frame.seq)) return 'drop';
+    if (this.late.length > 0 || this.lateRead.length > 0) {
+      // A late frame came live after all: the file need not deliver it.
+      const i = this.late.indexOf(frame.seq);
+      if (i >= 0) this.late.splice(i, 1);
+      const j = this.lateRead.findIndex((f) => f.seq === frame.seq);
+      if (j >= 0) this.lateRead.splice(j, 1);
+    }
     if (!this.on) {
       // Live, but a late copy of a frame the file already delivered.
       return frame.seq >= this.coveredFrom && frame.seq < this.coveredBelow ? 'drop' : 'take';
@@ -569,7 +611,7 @@ export class CatchUp<F extends SeqFrame> {
     }
     let frame;
     try {
-      while ((frame = cursor.tail.next(cursor.seek === null && cursor.next >= this.from - 1)) !== null) {
+      while ((frame = cursor.tail.next(cursor.seek === null && cursor.next >= (this.late.length > 0 ? Math.min(this.late[0], this.from) : this.from) - 1)) !== null) {
         if (cursor.headerEnd === null) cursor.headerEnd = cursor.tail.blockAt;
         if (cursor.seek !== null) {
           // The header is read: on to where the sizes say.
@@ -582,7 +624,8 @@ export class CatchUp<F extends SeqFrame> {
           // now, and from there, often, the anchor.
           this.sizes.learn(seq, cursor.tail.blockAt - cursor.headerEnd);
           const facts = this.files.get(cursor.index);
-          const point = facts !== undefined && this.anchor !== null ? this.seekPoint(facts, this.anchor.seq) : null;
+          const target = this.target();
+          const point = facts !== undefined && target !== null ? this.seekPoint(facts, target) : null;
           if (point !== null && point.seq > cursor.next) { this.aim(cursor, point); continue; }
           this.findGapEnd(cursor);
         }
@@ -592,9 +635,20 @@ export class CatchUp<F extends SeqFrame> {
           }
           cursor.landing = null;
           this.anchor = null;
+          for (const late of this.lateRead) this.takeLate(late, out);
+          this.lateRead = [];
           continue;
         }
-        if (seq < this.from) continue;
+        if (seq < this.from) {
+          const i = this.late.length > 0 ? this.late.indexOf(seq) : -1;
+          if (i >= 0) {
+            this.late.splice(i, 1);
+            // Before the anchor proves the count, it may be wrong: held until it does.
+            if (this.anchor !== null) this.lateRead.push({ ...frame, seq });
+            else this.takeLate({ ...frame, seq }, out);
+          }
+          continue;
+        }
         // The file has reached the live frames held for it: rejoin there.
         //
         // Found by content as well as by number. A frame the agent's writer
@@ -616,6 +670,7 @@ export class CatchUp<F extends SeqFrame> {
           this.coveredFrom = this.sessionFrom;
           this.coveredBelow = first.seq;
           out.rejoin = this.held;
+          out.lost = this.dropLate();
           this.held = [];
           this.heldBytes = 0;
           this.holdFrom = null;
@@ -641,6 +696,7 @@ export class CatchUp<F extends SeqFrame> {
       this.on = false;
       this.stats.rejoined++;
       out.rejoin = [];
+      out.lost = this.dropLate();
       return out;
     }
     if (cursor.tail.readOffset <= before) {
@@ -674,17 +730,33 @@ export class CatchUp<F extends SeqFrame> {
    * marks - or they would be missing with nothing saying so.
    */
   abort(): Abandoned<F> {
-    if (!this.on) return { held: [], from: 0, to: 0 };
+    if (!this.on) return { held: [], from: 0, to: 0, late: 0 };
     const held = this.held;
     const from = this.from;
     const to = this.edge;
+    const late = this.dropLate();
     this.on = false;
     this.inFlight = false;
     this.held = [];
     this.heldBytes = 0;
     this.holdFrom = null;
     this.anchor = null;
-    return { held, from, to };
+    return { held, from, to, late };
+  }
+
+  /** A late frame read back: delivered, and its live copy, should one come, dropped. */
+  private takeLate(frame: FileFrame, out: ReadResult<F>): void {
+    this.lateTaken.add(frame.seq);
+    this.stats.lateRead++;
+    out.frames.push(frame);
+  }
+
+  /** The late frames this catch-up will not deliver now, given up: how many. */
+  private dropLate(): number {
+    const lost = this.late.length + this.lateRead.length;
+    this.late = [];
+    this.lateRead = [];
+    return lost;
   }
 
   /** The device name an IDB of the file being read gives, if it gives one. */
@@ -747,6 +819,8 @@ export class CatchUpRouter<F extends SeqFrame> {
       readonly expectedSeq: number | null;
       seqArrived(seq: number): number;
       noteShed(firstSeq: number, frames: number): void;
+      takeLate(from: number, below: number): number[];
+      noteLost(frames: number): void;
     },
     readonly catchUp: CatchUp<F>,
     private readonly fromFile: (frame: FileFrame) => F,
@@ -779,7 +853,7 @@ export class CatchUpRouter<F extends SeqFrame> {
       if (this.catchUp.live(frame) === 'drop') { this.release(frame); return; }
       const expected = this.flow.expectedSeq;
       const hole = expected !== null && frame.seq - expected >= this.holeMin;
-      if (!(hole && this.enabled && this.catchUp.start(expected, this.anchor))) {
+      if (!(hole && this.enabled && this.catchUp.start(expected, this.anchor, this.flow.takeLate(expected - LATE_WINDOW, expected)))) {
         this.pass(frame);
         return;
       }
@@ -799,18 +873,24 @@ export class CatchUpRouter<F extends SeqFrame> {
   shed(firstSeq: number, frames: number): void {
     if (this.catchUp.active) { this.catchUp.shedSeen(firstSeq, frames); return; }
     const expected = this.flow.expectedSeq;
+    // Numbers below the next one owed that never came - two adapters' skew at
+    // the batch's edge: the shed batch held them, so they come from the file
+    // with the rest, or are marked with it (#18).
+    let late: number[] = [];
     // A file read faster than main's word of what it shed can level before
     // a later batch's notice arrives: the part the file delivered is not a
     // hole, and the rest is one to catch up from where the file stopped.
     if (expected !== null && firstSeq < expected) {
+      late = this.flow.takeLate(firstSeq, expected);
       frames -= expected - firstSeq;
       firstSeq = expected;
-      if (frames <= 0) return;
+      if (frames <= 0) { this.flow.noteLost(late.length); return; }
     }
-    if (this.enabled && expected !== null && expected <= firstSeq && this.catchUp.start(expected, this.anchor)) {
+    if (this.enabled && expected !== null && expected <= firstSeq && this.catchUp.start(expected, this.anchor, late)) {
       this.catchUp.shedSeen(firstSeq, frames);
       return;
     }
+    this.flow.noteLost(late.length);
     this.flow.noteShed(firstSeq, frames);
   }
 
@@ -818,6 +898,7 @@ export class CatchUpRouter<F extends SeqFrame> {
   read(result: { bytes: Uint8Array | null; gone: boolean; error?: string }): { retryMs?: number; ended?: CatchUpEnd } {
     const out = this.catchUp.readDone(result);
     for (const frame of out.frames) this.pass(this.fromFile(frame));
+    if (out.lost !== undefined) this.flow.noteLost(out.lost);
     if (out.rejoin !== null) for (const frame of out.rejoin) this.arrive(frame);
     if (out.ended !== null) this.giveBack(out.ended);
     return { retryMs: out.retryMs, ended: out.ended?.why };
@@ -828,7 +909,8 @@ export class CatchUpRouter<F extends SeqFrame> {
    * counted and marked on the next frame, as main's shed batches were before
    * catch-up existed; what was held goes on live.
    */
-  private giveBack({ held, from, to }: Abandoned<F>): void {
+  private giveBack({ held, from, to, late }: Abandoned<F>): void {
+    this.flow.noteLost(late);
     // Up to the first held frame, then past the last: the held ones arrive
     // live between, and mark the first gap themselves.
     const first = held.reduce((min, f) => Math.min(min, f.seq), to);
