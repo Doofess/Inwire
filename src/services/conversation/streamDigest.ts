@@ -69,8 +69,12 @@ export interface StreamSummary {
  * RSTs could make it more, and a summary is sent whole on every change.
  */
 export const MAX_STEPS = 64;
-/** Frame ids remembered for `relabel`. The patch horizon is two seconds. */
-const RECENT_FRAMES = 65_536;
+/**
+ * Frame ids remembered for `relabel`: at least the writer's patch horizon in
+ * frames (`DEFAULT_HORIZON_FRAMES`), which a fast link reaches before its
+ * two seconds. A power of two.
+ */
+export const RECENT_FRAMES = 131_072;
 
 const RETRANSMISSIONS = new Set(['retransmission', 'fast_retransmission', 'spurious_retransmission']);
 
@@ -119,10 +123,16 @@ const emptyTotals = (): DirectionTotals => ({ packets: 0, bytes: 0, first: null,
 
 export class StreamDigest {
   private readonly streams = new Map<number, Entry>();
-  private readonly recent = new Map<number, number>();
-  /** `recent`'s keys in arrival order, 0 where none yet; `recentAt` is the oldest. */
+  /**
+   * The last `RECENT_FRAMES` ids folded and the stream each was in, as two
+   * rings: ids ascend, so a lookup is a binary search, and a fold costs two
+   * stores where a Map's insert and delete were most of `feed`.
+   */
   private readonly recentIds = new Float64Array(RECENT_FRAMES);
+  private readonly recentKeys = new Int32Array(RECENT_FRAMES);
+  /** The next slot written: the oldest, once the ring is full. */
   private recentAt = 0;
+  private recentCount = 0;
   private through = 0;
   private versionValue = 0;
 
@@ -179,15 +189,27 @@ export class StreamDigest {
     s.outcome = outcomeOf(entry.machine);
     s.version = ++this.versionValue;
 
-    // A ring of the ids, not `recent.keys().next()`: deleting from a Map's
-    // front leaves holes its iterator walks on every call, and that one line
-    // was most of `feed` once the window filled (`scripts/perf/store-boundary.ts`).
     const slot = this.recentAt;
-    const evicted = this.recentIds[slot];
-    if (evicted !== 0) this.recent.delete(evicted);
     this.recentIds[slot] = row.id;
-    this.recentAt = (slot + 1) % RECENT_FRAMES;
-    this.recent.set(row.id, streamId);
+    this.recentKeys[slot] = streamId;
+    this.recentAt = (slot + 1) & (RECENT_FRAMES - 1);
+    if (this.recentCount < RECENT_FRAMES) this.recentCount++;
+  }
+
+  /** The stream a recently folded frame was in, or undefined. */
+  private recentStream(frameId: number): number | undefined {
+    const oldest = this.recentCount < RECENT_FRAMES ? 0 : this.recentAt;
+    let lo = 0;
+    let hi = this.recentCount - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      const slot = (oldest + mid) & (RECENT_FRAMES - 1);
+      const id = this.recentIds[slot];
+      if (id === frameId) return this.recentKeys[slot];
+      if (id < frameId) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return undefined;
   }
 
   /**
@@ -207,7 +229,7 @@ export class StreamDigest {
 
   /** An `InfoPatch.protocolLabel` for a frame already folded. */
   relabel(frameId: number, label: string): void {
-    const streamId = this.recent.get(frameId);
+    const streamId = this.recentStream(frameId);
     if (streamId === undefined) return;
     const s = this.streams.get(streamId)?.summary;
     if (s === undefined || label === 'TCP' || label === 'UDP') return;

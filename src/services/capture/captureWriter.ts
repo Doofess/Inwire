@@ -189,7 +189,7 @@ function slotOf(row: PackedRowIn): PackedChunkSlot {
 }
 
 const DEFAULT_HORIZON_US = 2_000_000;
-const DEFAULT_HORIZON_FRAMES = 100_000;
+export const DEFAULT_HORIZON_FRAMES = 100_000;
 const DEFAULT_FLUSH_EVERY_CHUNKS = 8;
 
 /**
