@@ -277,6 +277,13 @@ export interface StagedFrame {
  * Deliberately three fields. Anything more would be something a dissector
  * decided, and the point of this path is that nothing has dissected yet.
  */
+/** What `attachRows` did not take now, by id (see there). */
+export interface AttachedRows {
+  held: readonly number[];
+  missed: readonly number[];
+}
+const NONE: readonly number[] = [];
+
 export interface RawFrame {
   id: number;
   tsUs: number;
@@ -790,8 +797,15 @@ export class CaptureWriter {
    * The held rows are bounded by the same thing the staging ring is: a row
    * whose bytes never arrive is a frame that never arrived, and
    * `clearOrphans()` is called when a capture ends.
+   *
+   * Says which rows it did not take now: `held` wait for their bytes, and
+   * `missed` came after their chunk sealed, which keeps a placeholder. The
+   * stream digest folds only what was taken, so it stays a fold of the stored
+   * rows (ADR 0055).
    */
-  attachRows(rows: readonly RowIn[]): void {
+  attachRows(rows: readonly RowIn[]): AttachedRows {
+    let heldIds: number[] | null = null;
+    let missed: number[] | null = null;
     for (const row of rows) {
       const index = this.stagedAt.get(row.id);
       const sealed = index !== undefined
@@ -804,6 +818,7 @@ export class CaptureWriter {
         // Too late to be written: a sealed chunk is deflated and appended, and
         // rewriting it would undo the append-only property recovery depends on.
         this.counters.rowsMissed += 1;
+        (missed ??= []).push(row.id);
         continue;
       }
       // A carrying row's bytes were staged above (or are down already); the
@@ -811,6 +826,7 @@ export class CaptureWriter {
       const held = isPacked(row) ? slotOf(row) : row;
       if (index === undefined) {
         this.orphanRows.set(row.id, held);
+        (heldIds ??= []).push(row.id);
         continue;
       }
       // A row that replaces another brings its own history: the patches the
@@ -824,6 +840,7 @@ export class CaptureWriter {
     // `drainReady` only needs the slots - but a chunk held only by the horizon
     // is unaffected, so this is cheap and never premature.
     this.drainReady();
+    return { held: heldIds ?? NONE, missed: missed ?? NONE };
   }
 
   /** Rows waiting for bytes that have not arrived. Dropped when a capture ends. */

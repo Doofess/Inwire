@@ -121,6 +121,11 @@ interface OpenCapture {
    */
   digestPartial: boolean;
   /**
+   * Rows the writer holds for bytes that have not come: folded into the digest
+   * when they do, never if they do not, as the writer stores them.
+   */
+  digestWaiting: Map<number, Packet>;
+  /**
    * The frame ids the user marked (ADR 0067). Replaced, never edited, so a
    * scan that compiled with the set it saw keeps one consistent answer while a
    * newer set arrives; the next scan takes the new one. May hold ids the ring
@@ -396,6 +401,8 @@ export class CaptureHost {
         case 'finish': {
           if (this.open === null) return;
           this.open.writer.finish();
+          // The writer dropped the rows it held (`clearOrphans`): so does the digest.
+          this.open.digestWaiting.clear();
           this.trySnapshot(this.open);
           this.reportStats();
           return;
@@ -476,6 +483,7 @@ export class CaptureHost {
           ? writer.index.record(writer.index.floorChunk).lastId : null,
       },
       digestPartial: false,
+      digestWaiting: new Map(),
       marks: new Set(marksFrom),
     };
     this.open = open;
@@ -611,10 +619,23 @@ export class CaptureHost {
     // and nothing staged, so an empty `rawBytes` can never be written as a
     // frame. A row whose bytes never arrived is held and then counted missed,
     // like any other (`attachRows`).
-    if (sent.length > 0) this.open.writer.attachRows(sent);
-    if (carrying.length > 0) this.open.writer.append(carrying);
+    const open = this.open;
+    const attached = sent.length > 0 ? open.writer.attachRows(sent) : null;
+    if (carrying.length > 0) open.writer.append(carrying);
     // Both paths, after the writer: an import's rows and the live Worker's.
-    for (const p of rows) this.feedDigest(this.open, p);
+    // Only the rows it took: one it holds waits for its bytes, and a missed
+    // one's slot is a placeholder. A row folded that the capture never stores
+    // left the snapshot through an id no open could match.
+    if (attached === null || (attached.held.length === 0 && attached.missed.length === 0)) {
+      for (const p of rows) this.feedDigest(open, p);
+      return;
+    }
+    const held = new Set(attached.held);
+    const missed = new Set(attached.missed);
+    for (const p of rows) {
+      if (held.has(p.id)) open.digestWaiting.set(p.id, p);
+      else if (!missed.has(p.id)) this.feedDigest(open, p);
+    }
   }
 
   /** One row into the digest, or into the queue behind a rebuild. */
@@ -755,7 +776,20 @@ export class CaptureHost {
     reply: (message: FromCapture) => void,
   ): void {
     try {
-      if (this.open !== null) this.open.writer.appendBytes(unpackFrames(message.slab));
+      const open = this.open;
+      if (open !== null) {
+        const frames = unpackFrames(message.slab);
+        open.writer.appendBytes(frames);
+        // A row that overtook its bytes was taken just now (`appendRows`).
+        if (open.digestWaiting.size > 0) {
+          for (const frame of frames) {
+            const row = open.digestWaiting.get(frame.id);
+            if (row === undefined) continue;
+            open.digestWaiting.delete(frame.id);
+            this.feedDigest(open, row);
+          }
+        }
+      }
     } finally {
       // In a `finally`: a throw is reported by `handle` on the client port,
       // and the Worker must still hear that the append is no longer owed.

@@ -426,6 +426,46 @@ console.log('\n--- I6. a rebuild that dropped rows says so, and is never written
   roomy.store.close();
 }
 
+console.log('\n--- 13. a missed row does not cost every open a rebuild ---\n');
+
+{
+  // The live Worker's path: rows with `bytesSent`, their bytes on the same
+  // port. The newest row's bytes never come, so the writer holds it and counts
+  // it missed at finish - and the digest must not have folded it, or its
+  // snapshot is through an id the index never holds and no open trusts it.
+  const MISS = 'cap-20261009-120000-dig9';
+  const framesOf = (s: StreamSummary | undefined) => s === undefined ? undefined : s.toServer.packets + s.toClient.packets;
+  const missVolume = new MemoryVolume();
+  const h = host({ scanSliceMs: 0 }, missVolume);
+  nextId = 1;
+  const rows = connection();
+  const late = row(true, 'A', { seq: 102, ack: 1002 });
+  const lost = row(true, 'A', { seq: 102, ack: 1002 });
+  h.send({ type: 'open', captureId: MISS });
+  h.send({ type: 'appendBytes', slab: packFrames(rows.map((r) => ({ id: r.id, tsUs: r.tsUs, bytes: r.rawBytes }))) });
+  h.send({ type: 'append', packets: crossed(rows), bytesSent: true });
+  // A row that overtook its bytes is folded once they come; the lost one never.
+  h.send({ type: 'append', packets: crossed([late, lost]), bytesSent: true });
+  h.send({ type: 'appendBytes', slab: packFrames([{ id: late.id, tsUs: late.tsUs, bytes: late.rawBytes }]) });
+  const live = await ask(h, 0, 900);
+  check('a row whose bytes came after it is folded', framesOf(live?.summaries[0]), rows.length + 1);
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  check('...and the snapshot is through the newest stored id', decodeDigest(digestFile(missVolume, MISS), inflateSync)?.throughId, late.id);
+  h.store.close();
+
+  for (const [n, requestId] of [['second', 901], ['third', 902]] as const) {
+    const again = host({ scanSliceMs: 0 }, missVolume);
+    again.send({ type: 'open', captureId: MISS });
+    const answer = await ask(again, 0, requestId);
+    // A rebuild empties the file as it starts (and would finish within one drain here).
+    checkTrue(`the ${n} open restores the snapshot, no rebuild`, answer?.rebuilding === null && digestFile(missVolume, MISS).length > 0);
+    check(`...with every stored row`, framesOf(answer?.summaries[0]), rows.length + 1);
+    again.store.close();
+  }
+  check('no handle leaked', missVolume.outstanding, 0);
+}
+
 console.log(failures === 0
   ? '\nAll stream digest store checks passed.'
   : `\n${failures} stream digest store check(s) failed.`);
