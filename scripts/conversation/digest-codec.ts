@@ -153,7 +153,7 @@ function quicUdpRow(id: number, fromClient: boolean, over: Record<string, number
   const restored = back && StreamDigest.restore(back);
   check('...and restores each kind', restored && [restored.get(7)?.outcome, restored.getFlow('udp', 4)?.outcome, restored.getFlow('quic', 0)?.outcome],
     [d.get(7)?.outcome, d.getFlow('udp', 4)?.outcome, d.getFlow('quic', 0)?.outcome]);
-  check('format 3 is what is written', new DataView(bytes.buffer, bytes.byteOffset).getUint16(4, true), 3);
+  check('format 4 is what is written', new DataView(bytes.buffer, bytes.byteOffset).getUint16(4, true), 4);
 
   // A file written by stage 1: format 2, a 20-byte meta, untagged TCP entries,
   // every checksum and length right. Only its number is old, and it must read
@@ -172,7 +172,41 @@ function quicUdpRow(id: number, fromClient: boolean, over: Record<string, number
   mustBeNull('a format 2 snapshot is refused', old);
 }
 
-mustBeNull('a body one byte short', encoded.slice(0, encoded.length - 1));
+// Stage 3: TLS entries ride beside the TCP ones, and a format 3 file is refused.
+{
+  nextId = 1;
+  const d = new StreamDigest();
+  const tls = (fromClient: boolean, fields: Record<string, number | string>): Packet => ({
+    ...row(fromClient, 'A', { seq: 1, ack: 1, len: 100 }),
+    protocol: 'TCP', protocolLabel: 'TLSv1.3', frameProtocols: ['eth', 'ethertype', 'ip', 'tcp', 'tls'],
+    fields: { 'tcp.flags.ack': 1, 'tcp.len': 100, ...fields },
+  });
+  for (const r of [
+    row(true, 'S', { seq: 0 }), row(false, 'SA', { seq: 0, ack: 1 }),
+    tls(true, { 'tls.record.content_type': 22, 'tls.handshake.type': 1, 'tls.handshake.ja4': 'x' }),
+    tls(false, { 'tls.record.content_type': 22, 'tls.handshake.type': 2, 'tls.handshake.ja3s': 'y' }),
+    tls(false, { 'tls.record.content_type': 21, 'tls.alert_message.level': 2, 'tls.alert_message.desc': 40 }),
+  ]) d.feed(r);
+  const withTls = d.snapshot();
+  check('a snapshot holds a TLS entry beside the TCP one', withTls.entries.map((e) => e.kind).sort(), ['tcp', 'tls']);
+  const bytes = encodeDigest(withTls, deflate);
+  const back = decodeDigest(bytes, inflate);
+  check('round-trips TLS entries', back, withTls);
+  const restored = back && StreamDigest.restore(back);
+  check('...and restores the TLS summary', restored?.getTls(7), d.getTls(7));
+  check('...with its alert', restored?.getTls(7)?.fatalAlert, { side: 'server', name: 'Handshake Failure' });
+
+  // Format 3, byte for byte as 6113366 wrote it: only its number is old.
+  const body = bytes.slice(16);
+  const old = new Uint8Array(16 + body.length);
+  const v = new DataView(old.buffer);
+  v.setUint32(0, 0x47445749, true); v.setUint16(4, 3, true);
+  v.setUint32(8, body.length, true); v.setUint32(12, fnv1a(body), true);
+  old.set(body, 16);
+  mustBeNull('a format 3 snapshot is refused', old);
+}
+
+mustBeNull('a body one byte short',encoded.slice(0, encoded.length - 1));
 
 const flipped = encoded.slice();
 flipped[flipped.length - 1] ^= 0x01;

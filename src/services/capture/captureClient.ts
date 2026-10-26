@@ -37,6 +37,7 @@ import { MatchSet } from './matchSet';
 import { plainForStore } from './storePacket';
 import type { StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
+import type { TlsSummary } from '../conversation/tlsSummary';
 
 /** What a `streamDigest` poll gets back (ADR 0055). */
 export interface StreamDigestAnswer {
@@ -46,6 +47,7 @@ export interface StreamDigestAnswer {
   summaries: StreamSummary[];
   udp: UdpSummary[];
   quic: QuicSummary[];
+  tls: TlsSummary[];
   /** The digest's latest frame time, which "went quiet" is measured against. */
   captureEnd: number;
   rebuilding: { done: number; total: number } | null;
@@ -347,6 +349,7 @@ class CaptureClient {
           summaries: message.summaries,
           udp: message.udp,
           quic: message.quic,
+          tls: message.tls,
           captureEnd: message.captureEnd,
           rebuilding: message.rebuilding,
           partial: message.partial,
@@ -659,7 +662,7 @@ class CaptureClient {
     return this.request(
       this.pendingDigest as never,
       (requestId) => ({ type: 'streamDigest', requestId, since }),
-      { captureId: null, version: since, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false } as StreamDigestAnswer,
+      { captureId: null, version: since, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false } as StreamDigestAnswer,
     );
   }
 
@@ -792,7 +795,7 @@ class CaptureClient {
     // poller reads the null id as "start again" and asks the next capture
     // from zero.
     for (const settle of this.pendingDigest.values()) {
-      settle({ captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
+      settle({ captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false });
     }
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);

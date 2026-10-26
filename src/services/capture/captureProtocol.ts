@@ -12,6 +12,7 @@ import type { WriterStats } from './captureWriter';
 import type { FrameSlab } from './frameSlab';
 import type { StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
+import type { TlsSummary } from '../conversation/tlsSummary';
 import type { PackedRows } from '../pipeline/rowPack';
 
 export type ToCapture =
@@ -366,6 +367,8 @@ export type FromCapture =
       udp: UdpSummary[];
       /** QUIC connections changed since, keyed by `key` (`quic.connection.number`). */
       quic: QuicSummary[];
+      /** TLS summaries changed since, keyed by `key` (`tcp.stream`); a TCP stream with no TLS phase has none. */
+      tls: TlsSummary[];
       /** The largest `relativeTime` the digest has folded; 0 with nothing open. */
       captureEnd: number;
       rebuilding: { done: number; total: number } | null;

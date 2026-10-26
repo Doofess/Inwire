@@ -145,7 +145,7 @@ console.log('--- 1. every request answers ---\n');
   h.send({ type: 'streamOrdinals', requestId: 2, streamId: 7, fromId: 1, toId: 100, startChunk: 0 });
   await h.store.drain();
   check('streamDigest with nothing open answers empty', h.of('streamDigest'), [
-    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false },
+    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false },
   ]);
   check('streamOrdinals with nothing open answers empty', h.of('streamOrdinals'), [
     { type: 'streamOrdinals', requestId: 2, ordinals: [], nextChunk: null },
@@ -509,6 +509,46 @@ console.log('\n--- 14. UDP and QUIC reach the answer, and survive a reopen ---\n
     [restored?.rebuilding, restored?.udp, restored?.quic, restored?.captureEnd], [null, live?.udp, live?.quic, 12.5]);
   h.store.close();
   check('no handle leaked', flowVolume.outstanding, 0);
+}
+
+console.log('\n--- 14b. TLS reaches the answer, and survives a reopen ---\n');
+
+{
+  const TLS_CAPTURE = 'cap-20261027-120000-dig11';
+  const tlsVolume = new MemoryVolume();
+  const tlsRow = (fromClient: boolean, time: number, fields: Record<string, number | string>): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time,
+      source: fromClient ? '10.0.0.2' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.2',
+      sourcePort: fromClient ? 50000 : 443, destPort: fromClient ? 443 : 50000,
+      protocol: 'TCP', protocolLabel: 'TLSv1.3', frameProtocols: ['eth', 'ethertype', 'ip', 'tcp', 'tls'], streamId: 21,
+      fields: { 'tcp.flags.ack': 1, 'tcp.len': 90, ...fields },
+      length: 144, info: '', status: 'ok', interfaceName: 'eth0', layers: [], rawBytes: new Uint8Array([id & 0xff, 0, 0, 0]),
+    } as Packet;
+  };
+  nextId = 1;
+  const rows = [
+    tlsRow(true, 1, { 'tls.record.content_type': 22, 'tls.handshake.type': 1, 'tls.handshake.ja4': 'x' }),
+    tlsRow(false, 2, { 'tls.record.content_type': 22, 'tls.handshake.type': 2, 'tls.handshake.ja3s': 'y' }),
+    tlsRow(false, 3, { 'tls.record.content_type': 21, 'tls.alert_message.level': 2, 'tls.alert_message.desc': 40 }),
+  ];
+  const h = host({}, tlsVolume);
+  h.send({ type: 'open', captureId: TLS_CAPTURE });
+  h.send({ type: 'append', packets: crossed(rows) });
+  const live = await ask(h, 0, 2000);
+  const phases = (a: typeof live) => a?.tls.map((s) => [s.key, s.phases.map((p) => `${p.side}:${p.phase}`), s.fatalAlert]);
+  const expected = [[21, ['client:ClientHello', 'server:ServerHello', 'server:alert'], { side: 'server', name: 'Handshake Failure' }]];
+  check('an import\'s TLS rows reach the answer', phases(live), expected);
+  const quiet = await ask(h, live?.version ?? 0, 2001);
+  check('...and a poll with nothing new carries no TLS', quiet?.tls, []);
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  h.send({ type: 'open', captureId: TLS_CAPTURE });
+  const restored = await ask(h, 0, 2002);
+  check('a reopen restores TLS from the snapshot, with no rebuild', [restored?.rebuilding, phases(restored)], [null, expected]);
+  h.store.close();
+  check('no handle leaked', tlsVolume.outstanding, 0);
 }
 
 console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from the rows ---\n');

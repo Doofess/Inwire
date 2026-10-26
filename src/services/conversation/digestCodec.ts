@@ -5,9 +5,10 @@
  * older format, a checksum that does not match - reads as `null`, and the
  * store folds the digest again from the capture's rows.
  *
- * Format 3 is a header, four numbers, and a run of independently deflated
+ * Format 4 is a header, four numbers, and a run of independently deflated
  * chunks of at most `CHUNK_ENTRIES` entries each; each entry is tagged with its
- * kind (TCP stream, UDP flow, QUIC connection). Format 2 had no captureEnd and
+ * kind (TCP stream, UDP flow, QUIC connection, TLS summary). Format 3 had no TLS
+ * kind and reads as null, or a reopened capture would claim no TLS. Format 2 had no captureEnd and
  * untagged TCP entries, and reads as null like any other format. Format 1 was one JSON text
  * of every entry, which V8 refuses past about 512 MB ("Invalid string length"):
  * 300,000 closed streams, or 500,000 refused ones, made Stop's snapshot throw
@@ -24,7 +25,7 @@
 import { fnv1a } from '../dissect/frameRecord';
 import type { DigestSnapshot, DigestSnapshotData, TaggedEntry } from './streamDigest';
 
-export const DIGEST_FORMAT = 3;
+export const DIGEST_FORMAT = 4;
 const MAGIC = 0x47445749;
 const HEADER = 16;
 const META = 28;

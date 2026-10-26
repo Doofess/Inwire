@@ -992,6 +992,7 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
   await none.store.drain();
   check('no capture: the answer has empty udp, quic and a zero captureEnd',
     [none.of('streamDigest')[0]?.udp, none.of('streamDigest')[0]?.quic, none.of('streamDigest')[0]?.captureEnd], [[], [], 0]);
+  check('...and an empty tls', none.of('streamDigest')[0]?.tls, []);
 
   const h = host();
   const udp = (id: number, fromClient: boolean) => frame(id, {
@@ -1014,6 +1015,28 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
   check('an open capture: two UDP flows, keyed by udp.stream (the QUIC datagrams are one)', answer.udp.map((s) => [s.kind, s.key]), [['udp', 4], ['udp', 5]]);
   check('...one QUIC connection, keyed by its number', answer.quic.map((s) => [s.kind, s.key]), [['quic', 2]]);
   check('...and the capture\'s end is the newest row\'s time', answer.captureEnd, 4 / 1000);
+  // TLS rides the same answer (stage 3): a TCP stream's phases, through v8.
+  const tlsHost = host();
+  const tls = (id: number, fromClient: boolean, fields: Record<string, number | string>) => frame(id, {
+    protocol: 'TCP', protocolLabel: 'TLSv1.3', frameProtocols: ['eth', 'ip', 'tcp', 'tls'], streamId: 6,
+    fields: { 'tcp.flags.ack': 1, ...fields },
+    source: fromClient ? '10.0.0.4' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.4',
+    sourcePort: fromClient ? 50000 : 443, destPort: fromClient ? 443 : 50000,
+  });
+  tlsHost.send({ type: 'open', captureId: 'cap-20261027-010000-0002' });
+  tlsHost.send({ type: 'append', packets: crossed([
+    tls(1, true, { 'tls.record.content_type': 22, 'tls.handshake.type': 1, 'tls.handshake.ja4': 'x' }),
+    tls(2, false, { 'tls.record.content_type': 22, 'tls.handshake.type': 2, 'tls.handshake.ja3s': 'y' }),
+  ]) });
+  tlsHost.send({ type: 'streamDigest', requestId: 2, since: 0 });
+  await tlsHost.store.drain();
+  const tlsAnswer = deserialize(serialize(tlsHost.of('streamDigest')[0])) as Extract<FromCapture, { type: 'streamDigest' }>;
+  check('the v8 round trip carries tls: one summary, keyed by tcp.stream, with its phases',
+    tlsAnswer.tls.map((s) => [s.kind, s.key, s.phases.map((p) => `${p.side}:${p.phase}`)]),
+    [['tls', 6, ['client:ClientHello', 'server:ServerHello']]]);
+  check('...and an answer with no TLS carries an empty list', answer.tls, []);
+  tlsHost.store.close();
+
   // `flowOrdinals` answers over the same port, and through v8 as well. It reads
   // sealed chunks, so the capture is finished first.
   h.send({ type: 'finish' });

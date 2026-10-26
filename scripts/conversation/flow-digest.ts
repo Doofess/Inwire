@@ -11,6 +11,7 @@
  */
 import { RECENT_FRAMES, StreamDigest } from '../../src/services/conversation/streamDigest';
 import { flowKeyOf, inFlow, quicKeyOf, udpKeyOf, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
+import { tlsNote, type TlsSummary } from '../../src/services/conversation/tlsSummary';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -274,7 +275,7 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   const c = d.changedSince(v);
   check('one shared version covers every kind', [c.tcp.length, c.udp.length, c.quic.length, d.version > v], [0, 1, 1, true]);
   check('changedSince(0) returns all three (the QUIC datagram is also a UDP flow)', [d.changedSince(0).udp.length, d.changedSince(0).quic.length], [2, 1]);
-  check('changedSince at the current version is empty', Object.values(d.changedSince(d.version)).map((a) => a.length), [0, 0, 0]);
+  check('changedSince at the current version is empty', Object.values(d.changedSince(d.version)).map((a) => a.length), [0, 0, 0, 0]);
 }
 {
   nextId = 1;
@@ -348,6 +349,140 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   check('the digest folds exactly the flows the keys name', folded, [...new Set(keyed)].sort());
   const counts = [...d.changedSince(0).udp].map((s) => [s.key, s.toServer.packets]).sort();
   check('...and counts every UDP row with a stream in its UDP flow', counts, [[5, 1], [9, 2]]);
+}
+
+// ---- TLS on a TCP stream (stage 3).
+{
+  const TLS_STREAM = 11;
+  /** A TCP row that carries TLS facts. `fields` are exactly what the dissector writes. */
+  const tlsRow = (fromClient: boolean, fields: Record<string, number | string>, time?: number, over: Partial<Packet> = {}): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time ?? id / 1000,
+      source: fromClient ? CLIENT : SERVER, destination: fromClient ? SERVER : CLIENT,
+      sourcePort: fromClient ? 50000 : 443, destPort: fromClient ? 443 : 50000,
+      protocol: 'TCP', protocolLabel: 'TLSv1.2', frameProtocols: ['eth', 'ethertype', 'ip', 'tcp', 'tls'],
+      fields: { 'tcp.flags.ack': 1, 'tcp.len': 100, ...fields }, length: 154, info: '', status: 'ok',
+      streamId: TLS_STREAM, ...over,
+    } as Packet;
+  };
+  const hello = (): Record<string, number | string> => ({ 'tls.record.content_type': 22, 'tls.handshake.type': 1, 'tls.handshake.ja4': 't13d1516h2_x_y' });
+  const serverHello = (): Record<string, number | string> => ({ 'tls.record.content_type': 22, 'tls.handshake.type': 2, 'tls.handshake.ja3s': 'abc' });
+  const alert = (desc: number, level: number): Record<string, number | string> =>
+    ({ 'tls.record.content_type': 21, 'tls.alert_message.level': level, 'tls.alert_message.desc': desc });
+  const app = (): Record<string, number | string> => ({ 'tls.record.content_type': 23 });
+  const tlsOf = (d: StreamDigest, n = TLS_STREAM): TlsSummary | undefined => d.getTls(n);
+  const steps = (s: TlsSummary | undefined) => s?.phases.map((p) => `${p.side}:${p.phase}`);
+
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello(), 1));
+    d.feed(tlsRow(false, serverHello(), 2));
+    const s = tlsOf(d)!;
+    check('tls: ClientHello and ServerHello are two phases with their sides', steps(s), ['client:ClientHello', 'server:ServerHello']);
+    check('...each with the first frame and time that showed it', s.phases.map((p) => [p.frameId, p.time]), [[1, 1], [2, 2]]);
+    check('...keyed by tcp.stream, and no alert', [s.kind, s.key, s.fatalAlert], ['tls', TLS_STREAM, null]);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, serverHello()));
+    d.feed(tlsRow(false, { 'tls.record.content_type': 22, 'tls.handshake.type': 11, 'tls.x509.subject_cn': 'example.test' }));
+    d.feed(tlsRow(true, app()));
+    d.feed(tlsRow(false, app()));
+    d.feed(tlsRow(true, app()));
+    check('tls: application data from each side is a step each',
+      steps(tlsOf(d)), ['client:ClientHello', 'server:ServerHello', 'server:Certificate', 'client:application data', 'server:application data']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, { 'tls.record.content_type': 22, 'inwire.tls.decrypted': 1 }));
+    check('tls: a decrypted record is application data', steps(tlsOf(d)), ['client:application data']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, alert(0, 1)));
+    const s = tlsOf(d)!;
+    check('tls: a readable close_notify is close_notify, not an alert',
+      [steps(s), s.fatalAlert, s.phases[1].alertName], [['client:ClientHello', 'server:close_notify'], null, undefined]);
+    d.feed(tlsRow(true, alert(0, 2)));
+    check('...and a close_notify never sets fatalAlert, whatever its level', tlsOf(d)!.fatalAlert, null);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, alert(40, 2)));
+    d.feed(tlsRow(true, alert(42, 2)));
+    const s = tlsOf(d)!;
+    check('tls: a fatal alert names itself and sets fatalAlert',
+      [steps(s), s.phases[1].alertName, s.fatalAlert],
+      [['client:ClientHello', 'server:alert', 'client:alert'], 'Handshake Failure', { side: 'server', name: 'Handshake Failure' }]);
+    const warn = fresh();
+    warn.feed(tlsRow(false, alert(112, 1)));
+    check('...a warning alert is a step and not fatal', [steps(tlsOf(warn)), tlsOf(warn)!.fatalAlert], [['server:alert'], null]);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, serverHello()));
+    d.feed(tlsRow(false, app()));
+    d.feed(tlsRow(true, { 'tls.record.content_type': 21 }));
+    const s = tlsOf(d)!;
+    check('tls: an encrypted alert is not a failure',
+      [steps(s), s.fatalAlert, tlsNote(s, 'closed cleanly')],
+      [['client:ClientHello', 'server:ServerHello', 'server:application data', 'client:encrypted alert'], null, '']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, app(), 1));
+    const v1 = tlsOf(d)!.version;
+    d.feed(tlsRow(true, app(), 2));
+    d.feed(tlsRow(true, app(), 3));
+    check('tls: a repeated phase from the same side is not a second step', [steps(tlsOf(d)), tlsOf(d)!.phases[0].frameId], [['client:application data'], 1]);
+    check('...and a row that changes nothing leaves the TLS version alone', tlsOf(d)!.version, v1);
+  }
+  {
+    // QUIC's TLS is QUIC's phases (ruling S3-1): a row with no tcp is not folded.
+    const d = fresh();
+    d.feed(tlsRow(true, hello(), 1, { frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'quic', 'tls'], protocol: 'QUIC', streamId: undefined }));
+    check('tls: TLS inside QUIC is not folded as TLS', [d.changedSince(0).tls, tlsOf(d)], [[], undefined]);
+    const noTls = fresh();
+    noTls.feed(tlsRow(true, hello(), 1, { frameProtocols: ['eth', 'ethertype', 'ip', 'tcp'] }));
+    check('...nor is a TCP row that does not list tls', noTls.changedSince(0).tls, []);
+    const plain = fresh();
+    plain.feed(tlsRow(true, { 'tls.record.content_type': 22 }));
+    check('...nor a TLS row that shows no phase', [plain.changedSince(0).tls, plain.get(TLS_STREAM) !== undefined], [[], true]);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    const s = tlsOf(d)!;
+    check('tlsNote: unanswered only once the TCP stream is not open',
+      [tlsNote(s, 'open'), tlsNote(s, 'no reply'), tlsNote(s, 'half-closed by client'), tlsNote(s, 'reset by server'), tlsNote(undefined, 'reset by server')],
+      ['', ' · TLS unanswered', ' · TLS unanswered', ' · TLS unanswered', '']);
+    d.feed(tlsRow(false, serverHello()));
+    check('...an answered hello is no note', tlsNote(tlsOf(d), 'reset by server'), '');
+    d.feed(tlsRow(false, alert(40, 2)));
+    check('...a fatal alert is its own note, open or not', [tlsNote(tlsOf(d), 'open'), tlsNote(tlsOf(d), 'closed cleanly')], [' · TLS alert', ' · TLS alert']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    const first = d.version;
+    d.feed(tlsRow(false, serverHello()));
+    check('changedSince answers a TLS summary changed after a version',
+      [d.changedSince(0).tls.length, d.changedSince(first).tls.map((s) => s.key), d.changedSince(d.version).tls.length], [1, [TLS_STREAM], 0]);
+    const back = StreamDigest.restore(JSON.parse(JSON.stringify(d.snapshot())));
+    check('a snapshot round trip restores the TLS map', back.getTls(TLS_STREAM), d.getTls(TLS_STREAM));
+    back.feed(tlsRow(true, app()));
+    check('...and a restored digest keeps folding TLS', steps(back.getTls(TLS_STREAM)), ['client:ClientHello', 'server:ServerHello', 'client:application data']);
+    const lone = StreamDigest.restore({
+      throughId: 5, version: 5, captureEnd: 1,
+      entries: [{ kind: 'tls', summary: { kind: 'tls', key: 99, phases: [], fatalAlert: null, version: 3 } }],
+    });
+    check('restore keeps a TLS entry whose TCP stream is absent', [lone.getTls(99)?.key, lone.get(99)], [99, undefined]);
+  }
 }
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`);
