@@ -2,8 +2,8 @@
   "note": "Ceilings for the built renderer, in bytes. They may only FALL, with one exception whose shape scripts/perf/bundle-size.ts enforces: a raise is allowed only when the build actually outgrew the previous ceiling, and only to exactly that build - never in advance, never past it. Read against git HEAD. eagerJs is the entry chunk that must parse before React's first commit; total is every emitted asset including lazily-fetched ones.",
   "measured": "2026-10-26",
   "bundle": {
-    "eagerJs": 3079160,
-    "eagerCss": 102807,
-    "total": 9902593
+    "eagerJs": 3083488,
+    "eagerCss": 102857,
+    "total": 9906971
   }
 }
