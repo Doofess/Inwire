@@ -19,7 +19,7 @@ import {
   performanceStore,
 } from "./services/interfacePrefs";
 import { NameResolutionMap, snapshot as nameSnapshot } from "./services/nameResolution";
-import { summaryIsTarget, targetForPacket, type StreamTarget } from "./services/followStream";
+import { flowSummaryIsTarget, summaryIsTarget, targetForPacket, type StreamTarget } from "./services/followStream";
 import { ExpertLog, expertSnapshot } from "./services/expertInfo";
 import { useIncrementalAggregate } from "./lib/useIncrementalAggregate";
 import { useWindowOrdinal } from "./lib/useWindowOrdinal";
@@ -2212,9 +2212,15 @@ export default function App() {
   const streamDigest = useStreamDigest(view === 'stream' || view === 'statistics');
   const streamSummary = useMemo(() => {
     if (streamToFollow === null || streamToFollow.streamId === undefined) return null;
-    const summary = streamDigest.summaries.get(streamToFollow.streamId);
-    return summary !== undefined && summaryIsTarget(summary, streamToFollow) ? summary : null;
-  }, [streamDigest.summaries, streamToFollow]);
+    // The map of the target's own kind: a TCP stream id and a UDP key are both
+    // small integers and name different things.
+    if (streamToFollow.kind === 'tcp') {
+      const summary = streamDigest.summaries.get(streamToFollow.streamId);
+      return summary !== undefined && summaryIsTarget(summary, streamToFollow) ? summary : null;
+    }
+    const flow = (streamToFollow.kind === 'udp' ? streamDigest.udp : streamDigest.quic).get(streamToFollow.streamId);
+    return flow !== undefined && flowSummaryIsTarget(flow, streamToFollow) ? flow : null;
+  }, [streamDigest.summaries, streamDigest.udp, streamDigest.quic, streamToFollow]);
 
   /**
    * The rail's Follow Stream button, which is a verb and was reading as a place.
@@ -3726,10 +3732,10 @@ export default function App() {
                 expert={expertLog}
                 onApplyFilter={handleQuickFilter}
                 onFollowStream={handleFollowStream}
-                // The TCP level reads the store's digest, the whole capture
-                // with each stream's outcome - the one table here that does
-                // not count the buffer (ADR 0055).
-                tcpDigest={streamDigest}
+                // The TCP, UDP and QUIC levels read the store's digest, the
+                // whole capture with each flow's outcome - the tables here
+                // that do not count the buffer (ADR 0055).
+                digest={streamDigest}
                 onSelectFrame={goToFrame}
                 droppedBuffer={droppedBuffer}
                 // Every row here is a filter, so applying one means going to look

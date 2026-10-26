@@ -15,36 +15,54 @@
 
 import { Packet } from '../types/packet';
 import { chooseClient, type ClientEndBasis, type Endpoint } from './conversation/clientSide';
+import { flowKeyOf } from './conversation/flowSummary';
+import { fieldValue } from './dissect/fieldAccess';
 
 export interface StreamTarget {
-  /** Which transport, so a UDP flow on the same ports as a TCP one stays apart. */
-  kind: 'tcp' | 'udp';
+  /**
+   * Which transport, so a UDP flow on the same ports as a TCP one stays apart.
+   * A QUIC connection is its own kind: it is named by its connection number
+   * and survives a change of address, which a five-tuple does not.
+   */
+  kind: 'tcp' | 'udp' | 'quic';
   addressA: string;
   portA: number;
   addressB: string;
   portB: number;
-  /** The tracker's index, for the title. Absent for UDP, which has none. */
+  /**
+   * The key the digest holds this stream under: the tracker's index for TCP,
+   * `udp.stream` for UDP, the connection number for QUIC. Absent when the frame
+   * carries none (a UDP frame an older build imported).
+   */
   streamId?: number;
 }
 
 /** The stream a frame belongs to, or null when it is not on one. */
 export function targetForPacket(packet: Packet): StreamTarget | null {
   const layers = packet.frameProtocols;
-  const kind = layers?.includes('tcp') ? 'tcp' : layers?.includes('udp') ? 'udp' : null;
-  if (!kind) return null;
   if (packet.sourcePort === undefined || packet.destPort === undefined) return null;
-  return {
-    kind,
+  const ends = {
     addressA: packet.source,
     portA: packet.sourcePort,
     addressB: packet.destination,
     portB: packet.destPort,
-    streamId: packet.streamId,
   };
+  if (layers?.includes('tcp')) return { kind: 'tcp', ...ends, streamId: packet.streamId };
+  // The digest's routing: a QUIC datagram with a connection number is that
+  // connection's, any other UDP row is its udp.stream's.
+  const flow = flowKeyOf(packet);
+  if (flow !== null) return { kind: flow.kind, ...ends, streamId: flow.key };
+  if (layers?.includes('udp')) return { kind: 'udp', ...ends, streamId: packet.streamId };
+  return null;
 }
 
 /** Every frame on the stream, in capture order. */
 export function streamPackets(packets: readonly Packet[], target: StreamTarget): Packet[] {
+  if (target.kind === 'quic') {
+    // By connection, not five-tuple: a migrated connection keeps its frames.
+    return packets.filter((p) => p.frameProtocols?.includes('quic')
+      && fieldValue(p, 'quic.connection.number') === target.streamId);
+  }
   return packets.filter((p) => {
     if (!p.frameProtocols?.includes(target.kind)) return false;
     const forward = p.source === target.addressA && p.sourcePort === target.portA
@@ -107,6 +125,25 @@ export function summaryIsTarget(
   summary: { client: Endpoint; server: Endpoint }, target: StreamTarget,
 ): boolean {
   if (target.kind !== 'tcp' || target.streamId === undefined) return false;
+  const is = (end: Endpoint, address: string, port: number): boolean =>
+    end.address === address && end.port === port;
+  return (is(summary.client, target.addressA, target.portA) && is(summary.server, target.addressB, target.portB))
+    || (is(summary.client, target.addressB, target.portB) && is(summary.server, target.addressA, target.portA));
+}
+
+/**
+ * True when a UDP flow's or QUIC connection's summary describes this target.
+ *
+ * The same check as `summaryIsTarget`, for the same reason: the digest is
+ * looked up by a key that is unique within one capture only. The kind must
+ * match, and both ends must be the summary's, either way round. A QUIC
+ * summary names its first five-tuple, so a target taken from a frame after the
+ * connection moved does not match it, and the pane shows what the buffer holds.
+ */
+export function flowSummaryIsTarget(
+  summary: { kind: 'udp' | 'quic'; client: Endpoint; server: Endpoint }, target: StreamTarget,
+): boolean {
+  if (target.kind !== summary.kind || target.streamId === undefined) return false;
   const is = (end: Endpoint, address: string, port: number): boolean =>
     end.address === address && end.port === port;
   return (is(summary.client, target.addressA, target.portA) && is(summary.server, target.addressB, target.portB))

@@ -11,6 +11,7 @@ import type { InfoPatch } from '../dissect/types';
 import type { WriterStats } from './captureWriter';
 import type { FrameSlab } from './frameSlab';
 import type { StreamSummary } from '../conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import type { PackedRows } from '../pipeline/rowPack';
 
 export type ToCapture =
@@ -203,6 +204,24 @@ export type ToCapture =
       startChunk: number;
     }
   /**
+   * The positions of the frames of UDP flow or QUIC connection `key` (kind
+   * `kind`: `udp.stream` or `quic.connection.number`, by `inFlow`), ids
+   * `[fromId, toId]`, from chunk `startChunk` onward. Answered with
+   * `flowOrdinals`, a bounded page of chunks at a time, even when no capture is
+   * open, because the caller holds a promise. The prefix holds only
+   * `tcp.stream`, so this decodes the ROWS of those chunks; it is the dearer
+   * read and it never reads, waits for or cancels a running scan.
+   */
+  | {
+      type: 'flowOrdinals';
+      requestId: number;
+      kind: 'udp' | 'quic';
+      key: number;
+      fromId: number;
+      toId: number;
+      startChunk: number;
+    }
+  /**
    * Replaces the open capture's whole set of marked frame ids and persists it
    * (ADR 0067). One-way: the renderer holds the live set and the store keeps
    * the file, so there is nothing to answer. Ignored when `captureId` is not
@@ -343,6 +362,12 @@ export type FromCapture =
       captureId: string | null;
       version: number;
       summaries: StreamSummary[];
+      /** UDP flows changed since, keyed by `key` (`udp.stream`). */
+      udp: UdpSummary[];
+      /** QUIC connections changed since, keyed by `key` (`quic.connection.number`). */
+      quic: QuicSummary[];
+      /** The largest `relativeTime` the digest has folded; 0 with nothing open. */
+      captureEnd: number;
       rebuilding: { done: number; total: number } | null;
       /** A rebuild dropped rows: the summaries are not the whole capture, and no snapshot will be written. */
       partial: boolean;
@@ -353,6 +378,13 @@ export type FromCapture =
    * end. Empty and null when the read failed, which is reported separately.
    */
   | { type: 'streamOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null }
+  /**
+   * One page of a `flowOrdinals`, with `streamOrdinals`'s `nextChunk` meaning.
+   * `searched` (0..1) is how far through the flow's chunk range the walk has
+   * got, so a sparse flow that finds nothing for many pages still shows
+   * progress; 1 when `nextChunk` is null, and on the no-capture and failure answers.
+   */
+  | { type: 'flowOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null; searched: number }
   /**
    * How far a scan has got. Sent every `SCAN_PROGRESS_FRAMES`, not per slice.
    *

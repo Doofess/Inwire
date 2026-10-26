@@ -5,27 +5,29 @@
  * older format, a checksum that does not match - reads as `null`, and the
  * store folds the digest again from the capture's rows.
  *
- * Format 2 is a header, three numbers, and a run of independently deflated
- * chunks of at most `CHUNK_ENTRIES` entries each. Format 1 was one JSON text
+ * Format 3 is a header, four numbers, and a run of independently deflated
+ * chunks of at most `CHUNK_ENTRIES` entries each; each entry is tagged with its
+ * kind (TCP stream, UDP flow, QUIC connection). Format 2 had no captureEnd and
+ * untagged TCP entries, and reads as null like any other format. Format 1 was one JSON text
  * of every entry, which V8 refuses past about 512 MB ("Invalid string length"):
  * 300,000 closed streams, or 500,000 refused ones, made Stop's snapshot throw
  * (final review I3). No string, array or buffer here grows with the stream
  * count except the output itself, which is the compressed size.
  *
  *   header  u32 magic, u16 format, u16 0, u32 body length, u32 fnv1a(body)
- *   body    f64 throughId, f64 version, u32 entry count,
+ *   body    f64 throughId, f64 version, u32 entry count, f64 captureEnd,
  *           then per chunk: u32 compressed length, the deflated JSON array
  *
  * Each entry is its own JSON, so the encoding says nothing about the shape of
  * `machine`; it is whatever `TcpMachineState` is.
  */
 import { fnv1a } from '../dissect/frameRecord';
-import type { DigestEntry, DigestSnapshot, DigestSnapshotData } from './streamDigest';
+import type { DigestSnapshot, DigestSnapshotData, TaggedEntry } from './streamDigest';
 
-export const DIGEST_FORMAT = 2;
+export const DIGEST_FORMAT = 3;
 const MAGIC = 0x47445749;
 const HEADER = 16;
-const META = 20;
+const META = 28;
 /** About 0.5 MB of JSON a chunk; the largest string this module ever holds. */
 const CHUNK_ENTRIES = 512;
 // Built once, as `chunkCodec.ts` builds its pair: a codec's cost is in its
@@ -37,7 +39,7 @@ export function encodeDigest(data: DigestSnapshotData, deflate: (b: Uint8Array) 
   const chunks: Uint8Array[] = [];
   let compressed = 0;
   let count = 0;
-  let batch: DigestEntry[] = [];
+  let batch: TaggedEntry[] = [];
   const flush = (): void => {
     if (batch.length === 0) return;
     const z = deflate(textEncoder.encode(JSON.stringify(batch)));
@@ -57,6 +59,7 @@ export function encodeDigest(data: DigestSnapshotData, deflate: (b: Uint8Array) 
   view.setFloat64(HEADER, data.throughId, true);
   view.setFloat64(HEADER + 8, data.version, true);
   view.setUint32(HEADER + 16, count, true);
+  view.setFloat64(HEADER + 20, data.captureEnd, true);
   let at = HEADER + META;
   for (const z of chunks) {
     view.setUint32(at, z.length, true);
@@ -81,9 +84,10 @@ export function decodeDigest(bytes: Uint8Array, inflate: (b: Uint8Array) => Uint
   const throughId = view.getFloat64(HEADER, true);
   const version = view.getFloat64(HEADER + 8, true);
   const count = view.getUint32(HEADER + 16, true);
-  if (typeof throughId !== 'number' || !Number.isFinite(throughId) || !Number.isFinite(version)) return null;
+  const captureEnd = view.getFloat64(HEADER + 20, true);
+  if (!Number.isFinite(throughId) || !Number.isFinite(version) || !Number.isFinite(captureEnd)) return null;
   try {
-    const entries: DigestEntry[] = [];
+    const entries: TaggedEntry[] = [];
     let at = HEADER + META;
     while (at < bytes.length) {
       if (at + 4 > bytes.length) return null;
@@ -92,10 +96,10 @@ export function decodeDigest(bytes: Uint8Array, inflate: (b: Uint8Array) => Uint
       if (at + z > bytes.length) return null;
       const chunk: unknown = JSON.parse(textDecoder.decode(inflate(bytes.subarray(at, at + z))));
       if (!Array.isArray(chunk)) return null;
-      for (const entry of chunk as DigestEntry[]) entries.push(entry);
+      for (const entry of chunk as TaggedEntry[]) entries.push(entry);
       at += z;
     }
-    return entries.length === count ? { throughId, version, entries } : null;
+    return entries.length === count ? { throughId, version, captureEnd, entries } : null;
   } catch {
     return null;
   }

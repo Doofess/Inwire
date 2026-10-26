@@ -21,11 +21,15 @@
 import { useEffect, useState } from 'react';
 import { captureStore } from '../services/capture/captureClient';
 import type { StreamSummary } from '../services/conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../services/conversation/flowSummary';
 
 const POLL_MS = 1000;
 
 export function useStreamDigest(enabled: boolean) {
   const [summaries, setSummaries] = useState<Map<number, StreamSummary>>(() => new Map());
+  const [udp, setUdp] = useState<Map<number, UdpSummary>>(() => new Map());
+  const [quic, setQuic] = useState<Map<number, QuicSummary>>(() => new Map());
+  const [captureEnd, setCaptureEnd] = useState(0);
   const [rebuilding, setRebuilding] = useState<{ done: number; total: number } | null>(null);
   const [partial, setPartial] = useState(false);
   const [captureId, setCaptureId] = useState<string | null>(null);
@@ -45,6 +49,9 @@ export function useStreamDigest(enabled: boolean) {
         answering = answer.captureId;
         setCaptureId(answer.captureId);
         setSummaries(new Map());
+        setUdp(new Map());
+        setQuic(new Map());
+        setCaptureEnd(0);
         if (since !== 0) {
           // It was asked with the last capture's version, so this answer is
           // a partial one: ask it again from zero, now.
@@ -66,6 +73,21 @@ export function useStreamDigest(enabled: boolean) {
           return next;
         });
       }
+      if (answer.udp.length > 0) {
+        setUdp((current) => {
+          const next = new Map(current);
+          for (const s of answer.udp) next.set(s.key, s);
+          return next;
+        });
+      }
+      if (answer.quic.length > 0) {
+        setQuic((current) => {
+          const next = new Map(current);
+          for (const s of answer.quic) next.set(s.key, s);
+          return next;
+        });
+      }
+      setCaptureEnd(answer.captureEnd);
       setRebuilding(answer.rebuilding);
       setPartial(answer.partial);
       timer = window.setTimeout(poll, POLL_MS);
@@ -79,11 +101,14 @@ export function useStreamDigest(enabled: boolean) {
       // long enough to start reading a stream through a summary of frames
       // that no longer exist.
       setSummaries(new Map());
+      setUdp(new Map());
+      setQuic(new Map());
+      setCaptureEnd(0);
       setCaptureId(null);
       setRebuilding(null);
       setPartial(false);
     };
   }, [enabled]);
 
-  return { summaries, rebuilding, partial, captureId };
+  return { summaries, udp, quic, captureEnd, rebuilding, partial, captureId };
 }

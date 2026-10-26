@@ -188,7 +188,11 @@ console.log('--- every request answers, especially when it fails ---\n');
   h.send({ type: 'locate', requestId: 4, id: 1 });
   h.send({ type: 'scan', requestId: 5, filter: 'tcp' });
   h.send({ type: 'rowsForOrdinals', requestId: 6, ordinals: [0, 5] });
+  h.send({ type: 'flowOrdinals', requestId: 7, kind: 'udp', key: 1, fromId: 1, toId: 2, startChunk: 0 });
   await h.store.drain();
+  check('a flowOrdinals answers empty, with no next page', h.of('flowOrdinals'), [
+    { type: 'flowOrdinals', requestId: 7, ordinals: [], nextChunk: null, searched: 1 },
+  ]);
 
   check('a read with no capture open answers empty', h.of('bytes'), [
     { type: 'bytes', requestId: 1, frames: [] },
@@ -978,6 +982,53 @@ console.log('\n--- packed rows kept in their packs, and decoded (packNative) ---
   }
   check('the first capture leaves its half-read pack held, as expected', [native.heldAfterFirst, decoded.heldAfterFirst], [1, 1]);
   check('a new capture drops it (packsReset) and reads its own packs to the end', [native.heldAfterSecond, decoded.heldAfterSecond], [0, 0]);
+}
+
+console.log('\n--- the stream digest answer carries every kind ---\n');
+
+{
+  const none = host();
+  none.send({ type: 'streamDigest', requestId: 1, since: 0 });
+  await none.store.drain();
+  check('no capture: the answer has empty udp, quic and a zero captureEnd',
+    [none.of('streamDigest')[0]?.udp, none.of('streamDigest')[0]?.quic, none.of('streamDigest')[0]?.captureEnd], [[], [], 0]);
+
+  const h = host();
+  const udp = (id: number, fromClient: boolean) => frame(id, {
+    protocol: 'UDP', frameProtocols: ['eth', 'ip', 'udp'], fields: { 'udp.stream': 4 },
+    source: fromClient ? '10.0.0.4' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.4',
+    sourcePort: fromClient ? 50000 : 5353, destPort: fromClient ? 5353 : 50000,
+  });
+  const quic = (id: number, fromClient: boolean) => frame(id, {
+    protocol: 'QUIC', frameProtocols: ['eth', 'ip', 'udp', 'quic'],
+    fields: { 'udp.stream': 5, 'quic.connection.number': 2, 'quic.long.packet_type': 0, 'quic.version': 1 },
+    source: fromClient ? '10.0.0.4' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.4',
+    sourcePort: fromClient ? 50001 : 443, destPort: fromClient ? 443 : 50001,
+  });
+  h.send({ type: 'open', captureId: 'cap-20261026-010000-0001' });
+  h.send({ type: 'append', packets: crossed([udp(1, true), udp(2, false), quic(3, true), quic(4, false)]) });
+  h.send({ type: 'streamDigest', requestId: 2, since: 0 });
+  await h.store.drain();
+  // The answer is what the store's process posts, so it goes through v8 as well.
+  const answer = deserialize(serialize(h.of('streamDigest')[0])) as Extract<FromCapture, { type: 'streamDigest' }>;
+  check('an open capture: two UDP flows, keyed by udp.stream (the QUIC datagrams are one)', answer.udp.map((s) => [s.kind, s.key]), [['udp', 4], ['udp', 5]]);
+  check('...one QUIC connection, keyed by its number', answer.quic.map((s) => [s.kind, s.key]), [['quic', 2]]);
+  check('...and the capture\'s end is the newest row\'s time', answer.captureEnd, 4 / 1000);
+  // `flowOrdinals` answers over the same port, and through v8 as well. It reads
+  // sealed chunks, so the capture is finished first.
+  h.send({ type: 'finish' });
+  h.send({ type: 'flowOrdinals', requestId: 3, kind: 'quic', key: 2, fromId: 1, toId: 4, startChunk: 0 });
+  h.send({ type: 'flowOrdinals', requestId: 4, kind: 'udp', key: 4, fromId: 1, toId: 4, startChunk: 0 });
+  h.send({ type: 'flowOrdinals', requestId: 5, kind: 'udp', key: 5, fromId: 1, toId: 4, startChunk: 0 });
+  await h.store.drain();
+  const pages = deserialize(serialize(h.of('flowOrdinals'))) as Extract<FromCapture, { type: 'flowOrdinals' }>[];
+  check('flowOrdinals answers a QUIC connection and a UDP flow, whole, on the wire (the QUIC rows are in their UDP flow too)',
+    pages, [
+      { type: 'flowOrdinals', requestId: 3, ordinals: [2, 3], nextChunk: null, searched: 1 },
+      { type: 'flowOrdinals', requestId: 4, ordinals: [0, 1], nextChunk: null, searched: 1 },
+      { type: 'flowOrdinals', requestId: 5, ordinals: [2, 3], nextChunk: null, searched: 1 },
+    ]);
+  h.store.close();
 }
 
 console.log('\n--- progress ---\n');

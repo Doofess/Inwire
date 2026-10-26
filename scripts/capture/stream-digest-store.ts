@@ -145,7 +145,7 @@ console.log('--- 1. every request answers ---\n');
   h.send({ type: 'streamOrdinals', requestId: 2, streamId: 7, fromId: 1, toId: 100, startChunk: 0 });
   await h.store.drain();
   check('streamDigest with nothing open answers empty', h.of('streamDigest'), [
-    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], rebuilding: null, partial: false },
+    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false },
   ]);
   check('streamOrdinals with nothing open answers empty', h.of('streamOrdinals'), [
     { type: 'streamOrdinals', requestId: 2, ordinals: [], nextChunk: null },
@@ -197,7 +197,7 @@ console.log('\n--- 6. a stale snapshot rebuilds ---\n');
 
 {
   // Entries left empty, so a restore of it would be caught as a lost summary.
-  writeDigestFile(volume, ID, encodeDigest({ throughId: lastId + 5000, version: 1, entries: [] }, deflateSync));
+  writeDigestFile(volume, ID, encodeDigest({ throughId: lastId + 5000, version: 1, captureEnd: 0, entries: [] }, deflateSync));
   const h = host({ scanSliceMs: 0 }, volume);
   h.send({ type: 'open', captureId: ID });
   const firstAnswer = await ask(h, 0, 20);
@@ -424,6 +424,229 @@ console.log('\n--- I6. a rebuild that dropped rows says so, and is never written
   await roomy.store.drain();
   checkTrue('...and its snapshot is written', digestFile(bigVolume, BIG).length > 0);
   roomy.store.close();
+}
+
+console.log('\n--- 13. a missed row does not cost every open a rebuild ---\n');
+
+{
+  // The live Worker's path: rows with `bytesSent`, their bytes on the same
+  // port. The newest row's bytes never come, so the writer holds it and counts
+  // it missed at finish - and the digest must not have folded it, or its
+  // snapshot is through an id the index never holds and no open trusts it.
+  const MISS = 'cap-20261009-120000-dig9';
+  const framesOf = (s: StreamSummary | undefined) => s === undefined ? undefined : s.toServer.packets + s.toClient.packets;
+  const missVolume = new MemoryVolume();
+  const h = host({ scanSliceMs: 0 }, missVolume);
+  nextId = 1;
+  const rows = connection();
+  const late = row(true, 'A', { seq: 102, ack: 1002 });
+  const lost = row(true, 'A', { seq: 102, ack: 1002 });
+  h.send({ type: 'open', captureId: MISS });
+  h.send({ type: 'appendBytes', slab: packFrames(rows.map((r) => ({ id: r.id, tsUs: r.tsUs, bytes: r.rawBytes }))) });
+  h.send({ type: 'append', packets: crossed(rows), bytesSent: true });
+  // A row that overtook its bytes is folded once they come; the lost one never.
+  h.send({ type: 'append', packets: crossed([late, lost]), bytesSent: true });
+  h.send({ type: 'appendBytes', slab: packFrames([{ id: late.id, tsUs: late.tsUs, bytes: late.rawBytes }]) });
+  const live = await ask(h, 0, 900);
+  check('a row whose bytes came after it is folded', framesOf(live?.summaries[0]), rows.length + 1);
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  check('...and the snapshot is through the newest stored id', decodeDigest(digestFile(missVolume, MISS), inflateSync)?.throughId, late.id);
+  h.store.close();
+
+  for (const [n, requestId] of [['second', 901], ['third', 902]] as const) {
+    const again = host({ scanSliceMs: 0 }, missVolume);
+    again.send({ type: 'open', captureId: MISS });
+    const answer = await ask(again, 0, requestId);
+    // A rebuild empties the file as it starts (and would finish within one drain here).
+    checkTrue(`the ${n} open restores the snapshot, no rebuild`, answer?.rebuilding === null && digestFile(missVolume, MISS).length > 0);
+    check(`...with every stored row`, framesOf(answer?.summaries[0]), rows.length + 1);
+    again.store.close();
+  }
+  check('no handle leaked', missVolume.outstanding, 0);
+}
+
+console.log('\n--- 14. UDP and QUIC reach the answer, and survive a reopen ---\n');
+
+{
+  // Copied from `scripts/conversation/flow-digest.ts`: a script imports no other script.
+  const FLOWS = 'cap-20261026-120000-dig10';
+  const flowVolume = new MemoryVolume();
+  const udpRow = (fromClient: boolean, time: number): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time,
+      source: fromClient ? '10.0.0.2' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.2',
+      sourcePort: fromClient ? 50000 : 5353, destPort: fromClient ? 5353 : 50000,
+      protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'], fields: { 'udp.stream': 3 },
+      length: 80, info: '', status: 'ok', interfaceName: 'eth0', layers: [], rawBytes: new Uint8Array([id & 0xff, 0, 0, 0]),
+    } as Packet;
+  };
+  const quicRow = (fromClient: boolean, time: number, type?: number): Packet => {
+    const r = udpRow(fromClient, time);
+    r.sourcePort = fromClient ? 50001 : 443; r.destPort = fromClient ? 443 : 50001;
+    r.fields = { 'udp.stream': 9, 'quic.connection.number': 0, 'quic.version': 1, ...(type === undefined ? {} : { 'quic.long.packet_type': type }) };
+    r.protocol = 'QUIC'; r.frameProtocols = ['eth', 'ethertype', 'ip', 'udp', 'quic'];
+    return r;
+  };
+  nextId = 1;
+  const rows = [udpRow(true, 1), udpRow(false, 2), quicRow(true, 3, 0), quicRow(false, 4, 0), quicRow(true, 12.5)];
+  const h = host({}, flowVolume);
+  h.send({ type: 'open', captureId: FLOWS });
+  h.send({ type: 'append', packets: crossed(rows) });
+  const live = await ask(h, 0, 1000);
+  check('an import\'s UDP and QUIC rows reach the answer: two UDP flows (the QUIC datagrams are one), one QUIC connection',
+    [live?.udp.map((s) => [s.key, s.outcome]), live?.quic.map((s) => [s.key, s.outcome])],
+    [[[3, 'request/response'], [9, 'request/response']], [[0, 'established']]]);
+  check('captureEnd rides every answer', live?.captureEnd, 12.5);
+  const quiet = await ask(h, live?.version ?? 0, 1001);
+  check('...including one with nothing new', [quiet?.udp, quiet?.quic, quiet?.captureEnd], [[], [], 12.5]);
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  h.send({ type: 'open', captureId: FLOWS });
+  const restored = await ask(h, 0, 1002);
+  check('a reopen restores UDP and QUIC from the snapshot, with no rebuild',
+    [restored?.rebuilding, restored?.udp, restored?.quic, restored?.captureEnd], [null, live?.udp, live?.quic, 12.5]);
+  h.store.close();
+  check('no handle leaked', flowVolume.outstanding, 0);
+}
+
+console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from the rows ---\n');
+
+{
+  // Three chunks and a little: UDP stream 5 and 6, QUIC connection 2, a QUIC
+  // datagram with no connection number (UDP stream 5 by the digest's rule), and
+  // TCP filling the rest. `plan` is what each row is, so the expected ordinals
+  // come from how the rows were made and not from the code under test.
+  const FLOWS_ID = 'cap-20261026-120000-flo1';
+  const total = 3 * CHUNK_FRAMES + 50;
+  nextId = 1;
+  const plan: string[] = [];
+  const flowRows: Packet[] = [];
+  const base = (fromClient: boolean, over: Partial<Packet>): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: id / 1000,
+      source: fromClient ? '10.0.0.2' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.2',
+      sourcePort: fromClient ? 50000 : 443, destPort: fromClient ? 443 : 50000,
+      length: 80, info: '', status: 'ok', interfaceName: 'eth0', layers: [], rawBytes: new Uint8Array([id & 0xff, 0, 0, 0]),
+      ...over,
+    } as Packet;
+  };
+  for (let i = 0; i < total; i++) {
+    const fromClient = i % 2 === 0;
+    if (i === 3 || i === total - 2) {
+      // A sparse flow, heard in the first chunk and in the last and nowhere between.
+      plan.push('udp:8');
+      flowRows.push(base(fromClient, { protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'], fields: { 'udp.stream': 8 } }));
+    } else if (i % 5 === 0) {
+      plan.push('udp:5');
+      flowRows.push(base(fromClient, { protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'], fields: { 'udp.stream': 5 } }));
+    } else if (i % 7 === 0) {
+      plan.push('quic:2');
+      flowRows.push(base(fromClient, {
+        protocol: 'QUIC', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'quic'],
+        fields: { 'udp.stream': 9, 'quic.connection.number': 2 },
+      }));
+    } else if (i % 11 === 0) {
+      plan.push('udp:6');
+      flowRows.push(base(fromClient, { protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'], fields: { 'udp.stream': 6 } }));
+    } else if (i % 13 === 0) {
+      plan.push('udp:5');
+      flowRows.push(base(fromClient, {
+        protocol: 'QUIC', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'quic'], fields: { 'udp.stream': 5 },
+      }));
+    } else {
+      plan.push('tcp');
+      flowRows.push(row(fromClient, 'A', { seq: i, ack: 1, len: 10, streamId: 5 }));
+    }
+  }
+  const ordinalsOf = (what: string) => plan.flatMap((p, ordinal) => (p === what ? [ordinal] : []));
+  const lastId = flowRows[flowRows.length - 1].id;
+  const FIRST = flowRows[0].id;
+
+  /** Walks `flowOrdinals` page by page from chunk 0, as `loadStreamFrames` does. */
+  async function walk(h: Host, kind: 'udp' | 'quic', key: number, fromId: number, toId: number, firstRequestId: number) {
+    const got: number[] = [];
+    let startChunk: number | null = 0;
+    let pages = 0;
+    let requestId = firstRequestId;
+    const chunks: (number | null)[] = [];
+    const searched: number[] = [];
+    while (startChunk !== null && pages < 50) {
+      h.send({ type: 'flowOrdinals', requestId, kind, key, fromId, toId, startChunk });
+      await h.store.drain();
+      const answer = h.of('flowOrdinals').find((m) => m.requestId === requestId);
+      requestId++;
+      pages++;
+      if (answer === undefined) break;
+      got.push(...answer.ordinals);
+      startChunk = answer.nextChunk;
+      chunks.push(startChunk);
+      searched.push(answer.searched);
+    }
+    return { got, pages, chunks, searched };
+  }
+
+  {
+    const h = host();
+    h.send({ type: 'flowOrdinals', requestId: 3, kind: 'udp', key: 5, fromId: 1, toId: 100, startChunk: 0 });
+    await h.store.drain();
+    check('flowOrdinals answers with nothing open', h.of('flowOrdinals'), [
+      { type: 'flowOrdinals', requestId: 3, ordinals: [], nextChunk: null, searched: 1 },
+    ]);
+    h.store.close();
+  }
+
+  const h = host({ flowOrdinalChunks: 1, scanSliceMs: 0 });
+  h.send({ type: 'open', captureId: FLOWS_ID });
+  for (let i = 0; i < flowRows.length; i += 1000) h.send({ type: 'append', packets: crossed(flowRows.slice(i, i + 1000)) });
+  h.send({ type: 'finish' });
+  await h.store.drain();
+
+  const udp = await walk(h, 'udp', 5, FIRST, lastId, 100);
+  check('flowOrdinals returns a UDP flow\'s ordinals across chunks (the QUIC row with no connection number is UDP)',
+    udp.got, ordinalsOf('udp:5'));
+  const quic = await walk(h, 'quic', 2, FIRST, lastId, 200);
+  check('flowOrdinals returns a QUIC connection\'s ordinals', quic.got, ordinalsOf('quic:2'));
+  check('...and a UDP key of the same number is not a QUIC one', (await walk(h, 'quic', 5, FIRST, lastId, 300)).got, []);
+  check('...and a UDP flow carries its QUIC rows too (udp.stream 9 holds the connection\'s datagrams)',
+    (await walk(h, 'udp', 9, FIRST, lastId, 400)).got, ordinalsOf('quic:2'));
+  check('flowOrdinals reports how far it has searched: a sparse flow over four chunks',
+    await (async () => {
+      const sparseIds = flowRows.filter((p) => p.fields?.['udp.stream'] === 8).map((p) => p.id);
+      const sparse = await walk(h, 'udp', 8, sparseIds[0], sparseIds[sparseIds.length - 1], 700);
+      return { got: sparse.got, chunks: sparse.chunks, searched: sparse.searched };
+    })(),
+    { got: ordinalsOf('udp:8'), chunks: [1, 2, 3, null], searched: [0.25, 0.5, 0.75, 1] });
+  check('flowOrdinals pages: nextChunk walks the flow\'s chunks to null',
+    [udp.pages, udp.chunks], [4, [1, 2, 3, null]]);
+  const second = await walk(h, 'udp', 6, flowRows[CHUNK_FRAMES].id, lastId, 500);
+  check('...starting at the flow\'s first chunk, not at chunk 0',
+    [second.got, second.pages], [ordinalsOf('udp:6').filter((o) => o >= CHUNK_FRAMES), 3]);
+  check('nothing failed', h.of('failure'), []);
+
+  console.log('\n--- flowOrdinals leaves a running scan alone ---\n');
+
+  const scanBits = async (id: number, alongside: boolean) => {
+    h.said.length = 0;
+    h.send({ type: 'scan', requestId: id, filter: 'udp' });
+    if (alongside) h.send({ type: 'flowOrdinals', requestId: id + 1, kind: 'udp', key: 5, fromId: FIRST, toId: lastId, startChunk: 0 });
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline && !h.said.some((m) => m.type === 'scanDone')) await sleep(1);
+    const done = h.of('scanDone')[0];
+    return {
+      done: done === undefined ? null : { cancelled: done.cancelled, frameCount: done.frameCount, bits: Array.from(done.bits ?? []) },
+      answeredAt: h.said.findIndex((m) => m.type === 'flowOrdinals'),
+      doneAt: h.said.findIndex((m) => m.type === 'scanDone'),
+    };
+  };
+  const alone = await scanBits(600, false);
+  const beside = await scanBits(610, true);
+  check('the scan alone completes whole', [alone.done?.cancelled, alone.done?.frameCount], [false, total]);
+  check('flowOrdinals leaves a running scan alone: the same full result, not cancelled', beside.done, alone.done);
+  checkTrue('...and flowOrdinals was answered while it ran', beside.answeredAt >= 0 && beside.answeredAt < beside.doneAt);
+  h.store.close();
 }
 
 console.log(failures === 0

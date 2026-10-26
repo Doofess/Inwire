@@ -8,7 +8,7 @@
  * store folds the digest again from the capture's rows in that case.
  */
 import { deflateSync, inflateSync } from 'fflate';
-import { StreamDigest, type DigestEntry } from '../../src/services/conversation/streamDigest';
+import { StreamDigest, type TaggedEntry } from '../../src/services/conversation/streamDigest';
 import { DIGEST_FORMAT, decodeDigest, encodeDigest } from '../../src/services/conversation/digestCodec';
 import { fnv1a } from '../../src/services/dissect/frameRecord';
 import type { Packet } from '../../src/types/packet';
@@ -112,14 +112,64 @@ mustBeNull('a newer format', newer);
     return out;
   };
   mustBeNull('a count that does not match the entries', reseal((b) => { new DataView(b.buffer, b.byteOffset).setUint32(16, 99, true); return b; }));
-  mustBeNull('a chunk that claims more bytes than the file has', reseal((b) => { new DataView(b.buffer, b.byteOffset).setUint32(20, 0x7fffffff, true); return b; }));
+  // The body's meta is throughId, version, count, captureEnd: 28 bytes.
+  mustBeNull('a chunk that claims more bytes than the file has', reseal((b) => { new DataView(b.buffer, b.byteOffset).setUint32(28, 0x7fffffff, true); return b; }));
   mustBeNull('trailing bytes that are not a whole chunk', reseal((b) => { const c = new Uint8Array(b.length + 2); c.set(b); return c; }));
   mustBeNull('a chunk that inflates to something that is not an array', reseal((b) => {
     const z = deflate(new TextEncoder().encode('{"a":1}'));
-    const c = new Uint8Array(20 + 4 + z.length);
-    c.set(b.subarray(0, 20)); new DataView(c.buffer).setUint32(20, z.length, true); c.set(z, 24);
+    const c = new Uint8Array(28 + 4 + z.length);
+    c.set(b.subarray(0, 28)); new DataView(c.buffer).setUint32(28, z.length, true); c.set(z, 32);
     return c;
   }));
+}
+
+// Stage 2: three kinds of entry, each tagged, and the capture's end carried.
+function quicUdpRow(id: number, fromClient: boolean, over: Record<string, number | string>, quic: boolean): Packet {
+  return {
+    id, tsUs: id * 1000, timeDelta: 0, relativeTime: id / 1000 + 0.5,
+    source: fromClient ? '10.0.0.2' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.2',
+    sourcePort: fromClient ? 50000 : 443, destPort: fromClient ? 443 : 50000,
+    protocol: quic ? 'QUIC' : 'UDP', frameProtocols: quic ? ['eth', 'ip', 'udp', 'quic'] : ['eth', 'ip', 'udp'],
+    fields: over, length: 100, info: '', status: 'ok',
+  } as Packet;
+}
+{
+  nextId = 1;
+  const d = new StreamDigest();
+  const rows = [
+    row(true, 'S', { seq: 0 }), row(false, 'SA', { seq: 0, ack: 1 }),
+    quicUdpRow(3, true, { 'udp.stream': 4 }, false), quicUdpRow(4, false, { 'udp.stream': 4 }, false),
+    quicUdpRow(5, true, { 'udp.stream': 5, 'quic.connection.number': 0, 'quic.long.packet_type': 0, 'quic.version': 1 }, true),
+    quicUdpRow(6, false, { 'udp.stream': 5, 'quic.connection.number': 0, 'quic.long.packet_type': 2, 'quic.version': 1 }, true),
+  ];
+  for (const r of rows) d.feed(r);
+  const mixed = d.snapshot();
+  // The QUIC datagrams count in their UDP flow too, so udp.stream 5 is a second UDP entry.
+  check('a snapshot holds an entry per flow, a QUIC datagram\'s UDP flow too', mixed.entries.map((e) => e.kind).sort(), ['quic', 'tcp', 'udp', 'udp']);
+  const bytes = encodeDigest(mixed, deflate);
+  const back = decodeDigest(bytes, inflate);
+  check('round-trips all three kinds', back, mixed);
+  check('...with the capture\'s end', back?.captureEnd, d.captureEnd);
+  const restored = back && StreamDigest.restore(back);
+  check('...and restores each kind', restored && [restored.get(7)?.outcome, restored.getFlow('udp', 4)?.outcome, restored.getFlow('quic', 0)?.outcome],
+    [d.get(7)?.outcome, d.getFlow('udp', 4)?.outcome, d.getFlow('quic', 0)?.outcome]);
+  check('format 3 is what is written', new DataView(bytes.buffer, bytes.byteOffset).getUint16(4, true), 3);
+
+  // A file written by stage 1: format 2, a 20-byte meta, untagged TCP entries,
+  // every checksum and length right. Only its number is old, and it must read
+  // as null, so the store folds the digest again rather than trust half of it.
+  const tcpOnly = sampleSnapshot();
+  const json = deflate(new TextEncoder().encode(JSON.stringify(tcpOnly.entries.map((e) => (e.kind === 'tcp' ? e.entry : null)))));
+  const body = new Uint8Array(20 + 4 + json.length);
+  const bv = new DataView(body.buffer);
+  bv.setFloat64(0, tcpOnly.throughId, true); bv.setFloat64(8, tcpOnly.version, true); bv.setUint32(16, tcpOnly.entries.length, true);
+  bv.setUint32(20, json.length, true); body.set(json, 24);
+  const old = new Uint8Array(16 + body.length);
+  const ov = new DataView(old.buffer);
+  ov.setUint32(0, 0x47445749, true); ov.setUint16(4, 2, true);
+  ov.setUint32(8, body.length, true); ov.setUint32(12, fnv1a(body), true);
+  old.set(body, 16);
+  mustBeNull('a format 2 snapshot is refused', old);
 }
 
 mustBeNull('a body one byte short', encoded.slice(0, encoded.length - 1));
@@ -136,7 +186,7 @@ mustBeNull('one flipped body byte', flipped);
 {
   const COUNT = 500_000;
   const BATCH = 1000;
-  const refusedEntries = function* (): Generator<DigestEntry> {
+  const refusedEntries = function* (): Generator<TaggedEntry> {
     nextId = 1;
     for (let first = 1; first <= COUNT; first += BATCH) {
       const d = new StreamDigest();
@@ -147,7 +197,7 @@ mustBeNull('one flipped body byte', flipped);
       yield* d.snapshot().entries;
     }
   };
-  const input = { throughId: COUNT * 2, version: COUNT * 2, entries: refusedEntries() };
+  const input = { throughId: COUNT * 2, version: COUNT * 2, captureEnd: 1, entries: refusedEntries() };
 
   // The input must be big enough to have broken the old encoder, or passing
   // proves nothing: the same entries as one JSON text really do not fit.

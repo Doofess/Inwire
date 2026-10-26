@@ -11,8 +11,9 @@ import {
 import { flowAnnotations } from '../../services/flowAnnotations';
 import { resolveMacVendor } from '../../services/macVendors';
 import type { StreamTarget } from '../../services/followStream';
-import { conversationRows, outcomeText, tcpScopeNote, type DigestConversation } from '../../services/conversation/digestRows';
+import { conversationRows, digestScopeNote, outcomeText, type DigestConversation } from '../../services/conversation/digestRows';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../../services/conversation/flowSummary';
 import { NameLookup, SOURCE_LABELS } from '../../services/nameResolution';
 import {
   CATEGORY_HINTS, CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TEXT,
@@ -48,7 +49,14 @@ import {
  */
 
 /** The empty digest, one identity, so a pane without one memoizes. */
-const NO_SUMMARIES: ReadonlyMap<number, StreamSummary> = new Map();
+const NO_DIGEST = {
+  summaries: new Map<number, StreamSummary>() as ReadonlyMap<number, StreamSummary>,
+  udp: new Map<number, UdpSummary>() as ReadonlyMap<number, UdpSummary>,
+  quic: new Map<number, QuicSummary>() as ReadonlyMap<number, QuicSummary>,
+  captureEnd: 0,
+  rebuilding: null as { done: number; total: number } | null,
+  partial: false,
+};
 
 type Tab = 'hierarchy' | 'conversations' | 'endpoints' | 'devices' | 'processes'
   | 'graphs' | 'expert' | 'names';
@@ -59,6 +67,7 @@ const CONVERSATION_TABS: { id: ConversationKind; label: string }[] = [
   { id: 'ipv6', label: 'IPv6' },
   { id: 'tcp', label: 'TCP' },
   { id: 'udp', label: 'UDP' },
+  { id: 'quic', label: 'QUIC' },
 ];
 
 interface StatisticsPaneProps {
@@ -73,14 +82,18 @@ interface StatisticsPaneProps {
   /** Opens the stream follower on a TCP or UDP conversation. */
   onFollowStream?: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
   /**
-   * The store's stream digest (ADR 0055), which answers the TCP level for the
-   * whole capture where the buffer can only count what it still holds - and
-   * knows how each stream ended, which a pair count cannot.
+   * The store's stream digest (ADR 0055), which answers the TCP, UDP and QUIC
+   * levels for the whole capture where the buffer can only count what it still
+   * holds - and knows how each flow ended, which a pair count cannot.
    */
-  tcpDigest?: {
+  digest?: {
     summaries: ReadonlyMap<number, StreamSummary>;
+    udp: ReadonlyMap<number, UdpSummary>;
+    quic: ReadonlyMap<number, QuicSummary>;
+    /** The latest frame time folded, which "went quiet" is measured against. */
+    captureEnd: number;
     rebuilding: { done: number; total: number } | null;
-    /** A rebuild dropped rows, so the TCP level is not the whole capture. */
+    /** A rebuild dropped rows, so these levels are not the whole capture. */
     partial?: boolean;
   };
   /** Everything the dissectors and the anomaly detector found. */
@@ -130,7 +143,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   expert,
   onApplyFilter,
   onFollowStream,
-  tcpDigest,
+  digest,
   onSelectFrame,
   droppedBuffer = 0,
   onReturnToPackets,
@@ -147,22 +160,25 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   } | null>(null);
 
   const hierarchy = useMemo(() => protocolHierarchy(packets), [packets]);
-  const digestSummaries = tcpDigest?.summaries ?? NO_SUMMARIES;
+  const held = digest ?? NO_DIGEST;
   // The digest's rows where it answers the level, the buffer's count elsewhere.
-  const digestRows = useMemo(() => conversationRows(kind, digestSummaries), [kind, digestSummaries]);
+  const digestRows = useMemo(
+    () => conversationRows(kind, held),
+    [kind, held.summaries, held.udp, held.quic],
+  );
   const bufferRows = useMemo(
     () => (digestRows === null ? conversations(packets, kind) : []),
     [packets, kind, digestRows],
   );
   const convRows: Conversation[] = digestRows ?? bufferRows;
-  const scopeNote = tab === 'conversations' && kind === 'tcp'
-    ? tcpScopeNote(digestSummaries, tcpDigest?.rebuilding ?? null, tcpDigest?.partial ?? false)
+  const scopeNote = tab === 'conversations'
+    ? digestScopeNote(kind, held, held.rebuilding, held.partial ?? false)
     : null;
-  const transport = kind === 'tcp' || kind === 'udp';
-  /** A transport row is one stream; an address row is many, with no single one to open. */
+  const transport = kind === 'tcp' || kind === 'udp' || kind === 'quic';
+  /** A TCP, UDP or QUIC row is one stream; an address row is many, with no single one to open. */
   const streamOf = (r: Conversation): StreamTarget | undefined =>
-    transport && r.portA !== undefined && r.portB !== undefined
-      ? { kind: kind as 'tcp' | 'udp', addressA: r.addressA, portA: r.portA, addressB: r.addressB, portB: r.portB, streamId: r.streamId }
+    (kind === 'tcp' || kind === 'udp' || kind === 'quic') && r.portA !== undefined && r.portB !== undefined
+      ? { kind, addressA: r.addressA, portA: r.portA, addressB: r.addressB, portB: r.portB, streamId: r.streamId }
       : undefined;
   const endpointRows = useMemo(() => endpoints(packets, kind), [packets, kind]);
   const nameRows = useMemo(
@@ -188,7 +204,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     return <span title={value}>{name ?? value}</span>;
   };
   const port = (value: number | undefined) =>
-    value === undefined ? '' : portLabel(value, kind === 'udp' ? 'udp' : 'tcp', resolvePorts);
+    value === undefined ? '' : portLabel(value, kind === 'udp' || kind === 'quic' ? 'udp' : 'tcp', resolvePorts);
 
   const apply = (expression: string) => {
     onApplyFilter(expression);
@@ -211,11 +227,11 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
 
   const conversationColumns: StatColumn<Conversation>[] = [
     { key: 'a', label: 'Address A', render: (r) => addr(r.addressA), sortValue: (r) => r.addressA, className: 'max-w-[15rem]' },
-    ...(kind === 'tcp' || kind === 'udp'
+    ...(transport
       ? [{ key: 'pa', label: 'Port A', align: 'right' as const, render: (r: Conversation) => port(r.portA), sortValue: (r: Conversation) => r.portA ?? 0 }]
       : []),
     { key: 'b', label: 'Address B', render: (r) => addr(r.addressB), sortValue: (r) => r.addressB, className: 'max-w-[15rem]' },
-    ...(kind === 'tcp' || kind === 'udp'
+    ...(transport
       ? [{ key: 'pb', label: 'Port B', align: 'right' as const, render: (r: Conversation) => port(r.portB), sortValue: (r: Conversation) => r.portB ?? 0 }]
       : []),
     { key: 'proto', label: 'Protocol', render: (r) => r.protocol, sortValue: (r) => r.protocol },
@@ -227,7 +243,11 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
         key: 'outcome', label: 'Outcome',
         render: (r: Conversation) => {
           const d = r as DigestConversation;
-          return <span className={d.outcome === 'open' ? 'text-muted-foreground' : undefined}>{outcomeText(d)}</span>;
+          return (
+            <span className={d.kind === 'tcp' && d.outcome === 'open' ? 'text-muted-foreground' : undefined}>
+              {outcomeText(d, held.captureEnd)}
+            </span>
+          );
         },
         sortValue: (r: Conversation) => (r as DigestConversation).outcome,
       }]
@@ -348,7 +368,8 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
         <div className="px-5 py-2 border-b border-border flex flex-wrap items-center gap-2 text-xs shrink-0">
           <button onClick={() => setTab('hierarchy')} className={tabClass('hierarchy')}>Protocol Hierarchy</button>
           <button onClick={() => setTab('conversations')} className={tabClass('conversations')}>Conversations</button>
-          <button onClick={() => setTab('endpoints')} className={tabClass('endpoints')}>Endpoints</button>
+          {/* QUIC is a conversation level only: a connection is not an endpoint. */}
+          <button onClick={() => { setTab('endpoints'); setKind((k) => (k === 'quic' ? 'udp' : k)); }} className={tabClass('endpoints')}>Endpoints</button>
           <button onClick={() => setTab('devices')} className={tabClass('devices')}>
             Devices{deviceRows.length > 0 ? ` (${deviceRows.length})` : ''}
           </button>
@@ -370,7 +391,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
 
           {(tab === 'conversations' || tab === 'endpoints') && (
             <div className="ml-auto flex items-center gap-1">
-              {CONVERSATION_TABS.map((t) => (
+              {CONVERSATION_TABS.filter((t) => t.id !== 'quic' || tab === 'conversations').map((t) => (
                 <button key={t.id} onClick={() => setKind(t.id)} className={kindClass(t.id)}>
                   {t.label}
                 </button>

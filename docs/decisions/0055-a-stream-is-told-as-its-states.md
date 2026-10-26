@@ -2,7 +2,10 @@
 
 **Status:** accepted 2026-10-09; Stage 1 (TCP) landed 2026-10-24: the store's
 digest and `streams.iwdig`, the ladder, the docked state map and the
-conversation list's TCP level. UDP and the other protocols are not started. The owner asked for
+conversation list's TCP level. Stage 2 (UDP and QUIC) landed 2026-10-26: the
+digest folds UDP flows and QUIC connections too, the conversation list's UDP
+and QUIC levels are the whole capture, and Follow Stream reads either from
+disk (section 7). TLS, DNS and DHCP phases (stage 3) are not started. The owner asked for
 a Conversations pane that shows "the networking that's going on" in a stream,
 pointing at the RFC 793 state diagram, and the same idea for UDP and for any
 other protocol that has a stream.
@@ -157,6 +160,61 @@ the Worker and not the trackers.
 3. TLS, DNS and DHCP phases, each a small description of its phases plugged
    into the same view.
 
+**7. Stage 2: UDP flows and QUIC connections.** The same digest, the same
+snapshot file and the same view, with these rulings.
+
+- **S2-1: no stateless-reset outcome.** Telling one from a datagram needs the
+  token, which the capture never shows in the clear.
+- **S2-2: a UDP flow's outcome.** `one-way` when only one direction was heard.
+  `request/response` when both were and neither sent more than 2 frames, which
+  covers a retried query. Anything larger both ways is `two-way`.
+- **S2-3: a QUIC row's phase is its last coalesced packet's.** The dissector
+  overwrites `quic.long.packet_type` per packet, so a Handshake row stands for
+  an Initial from the same side before it. The type bits are read by the
+  version the connection's first long header gave, v1 or v2 (0x6b3343cf).
+  A Version Negotiation is no phase. A close is claimed only when a decrypted
+  CONNECTION_CLOSE is the row's last frame, so a capture without keys shows a
+  connection as established or unfinished, never as closed. This under-claims
+  on purpose.
+- **S2-4: separate types beside TCP's.** UDP and QUIC summaries are their own
+  types and maps, not a union through the TCP summary. TCP's ladder, state map
+  and tests stay as they were, and only the new kinds' code is new.
+- **S2-5: a QUIC connection is listed under its first five-tuple.** A later
+  address or port sets `migrated`, shown as "· migrated" after the outcome.
+  Its frames are found by connection number, so a migrated connection keeps
+  them all.
+
+And these, which the stage's work settled:
+
+- **One routing rule.** The UDP level counts every UDP row with a
+  `udp.stream`, a QUIC datagram included (Wireshark's UDP tab and Endpoints →
+  UDP do the same), and a QUIC datagram with a `quic.connection.number` also
+  counts in that connection; a row with neither number is no flow. `inFlow`
+  (`udpKeyOf` and `quicKeyOf`) is the one membership test: the digest folds by
+  it, the store's `flowOrdinals` matches with it and Follow Stream's RAM tail
+  filters with it, so the three cannot disagree. `flowKeyOf` is only which of
+  the two a click on a frame opens, the connection first.
+- **The client end.** A well-known port outranks the first Initial, as it
+  outranks a SYN for TCP: a server's Initial heard first means the client's
+  was missed, and the connection is marked joined mid-stream.
+- **"Went quiet".** A UDP flow or QUIC connection whose last frame came 30 s
+  or more before the capture's last frame says so after its outcome.
+- **A flow's frames come from the rows.** The prefix holds only `tcp.stream`,
+  so `flowOrdinals` decodes the rows of the flow's chunks, a few chunks per
+  answer, and like `streamOrdinals` never touches the filter bar's scan. Each
+  answer says how far through the flow's chunks it has searched, so a sparse
+  flow over a long capture shows "N% searched" rather than a count stuck at 0.
+- **Only rows the writer stored are folded.** A row held for its bytes is
+  folded when they come. A row sealed as missed is not, because its slot is a
+  placeholder; before this, such a row made the next open rebuild.
+- **The snapshot is format 3** and carries the capture's last frame time. A
+  format 2 snapshot is refused and the digest rebuilt from the rows.
+- **QUIC's phases are a line, not a map.** Follow Stream shows them above the
+  ladder, each a button that brings its frame into view. A UDP flow has no
+  states to show, and both kinds band by direction and colour rule alone.
+- Ethernet and IP stay the RAM window: an address pair is many streams, and
+  nothing about it is a state.
+
 ## Considered and rejected
 
 - **The state diagram on its own.** It explains why but leaves out when, who,
@@ -181,9 +239,9 @@ the Worker and not the trackers.
 
 - **A capture directory has six files.** `planPrune` already removes whole
   directories, so a prune needs no change. `bytesOnDisk` counts the new file.
-- **For one stage, Conversations has two scopes.** The TCP level is the whole
-  capture and the other levels are still the RAM window until stage 2. The
-  pane says which.
+- **Conversations has two scopes.** The TCP, UDP and QUIC levels are the
+  whole capture. The Ethernet and IP levels are the RAM window. The pane says
+  which.
 - **Opening a capture after a crash rebuilds its digest.** This takes as long
   as a scan of the whole capture. The TCP level shows the rebuild's progress
   and is usable from its first slice.

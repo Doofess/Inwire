@@ -57,6 +57,7 @@ import type { Packet } from '../../types/packet';
 import { recordRefs } from '../dissect/recordHeader';
 import { readExact, type BlockFile } from './blockFile';
 import { StreamDigest, type StreamSummary } from '../conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import { decodeDigest, encodeDigest } from '../conversation/digestCodec';
 import { decodeMarks, encodeMarks } from '../marks';
 import { PackReader } from '../pipeline/rowPack';
@@ -120,6 +121,11 @@ interface OpenCapture {
    * written as a snapshot, or the next open would trust it.
    */
   digestPartial: boolean;
+  /**
+   * Rows the writer holds for bytes that have not come: folded into the digest
+   * when they do, never if they do not, as the writer stores them.
+   */
+  digestWaiting: Map<number, Packet>;
   /**
    * The frame ids the user marked (ADR 0067). Replaced, never edited, so a
    * scan that compiled with the set it saw keeps one consistent answer while a
@@ -203,6 +209,12 @@ export interface CaptureHostOptions {
    * test can see the paging on a capture of a few chunks.
    */
   streamOrdinalChunks?: number;
+  /**
+   * Chunks one `flowOrdinals` answer may cover. Default 4: it decodes each
+   * chunk's rows, where `streamOrdinals` reads a prefix, so a page is dearer
+   * and the store's queue must not be held for the 32 a prefix read takes.
+   */
+  flowOrdinalChunks?: number;
   /** Rows held back while a rebuild runs. Default `DIGEST_DEFERRED_MAX`. Settable so a test can overflow it. */
   digestDeferredMax?: number;
   /**
@@ -237,6 +249,7 @@ export class CaptureHost {
   private readonly deflate: ((bytes: Uint8Array) => Uint8Array) | undefined;
   private readonly inflate: (bytes: Uint8Array) => Uint8Array;
   private readonly streamOrdinalChunks: number;
+  private readonly flowOrdinalChunks: number;
   private readonly writerOptions: Partial<CaptureWriterOptions>;
 
   constructor(
@@ -248,6 +261,7 @@ export class CaptureHost {
     this.deflate = options.deflate;
     this.inflate = options.inflate ?? inflateSync;
     this.streamOrdinalChunks = options.streamOrdinalChunks ?? 32;
+    this.flowOrdinalChunks = options.flowOrdinalChunks ?? 4;
     this.digestDeferredMax = options.digestDeferredMax ?? DIGEST_DEFERRED_MAX;
     this.writerOptions = options.writer ?? {};
   }
@@ -396,6 +410,8 @@ export class CaptureHost {
         case 'finish': {
           if (this.open === null) return;
           this.open.writer.finish();
+          // The writer dropped the rows it held (`clearOrphans`): so does the digest.
+          this.open.digestWaiting.clear();
           this.trySnapshot(this.open);
           this.reportStats();
           return;
@@ -412,6 +428,7 @@ export class CaptureHost {
         case 'stats': return this.reportStats();
         case 'streamDigest': return this.onStreamDigest(message);
         case 'streamOrdinals': return this.onStreamOrdinals(message);
+        case 'flowOrdinals': return this.onFlowOrdinals(message);
         case 'marks': return this.onMarks(message);
         case 'markMatches': return this.onMarkMatches(message);
       }
@@ -476,6 +493,7 @@ export class CaptureHost {
           ? writer.index.record(writer.index.floorChunk).lastId : null,
       },
       digestPartial: false,
+      digestWaiting: new Map(),
       marks: new Set(marksFrom),
     };
     this.open = open;
@@ -611,10 +629,23 @@ export class CaptureHost {
     // and nothing staged, so an empty `rawBytes` can never be written as a
     // frame. A row whose bytes never arrived is held and then counted missed,
     // like any other (`attachRows`).
-    if (sent.length > 0) this.open.writer.attachRows(sent);
-    if (carrying.length > 0) this.open.writer.append(carrying);
+    const open = this.open;
+    const attached = sent.length > 0 ? open.writer.attachRows(sent) : null;
+    if (carrying.length > 0) open.writer.append(carrying);
     // Both paths, after the writer: an import's rows and the live Worker's.
-    for (const p of rows) this.feedDigest(this.open, p);
+    // Only the rows it took: one it holds waits for its bytes, and a missed
+    // one's slot is a placeholder. A row folded that the capture never stores
+    // left the snapshot through an id no open could match.
+    if (attached === null || (attached.held.length === 0 && attached.missed.length === 0)) {
+      for (const p of rows) this.feedDigest(open, p);
+      return;
+    }
+    const held = new Set(attached.held);
+    const missed = new Set(attached.missed);
+    for (const p of rows) {
+      if (held.has(p.id)) open.digestWaiting.set(p.id, p);
+      else if (!missed.has(p.id)) this.feedDigest(open, p);
+    }
   }
 
   /** One row into the digest, or into the queue behind a rebuild. */
@@ -696,11 +727,18 @@ export class CaptureHost {
   private onStreamDigest(message: Extract<ToCapture, { type: 'streamDigest' }>): void {
     const open = this.open;
     let summaries: StreamSummary[] = [];
+    let udp: UdpSummary[] = [];
+    let quic: QuicSummary[] = [];
+    let captureEnd = 0;
     let version = 0;
     let rebuilding: { done: number; total: number } | null = null;
     try {
       if (open !== null) {
-        summaries = open.digest.changedSince(message.since);
+        const changed = open.digest.changedSince(message.since);
+        summaries = changed.tcp;
+        udp = changed.udp;
+        quic = changed.quic;
+        captureEnd = open.digest.captureEnd;
         version = open.digest.version;
         const rebuild = open.rebuild;
         if (rebuild !== null) {
@@ -711,11 +749,11 @@ export class CaptureHost {
       }
     } catch (error) {
       this.fail(describe(error), false);
-      summaries = [];
+      summaries = []; udp = []; quic = [];
     }
     this.post({
       type: 'streamDigest', requestId: message.requestId, captureId: open?.id ?? null,
-      version, summaries, rebuilding, partial: open?.digestPartial ?? false,
+      version, summaries, udp, quic, captureEnd, rebuilding, partial: open?.digestPartial ?? false,
     });
   }
 
@@ -740,6 +778,26 @@ export class CaptureHost {
   }
 
   /**
+   * A page of one UDP flow's or QUIC connection's positions, decoded from the
+   * rows of its chunks. Answered like `onStreamOrdinals`, and like it it never
+   * touches a scan: it reads the sealed chunks and nothing of the scan's state.
+   */
+  private onFlowOrdinals(message: Extract<ToCapture, { type: 'flowOrdinals' }>): void {
+    let page: { ordinals: number[]; nextChunk: number | null; searched: number } = { ordinals: [], nextChunk: null, searched: 1 };
+    try {
+      if (this.open !== null) {
+        page = this.open.reader.flowOrdinals(
+          message.kind, message.key, message.fromId, message.toId, message.startChunk, this.flowOrdinalChunks,
+        );
+      }
+    } catch (error) {
+      this.fail(describe(error), false);
+      page = { ordinals: [], nextChunk: null, searched: 1 };
+    }
+    this.post({ type: 'flowOrdinals', requestId: message.requestId, ...page });
+  }
+
+  /**
    * Frame bytes, straight off the capture path.
    *
    * **Silently ignored when no capture is open, unlike `append` above**, and
@@ -755,7 +813,20 @@ export class CaptureHost {
     reply: (message: FromCapture) => void,
   ): void {
     try {
-      if (this.open !== null) this.open.writer.appendBytes(unpackFrames(message.slab));
+      const open = this.open;
+      if (open !== null) {
+        const frames = unpackFrames(message.slab);
+        open.writer.appendBytes(frames);
+        // A row that overtook its bytes was taken just now (`appendRows`).
+        if (open.digestWaiting.size > 0) {
+          for (const frame of frames) {
+            const row = open.digestWaiting.get(frame.id);
+            if (row === undefined) continue;
+            open.digestWaiting.delete(frame.id);
+            this.feedDigest(open, row);
+          }
+        }
+      }
     } finally {
       // In a `finally`: a throw is reported by `handle` on the client port,
       // and the Worker must still hear that the append is no longer owed.

@@ -36,6 +36,7 @@ import { freshCaptureStorageState } from './captureProtocol';
 import { MatchSet } from './matchSet';
 import { plainForStore } from './storePacket';
 import type { StreamSummary } from '../conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 
 /** What a `streamDigest` poll gets back (ADR 0055). */
 export interface StreamDigestAnswer {
@@ -43,6 +44,10 @@ export interface StreamDigestAnswer {
   captureId: string | null;
   version: number;
   summaries: StreamSummary[];
+  udp: UdpSummary[];
+  quic: QuicSummary[];
+  /** The digest's latest frame time, which "went quiet" is measured against. */
+  captureEnd: number;
   rebuilding: { done: number; total: number } | null;
   /** A rebuild dropped rows: these summaries are not the whole capture. */
   partial: boolean;
@@ -52,6 +57,11 @@ export interface StreamDigestAnswer {
 export interface StreamOrdinalsPage {
   ordinals: number[];
   nextChunk: number | null;
+}
+
+/** One page of a flow's frame positions, and how far (0..1) its search has got. */
+export interface FlowOrdinalsPage extends StreamOrdinalsPage {
+  searched: number;
 }
 
 /** One decoded chunk, and where it starts in the capture. */
@@ -165,6 +175,7 @@ const NONE = new Map<number, Uint8Array>();
 const NO_ROWS = new Map<number, Packet>();
 /** The same, for a stream's positions. */
 const NO_ORDINALS: StreamOrdinalsPage = { ordinals: [], nextChunk: null };
+const NO_FLOW_ORDINALS: FlowOrdinalsPage = { ordinals: [], nextChunk: null, searched: 1 };
 
 class CaptureClient {
   /**
@@ -193,6 +204,7 @@ class CaptureClient {
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
   private readonly pendingDigest = new Map<number, (answer: StreamDigestAnswer) => void>();
   private readonly pendingStreamOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
+  private readonly pendingFlowOrdinals = new Map<number, (page: FlowOrdinalsPage) => void>();
   private readonly pendingMarkMatches = new Map<number, (matches: MatchSet) => void>();
   /** The scan in flight. At most one - the store enforces the same. */
   private readonly pendingScan = new Map<number, {
@@ -333,6 +345,9 @@ class CaptureClient {
           captureId: message.captureId,
           version: message.version,
           summaries: message.summaries,
+          udp: message.udp,
+          quic: message.quic,
+          captureEnd: message.captureEnd,
           rebuilding: message.rebuilding,
           partial: message.partial,
         });
@@ -343,6 +358,13 @@ class CaptureClient {
         if (settle === undefined) break;
         this.pendingStreamOrdinals.delete(message.requestId);
         settle({ ordinals: message.ordinals, nextChunk: message.nextChunk });
+        break;
+      }
+      case 'flowOrdinals': {
+        const settle = this.pendingFlowOrdinals.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingFlowOrdinals.delete(message.requestId);
+        settle({ ordinals: message.ordinals, nextChunk: message.nextChunk, searched: message.searched });
         break;
       }
       case 'markMatches': {
@@ -637,7 +659,7 @@ class CaptureClient {
     return this.request(
       this.pendingDigest as never,
       (requestId) => ({ type: 'streamDigest', requestId, since }),
-      { captureId: null, version: since, summaries: [], rebuilding: null, partial: false } as StreamDigestAnswer,
+      { captureId: null, version: since, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false } as StreamDigestAnswer,
     );
   }
 
@@ -655,6 +677,24 @@ class CaptureClient {
       this.pendingStreamOrdinals as never,
       (requestId) => ({ type: 'streamOrdinals', requestId, streamId, fromId, toId, startChunk }),
       NO_ORDINALS,
+    );
+  }
+
+  /**
+   * The positions of UDP flow or QUIC connection `key`'s frames with ids in
+   * `[fromId, toId]`, from chunk `startChunk` onward: one bounded page of
+   * chunks, and where to ask from next, or null at the end. Unlike
+   * `streamOrdinals` the store decodes rows for it (the prefix holds only
+   * `tcp.stream`), but it too never waits for or cancels a running scan.
+   * Empty with no next page when there is no store.
+   */
+  flowOrdinals(
+    kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number,
+  ): Promise<FlowOrdinalsPage> {
+    return this.request(
+      this.pendingFlowOrdinals as never,
+      (requestId) => ({ type: 'flowOrdinals', requestId, kind, key, fromId, toId, startChunk }),
+      NO_FLOW_ORDINALS,
     );
   }
 
@@ -752,11 +792,13 @@ class CaptureClient {
     // poller reads the null id as "start again" and asks the next capture
     // from zero.
     for (const settle of this.pendingDigest.values()) {
-      settle({ captureId: null, version: 0, summaries: [], rebuilding: null, partial: false });
+      settle({ captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
     }
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);
     this.pendingStreamOrdinals.clear();
+    for (const settle of this.pendingFlowOrdinals.values()) settle(NO_FLOW_ORDINALS);
+    this.pendingFlowOrdinals.clear();
     for (const settle of this.pendingMarkMatches.values()) settle(new MatchSet(0).seal());
     this.pendingMarkMatches.clear();
     // `failed` rather than `cancelled`: the store went away, which is not the

@@ -38,6 +38,7 @@
  */
 import { ChunkDirectory, PrefixBlock, applyPrefixes, chunkStoresLinkType, decodeChunk, prefixBlockBytes } from './chunkCodec';
 import type { CaptureIndex } from './captureIndex';
+import { inFlow } from '../conversation/flowSummary';
 import { readExact, type BlockFile } from './blockFile';
 import { dataFilesOf, type CaptureFiles, type DataFiles } from './captureWriter';
 import type { Packet } from '../../types/packet';
@@ -321,6 +322,43 @@ export class CaptureReader {
       }
     }
     return { ordinals, nextChunk: chunk < this.index.chunkCount ? chunk : null };
+  }
+
+  /**
+   * Positions of the frames of UDP flow or QUIC connection `key`, by
+   * `inFlow`: the membership test the digest folds by (a numbered QUIC
+   * datagram is in its UDP flow and in its connection).
+   *
+   * The prefix holds only `tcp.stream`, so this decodes the ROWS of each chunk
+   * in `[fromId, toId]` and paged by chunk exactly as `streamOrdinals` is, but
+   * with a smaller `maxChunks`, because a chunk of rows costs far more than a
+   * chunk of prefix. It reads sealed chunks and keeps no state of its own.
+   *
+   * `searched` is how far through the chunks that range spans the walk has got
+   * (0..1), because a sparse flow finds nothing for many pages and the caller
+   * would otherwise have no progress to show. Exactly 1 when `nextChunk` is null.
+   */
+  flowOrdinals(
+    kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number, maxChunks: number,
+  ): { ordinals: number[]; nextChunk: number | null; searched: number } {
+    const ordinals: number[] = [];
+    const first = Math.max(this.index.floorChunk, this.index.chunkForId(fromId));
+    const toChunk = this.index.chunkForId(toId);
+    const last = toChunk < 0 ? this.index.chunkCount - 1 : toChunk;
+    const span = Math.max(1, last - first + 1);
+    let chunk = Math.max(startChunk, first);
+    const stop = Math.min(this.index.chunkCount, chunk + maxChunks);
+    for (; chunk < stop; chunk++) {
+      const record = this.index.record(chunk);
+      if (record.firstId > toId) return { ordinals, nextChunk: null, searched: 1 };
+      if (record.lastId < fromId) continue;
+      const packets = this.readRows(chunk);
+      for (let i = 0; i < packets.length; i++) {
+        if (inFlow(packets[i], kind, key)) ordinals.push(record.firstOrdinal + i);
+      }
+    }
+    if (chunk >= this.index.chunkCount) return { ordinals, nextChunk: null, searched: 1 };
+    return { ordinals, nextChunk: chunk, searched: Math.min(1, Math.max(0, (chunk - first) / span)) };
   }
 
   /**

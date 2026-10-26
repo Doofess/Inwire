@@ -17,10 +17,14 @@
  */
 import type { Packet } from '../../types/packet';
 import type { StreamSummary } from './streamDigest';
+import { inFlow, type QuicSummary, type UdpSummary } from './flowSummary';
 
 export interface StreamFrameSource {
   streamOrdinals(streamId: number, fromId: number, toId: number, startChunk: number):
     Promise<{ ordinals: number[]; nextChunk: number | null }>;
+  /** A UDP flow's or QUIC connection's positions, a bounded page of chunks, from the rows. */
+  flowOrdinals(kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number):
+    Promise<{ ordinals: number[]; nextChunk: number | null; searched: number }>;
   readRowsFor(ordinals: readonly number[]): Promise<Map<number, Packet>>;
 }
 
@@ -38,19 +42,23 @@ export const KEPT_STREAMS = 2;
  */
 export const KEPT_FRAMES_MAX = 500_000;
 
-/** A kept stream's frames, marked most recently used; undefined when not kept. */
-export function recallFrames(kept: Map<number, Packet[]>, streamId: number): Packet[] | undefined {
-  const frames = kept.get(streamId);
-  if (frames !== undefined) { kept.delete(streamId); kept.set(streamId, frames); }
+/**
+ * A kept stream's frames, marked most recently used; undefined when not kept.
+ * The key is whatever names a stream uniquely: a TCP stream id and a UDP key
+ * are both small integers, so a caller holding both kinds keys by kind too.
+ */
+export function recallFrames<K>(kept: Map<K, Packet[]>, key: K): Packet[] | undefined {
+  const frames = kept.get(key);
+  if (frames !== undefined) { kept.delete(key); kept.set(key, frames); }
   return frames;
 }
 
 /** Keeps a stream's frames, dropping the least recently used past `KEPT_STREAMS`. */
-export function keepFrames(kept: Map<number, Packet[]>, streamId: number, frames: Packet[]): void {
-  kept.delete(streamId);
+export function keepFrames<K>(kept: Map<K, Packet[]>, key: K, frames: Packet[]): void {
+  kept.delete(key);
   if (frames.length > KEPT_FRAMES_MAX) return;
-  kept.set(streamId, frames);
-  while (kept.size > KEPT_STREAMS) kept.delete(kept.keys().next().value as number);
+  kept.set(key, frames);
+  while (kept.size > KEPT_STREAMS) kept.delete(kept.keys().next().value as K);
 }
 
 /**
@@ -84,19 +92,29 @@ export function progressGate(signal: { cancelled: boolean }, intervalMs: number)
  * `onProgress` is handed the count and the array being filled, by reference,
  * after each page of rows - so a view can draw the stream from its first page
  * rather than after its last. A caller that keeps what it was handed copies
- * it; the next page is appended to the same array.
+ * it; the next page is appended to the same array. A UDP flow or QUIC
+ * connection also reports after a page that found no frames, and adds how far
+ * the store's search has got (0..1) as a third argument: a sparse flow can sit
+ * on the same count for many pages.
  */
 export async function loadStreamFrames(
-  summary: StreamSummary, ram: readonly Packet[], source: StreamFrameSource,
-  onProgress?: (loaded: number, soFar: readonly Packet[]) => void, signal?: { cancelled: boolean },
+  summary: StreamSummary | UdpSummary | QuicSummary, ram: readonly Packet[], source: StreamFrameSource,
+  onProgress?: (loaded: number, soFar: readonly Packet[], searched?: number) => void, signal?: { cancelled: boolean },
 ): Promise<Packet[]> {
+  // A TCP summary has no `kind`; a UDP or QUIC one names it and its key.
+  const flow = 'kind' in summary ? summary : null;
   const frames: Packet[] = [];
   // From chunk 0: the store begins at the stream's first chunk itself (it
   // holds the index; this side has none), so the first page is not spent on
   // chunks before it.
   let chunk: number | null = 0;
   while (chunk !== null && !signal?.cancelled) {
-    const page = await source.streamOrdinals(summary.streamId, summary.firstId, summary.lastId, chunk);
+    const page: { ordinals: number[]; nextChunk: number | null; searched?: number } = flow === null
+      ? await source.streamOrdinals((summary as StreamSummary).streamId, summary.firstId, summary.lastId, chunk)
+      : await source.flowOrdinals(flow.kind, flow.key, summary.firstId, summary.lastId, chunk);
+    // A sparse flow finds nothing for many pages, so progress by frames alone
+    // would sit still: a flow reports after EVERY page, with how far it has searched.
+    if (flow !== null && page.ordinals.length === 0 && !signal?.cancelled) onProgress?.(frames.length, frames, page.searched);
     for (let i = 0; i < page.ordinals.length && !signal?.cancelled; i += ROW_PAGE) {
       const ordinals = page.ordinals.slice(i, i + ROW_PAGE);
       const rows = await source.readRowsFor(ordinals);
@@ -106,14 +124,21 @@ export async function loadStreamFrames(
       }
       // A page that resolved after the cancel is not reported: the caller has
       // moved on, and what it is showing now is not this stream.
-      if (!signal?.cancelled) onProgress?.(frames.length, frames);
+      if (!signal?.cancelled) onProgress?.(frames.length, frames, page.searched); // undefined for TCP
     }
     chunk = page.nextChunk;
   }
   if (signal?.cancelled) return frames;
   const lastDisk = frames.length > 0 ? frames[frames.length - 1].id : 0;
   for (const p of ram) {
-    if (p.id > lastDisk && p.streamId === summary.streamId && p.frameProtocols?.includes('tcp')) frames.push(p);
+    if (p.id <= lastDisk) continue;
+    if (flow === null) {
+      if (p.streamId === (summary as StreamSummary).streamId && p.frameProtocols?.includes('tcp')) frames.push(p);
+    } else {
+      // The digest's own membership test (`inFlow`, also the store's), so a RAM
+      // frame is a flow's exactly when the store would have said so.
+      if (inFlow(p, flow.kind, flow.key)) frames.push(p);
+    }
   }
   return frames;
 }

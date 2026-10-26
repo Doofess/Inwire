@@ -15,6 +15,7 @@
  * Skips cleanly without the untracked fixtures; the tshark oracle skips alone
  * without tshark. Each fixture also prints a census, outcome -> streams.
  */
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,7 +68,24 @@ for (const rel of FIXTURES) {
 
   const digest = new StreamDigest();
   for (const p of packets) digest.feed(p);
-  const summaries: StreamSummary[] = digest.changedSince(0);
+  const summaries: StreamSummary[] = digest.changedSince(0).tcp;
+
+  // ---- Stage 2 must leave the TCP fold byte for byte. The hashes are of what
+  // the code before stage 2 produced: every summary without its `version`,
+  // sorted by stream, as JSON. Only counts and a hash are printed.
+  const GOLDEN: Record<string, { streams: number; sha256: string }> = {
+    inwire: { streams: 47, sha256: 'd7bbfc3ef4ee8691c939374c44c310cdcda36bd96fac7f44464428422f6be83b' },
+    bulk: { streams: 30, sha256: 'bc94491deb6a034ffa1468b9830a3b2ec186f3f89b30733e2c15f318cc99611c' },
+  };
+  {
+    const text = JSON.stringify(
+      summaries.map(({ version: _version, ...rest }) => rest).sort((a, b) => a.streamId - b.streamId));
+    const sha256 = createHash('sha256').update(text).digest('hex');
+    const golden = GOLDEN[name];
+    check(`${name}: TCP summaries are unchanged by stage 2`,
+      golden !== undefined && golden.streams === summaries.length && golden.sha256 === sha256,
+      `${summaries.length} streams, sha256 ${sha256}`);
+  }
 
   // ---- Census.
   const census = new Map<string, number>();

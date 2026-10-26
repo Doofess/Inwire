@@ -55,6 +55,11 @@ function standsAlone(p: Packet): boolean {
     || fieldValue(p, 'inwire.expert.category') !== undefined;
 }
 
+/** What a UDP datagram or QUIC packet says: an analysis flag or an expert finding. TCP's flags are not here. */
+function flowStandsAlone(p: Packet): boolean {
+  return (p.analysisFlags?.length ?? 0) > 0 || fieldValue(p, 'inwire.expert.category') !== undefined;
+}
+
 /** No payload and no flag but ACK. `standsAlone` has already taken the rest. */
 function isPureAck(p: Packet): boolean {
   return fieldValue(p, 'tcp.len') === 0 && fieldValue(p, 'tcp.flags.ack') === 1
@@ -77,8 +82,12 @@ export function itemPacket(item: LadderItem): Packet {
  */
 export function foldRuns(
   frames: readonly Packet[], client: Endpoint, ruleKeyOf: (p: Packet) => string,
-  expanded: ReadonlySet<number>,
+  expanded: ReadonlySet<number>, kind: 'tcp' | 'udp' | 'quic' = 'tcp',
 ): LadderItem[] {
+  // TCP's flags, its pure ACKs and their riders are TCP's. A UDP flow or QUIC
+  // connection has only same-direction runs under one rule, broken by an
+  // analysis flag or an expert finding; the first and last frame still stand.
+  const tcp = kind === 'tcp';
   const items: LadderItem[] = [];
   // Each frame keeps its own lane: a riding ACK is drawn in its own when the band opens.
   let run: { packet: Packet; from: Lane }[] = [];
@@ -106,12 +115,12 @@ export function foldRuns(
 
   frames.forEach((p, i) => {
     const from: Lane = isFromClient(p, client) ? 'client' : 'server';
-    if (standsAlone(p) || i === 0 || i === frames.length - 1) {
+    if ((tcp ? standsAlone(p) : flowStandsAlone(p)) || i === 0 || i === frames.length - 1) {
       flush();
       items.push({ kind: 'frame', packet: p, from });
       return;
     }
-    const pureAck = isPureAck(p);
+    const pureAck = tcp && isPureAck(p);
     if (run.length > 0 && from !== runFrom && runCarriesData && pureAck && run.length < BAND_MAX) {
       run.push({ packet: p, from });
       acks++;

@@ -121,8 +121,14 @@ interface LadderViewProps {
   loading: { loaded: number; total: number } | null;
   client: ClientEnd;
   server: Endpoint;
-  /** The digest's summary of this stream, or null for UDP and for a capture with no store. */
+  /**
+   * The digest's summary of this TCP stream, or null for a UDP flow or QUIC
+   * connection (which have no states to write beside the arrows) and for a
+   * capture with no store.
+   */
   summary: StreamSummary | null;
+  /** What the frames are, which decides how a quiet run folds (`foldRuns`). Default TCP. */
+  kind?: 'tcp' | 'udp' | 'quic';
   colorEngine: ColorRulesEngine;
   packetTheme: PacketTheme;
   /** The frame selected elsewhere, highlighted here. */
@@ -148,7 +154,7 @@ interface LadderViewProps {
 }
 
 export const LadderView: React.FC<LadderViewProps> = ({
-  frames, loading, client, server, summary, colorEngine, packetTheme,
+  frames, loading, client, server, summary, kind = 'tcp', colorEngine, packetTheme,
   selectedId, onSelectFrame, highlightFrameId, onHoverFrame, scrollTo,
   expanded, onToggleBand, onOpenBand,
 }) => {
@@ -157,7 +163,10 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // colour and never an average. `getMatchedRuleName` caches on the packet, so
   // the fold asks the chain once per frame and the chips not at all.
   const ruleKeyOf = useCallback((p: Packet) => colorEngine.getMatchedRuleName(p) ?? '', [colorEngine]);
-  const items = useMemo(() => foldRuns(frames, client, ruleKeyOf, expanded), [frames, client, ruleKeyOf, expanded]);
+  const items = useMemo(
+    () => foldRuns(frames, client, ruleKeyOf, expanded, kind),
+    [frames, client, ruleKeyOf, expanded, kind],
+  );
   const extent = useMemo(() => ladderExtent(items), [items]);
   // Read by the opening-window effect, which must not re-run on every fold:
   // opening a band changes the items and must not reset the window it was

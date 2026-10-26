@@ -15,6 +15,7 @@ import {
 } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
+import type { QuicPhaseStep, QuicSummary, UdpSummary } from '../../services/conversation/flowSummary';
 import { keepFrames, loadStreamFrames, progressGate, recallFrames } from '../../services/conversation/streamFrames';
 import { captureStore } from '../../services/capture/captureClient';
 import type { ColorRulesEngine } from '../../services/colorRules';
@@ -117,21 +118,40 @@ const NONE_EXPANDED: ReadonlySet<number> = new Set();
  * id order. `loading` is set until the last page has arrived.
  */
 interface LoadedStream {
-  streamId: number;
+  /** `streamKey`: a TCP stream id and a UDP key are both small integers, so the kind rides in it. */
+  key: string;
   frames: Packet[];
-  loading: { loaded: number; total: number } | null;
+  /** `searched` (0..1): how far a sparse UDP or QUIC flow's search has got, when it reports one. */
+  loading: { loaded: number; total: number; searched?: number } | null;
 }
+
+/** " · 40% searched" while a flow's search is under way, else nothing. */
+function searchedSuffix(searched: number | undefined): string {
+  return searched !== undefined && searched < 1 ? ` · ${Math.floor(searched * 100)}% searched` : '';
+}
+
+type AnySummary = StreamSummary | UdpSummary | QuicSummary;
+
+/** What names a stream within one capture: its kind and the key the digest holds it under. */
+const streamKey = (kind: 'tcp' | 'udp' | 'quic', id: number): string => `${kind}:${id}`;
+const summaryKey = (s: AnySummary): string => ('kind' in s ? streamKey(s.kind, s.key) : streamKey('tcp', s.streamId));
+
+/** The words for a QUIC phase. Inferred from what the frames carry, so the tooltip says so. */
+const PHASE_LABEL: Record<QuicPhaseStep['phase'], string> = {
+  initial: 'Initial', handshake: 'Handshake', '1-rtt': '1-RTT', closed: 'Closed',
+};
 
 interface StreamFollowerPaneProps {
   target: StreamTarget | null;
   packets: Packet[];
   /**
-   * The digest's summary of the target's stream (ADR 0055), or null when there
-   * is none to have: a UDP flow, a capture with no store, or a digest that has
-   * not answered yet. With one, the pane reads the stream's frames from the
-   * whole capture; without, it shows what the buffer holds, as it always did.
+   * The digest's summary of the target's stream, UDP flow or QUIC connection
+   * (ADR 0055), or null when there is none to have: a capture with no store, a
+   * digest that has not answered yet, or a target the digest does not hold.
+   * With one, the pane reads the stream's frames from the whole capture;
+   * without, it shows what the buffer holds, as it always did.
    */
-  summary: StreamSummary | null;
+  summary: StreamSummary | UdpSummary | QuicSummary | null;
   /**
    * The capture the digest is answering for, or null when none has answered.
    * Everything this pane keeps per stream belongs to one capture, and a stream
@@ -232,7 +252,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   /**
    * The stream's frames from the whole capture, read through the digest.
    *
-   * Loaded once per stream, keyed on the summary's `streamId` and not on the
+   * Loaded once per stream, keyed on the summary's kind and key and not on the
    * summary itself: the digest polls once a second and hands back a new
    * summary each time the stream changes, and reloading on each would read a
    * live stream off disk every second. `summary.lastId` bounds the disk read,
@@ -247,7 +267,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
    * left costs nothing and the pane's memory stays bounded.
    */
   const [stream, setStream] = useState<LoadedStream | null>(null);
-  const cache = useRef(new Map<number, Packet[]>());
+  const cache = useRef(new Map<string, Packet[]>());
 
   // Bands the user opened, by their first frame's id. Held here rather than in
   // the ladder so a band stays open across the tabs; an id rather than an
@@ -289,13 +309,13 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     setScrollTo(null);
   }, [captureId]);
 
-  const summaryId = summary?.streamId;
+  const summaryId = summary === null ? undefined : summaryKey(summary);
   useEffect(() => {
     if (summary === null) return;
-    const { streamId } = summary;
+    const streamId = summaryKey(summary);
     const cached = recallFrames(cache.current, streamId);
     if (cached !== undefined) {
-      setStream({ streamId, frames: cached, loading: null });
+      setStream({ key: streamId, frames: cached, loading: null });
       return;
     }
     const total = summary.toServer.packets + summary.toClient.packets;
@@ -303,15 +323,15 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     // The gate answers for a page that resolves after this stream was left:
     // published, it would put the old frames under the new stream's summary.
     const publish = progressGate(signal, PUBLISH_MS);
-    setStream({ streamId, frames: EMPTY_FRAMES, loading: { loaded: 0, total } });
-    void loadStreamFrames(summary, packets, captureStore, (loaded, soFar) => {
+    setStream({ key: streamId, frames: EMPTY_FRAMES, loading: { loaded: 0, total } });
+    void loadStreamFrames(summary, packets, captureStore, (loaded, soFar, searched) => {
       if (!publish(performance.now())) return;
       // A copy: the array handed over is the one still being filled.
-      setStream({ streamId, frames: soFar.slice(), loading: { loaded, total } });
+      setStream({ key: streamId, frames: soFar.slice(), loading: { loaded, total, searched } });
     }, signal).then((frames) => {
       if (signal.cancelled) return;
       keepFrames(cache.current, streamId, frames);
-      setStream({ streamId, frames, loading: null });
+      setStream({ key: streamId, frames, loading: null });
     }).catch((error: unknown) => {
       // The read failed: the pane falls back to the buffer's frames, as it
       // would with no summary, rather than reading "Reading 0 of N" for good.
@@ -331,9 +351,10 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
 
   // What was loaded counts only for the stream on screen: the target can
   // change under a load, and the fallback below answers until the new one is
-  // in. A UDP target has no stream id and never matches.
-  const targetId = target?.streamId;
-  const loaded = stream !== null && targetId !== undefined && stream.streamId === targetId ? stream : null;
+  // in. A target with no stream id (a UDP frame the digest has no key for)
+  // never matches.
+  const targetId = target === null || target.streamId === undefined ? undefined : streamKey(target.kind, target.streamId);
+  const loaded = stream !== null && targetId !== undefined && stream.key === targetId ? stream : null;
 
   /**
    * The RAM frames past what was read: a live stream keeps growing after its
@@ -455,6 +476,12 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   if (target === null) return null;
 
   const loading = loaded?.loading ?? null;
+  // The state map, the lane pills and the markers are TCP's: a UDP flow has no
+  // states and a QUIC connection has phases, shown as the line above the ladder.
+  const tcpSummary = summary !== null && !('kind' in summary) ? summary : null;
+  const quicSummary = summary !== null && 'kind' in summary && summary.kind === 'quic' ? summary : null;
+  // The noun in the title: a QUIC target is a connection, the others streams.
+  const noun = target.kind === 'quic' ? 'Connection' : 'Stream';
 
   /**
    * One frame as one line, and the same line the pane draws.
@@ -480,7 +507,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   };
 
   const streamText = (): string => {
-    const header = `# Follow ${target.kind.toUpperCase()} stream`
+    const header = `# Follow ${target.kind.toUpperCase()} ${noun.toLowerCase()}`
       + `${target.streamId !== undefined ? ` #${target.streamId}` : ''}`
       + `  ${client.address} <-> ${server.address}:${server.port}\n`
       + `# frame\ttime\tdir\tsource\tdestination\tlength\n`;
@@ -522,19 +549,19 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             <div>
               <div className="flex items-center gap-2 font-bold text-sm">
                 <span>
-                  Follow {target.kind.toUpperCase()} Stream
+                  Follow {target.kind.toUpperCase()} {noun}
                   {target.streamId !== undefined ? ` #${target.streamId}` : ''}
                 </span>
                 <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80">
                   {loading !== null
-                    ? `reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()}`
+                    ? `reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()}${searchedSuffix(loading.searched)}`
                     : `${frames.length.toLocaleString()} ${frames.length === 1 ? 'frame' : 'frames'}`}
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
                 <span className="font-mono">
                   {client.address} <span className="text-muted-foreground">⇄</span> {server.address}
-                  :{portLabel(server.port, target.kind, true)}
+                  :{portLabel(server.port, target.kind === 'quic' ? 'udp' : target.kind, true)}
                 </span>
               </p>
             </div>
@@ -620,6 +647,36 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
            * up the map is always there; below, it can be put away for the
            * ladder's sake, and a slim strip brings it back.
            */
+          <>
+          {/* A QUIC connection's phases, in the order they were first seen, each
+              a button that brings its frame into the ladder through the same
+              request the state map's states make. Inferred from the frames the
+              capture holds, and the tooltip says so: a Closed is only a
+              decrypted CONNECTION_CLOSE, never a guess. It wraps rather than
+              scrolling, so at the 1024 minimum window nothing leaves the pane. */}
+          {loaded !== null && quicSummary !== null && quicSummary.phases.length > 0 && (
+            <div
+              aria-label="QUIC phases"
+              className="px-4 py-2 border-b border-border flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs"
+            >
+              <span className="text-muted-foreground mr-1">Phases</span>
+              {quicSummary.phases.map((step, i) => (
+                <React.Fragment key={`${step.phase}:${step.side}`}>
+                  {i > 0 && <span className="text-muted-foreground" aria-hidden="true">→</span>}
+                  <button
+                    type="button"
+                    onClick={() => pickState(step.frameId)}
+                    title={`Frame #${step.frameId} at ${step.time.toFixed(3)} s, as read from the frames`}
+                    className="px-2 py-0.5 rounded border border-border bg-secondary/50 text-foreground/90
+                      hover:bg-accent active:opacity-70
+                      focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {PHASE_LABEL[step.phase]} <span className="text-muted-foreground">{step.side}</span>
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
           <div className="flex-1 min-h-0 flex @container">
             <LadderView
               frames={frames}
@@ -629,7 +686,8 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               // The summary goes with the frames it describes, and only those:
               // over the buffer's frames its first id would read as a ring floor
               // and its steps would land on rows the buffer happens to hold.
-              summary={loaded !== null ? summary : null}
+              summary={loaded !== null ? tcpSummary : null}
+              kind={target.kind}
               colorEngine={colorEngine}
               packetTheme={packetTheme}
               selectedId={selectedId}
@@ -641,7 +699,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               onToggleBand={toggleBand}
               onOpenBand={openBand}
             />
-            {loaded !== null && summary !== null && (
+            {loaded !== null && tcpSummary !== null && (
               <>
                 <aside
                   className={`${mapOpen ? 'flex' : 'hidden @min-[1180px]:flex'} w-[19.5rem] shrink-0 min-h-0 flex-col
@@ -649,7 +707,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
                   aria-label="TCP state map"
                 >
                   <TcpStateMap
-                    summary={summary}
+                    summary={tcpSummary}
                     hoverFrameId={hoverFrameId}
                     onPickState={pickState}
                     onCollapse={() => setMapOpen(false)}
@@ -670,6 +728,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               </>
             )}
           </div>
+          </>
         ) : (
         /*
          * The dialogue, virtualised.
@@ -696,7 +755,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               {frames.length === 0 ? (
                 <div className="text-center py-12 text-muted-foreground">
                   {loading !== null
-                    ? `Reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()} frames`
+                    ? `Reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()} frames${searchedSuffix(loading.searched)}`
                     : summary !== null
                       ? 'No frames on this stream.'
                       : 'No frames on this stream are in the buffer.'}

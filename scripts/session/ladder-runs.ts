@@ -37,7 +37,8 @@ import {
   keepFrames, KEPT_FRAMES_MAX, loadStreamFrames, progressGate, recallFrames, type StreamFrameSource,
 } from '../../src/services/conversation/streamFrames';
 import { rechoosesWindow, revealStep } from '../../src/components/ladder/ladderFollow';
-import { summaryIsTarget, type StreamTarget } from '../../src/services/followStream';
+import { flowSummaryIsTarget, summaryIsTarget, type StreamTarget } from '../../src/services/followStream';
+import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
 import { foldRuns, itemTime, type LadderItem } from '../../src/components/ladder/ladderRuns';
 import { layoutLadder, MIN_ROW_GAP, revealScroll, rowMeta, type LadderLayout } from '../../src/components/ladder/ladderLayout';
 import {
@@ -286,18 +287,27 @@ function bulk(segments: number, ackRule = 'ack'): Packet[] {
 interface FakeSource extends StreamFrameSource {
   ordinalCalls: number[];
   rowCalls: number[];
+  /** The `flowOrdinals` asks, as `[kind, key, fromId, toId, startChunk]`. */
+  flowCalls: unknown[][];
 }
 
 /** Ordinals `0..n-1` paged by `pageSize` chunks, each ordinal holding the row at that index. */
 function fakeSource(disk: readonly Packet[], pageSize: number, onRead?: () => void): FakeSource {
   const source: FakeSource = {
-    ordinalCalls: [], rowCalls: [],
+    ordinalCalls: [], rowCalls: [], flowCalls: [],
     streamOrdinals(_streamId, _fromId, _toId, startChunk) {
       source.ordinalCalls.push(startChunk);
       const from = startChunk * pageSize;
       const ordinals = Array.from({ length: Math.min(pageSize, disk.length - from) }, (_, i) => from + i);
       const nextChunk = from + pageSize < disk.length ? startChunk + 1 : null;
       return Promise.resolve({ ordinals, nextChunk });
+    },
+    flowOrdinals(kind, key, fromId, toId, startChunk) {
+      source.flowCalls.push([kind, key, fromId, toId, startChunk]);
+      const from = startChunk * pageSize;
+      const ordinals = Array.from({ length: Math.min(pageSize, disk.length - from) }, (_, i) => from + i);
+      const nextChunk = from + pageSize < disk.length ? startChunk + 1 : null;
+      return Promise.resolve({ ordinals, nextChunk, searched: nextChunk === null ? 1 : (from + pageSize) / disk.length });
     },
     readRowsFor(ordinals) {
       source.rowCalls.push(ordinals.length);
@@ -403,6 +413,7 @@ await (async () => {
   // A row the store could not read back is skipped, not drawn as a hole.
   const partial: StreamFrameSource = {
     streamOrdinals: (...args) => source.streamOrdinals(...args),
+    flowOrdinals: (...args) => source.flowOrdinals(...args),
     async readRowsFor(ordinals) {
       const rows = await source.readRowsFor(ordinals);
       rows.delete(4);
@@ -772,7 +783,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   // A new capture drops everything the pane keeps per stream, because every
   // one of those is keyed by a frame id and ids start again from one.
   checkTrue('the digest hook returns the capture it is answering for',
-    /return \{ summaries, rebuilding, partial, captureId \}/.test(hook));
+    /return \{ summaries, udp, quic, captureEnd, rebuilding, partial, captureId \}/.test(hook));
   const reset = pane.match(/const seenCapture = useRef\(captureId\);[\s\S]*?\}, \[captureId\]\);/)?.[0] ?? '';
   checkTrue('the pane has an effect keyed on the capture id', reset.length > 0);
   for (const call of ['cache.current.clear()', 'setStream(null)', 'setExpanded(NONE_EXPANDED)']) {
@@ -785,14 +796,21 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the load is cancelled and begun again when the capture changes',
     pane.includes('}, [captureId, summaryId]);'));
   checkTrue('the digest hook keeps nothing across a disable',
-    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*setPartial\(false\);\s*\};/.test(hook));
+    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setUdp\(new Map\(\)\);\s*setQuic\(new Map\(\)\);\s*setCaptureEnd\(0\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*setPartial\(false\);\s*\};/.test(hook));
 
   // A page of a stream that was left is never published, and the summary goes
   // only with the frames it describes.
   checkTrue('the loader reports no page after a cancel', loader.includes('if (!signal?.cancelled) onProgress?.('));
   checkTrue('the pane publishes through the gate', pane.includes('progressGate(signal, PUBLISH_MS)') && pane.includes('if (!publish(performance.now())) return;'));
-  checkTrue('the summary reaches the ladder only with frames read through it',
-    pane.includes('summary={loaded !== null ? summary : null}'));
+  checkTrue('the summary reaches the ladder only with frames read through it, and only a TCP one',
+    pane.includes('summary={loaded !== null ? tcpSummary : null}'));
+  checkTrue('...the state map is docked for a TCP summary alone, never for UDP or QUIC',
+    /\{loaded !== null && tcpSummary !== null && \(\s*<>\s*<aside/.test(pane) && !/<TcpStateMap\s+summary=\{summary\}/.test(pane));
+  checkTrue('...the ladder is told what it is folding', pane.includes('kind={target.kind}') && view.includes("foldRuns(frames, client, ruleKeyOf, expanded, kind)"));
+  checkTrue('...and frames cached for a stream are keyed by kind as well as key',
+    pane.includes('new Map<string, Packet[]>()') && pane.includes('streamKey(target.kind, target.streamId)'));
+  checkTrue('...a QUIC connection\'s phase line scrolls through the state map\'s request',
+    /quicSummary\.phases\.map[\s\S]*?pickState\(step\.frameId\)/.test(pane));
   checkTrue('a failed read falls back to the buffer rather than reading "Reading 0 of N" for good',
     /\.catch\(\(error: unknown\) => \{[\s\S]*?setStream\(null\);/.test(pane));
 
@@ -860,6 +878,176 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   const reader = readFileSync(join(root, 'src/services/capture/captureReader.ts'), 'utf8');
   checkTrue('readRowsFor decodes through the one-chunk cache (scripts/capture/stream-reader.ts counts it)',
     /readRowsFor[\s\S]*?this\.rowsOfChunk\(chunk\)/.test(reader));
+}
+
+// --- UDP flows and QUIC connections (ADR 0055 stage 2) ------------------------------------------
+
+/** A datagram of UDP flow 3, as the store would hand it back; `rule` as in `row`. */
+function udpRow(fromClient: boolean, extra: Partial<Packet> & { rule?: string } = {}): Packet {
+  const { rule, ...rest } = extra;
+  const id = nextId++;
+  return {
+    id, tsUs: id * 1000, timeDelta: 0, relativeTime: id / 1000,
+    source: fromClient ? '10.0.0.2' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.2',
+    sourcePort: fromClient ? 50000 : 5353, destPort: fromClient ? 5353 : 50000,
+    protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'],
+    fields: { 'udp.stream': 3, ...(rule !== undefined ? { 'test.rule': rule } : {}) },
+    length: 100, info: '', status: 'ok', ...rest,
+  } as Packet;
+}
+const udpRun = (n: number, fromClient: boolean, rule = 'a') => Array.from({ length: n }, () => udpRow(fromClient, { rule }));
+
+{
+  nextId = 1;
+  const frames = [
+    ...udpRun(1, true), ...udpRun(10, true), ...udpRun(5, false), ...udpRun(4, true, 'b'), ...udpRun(1, false),
+  ];
+  for (const kind of ['udp', 'quic'] as const) {
+    check(`a ${kind.toUpperCase()} band breaks on direction and on a rule change`,
+      shape(foldRuns(frames, CLIENT, ruleKeyOf, NONE, kind)),
+      ['frame', 'band(10)', 'band(5)', 'band(4)', 'frame']);
+  }
+  const udp = foldRuns(frames, CLIENT, ruleKeyOf, NONE, 'udp');
+  check('...each band goes the way its frames went', udp.map((i) => i.from), ['client', 'client', 'server', 'client', 'server']);
+  check('...in its own rule', udp.flatMap((i) => (i.kind === 'band' ? [i.ruleKey] : [])), ['a', 'a', 'b']);
+  check('...and none carries riders, which is TCP\'s',
+    udp.flatMap((i) => (i.kind === 'band' ? [i.acks] : [])), [0, 0, 0]);
+}
+{
+  // A finding, a flag or an expert category breaks a band, and the frame stands alone.
+  nextId = 1;
+  const frames = [
+    ...udpRun(1, true), ...udpRun(4, true),
+    udpRow(true, { rule: 'a', analysisFlags: ['retransmission'] } as Partial<Packet>),
+    ...udpRun(4, true),
+    udpRow(true, { rule: 'a', fields: { 'udp.stream': 3, 'test.rule': 'a', 'inwire.expert.category': 'warning' } }),
+    ...udpRun(4, true), ...udpRun(1, false),
+  ];
+  check('a UDP band breaks on an analysis flag and on an expert finding, which stand alone',
+    shape(foldRuns(frames, CLIENT, ruleKeyOf, NONE, 'udp')),
+    ['frame', 'band(4)', 'frame', 'band(4)', 'frame', 'band(4)', 'frame']);
+  nextId = 1;
+  const alternating = Array.from({ length: 12 }, (_, i) => udpRow(i % 2 === 0, { rule: 'a' }));
+  check('...and alternating directions never fold', shape(foldRuns(alternating, CLIENT, ruleKeyOf, NONE, 'udp')),
+    alternating.map(() => 'frame'));
+  // standsAlone and isPureAck are TCP's: TCP fields on a UDP row mean nothing to a UDP band.
+  nextId = 1;
+  const withTcpFields = [
+    ...udpRun(1, true),
+    ...udpRun(3, true), udpRow(true, { rule: 'a', fields: { 'udp.stream': 3, 'test.rule': 'a', 'tcp.flags.fin': 1 } }), ...udpRun(3, true),
+    udpRow(false, { rule: 'a', fields: { 'udp.stream': 3, 'test.rule': 'a', 'tcp.len': 0, 'tcp.flags.ack': 1 } }),
+    ...udpRun(2, true), ...udpRun(1, false),
+  ];
+  check('...and a TCP flag or a bare ACK on a UDP row neither breaks a band nor rides one',
+    shape(foldRuns(withTcpFields, CLIENT, ruleKeyOf, NONE, 'udp')), ['frame', 'band(7)', 'frame', 'band(2)', 'frame']);
+  check('an opened UDP band is its frames', shape(foldRuns(frames, CLIENT, ruleKeyOf, new Set([frames[1].id]), 'udp')),
+    ['frame', ...Array(4).fill('frame'), 'frame', 'band(4)', 'frame', 'band(4)', 'frame']);
+}
+{
+  // A TCP stream's pure ACK rides a band; a UDP datagram that merely looks like one does not.
+  nextId = 1;
+  const tcp = [row(true, 'A', { len: 100 }), ...data(4), row(false, 'A', { len: 0 }), ...data(4), row(true, 'FA')];
+  check('TCP keeps its riders: the default kind folds a bare ACK into the band',
+    foldRuns(tcp, CLIENT, ruleKeyOf, NONE).flatMap((i) => (i.kind === 'band' ? [i.acks] : [])), [1]);
+  check('...and as an explicit tcp kind, the same',
+    shape(foldRuns(tcp, CLIENT, ruleKeyOf, NONE, 'tcp')), shape(foldRuns(tcp, CLIENT, ruleKeyOf, NONE)));
+}
+
+await (async () => {
+  // loadStreamFrames: a flow reads through flowOrdinals, with its kind and key.
+  nextId = 1;
+  const disk = udpRun(400, true);
+  const quicRam = (n: number, connection: number | null): Packet[] => Array.from({ length: n }, () => udpRow(true, {
+    protocol: 'QUIC', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'quic'],
+    fields: { 'udp.stream': 9, ...(connection === null ? {} : { 'quic.connection.number': connection }) },
+  }));
+  const udpSummary = (frames: readonly Packet[]) => ({
+    kind: 'udp', key: 3, firstId: frames[0].id, lastId: frames[frames.length - 1].id,
+  }) as UdpSummary;
+
+  const ram = [...disk.slice(350), ...udpRun(30, true)];
+  // Past the last disk id and not this flow's: another udp.stream, a TCP row carrying
+  // stream id 3, a QUIC connection, and a QUIC datagram with no connection number
+  // (which is UDP stream 9 by the digest's rule, not stream 3).
+  ram.push(udpRow(true, { fields: { 'udp.stream': 4 } }));
+  ram.push(row(true, 'A', { streamId: 3 }));
+  ram.push(...quicRam(2, 6), ...quicRam(1, null));
+  const expected = [...disk, ...ram.slice(50, 80)];
+  const source = fakeSource(disk, 300);
+  const frames = await loadStreamFrames(udpSummary(expected), ram, source);
+  check('loadStreamFrames reads a UDP flow through flowOrdinals, from chunk 0, then the next page',
+    source.flowCalls.map((c) => [c[0], c[1], c[4]]), [['udp', 3, 0], ['udp', 3, 1]]);
+  check('...with the summary\'s first and last id', [source.flowCalls[0][2], source.flowCalls[0][3]], [expected[0].id, expected[expected.length - 1].id]);
+  check('...never asking the TCP request', source.ordinalCalls, []);
+  check('...and the RAM tail is this flow\'s frames only, by the digest\'s routing', ids(frames), ids(expected));
+
+  // A QUIC connection: the RAM tail is matched on its connection number.
+  nextId = 1;
+  const qdisk = quicRam(50, 6);
+  const qram = [...qdisk.slice(40), ...quicRam(5, 6), ...quicRam(3, 7), ...udpRun(2, true)];
+  const qsource = fakeSource(qdisk, 300);
+  const quic = await loadStreamFrames(
+    { kind: 'quic', key: 6, firstId: qdisk[0].id, lastId: qdisk[49].id } as QuicSummary, qram, qsource);
+  check('a QUIC connection reads through flowOrdinals as quic', qsource.flowCalls.map((c) => [c[0], c[1]]), [['quic', 6]]);
+  check('...its RAM tail is its own connection\'s frames', ids(quic), ids([...qdisk, ...qram.slice(10, 15)]));
+
+  // Cancelling stops between pages exactly as it does for TCP.
+  nextId = 1;
+  const big = udpRun(900, true);
+  const signal = { cancelled: false };
+  const cancelling = fakeSource(big, 300);
+  const progress: number[] = [];
+  const partial = await loadStreamFrames(udpSummary(big), [], cancelling, (n) => { progress.push(n); signal.cancelled = true; }, signal);
+  check('a cancelled flow read stops at the next boundary, as a TCP one does', [partial.length, cancelling.flowCalls.length], [256, 1]);
+
+  // A sparse flow: pages with no frames still report how far the search has got.
+  nextId = 1;
+  const sparse = udpRun(3, true);
+  const pages = [
+    { ordinals: [] as number[], nextChunk: 1 as number | null, searched: 0.25 },
+    { ordinals: [], nextChunk: 2, searched: 0.5 },
+    { ordinals: [0, 1], nextChunk: 3, searched: 0.75 },
+    { ordinals: [2], nextChunk: null, searched: 1 },
+  ];
+  const sparseSource = (onPage?: () => void): StreamFrameSource => ({
+    streamOrdinals: () => Promise.resolve({ ordinals: [], nextChunk: null }),
+    flowOrdinals(_kind, _key, _fromId, _toId, startChunk) { onPage?.(); return Promise.resolve(pages[startChunk]); },
+    readRowsFor: (ordinals) => Promise.resolve(new Map(ordinals.map((o) => [o, sparse[o]]))),
+  });
+  const seen: [number, number | undefined][] = [];
+  const loaded = await loadStreamFrames(udpSummary(sparse), [], sparseSource(),
+    (n, _soFar, searched) => seen.push([n, searched]));
+  check('a flow\'s progress moves on a page with no frames',
+    seen, [[0, 0.25], [0, 0.5], [2, 0.75], [3, 1]]);
+  check('...and the frames are still all there', ids(loaded), ids(sparse));
+
+  const stop = { cancelled: false };
+  const afterCancel: number[] = [];
+  await loadStreamFrames(udpSummary(sparse), [], sparseSource(() => { if (afterCancel.length === 1) stop.cancelled = true; }),
+    (n) => afterCancel.push(n), stop);
+  check('...but not after a cancel', afterCancel, [0]);
+
+  const tcp = data(5);
+  const tcpArgs: unknown[][] = [];
+  await loadStreamFrames(summaryOf(tcp), [], fakeSource(tcp, 300), (...args) => tcpArgs.push(args));
+  check('a TCP stream\'s progress carries no searched fraction', tcpArgs.map((a) => a[2]), [undefined]);
+})();
+
+{
+  const flow = (kind: 'udp' | 'quic') => ({ kind, client: { address: '10.0.0.2', port: 50000 }, server: { address: '93.184.216.34', port: 443 } }) as UdpSummary | QuicSummary;
+  const target = (over: Partial<StreamTarget> = {}): StreamTarget => ({
+    kind: 'udp', addressA: '10.0.0.2', portA: 50000, addressB: '93.184.216.34', portB: 443, streamId: 3, ...over,
+  });
+  checkTrue('a UDP summary of the target\'s two ends is its own', flowSummaryIsTarget(flow('udp'), target()));
+  checkTrue('...whichever end the target names first', flowSummaryIsTarget(flow('udp'), target({
+    addressA: '93.184.216.34', portA: 443, addressB: '10.0.0.2', portB: 50000,
+  })));
+  checkTrue('a QUIC summary is a QUIC target\'s', flowSummaryIsTarget(flow('quic'), target({ kind: 'quic' })));
+  checkTrue('...and not a UDP target\'s, nor the other way round',
+    !flowSummaryIsTarget(flow('quic'), target()) && !flowSummaryIsTarget(flow('udp'), target({ kind: 'quic' })));
+  checkTrue('another port under the same key is another flow', !flowSummaryIsTarget(flow('udp'), target({ portA: 50001 })));
+  checkTrue('a target with no key has no summary', !flowSummaryIsTarget(flow('udp'), target({ streamId: undefined })));
+  checkTrue('a TCP target has no flow summary', !flowSummaryIsTarget(flow('udp'), target({ kind: 'tcp' })));
 }
 
 // --- A band's label names its riders ---------------------------------------------------------
