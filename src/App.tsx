@@ -2218,9 +2218,13 @@ export default function App() {
       const summary = streamDigest.summaries.get(streamToFollow.streamId);
       return summary !== undefined && summaryIsTarget(summary, streamToFollow) ? summary : null;
     }
+    if (streamToFollow.kind === 'dhcp') {
+      const exchange = streamDigest.dhcp.get(streamToFollow.streamId);
+      return exchange !== undefined && flowSummaryIsTarget(exchange, streamToFollow) ? exchange : null;
+    }
     const flow = (streamToFollow.kind === 'udp' ? streamDigest.udp : streamDigest.quic).get(streamToFollow.streamId);
     return flow !== undefined && flowSummaryIsTarget(flow, streamToFollow) ? flow : null;
-  }, [streamDigest.summaries, streamDigest.udp, streamDigest.quic, streamToFollow]);
+  }, [streamDigest.summaries, streamDigest.udp, streamDigest.quic, streamDigest.dhcp, streamToFollow]);
 
   /**
    * The rail's Follow Stream button, which is a verb and was reading as a place.

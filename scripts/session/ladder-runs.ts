@@ -953,6 +953,36 @@ const udpRun = (n: number, fromClient: boolean, rule = 'a') => Array.from({ leng
     shape(foldRuns(tcp, CLIENT, ruleKeyOf, NONE, 'tcp')), shape(foldRuns(tcp, CLIENT, ruleKeyOf, NONE)));
 }
 
+{
+  // A DHCP exchange's client is a MAC, which no frame's source is, so a lane
+  // comes from the message type (ruling S3-7): a unicast renewal's request
+  // comes from the offered address and still goes the client's way.
+  nextId = 1;
+  const MAC_CLIENT = { address: '02:00:00:00:00:01', port: 68 };
+  const dhcpRow = (src: string, sport: number, dst: string, dport: number, type: number): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: id / 1000,
+      source: src, destination: dst, sourcePort: sport, destPort: dport,
+      protocol: 'DHCP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'dhcp'],
+      fields: { 'dhcp.id': 0xdeadbeef, 'dhcp.option.dhcp': type },
+      length: 342, info: '', status: 'ok',
+    } as unknown as Packet;
+  };
+  const frames = [
+    dhcpRow('0.0.0.0', 68, '255.255.255.255', 67, 1),
+    dhcpRow('192.0.2.1', 67, '192.0.2.50', 68, 2),
+    dhcpRow('0.0.0.0', 68, '255.255.255.255', 67, 3),
+    dhcpRow('192.0.2.1', 67, '192.0.2.50', 68, 5),
+    dhcpRow('192.0.2.50', 68, '192.0.2.1', 67, 3),
+    dhcpRow('192.0.2.7', 67, '192.0.2.1', 67, 5),
+  ];
+  const items = foldRuns(frames, MAC_CLIENT, ruleKeyOf, NONE, 'dhcp');
+  check('a DHCP ladder draws a renewal\'s request from the client',
+    items.map((i) => i.from), ['client', 'server', 'client', 'server', 'client', 'server']);
+  check('...every exchange row is drawn as itself', shape(items), frames.map(() => 'frame'));
+}
+
 await (async () => {
   // loadStreamFrames: a flow reads through flowOrdinals, with its kind and key.
   nextId = 1;

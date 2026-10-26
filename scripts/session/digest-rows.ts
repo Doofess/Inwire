@@ -22,6 +22,7 @@ import { QUIET_SECONDS, conversationRows, digestConversation, digestScopeNote, o
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
 import type { DnsTally, QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
 import type { TlsPhaseStep, TlsSummary } from '../../src/services/conversation/tlsSummary';
+import type { DhcpSummary } from '../../src/services/conversation/dhcpSummary';
 import type { ToCapture, FromCapture } from '../../src/services/capture/captureProtocol';
 
 let failures = 0;
@@ -92,11 +93,25 @@ function tlsSummary(key: number, phases: TlsPhaseStep[], fatalAlert: TlsSummary[
 const step = (phase: TlsPhaseStep['phase'], side: TlsPhaseStep['side'] = 'client', alertName?: string): TlsPhaseStep =>
   ({ phase, side, frameId: 1, time: 0.1, ...(alertName === undefined ? {} : { alertName }) });
 
+/** A DHCP exchange, acked, with a hostname. The key is past 2^31 on purpose: it is unsigned. */
+function dhcpSummary(overrides: Partial<DhcpSummary> = {}): DhcpSummary {
+  return {
+    kind: 'dhcp', key: 0xdeadbeef,
+    client: { address: '02:00:00:00:00:01', port: 68 }, server: { address: '192.0.2.1', port: 67 },
+    hostname: 'host-a', offered: '192.0.2.50',
+    toServer: { packets: 2, bytes: 684, first: 1, last: 1.2 },
+    toClient: { packets: 2, bytes: 684, first: 1.1, last: 1.3 },
+    firstId: 60, lastId: 63, start: 1, end: 1.3,
+    phases: [], outcome: 'acked', version: 5,
+    ...overrides,
+  };
+}
+
 const NO_FLOWS = {
   udp: new Map<number, UdpSummary>(), quic: new Map<number, QuicSummary>(),
-  tls: new Map<number, TlsSummary>(), captureEnd: 0,
+  tls: new Map<number, TlsSummary>(), dhcp: new Map<number, DhcpSummary>(), captureEnd: 0,
 };
-const flows = (over: { summaries?: ReadonlyMap<number, StreamSummary>; udp?: ReadonlyMap<number, UdpSummary>; quic?: ReadonlyMap<number, QuicSummary>; tls?: ReadonlyMap<number, TlsSummary>; captureEnd?: number }) =>
+const flows = (over: { summaries?: ReadonlyMap<number, StreamSummary>; udp?: ReadonlyMap<number, UdpSummary>; quic?: ReadonlyMap<number, QuicSummary>; tls?: ReadonlyMap<number, TlsSummary>; dhcp?: ReadonlyMap<number, DhcpSummary>; captureEnd?: number }) =>
   ({ summaries: new Map<number, StreamSummary>(), ...NO_FLOWS, ...over });
 
 console.log('\n--- a summary as the conversation table\'s row ---\n');
@@ -193,6 +208,26 @@ console.log('\n--- UDP and QUIC from the digest ---\n');
   check('...and an empty QUIC map leaves the level to the buffer, which has none', conversationRows('quic', flows({})), null);
 }
 
+console.log('\n--- DHCP exchanges from the digest ---\n');
+
+{
+  const dhcp = flows({ dhcp: new Map([[0xdeadbeef, dhcpSummary()]]), captureEnd: 2 });
+  const rows = conversationRows('dhcp', dhcp);
+  check('dhcp rows come from the digest, client as A',
+    rows?.map((r) => [r.key, r.streamId, r.kind, r.protocol, r.addressA, r.portA, r.addressB, r.portB, r.outcome]),
+    [['dhcp:3735928559', 3735928559, 'dhcp', 'DHCP', 'host-a', 68, '192.0.2.1', 67, 'acked']]);
+  const row = rows![0];
+  check('...A to B is toServer, B to A is toClient',
+    [row.packetsAtoB, row.bytesAtoB, row.packetsBtoA, row.bytesBtoA, row.packets, row.firstFrame],
+    [2, 684, 2, 684, 4, 60]);
+  const noName = conversationRows('dhcp', flows({ dhcp: new Map([[7, dhcpSummary({ key: 7, hostname: null })]]) }));
+  check('...with no hostname, A is the client MAC', noName?.[0].addressA, '02:00:00:00:00:01');
+  check('...the outcome is the summary\'s alone, with no modifier even long after the end',
+    outcomeText(row, 9_999), 'acked');
+  check('...an empty DHCP map leaves the level to the buffer', conversationRows('dhcp', flows({})), null);
+  check('...and a DHCP-only digest leaves the UDP level alone', conversationRows('udp', dhcp), null);
+}
+
 console.log('\n--- went quiet ---\n');
 
 {
@@ -271,6 +306,11 @@ console.log('\n--- the scope note for each level ---\n');
       digestScopeNote('ipv6', all, null), digestScopeNote('eth', all, { done: 1, total: 2 })],
     ['Whole capture', 'Whole capture', null, null, null]);
   check('...an empty level and no rebuild makes no claim', [digestScopeNote('udp', flows({}), null), digestScopeNote('quic', flows({ udp: all.udp }), null)], [null, null]);
+  const withDhcp = flows({ dhcp: new Map([[1, dhcpSummary({ key: 1 })]]) });
+  check('the scope note names the whole capture for dhcp',
+    [digestScopeNote('dhcp', withDhcp, null), digestScopeNote('dhcp', flows({}), null),
+      digestScopeNote('dhcp', flows({}), { done: 1, total: 4 })],
+    ['Whole capture', null, 'Rebuilding the stream digest: 1 of 4 chunks']);
   check('...a rebuild is reported on udp and quic too', digestScopeNote('quic', flows({}), { done: 1, total: 4 }),
     'Rebuilding the stream digest: 1 of 4 chunks');
 }

@@ -2,7 +2,7 @@
  * The ladder and the state map over real streams, photographed - for looking
  * at, not asserting (ADR 0055).
  *
- *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light] [--kinds tcp,udp,quic,tls,dns]
+ *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light] [--kinds tcp,udp,quic,tls,dns,dhcp] [--dhcp-pcap <file>]
  *
  * Imports the `inwire` fixture into the built app and opens a stream that
  * closed cleanly and one that was reset, then the `bulk` fixture for one
@@ -24,14 +24,24 @@
  * state map; QUIC's phase line, then a click on its last phase), the packet
  * list filtered to it, and Statistics' UDP and QUIC levels with a row's click.
  * `--kinds` picks which of the three to shoot.
+ *
+ * `--kinds dhcp` needs no fixture: the fixtures hold no DHCP, so the script
+ * writes a synthetic capture (documentation addresses only) with one acked
+ * DORA exchange, one Discover and Offer with no Request, and one unicast
+ * renewal Request with no reply, imports it, and shoots Statistics' DHCP level
+ * and Follow Stream on each exchange. `--dhcp-pcap <file>` keeps the capture
+ * at that path; otherwise it lives in a temp directory and is removed.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Page } from 'playwright';
 import { arrive, FIXTURES } from '../pipeline/arrival';
 import { StreamDigest, type StreamSummary } from '../../src/services/conversation/streamDigest';
 import { inFlow, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
+import { Bytes, pcapOf, udpFrameTo } from '../parity/synthetic';
+import type { DhcpSummary } from '../../src/services/conversation/dhcpSummary';
 import { dnsMarks } from '../../src/services/conversation/dnsMarks';
 import type { Packet } from '../../src/types/packet';
 import { dnsOutcomeText } from '../../src/services/conversation/digestRows';
@@ -58,8 +68,12 @@ if (!existsSync(path.join('dist', 'index.html')) || !existsSync(path.join('dist-
 }
 const inwire = FIXTURES.find((f) => f.name === 'inwire')!;
 const bulk = FIXTURES.find((f) => f.name === 'bulk')!;
-for (const f of [inwire, bulk]) {
-  if (!existsSync(f.path)) { console.log(`SKIP  ${f.path} is not present - see test/fixtures/README.md`); process.exit(0); }
+// DHCP writes its own capture; every other kind reads the private fixtures.
+const NEED_FIXTURES = KINDS.some((k) => k !== 'dhcp');
+if (NEED_FIXTURES) {
+  for (const f of [inwire, bulk]) {
+    if (!existsSync(f.path)) { console.log(`SKIP  ${f.path} is not present - see test/fixtures/README.md`); process.exit(0); }
+  }
 }
 
 /** A stream worth photographing: how to find it, and what to hover and click once it is open. */
@@ -78,19 +92,21 @@ interface FlowCase {
 
 /** The fixture's streams as the digest folds them, which is the fold the store runs. */
 async function digestOf(fixturePath: string): Promise<{
-  summaries: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; tls: TlsSummary[]; frames: number; rows: Packet[];
+  summaries: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; tls: TlsSummary[]; dhcp: DhcpSummary[];
+  frames: number; rows: Packet[];
 }> {
   const { arrived } = await arrive(fixturePath);
   const digest = new StreamDigest();
   for (const a of arrived) digest.feed(a.packet);
   // Every summary: each has a version above zero once a row has been folded.
   const changes = digest.changedSince(0);
-  return { summaries: changes.tcp, udp: changes.udp, quic: changes.quic, tls: changes.tls, frames: arrived.length, rows: arrived.map((a) => a.packet) };
+  return { summaries: changes.tcp, udp: changes.udp, quic: changes.quic, tls: changes.tls, dhcp: changes.dhcp, frames: arrived.length, rows: arrived.map((a) => a.packet) };
 }
 
 console.log('folding the fixtures through the digest...');
-const inwireDigest = await digestOf(inwire.path);
-const bulkDigest = await digestOf(bulk.path);
+const NO_DIGEST: Awaited<ReturnType<typeof digestOf>> = { summaries: [], udp: [], quic: [], tls: [], dhcp: [], frames: 0, rows: [] };
+const inwireDigest = NEED_FIXTURES ? await digestOf(inwire.path) : NO_DIGEST;
+const bulkDigest = NEED_FIXTURES ? await digestOf(bulk.path) : NO_DIGEST;
 const total = (s: { toServer: { packets: number }; toClient: { packets: number } }) => s.toServer.packets + s.toClient.packets;
 // A stream with a few dozen frames reads on one ladder; thousands fold into bands.
 const pick = (list: StreamSummary[], want: (s: StreamSummary) => boolean) =>
@@ -151,7 +167,79 @@ if (KINDS.includes('dns')) {
     console.log(`  dns: opened on frame #${dnsFrame}${marks.has(dnsFrame) ? `, marked "${marks.get(dnsFrame)}"` : ''}`);
   }
 }
-if (cases.length === 0 && flowCases.length === 0 && tlsCase === undefined && dnsCase === undefined) { console.log('no streams to photograph'); process.exit(1); }
+
+// Stage 3: DHCP, from a capture written here because the fixtures hold none.
+const MAC_A = '02:00:00:00:00:01';
+const MAC_B = '02:00:00:00:00:02';
+const MAC_C = '02:00:00:00:00:03';
+const SERVER = '192.0.2.1';
+
+/** A BOOTP message (RFC 2131) with option 53 and the given options, as UDP payload. */
+function bootp(
+  op: 1 | 2, xid: number, mac: string, type: number,
+  opts: { ciaddr?: string; yiaddr?: string; hostname?: string; requested?: string; server?: string } = {},
+): Uint8Array {
+  const b = new Bytes()
+    .u8(op, 1, 6, 0).u32(xid).u16(0, 0x8000)
+    .ipv4(opts.ciaddr ?? '0.0.0.0').ipv4(opts.yiaddr ?? '0.0.0.0').ipv4('0.0.0.0').ipv4('0.0.0.0')
+    .mac(mac).zeros(10).zeros(64).zeros(128)
+    .u32(0x63825363)
+    .u8(53, 1, type);
+  if (opts.hostname !== undefined) b.u8(12, opts.hostname.length).ascii(opts.hostname);
+  if (opts.requested !== undefined) b.u8(50, 4).ipv4(opts.requested);
+  if (opts.server !== undefined) b.u8(54, 4).ipv4(opts.server);
+  if (op === 2 && type !== 6) b.u8(51, 4).u32(3600);
+  return b.u8(255).build();
+}
+
+/** The synthetic capture: frames in order, and what each exchange should read as. */
+function dhcpFrames(): { frames: Uint8Array[]; expect: Record<string, string> } {
+  const bc = '255.255.255.255';
+  const A = 0x1a2b3c4d, B = 0x5e6f7081, C = 0x8badf00d;
+  const frames = [
+    // A: acked, with a hostname and a server identifier.
+    udpFrameTo('0.0.0.0', bc, 68, 67, bootp(1, A, MAC_A, 1, { hostname: 'synth-laptop' })),
+    udpFrameTo(SERVER, '192.0.2.50', 67, 68, bootp(2, A, MAC_A, 2, { yiaddr: '192.0.2.50', server: SERVER })),
+    udpFrameTo('0.0.0.0', bc, 68, 67, bootp(1, A, MAC_A, 3, { hostname: 'synth-laptop', requested: '192.0.2.50', server: SERVER })),
+    udpFrameTo(SERVER, '192.0.2.50', 67, 68, bootp(2, A, MAC_A, 5, { yiaddr: '192.0.2.50', server: SERVER })),
+    // B: an offer nobody took.
+    udpFrameTo('0.0.0.0', bc, 68, 67, bootp(1, B, MAC_B, 1)),
+    udpFrameTo(SERVER, '192.0.2.51', 67, 68, bootp(2, B, MAC_B, 2, { yiaddr: '192.0.2.51', server: SERVER })),
+    // C: a unicast renewal Request that nothing answered.
+    udpFrameTo('198.51.100.20', '198.51.100.1', 68, 67, bootp(1, C, MAC_C, 3, { ciaddr: '198.51.100.20' })),
+  ];
+  return { frames, expect: { [String(A)]: 'acked', [String(B)]: 'offer not taken', [String(C)]: 'no reply' } };
+}
+
+interface DhcpCase { name: string; summary: DhcpSummary }
+const dhcpCases: DhcpCase[] = [];
+let dhcpFixture: { path: string; frames: number } | undefined;
+let dhcpDir: string | undefined;
+if (KINDS.includes('dhcp')) {
+  const { frames, expect } = dhcpFrames();
+  const keep = arg('dhcp-pcap', '');
+  dhcpDir = keep === '' ? mkdtempSync(path.join(tmpdir(), 'inwire-dhcp-shots-')) : undefined;
+  const file = keep === '' ? path.join(dhcpDir!, 'dhcp-synthetic.pcap') : keep;
+  writeFileSync(file, pcapOf(frames));
+  dhcpFixture = { path: file, frames: frames.length };
+  const tsharkArgs = ['-r', file, '-Y', 'dhcp', '-T', 'fields', '-e', 'dhcp.option.dhcp'];
+  const probe = [spawnSync('tshark', tsharkArgs, { encoding: 'utf8' }),
+    spawnSync('C:/Program Files/Wireshark/tshark.exe', tsharkArgs, { encoding: 'utf8' })]
+    .find((r) => r.status === 0) ?? { status: 1, stdout: '' };
+  const types = (probe.stdout ?? '').split('\n').filter((l) => l !== '');
+  console.log(probe.status === 0
+    ? `  dhcp: tshark reads ${types.length} DHCP frames of ${frames.length}, option 53 values ${types.join(',')}`
+    : '  dhcp: tshark not on PATH, frame layout not cross-checked');
+  const folded = await digestOf(file);
+  const names: Record<string, string> = { acked: 'ladder', 'offer not taken': 'offer', 'no reply': 'renewal' };
+  for (const d of folded.dhcp) {
+    const want = expect[String(d.key)];
+    console.log(`  dhcp: 0x${d.key.toString(16).padStart(8, '0')} ${d.outcome} (expected ${want}), ${d.phases.map((p) => p.message).join(' -> ')}, frames #${d.firstId}..#${d.lastId}`);
+    dhcpCases.push({ name: names[want] ?? `x${d.key}`, summary: d });
+  }
+  dhcpCases.sort((a, b) => a.summary.firstId - b.summary.firstId);
+}
+if (cases.length === 0 && flowCases.length === 0 && tlsCase === undefined && dnsCase === undefined && dhcpCases.length === 0) { console.log('no streams to photograph'); process.exit(1); }
 
 const PIPE = String.raw`\\.\pipe\inwire-stream-shots-` + process.pid;
 const agent = await startStubAgent(PIPE, 5);
@@ -468,6 +556,47 @@ try {
           await shot('stats-udp-dns');
         }
 
+        // Stage 3: the synthetic DHCP capture. Statistics' DHCP level first,
+        // then Follow Stream on each exchange, opened from its first frame.
+        if (dhcpFixture !== undefined && dhcpCases.length > 0) {
+          console.log(`${tag}: importing ${path.basename(dhcpFixture.path)}`);
+          console.log(`  imported: ${await importFixture(p, dhcpFixture)}`);
+          imported = dhcpFixture.path;
+          const filter = p.getByPlaceholder('e.g. tcp.port == 443');
+          await p.getByRole('button', { name: /^Statistics/ }).click();
+          await p.getByRole('button', { name: 'Conversations' }).click();
+          await p.getByRole('button', { name: 'DHCP', exact: true }).click();
+          const note = await p.getByText(/^(Whole capture|Rebuilding the stream digest)/).first().textContent({ timeout: 30_000 }).catch(() => null);
+          const rows = await p.locator('tbody tr').filter({ has: p.getByRole('button', { name: 'Filter to this conversation' }) }).count();
+          console.log(`  statistics DHCP scope note: ${note ?? 'NONE'}; ${rows} rows (expected ${dhcpCases.length})`);
+          await sleep(500);
+          await shot('stats-dhcp');
+          await p.keyboard.press('Escape');
+          await sleep(400);
+          for (const [i, c] of dhcpCases.entries()) {
+            await filter.fill(`frame.number == ${c.summary.firstId}`);
+            await filter.press('Enter');
+            const row = p.locator(`#packet-row-${c.summary.firstId}`);
+            await row.waitFor({ timeout: 30_000 });
+            await row.click();
+            await sleep(300);
+            await p.getByRole('button', { name: 'Follow Stream' }).click();
+            await sleep(500);
+            await p.getByRole('radio', { name: 'Ladder' }).click();
+            await p.waitForFunction(() => !/reading \d/i.test(document.body.innerText), undefined, { timeout: 60_000 }).catch(() => {});
+            await sleep(800);
+            const title = await p.getByText(/^Follow DHCP Exchange/).first().textContent({ timeout: 30_000 }).catch(() => null);
+            const line = p.locator('[aria-label="DHCP phases"]');
+            const shown = await line.waitFor({ timeout: 30_000 }).then(() => true, () => false);
+            console.log(`  dhcp ${c.name}: title ${title ?? 'NONE'}; phase line ${shown}, ${shown ? await line.getByRole('button').count() : 0} buttons (summary has ${c.summary.phases.length})`);
+            await shot(`dhcp-${i + 1}-${c.name}`);
+            await p.keyboard.press('Escape');
+            await sleep(400);
+          }
+          await filter.fill('');
+          await filter.press('Enter');
+        }
+
         // Statistics' UDP and QUIC levels, read from the digest, and a row's
         // click, which must land on Follow Stream for both.
         if (flowCases.length > 0) {
@@ -511,6 +640,7 @@ try {
   }
 } finally {
   await agent.close();
+  if (dhcpDir !== undefined) rmSync(dhcpDir, { recursive: true, force: true });
 }
 console.log(`shots in ${OUT}`);
 process.exit(0);

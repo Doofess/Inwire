@@ -16,6 +16,7 @@
 import { Packet } from '../types/packet';
 import { chooseClient, type ClientEndBasis, type Endpoint } from './conversation/clientSide';
 import { flowKeyOf } from './conversation/flowSummary';
+import { dhcpFromClient, dhcpKeyOf } from './conversation/dhcpSummary';
 import { fieldValue } from './dissect/fieldAccess';
 
 export interface StreamTarget {
@@ -23,15 +24,17 @@ export interface StreamTarget {
    * Which transport, so a UDP flow on the same ports as a TCP one stays apart.
    * A QUIC connection is its own kind: it is named by its connection number
    * and survives a change of address, which a five-tuple does not.
+   * A DHCP exchange is its own kind too: it is named by its transaction id,
+   * and its addresses change as it goes (0.0.0.0, broadcast, the offered one).
    */
-  kind: 'tcp' | 'udp' | 'quic';
+  kind: 'tcp' | 'udp' | 'quic' | 'dhcp';
   addressA: string;
   portA: number;
   addressB: string;
   portB: number;
   /**
    * The key the digest holds this stream under: the tracker's index for TCP,
-   * `udp.stream` for UDP, the connection number for QUIC. Absent when the frame
+   * `udp.stream` for UDP, the connection number for QUIC, `dhcp.id` (unsigned) for DHCP. Absent when the frame
    * carries none (a UDP frame an older build imported).
    */
   streamId?: number;
@@ -48,6 +51,10 @@ export function targetForPacket(packet: Packet): StreamTarget | null {
     portB: packet.destPort,
   };
   if (layers?.includes('tcp')) return { kind: 'tcp', ...ends, streamId: packet.streamId };
+  // A DHCPv4 row with a transaction id and a message type is its exchange's,
+  // whatever its UDP flow is (the digest counts it in both).
+  const xid = dhcpKeyOf(packet);
+  if (xid !== null) return { kind: 'dhcp', ...ends, streamId: xid };
   // The digest's routing: a QUIC datagram with a connection number is that
   // connection's, any other UDP row is its udp.stream's.
   const flow = flowKeyOf(packet);
@@ -62,6 +69,10 @@ export function streamPackets(packets: readonly Packet[], target: StreamTarget):
     // By connection, not five-tuple: a migrated connection keeps its frames.
     return packets.filter((p) => p.frameProtocols?.includes('quic')
       && fieldValue(p, 'quic.connection.number') === target.streamId);
+  }
+  if (target.kind === 'dhcp') {
+    // By transaction, not five-tuple: the addresses change along the exchange.
+    return packets.filter((p) => dhcpKeyOf(p) === target.streamId);
   }
   return packets.filter((p) => {
     if (!p.frameProtocols?.includes(target.kind)) return false;
@@ -112,6 +123,31 @@ export function isFromClient(packet: Packet, client: { address: string; port: nu
 }
 
 /**
+ * Which way a frame travelled. A DHCP side comes from the message type
+ * (ruling S3-7): its client is a hardware address that no frame names, and its
+ * addresses change along the exchange, so an endpoint match would read a
+ * unicast renewal as the server's. Every other kind reads the endpoint.
+ */
+export function sideOf(
+  kind: StreamTarget['kind'], packet: Packet, client: { address: string; port: number },
+): 'client' | 'server' {
+  if (kind === 'dhcp') return dhcpFromClient(packet) ? 'client' : 'server';
+  return isFromClient(packet, client) ? 'client' : 'server';
+}
+
+/**
+ * An end as the lane headers and the copied text write it. A DHCP client is a
+ * hardware address, which a port would turn into a seventh octet; an address
+ * the exchange never showed (a discover that went unanswered) says so instead
+ * of leaving a bare port.
+ */
+export function endpointText(end: Endpoint, kind: StreamTarget['kind'], role: 'client' | 'server' = 'server'): string {
+  if (end.address === '') return 'not seen';
+  if (kind === 'dhcp' && role === 'client') return end.address;
+  return `${end.address}:${end.port}`;
+}
+
+/**
  * True when a stream digest summary describes this target's conversation.
  *
  * The digest is looked up by the tracker's stream index, and an index is only
@@ -141,9 +177,14 @@ export function summaryIsTarget(
  * connection moved does not match it, and the pane shows what the buffer holds.
  */
 export function flowSummaryIsTarget(
-  summary: { kind: 'udp' | 'quic'; client: Endpoint; server: Endpoint }, target: StreamTarget,
+  summary: { kind: 'udp' | 'quic'; client: Endpoint; server: Endpoint }
+    | { kind: 'dhcp'; key: number },
+  target: StreamTarget,
 ): boolean {
   if (target.kind !== summary.kind || target.streamId === undefined) return false;
+  // A DHCP summary names its client by hardware address, which no target has;
+  // the transaction id is the whole identity.
+  if (summary.kind === 'dhcp') return summary.key === target.streamId;
   const is = (end: Endpoint, address: string, port: number): boolean =>
     end.address === address && end.port === port;
   return (is(summary.client, target.addressA, target.portA) && is(summary.server, target.addressB, target.portB))

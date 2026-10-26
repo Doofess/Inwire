@@ -263,12 +263,15 @@ export const FrameMetaRail: React.FC<FrameMetaRailProps> = ({
           {streamTarget !== null && (
             <RailLink
               onClick={() => onFollowStream(streamTarget)}
-              title={`Follow this ${streamTarget.kind.toUpperCase()} stream`}
+              title={`Follow this ${streamTarget.kind.toUpperCase()} ${streamTarget.kind === 'dhcp' ? 'exchange' : 'stream'}`}
             >
               <MessageSquare className="w-3 h-3 shrink-0" />
               <span className="truncate">
-                {streamTarget.kind.toUpperCase()} stream
-                {streamTarget.streamId !== undefined ? ` ${streamTarget.streamId}` : ''}
+                {streamTarget.kind.toUpperCase()} {streamTarget.kind === 'dhcp' ? 'exchange' : 'stream'}
+                {streamTarget.streamId === undefined ? ''
+                  : streamTarget.kind === 'dhcp'
+                    ? ` 0x${(streamTarget.streamId >>> 0).toString(16).padStart(8, '0')}`
+                    : ` ${streamTarget.streamId}`}
               </span>
             </RailLink>
           )}

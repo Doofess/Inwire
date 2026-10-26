@@ -112,6 +112,8 @@ const TSHARK_KIND: Record<ConversationKind, { tap: string; title: string; ported
   udp: { tap: 'udp', title: 'UDP', ported: true },
   // Not compared: only the digest knows a QUIC connection, and KINDS leaves it out.
   quic: { tap: 'udp', title: 'QUIC', ported: true },
+  // Not compared either: only the digest knows a DHCP exchange.
+  dhcp: { tap: 'udp', title: 'DHCP', ported: true },
 };
 const KINDS: readonly ConversationKind[] = ['eth', 'ipv4', 'ipv6', 'tcp', 'udp'];
 

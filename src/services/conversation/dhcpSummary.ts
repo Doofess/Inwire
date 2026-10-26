@@ -115,10 +115,15 @@ export function foldDhcp(s: DhcpSummary, row: Packet): void {
 
   if (s.client.address === '') s.client = { address: text(row, 'dhcp.hw.mac_addr') ?? '', port: 68 };
   // The server identifier names the server whoever sent the row; the first
-  // server message's source stands in until one does.
+  // server message's source stands in until one does, and before that a client
+  // message sent to an address rather than broadcast: a renewal, a release or an
+  // inform goes to the server it names.
   const serverId = text(row, 'dhcp.option.dhcp_server_id');
   if (serverId !== undefined) s.server = { address: serverId, port: 67 };
   else if (s.server.address === '' && side === 'server') s.server = { address: row.source, port: 67 };
+  else if (s.server.address === '' && row.destination !== '' && row.destination !== '255.255.255.255') {
+    s.server = { address: row.destination, port: 67 };
+  }
   if (s.hostname === null) s.hostname = text(row, 'dhcp.option.hostname') ?? null;
   s.offered = text(row, 'dhcp.ip.your') ?? s.offered;
 

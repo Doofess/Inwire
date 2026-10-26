@@ -595,6 +595,14 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   }
   {
     const d = fresh();
+    d.feed(dhcpRow(3, ['192.168.1.5', 68], [GATEWAY, 67]));
+    check('dhcp: a unicast renewal names its server by where it was sent', dhcpOf(d)?.server, { address: GATEWAY, port: 67 });
+    const b = fresh();
+    b.feed(toServer(1));
+    check('...a broadcast names none', dhcpOf(b)?.server.address, '');
+  }
+  {
+    const d = fresh();
     d.feed(toServer(3));
     d.feed(toClient(6));
     check('dhcp: a NAK after a request is NAK', dhcpOf(d)?.outcome, 'NAK');

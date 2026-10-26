@@ -18,6 +18,7 @@
 import type { Packet } from '../../types/packet';
 import type { StreamSummary } from './streamDigest';
 import { inFlow, type QuicSummary, type UdpSummary } from './flowSummary';
+import type { DhcpSummary } from './dhcpSummary';
 
 export interface StreamFrameSource {
   streamOrdinals(streamId: number, fromId: number, toId: number, startChunk: number):
@@ -92,16 +93,16 @@ export function progressGate(signal: { cancelled: boolean }, intervalMs: number)
  * `onProgress` is handed the count and the array being filled, by reference,
  * after each page of rows - so a view can draw the stream from its first page
  * rather than after its last. A caller that keeps what it was handed copies
- * it; the next page is appended to the same array. A UDP flow or QUIC
- * connection also reports after a page that found no frames, and adds how far
+ * it; the next page is appended to the same array. A UDP flow, QUIC
+ * connection or DHCP exchange also reports after a page that found no frames, and adds how far
  * the store's search has got (0..1) as a third argument: a sparse flow can sit
  * on the same count for many pages.
  */
 export async function loadStreamFrames(
-  summary: StreamSummary | UdpSummary | QuicSummary, ram: readonly Packet[], source: StreamFrameSource,
+  summary: StreamSummary | UdpSummary | QuicSummary | DhcpSummary, ram: readonly Packet[], source: StreamFrameSource,
   onProgress?: (loaded: number, soFar: readonly Packet[], searched?: number) => void, signal?: { cancelled: boolean },
 ): Promise<Packet[]> {
-  // A TCP summary has no `kind`; a UDP or QUIC one names it and its key.
+  // A TCP summary has no `kind`; a UDP, QUIC or DHCP one names it and its key.
   const flow = 'kind' in summary ? summary : null;
   const frames: Packet[] = [];
   // From chunk 0: the store begins at the stream's first chunk itself (it

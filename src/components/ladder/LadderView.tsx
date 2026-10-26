@@ -6,7 +6,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { scaleLinear } from 'd3';
 import { TriangleAlert } from 'lucide-react';
 import type { Packet } from '../../types/packet';
-import type { ClientEnd } from '../../services/followStream';
+import { endpointText, type ClientEnd } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
 import type { ColorRulesEngine } from '../../services/colorRules';
@@ -128,7 +128,7 @@ interface LadderViewProps {
    */
   summary: StreamSummary | null;
   /** What the frames are, which decides how a quiet run folds (`foldRuns`). Default TCP. */
-  kind?: 'tcp' | 'udp' | 'quic';
+  kind?: 'tcp' | 'udp' | 'quic' | 'dhcp';
   colorEngine: ColorRulesEngine;
   packetTheme: PacketTheme;
   /** The frame selected elsewhere, highlighted here. */
@@ -423,7 +423,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
           <div className="text-foreground font-semibold">
             {client.basis === 'first-speaker' ? 'client is a guess: first to speak' : 'client'}
           </div>
-          <div className="text-muted-foreground truncate">{client.address}:{client.port}</div>
+          <div className="text-muted-foreground truncate">{endpointText(client, kind, 'client')}</div>
         </div>
         <span className="text-muted-foreground text-center pt-px">
           {loading !== null
@@ -433,7 +433,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
         </span>
         <div className="min-w-0 max-w-[260px] text-right">
           <div className="text-foreground font-semibold">server</div>
-          <div className="text-muted-foreground truncate">{server.address}:{server.port}</div>
+          <div className="text-muted-foreground truncate">{endpointText(server, kind)}</div>
         </div>
       </div>
 

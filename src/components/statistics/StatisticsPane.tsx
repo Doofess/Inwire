@@ -15,6 +15,7 @@ import { conversationRows, digestScopeNote, outcomeText, type DigestConversation
 import type { StreamSummary } from '../../services/conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../../services/conversation/flowSummary';
 import type { TlsSummary } from '../../services/conversation/tlsSummary';
+import type { DhcpSummary } from '../../services/conversation/dhcpSummary';
 import { NameLookup, SOURCE_LABELS } from '../../services/nameResolution';
 import {
   CATEGORY_HINTS, CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TEXT,
@@ -55,6 +56,7 @@ const NO_DIGEST = {
   udp: new Map<number, UdpSummary>() as ReadonlyMap<number, UdpSummary>,
   quic: new Map<number, QuicSummary>() as ReadonlyMap<number, QuicSummary>,
   tls: new Map<number, TlsSummary>() as ReadonlyMap<number, TlsSummary>,
+  dhcp: new Map<number, DhcpSummary>() as ReadonlyMap<number, DhcpSummary>,
   captureEnd: 0,
   rebuilding: null as { done: number; total: number } | null,
   partial: false,
@@ -70,6 +72,7 @@ const CONVERSATION_TABS: { id: ConversationKind; label: string }[] = [
   { id: 'tcp', label: 'TCP' },
   { id: 'udp', label: 'UDP' },
   { id: 'quic', label: 'QUIC' },
+  { id: 'dhcp', label: 'DHCP' },
 ];
 
 interface StatisticsPaneProps {
@@ -84,8 +87,8 @@ interface StatisticsPaneProps {
   /** Opens the stream follower on a TCP or UDP conversation. */
   onFollowStream?: (target: StreamTarget, view?: 'dialogue' | 'ladder') => void;
   /**
-   * The store's stream digest (ADR 0055), which answers the TCP, UDP and QUIC
-   * levels for the whole capture where the buffer can only count what it still
+   * The store's stream digest (ADR 0055), which answers the TCP, UDP, QUIC and
+   * DHCP levels for the whole capture where the buffer can only count what it still
    * holds - and knows how each flow ended, which a pair count cannot.
    */
   digest?: {
@@ -93,6 +96,7 @@ interface StatisticsPaneProps {
     udp: ReadonlyMap<number, UdpSummary>;
     quic: ReadonlyMap<number, QuicSummary>;
     tls: ReadonlyMap<number, TlsSummary>;
+    dhcp: ReadonlyMap<number, DhcpSummary>;
     /** The latest frame time folded, which "went quiet" is measured against. */
     captureEnd: number;
     rebuilding: { done: number; total: number } | null;
@@ -167,7 +171,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   // The digest's rows where it answers the level, the buffer's count elsewhere.
   const digestRows = useMemo(
     () => conversationRows(kind, held),
-    [kind, held.summaries, held.udp, held.quic, held.tls],
+    [kind, held.summaries, held.udp, held.quic, held.tls, held.dhcp],
   );
   const bufferRows = useMemo(
     () => (digestRows === null ? conversations(packets, kind) : []),
@@ -177,10 +181,10 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   const scopeNote = tab === 'conversations'
     ? digestScopeNote(kind, held, held.rebuilding, held.partial ?? false)
     : null;
-  const transport = kind === 'tcp' || kind === 'udp' || kind === 'quic';
-  /** A TCP, UDP or QUIC row is one stream; an address row is many, with no single one to open. */
+  const transport = kind === 'tcp' || kind === 'udp' || kind === 'quic' || kind === 'dhcp';
+  /** A TCP, UDP, QUIC or DHCP row is one stream; an address row is many, with no single one to open. */
   const streamOf = (r: Conversation): StreamTarget | undefined =>
-    (kind === 'tcp' || kind === 'udp' || kind === 'quic') && r.portA !== undefined && r.portB !== undefined
+    (kind === 'tcp' || kind === 'udp' || kind === 'quic' || kind === 'dhcp') && r.portA !== undefined && r.portB !== undefined
       ? { kind, addressA: r.addressA, portA: r.portA, addressB: r.addressB, portB: r.portB, streamId: r.streamId }
       : undefined;
   const endpointRows = useMemo(() => endpoints(packets, kind), [packets, kind]);
@@ -207,7 +211,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     return <span title={value}>{name ?? value}</span>;
   };
   const port = (value: number | undefined) =>
-    value === undefined ? '' : portLabel(value, kind === 'udp' || kind === 'quic' ? 'udp' : 'tcp', resolvePorts);
+    value === undefined ? '' : portLabel(value, kind === 'udp' || kind === 'quic' || kind === 'dhcp' ? 'udp' : 'tcp', resolvePorts);
 
   const apply = (expression: string) => {
     onApplyFilter(expression);
@@ -371,8 +375,8 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
         <div className="px-5 py-2 border-b border-border flex flex-wrap items-center gap-2 text-xs shrink-0">
           <button onClick={() => setTab('hierarchy')} className={tabClass('hierarchy')}>Protocol Hierarchy</button>
           <button onClick={() => setTab('conversations')} className={tabClass('conversations')}>Conversations</button>
-          {/* QUIC is a conversation level only: a connection is not an endpoint. */}
-          <button onClick={() => { setTab('endpoints'); setKind((k) => (k === 'quic' ? 'udp' : k)); }} className={tabClass('endpoints')}>Endpoints</button>
+          {/* QUIC and DHCP are conversation levels only: a connection or an exchange is not an endpoint. */}
+          <button onClick={() => { setTab('endpoints'); setKind((k) => (k === 'quic' ? 'udp' : k === 'dhcp' ? 'udp' : k)); }} className={tabClass('endpoints')}>Endpoints</button>
           <button onClick={() => setTab('devices')} className={tabClass('devices')}>
             Devices{deviceRows.length > 0 ? ` (${deviceRows.length})` : ''}
           </button>
@@ -394,7 +398,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
 
           {(tab === 'conversations' || tab === 'endpoints') && (
             <div className="ml-auto flex items-center gap-1">
-              {CONVERSATION_TABS.filter((t) => t.id !== 'quic' || tab === 'conversations').map((t) => (
+              {CONVERSATION_TABS.filter((t) => (t.id !== 'quic' && t.id !== 'dhcp') || tab === 'conversations').map((t) => (
                 <button key={t.id} onClick={() => setKind(t.id)} className={kindClass(t.id)}>
                   {t.label}
                 </button>
