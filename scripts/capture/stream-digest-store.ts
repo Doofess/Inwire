@@ -197,7 +197,7 @@ console.log('\n--- 6. a stale snapshot rebuilds ---\n');
 
 {
   // Entries left empty, so a restore of it would be caught as a lost summary.
-  writeDigestFile(volume, ID, encodeDigest({ throughId: lastId + 5000, version: 1, entries: [] }, deflateSync));
+  writeDigestFile(volume, ID, encodeDigest({ throughId: lastId + 5000, version: 1, captureEnd: 0, entries: [] }, deflateSync));
   const h = host({ scanSliceMs: 0 }, volume);
   h.send({ type: 'open', captureId: ID });
   const firstAnswer = await ask(h, 0, 20);

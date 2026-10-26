@@ -721,7 +721,8 @@ export class CaptureHost {
     let rebuilding: { done: number; total: number } | null = null;
     try {
       if (open !== null) {
-        summaries = open.digest.changedSince(message.since);
+        // TCP only for now: the answer carries the other kinds in a later task.
+        summaries = open.digest.changedSince(message.since).tcp;
         version = open.digest.version;
         const rebuild = open.rebuild;
         if (rebuild !== null) {

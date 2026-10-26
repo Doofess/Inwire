@@ -60,7 +60,7 @@ function row(fromClient: boolean, flags: string, extra: Partial<Packet> & { seq?
   const before = d.version;
   d.relabel(4, 'TLSv1.2');
   check('a protocolLabel patch relabels and bumps the version', [d.get(7)!.protocol, d.version > before], ['TLSv1.2', true]);
-  check('changedSince returns only changed streams', d.changedSince(d.version).length, 0);
+  check('changedSince returns only changed streams', d.changedSince(d.version).tcp.length, 0);
 
   const back = StreamDigest.restore(JSON.parse(JSON.stringify(d.snapshot())));
   check('snapshot round-trips', back.get(7), d.get(7));
@@ -69,14 +69,15 @@ function row(fromClient: boolean, flags: string, extra: Partial<Packet> & { seq?
   // The contract is "serialise it now": snapshot() hands out the digest's own
   // entries (a copy was 2.4 s and 239 MB at 100k streams), so the text taken
   // before a feed is what stays fixed, and `encodeDigest` is that text.
-  check('snapshot() is the digest\'s own entries, not a copy', snap.entries[0].summary === d.get(7), true);
+  const first = snap.entries[0];
+  check('snapshot() is the digest\'s own entries, not a copy', first.kind === 'tcp' && first.entry.summary === d.get(7), true);
   const data = JSON.parse(snapJson);
   const restored = StreamDigest.restore(data);
   nextId = 9;
   restored.feed(row(true, 'RA'));
   // restore() adopts what it is handed (a copy was 6 s of a reopen's 8 at
   // 500k streams), so the restored digest folds into the decoded entries.
-  check('restore() adopts the entries it is handed, not a copy', restored.get(7) === data.entries[0].summary, true);
+  check('restore() adopts the entries it is handed, not a copy', restored.get(7) === data.entries[0].entry.summary, true);
   nextId = 9;
   back.feed(row(true, 'RA'));
   check('a restored digest keeps folding', [back.get(7)!.lastId, back.get(7)!.outcome], [9, 'closed cleanly']);

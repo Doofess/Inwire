@@ -1,11 +1,16 @@
 /**
- * One summary per TCP stream, folded from rows (ADR 0055).
+ * One summary per TCP stream, UDP flow and QUIC connection, folded from rows
+ * (ADR 0055).
  *
  * The capture store owns one of these. Rows reach it from a live capture after
  * the shards' merge and from an import alike, in id order, so this is the one
  * place every row of every capture is seen exactly once. It reads only what a
  * row already carries, so it needs nothing new from any dissector and is held
  * to the same rows the list shows.
+ *
+ * TCP is keyed by `tcp.stream`, UDP by `udp.stream` and QUIC by
+ * `quic.connection.number`, in three maps; a row is folded into at most one.
+ * The UDP and QUIC steps are in `flowSummary.ts`.
  *
  * Derived data: `snapshot()` is what the store persists, and a capture whose
  * snapshot is missing or stale is folded again from its rows.
@@ -17,6 +22,9 @@ import {
   TcpStateMachine, outcomeOf, type Side, type TcpMachineState, type TcpOutcome,
   type TcpSegment, type TcpState, type TcpTransition,
 } from './tcpStates';
+import {
+  foldQuic, foldUdp, openQuic, openUdp, type QuicSummary, type UdpSummary,
+} from './flowSummary';
 
 export interface DirectionTotals {
   packets: number;
@@ -104,6 +112,20 @@ export function segmentOf(row: Packet, from: Side): TcpSegment {
 export interface DigestEntry { summary: StreamSummary; machine: TcpMachineState }
 type Entry = DigestEntry;
 
+/** One snapshot entry, tagged by kind (snapshot format 3). */
+export type TaggedEntry =
+  | { kind: 'tcp'; entry: DigestEntry }
+  | { kind: 'udp'; summary: UdpSummary }
+  | { kind: 'quic'; summary: QuicSummary };
+
+export type FlowKind = 'udp' | 'quic';
+/** What `changedSince` answers: every summary of each kind changed after a version. */
+export interface DigestChanges { tcp: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[] }
+
+const KIND_TCP = 0;
+const KIND_UDP = 1;
+const KIND_QUIC = 2;
+
 /**
  * What `encodeDigest` takes. `entries` is any iterable, so a caller with
  * hundreds of thousands of streams need not materialise them first.
@@ -111,46 +133,99 @@ type Entry = DigestEntry;
 export interface DigestSnapshotData {
   throughId: number;
   version: number;
-  entries: Iterable<DigestEntry>;
+  /** The largest `relativeTime` of any row folded: what "went quiet" is measured against. */
+  captureEnd: number;
+  entries: Iterable<TaggedEntry>;
 }
 
 /** What `snapshot()` returns and `decodeDigest` reads back, and `restore` takes. */
 export interface DigestSnapshot extends DigestSnapshotData {
-  entries: DigestEntry[];
+  entries: TaggedEntry[];
 }
 
 const emptyTotals = (): DirectionTotals => ({ packets: 0, bytes: 0, first: null, last: null });
 
 export class StreamDigest {
   private readonly streams = new Map<number, Entry>();
+  private readonly udps = new Map<number, UdpSummary>();
+  private readonly quics = new Map<number, QuicSummary>();
   /**
-   * The last `RECENT_FRAMES` ids folded and the stream each was in, as two
-   * rings: ids ascend, so a lookup is a binary search, and a fold costs two
-   * stores where a Map's insert and delete were most of `feed`.
+   * The last `RECENT_FRAMES` ids folded and the stream each was in, as three
+   * rings: ids ascend, so a lookup is a binary search, and a fold costs three
+   * stores where a Map's insert and delete were most of `feed`. A key is only
+   * unique within its kind, so the kind rides beside it.
    */
   private readonly recentIds = new Float64Array(RECENT_FRAMES);
   private readonly recentKeys = new Int32Array(RECENT_FRAMES);
+  private readonly recentKinds = new Uint8Array(RECENT_FRAMES);
   /** The next slot written: the oldest, once the ring is full. */
   private recentAt = 0;
   private recentCount = 0;
   private through = 0;
   private versionValue = 0;
+  private captureEndValue = 0;
 
   /** The highest frame id folded. A row at or below it is a repeat and is ignored. */
   get throughId(): number { return this.through; }
   get version(): number { return this.versionValue; }
   get size(): number { return this.streams.size; }
+  /** The largest `relativeTime` of every row fed, whatever its kind. */
+  get captureEnd(): number { return this.captureEndValue; }
 
   get(streamId: number): StreamSummary | undefined {
     return this.streams.get(streamId)?.summary;
   }
 
+  getFlow(kind: FlowKind, key: number): UdpSummary | QuicSummary | undefined {
+    return kind === 'udp' ? this.udps.get(key) : this.quics.get(key);
+  }
+
   feed(row: Packet): void {
     if (row.id <= this.through) return;
     this.through = row.id;
+    if (row.relativeTime > this.captureEndValue) this.captureEndValue = row.relativeTime;
+    const protocols = row.frameProtocols;
+    if (protocols === undefined) return;
+    if (protocols.includes('tcp')) { this.feedTcp(row); return; }
+    if (!protocols.includes('udp') || row.sourcePort === undefined || row.destPort === undefined) return;
+    if (protocols.includes('quic')) {
+      const connection = fieldValue(row, 'quic.connection.number');
+      if (typeof connection === 'number') { this.feedQuic(row, connection); return; }
+    }
+    // Without `udp.stream` a row is no flow: folding it under 0 would merge
+    // every such datagram into one.
+    const stream = fieldValue(row, 'udp.stream');
+    if (typeof stream === 'number') this.feedUdp(row, stream);
+  }
+
+  private feedUdp(row: Packet, key: number): void {
+    let s = this.udps.get(key);
+    if (s === undefined) { s = openUdp(row, key); this.udps.set(key, s); }
+    foldUdp(s, row);
+    s.version = ++this.versionValue;
+    this.remember(row.id, key, KIND_UDP);
+  }
+
+  private feedQuic(row: Packet, key: number): void {
+    let s = this.quics.get(key);
+    if (s === undefined) { s = openQuic(row, key); this.quics.set(key, s); }
+    foldQuic(s, row);
+    s.version = ++this.versionValue;
+    this.remember(row.id, key, KIND_QUIC);
+  }
+
+  private remember(id: number, key: number, kind: number): void {
+    const slot = this.recentAt;
+    this.recentIds[slot] = id;
+    this.recentKeys[slot] = key;
+    this.recentKinds[slot] = kind;
+    this.recentAt = (slot + 1) & (RECENT_FRAMES - 1);
+    if (this.recentCount < RECENT_FRAMES) this.recentCount++;
+  }
+
+  private feedTcp(row: Packet): void {
     const streamId = row.streamId;
     if (streamId === undefined || row.sourcePort === undefined || row.destPort === undefined) return;
-    if (!row.frameProtocols?.includes('tcp')) return;
 
     let entry = this.streams.get(streamId);
     if (entry === undefined) {
@@ -189,15 +264,11 @@ export class StreamDigest {
     s.outcome = outcomeOf(entry.machine);
     s.version = ++this.versionValue;
 
-    const slot = this.recentAt;
-    this.recentIds[slot] = row.id;
-    this.recentKeys[slot] = streamId;
-    this.recentAt = (slot + 1) & (RECENT_FRAMES - 1);
-    if (this.recentCount < RECENT_FRAMES) this.recentCount++;
+    this.remember(row.id, streamId, KIND_TCP);
   }
 
-  /** The stream a recently folded frame was in, or undefined. */
-  private recentStream(frameId: number): number | undefined {
+  /** The ring slot a recently folded frame was written to, or -1. */
+  private recentSlot(frameId: number): number {
     const oldest = this.recentCount < RECENT_FRAMES ? 0 : this.recentAt;
     let lo = 0;
     let hi = this.recentCount - 1;
@@ -205,11 +276,11 @@ export class StreamDigest {
       const mid = (lo + hi) >>> 1;
       const slot = (oldest + mid) & (RECENT_FRAMES - 1);
       const id = this.recentIds[slot];
-      if (id === frameId) return this.recentKeys[slot];
+      if (id === frameId) return slot;
       if (id < frameId) lo = mid + 1;
       else hi = mid - 1;
     }
-    return undefined;
+    return -1;
   }
 
   /**
@@ -229,19 +300,27 @@ export class StreamDigest {
 
   /** An `InfoPatch.protocolLabel` for a frame already folded. */
   relabel(frameId: number, label: string): void {
-    const streamId = this.recentStream(frameId);
-    if (streamId === undefined) return;
-    const s = this.streams.get(streamId)?.summary;
-    if (s === undefined || label === 'TCP' || label === 'UDP') return;
+    if (label === 'TCP' || label === 'UDP') return;
+    const slot = this.recentSlot(frameId);
+    if (slot < 0) return;
+    const key = this.recentKeys[slot];
+    const kind = this.recentKinds[slot];
+    const s = kind === KIND_TCP ? this.streams.get(key)?.summary
+      : kind === KIND_UDP ? this.udps.get(key) : this.quics.get(key);
+    if (s === undefined) return;
     s.protocol = label;
     s.version = ++this.versionValue;
   }
 
   /** Every summary changed after `version`, for a poll. */
-  changedSince(version: number): StreamSummary[] {
-    const out: StreamSummary[] = [];
-    for (const { summary } of this.streams.values()) if (summary.version > version) out.push(summary);
-    return out;
+  changedSince(version: number): DigestChanges {
+    const tcp: StreamSummary[] = [];
+    for (const { summary } of this.streams.values()) if (summary.version > version) tcp.push(summary);
+    const udp: UdpSummary[] = [];
+    for (const s of this.udps.values()) if (s.version > version) udp.push(s);
+    const quic: QuicSummary[] = [];
+    for (const s of this.quics.values()) if (s.version > version) quic.push(s);
+    return { tcp, udp, quic };
   }
 
   /**
@@ -252,7 +331,11 @@ export class StreamDigest {
    * final review I3).
    */
   snapshot(): DigestSnapshot {
-    return { throughId: this.through, version: this.versionValue, entries: [...this.streams.values()] };
+    const entries: TaggedEntry[] = [];
+    for (const entry of this.streams.values()) entries.push({ kind: 'tcp', entry });
+    for (const summary of this.udps.values()) entries.push({ kind: 'udp', summary });
+    for (const summary of this.quics.values()) entries.push({ kind: 'quic', summary });
+    return { throughId: this.through, version: this.versionValue, captureEnd: this.captureEndValue, entries };
   }
 
   /**
@@ -265,7 +348,12 @@ export class StreamDigest {
     const d = new StreamDigest();
     d.through = data.throughId;
     d.versionValue = data.version;
-    for (const entry of data.entries) d.streams.set(entry.summary.streamId, entry);
+    d.captureEndValue = data.captureEnd;
+    for (const tagged of data.entries) {
+      if (tagged.kind === 'tcp') d.streams.set(tagged.entry.summary.streamId, tagged.entry);
+      else if (tagged.kind === 'udp') d.udps.set(tagged.summary.key, tagged.summary);
+      else d.quics.set(tagged.summary.key, tagged.summary);
+    }
     return d;
   }
 

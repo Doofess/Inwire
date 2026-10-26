@@ -63,7 +63,7 @@ async function digestOf(fixturePath: string): Promise<{ summaries: StreamSummary
   const digest = new StreamDigest();
   for (const a of arrived) digest.feed(a.packet);
   // Every summary: each has a version above zero once a row has been folded.
-  return { summaries: digest.changedSince(0), frames: arrived.length };
+  return { summaries: digest.changedSince(0).tcp, frames: arrived.length };
 }
 
 console.log('folding the fixtures through the digest...');
