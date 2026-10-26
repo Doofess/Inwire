@@ -198,6 +198,7 @@ class CaptureClient {
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
   private readonly pendingDigest = new Map<number, (answer: StreamDigestAnswer) => void>();
   private readonly pendingStreamOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
+  private readonly pendingFlowOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
   private readonly pendingMarkMatches = new Map<number, (matches: MatchSet) => void>();
   /** The scan in flight. At most one - the store enforces the same. */
   private readonly pendingScan = new Map<number, {
@@ -350,6 +351,13 @@ class CaptureClient {
         const settle = this.pendingStreamOrdinals.get(message.requestId);
         if (settle === undefined) break;
         this.pendingStreamOrdinals.delete(message.requestId);
+        settle({ ordinals: message.ordinals, nextChunk: message.nextChunk });
+        break;
+      }
+      case 'flowOrdinals': {
+        const settle = this.pendingFlowOrdinals.get(message.requestId);
+        if (settle === undefined) break;
+        this.pendingFlowOrdinals.delete(message.requestId);
         settle({ ordinals: message.ordinals, nextChunk: message.nextChunk });
         break;
       }
@@ -667,6 +675,24 @@ class CaptureClient {
   }
 
   /**
+   * The positions of UDP flow or QUIC connection `key`'s frames with ids in
+   * `[fromId, toId]`, from chunk `startChunk` onward: one bounded page of
+   * chunks, and where to ask from next, or null at the end. Unlike
+   * `streamOrdinals` the store decodes rows for it (the prefix holds only
+   * `tcp.stream`), but it too never waits for or cancels a running scan.
+   * Empty with no next page when there is no store.
+   */
+  flowOrdinals(
+    kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number,
+  ): Promise<StreamOrdinalsPage> {
+    return this.request(
+      this.pendingFlowOrdinals as never,
+      (requestId) => ({ type: 'flowOrdinals', requestId, kind, key, fromId, toId, startChunk }),
+      NO_ORDINALS,
+    );
+  }
+
+  /**
    * The stored frames the capture's marks name, as the same bitmap a scan
    * answers with - what Export's "marked packets only" reads, and the count it
    * shows. Marks the store does not hold (ring-expired, never stored) are not in
@@ -765,6 +791,8 @@ class CaptureClient {
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);
     this.pendingStreamOrdinals.clear();
+    for (const settle of this.pendingFlowOrdinals.values()) settle(NO_ORDINALS);
+    this.pendingFlowOrdinals.clear();
     for (const settle of this.pendingMarkMatches.values()) settle(new MatchSet(0).seal());
     this.pendingMarkMatches.clear();
     // `failed` rather than `cancelled`: the store went away, which is not the

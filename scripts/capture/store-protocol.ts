@@ -188,7 +188,11 @@ console.log('--- every request answers, especially when it fails ---\n');
   h.send({ type: 'locate', requestId: 4, id: 1 });
   h.send({ type: 'scan', requestId: 5, filter: 'tcp' });
   h.send({ type: 'rowsForOrdinals', requestId: 6, ordinals: [0, 5] });
+  h.send({ type: 'flowOrdinals', requestId: 7, kind: 'udp', key: 1, fromId: 1, toId: 2, startChunk: 0 });
   await h.store.drain();
+  check('a flowOrdinals answers empty, with no next page', h.of('flowOrdinals'), [
+    { type: 'flowOrdinals', requestId: 7, ordinals: [], nextChunk: null },
+  ]);
 
   check('a read with no capture open answers empty', h.of('bytes'), [
     { type: 'bytes', requestId: 1, frames: [] },
@@ -1010,6 +1014,18 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
   check('an open capture: one UDP flow, keyed by udp.stream', answer.udp.map((s) => [s.kind, s.key]), [['udp', 4]]);
   check('...one QUIC connection, keyed by its number', answer.quic.map((s) => [s.kind, s.key]), [['quic', 2]]);
   check('...and the capture\'s end is the newest row\'s time', answer.captureEnd, 4 / 1000);
+  // `flowOrdinals` answers over the same port, and through v8 as well. It reads
+  // sealed chunks, so the capture is finished first.
+  h.send({ type: 'finish' });
+  h.send({ type: 'flowOrdinals', requestId: 3, kind: 'quic', key: 2, fromId: 1, toId: 4, startChunk: 0 });
+  h.send({ type: 'flowOrdinals', requestId: 4, kind: 'udp', key: 4, fromId: 1, toId: 4, startChunk: 0 });
+  await h.store.drain();
+  const pages = deserialize(serialize(h.of('flowOrdinals'))) as Extract<FromCapture, { type: 'flowOrdinals' }>[];
+  check('flowOrdinals answers a QUIC connection and a UDP flow, whole, on the wire',
+    pages, [
+      { type: 'flowOrdinals', requestId: 3, ordinals: [2, 3], nextChunk: null },
+      { type: 'flowOrdinals', requestId: 4, ordinals: [0, 1], nextChunk: null },
+    ]);
   h.store.close();
 }
 

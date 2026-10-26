@@ -72,6 +72,10 @@ async function open(rows: Packet[], streamOrdinalChunks: number) {
       const a = await ask({ type: 'streamOrdinals', requestId: requestId++, streamId, fromId, toId, startChunk }, 'streamOrdinals');
       return { ordinals: a.ordinals, nextChunk: a.nextChunk };
     },
+    async flowOrdinals(kind, key, fromId, toId, startChunk) {
+      const a = await ask({ type: 'flowOrdinals', requestId: requestId++, kind, key, fromId, toId, startChunk }, 'flowOrdinals');
+      return { ordinals: a.ordinals, nextChunk: a.nextChunk };
+    },
     async readRowsFor(ordinals) {
       const a = await ask({ type: 'rowsForOrdinals', requestId: requestId++, ordinals: [...ordinals] }, 'rowsByOrdinal');
       return new Map(a.rows);
@@ -91,6 +95,7 @@ console.log('\n--- a 20k-frame stream decodes each chunk once ---\n');
   let rowPages = 0;
   const counting: StreamFrameSource = {
     streamOrdinals: (...args) => source.streamOrdinals(...args),
+    flowOrdinals: (...args) => source.flowOrdinals(...args),
     async readRowsFor(ordinals) {
       const before = counter.inflates;
       const rows = await source.readRowsFor(ordinals);

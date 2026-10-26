@@ -59,6 +59,28 @@ const REQUEST_RESPONSE_MAX = 2;
 
 const emptyTotals = (): DirectionTotals => ({ packets: 0, bytes: 0, first: null, last: null });
 
+/**
+ * Which UDP flow or QUIC connection a row belongs to, or null: the one routing
+ * rule. `StreamDigest.feed` folds by it, the store's `flowOrdinals` matches by
+ * it and Follow Stream's RAM tail filters by it, so the three cannot disagree.
+ *
+ * A UDP row needs both ports. A QUIC datagram with a `quic.connection.number`
+ * is that connection's; without one it is the UDP flow it rides in, and a row
+ * with no `udp.stream` either is no flow at all - folding it under 0 would
+ * merge every such datagram into one.
+ */
+export function flowKeyOf(row: Packet): { kind: 'udp' | 'quic'; key: number } | null {
+  const protocols = row.frameProtocols;
+  if (protocols === undefined || protocols.includes('tcp') || !protocols.includes('udp')) return null;
+  if (row.sourcePort === undefined || row.destPort === undefined) return null;
+  if (protocols.includes('quic')) {
+    const connection = fieldValue(row, 'quic.connection.number');
+    if (typeof connection === 'number') return { kind: 'quic', key: connection };
+  }
+  const stream = fieldValue(row, 'udp.stream');
+  return typeof stream === 'number' ? { kind: 'udp', key: stream } : null;
+}
+
 /** Ruling S2-2. */
 export function udpOutcome(s: UdpSummary): UdpOutcome {
   if (s.toServer.packets === 0 || s.toClient.packets === 0) return 'one-way';

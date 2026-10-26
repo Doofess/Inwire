@@ -15,6 +15,7 @@
  * reads as a fact.
  */
 import { clientEnd, isFromClient, streamPackets, targetForPacket } from '../../src/services/followStream';
+import { conversationFilter, type Conversation } from '../../src/services/statistics';
 import type { Packet, ProtocolType } from '../../src/types/packet';
 
 let failures = 0;
@@ -61,6 +62,39 @@ function packet(
   arp.sourcePort = undefined;
   arp.destPort = undefined;
   check('a frame on no transport has no stream', targetForPacket(arp), null);
+}
+
+// --- a QUIC connection is its own kind of stream -----------------------------------
+
+{
+  nextId = 1;
+  const quicFields = (n: number) => ({ 'udp.stream': 9, 'quic.connection.number': n });
+  const quic = (src: string, sport: number, dst: string, dport: number, n: number) =>
+    packet(src, sport, dst, dport, ['udp', 'quic'], { protocol: 'QUIC' as ProtocolType, fields: quicFields(n) });
+  const first = quic('10.0.0.1', 51000, '93.184.216.34', 443, 4);
+  check('follow: a QUIC frame names a QUIC target, numbered by its connection',
+    targetForPacket(first),
+    { kind: 'quic', addressA: '10.0.0.1', portA: 51000, addressB: '93.184.216.34', portB: 443, streamId: 4 });
+  check('...a QUIC frame with no connection number is a UDP target',
+    targetForPacket(packet('10.0.0.1', 51000, '93.184.216.34', 443, ['udp', 'quic'], { fields: { 'udp.stream': 9 } }))?.kind, 'udp');
+  check('...and a UDP frame is numbered by its udp.stream',
+    targetForPacket(packet('10.0.0.1', 51001, '1.1.1.1', 53, ['udp', 'dns'], { fields: { 'udp.stream': 12 } }))?.streamId, 12);
+
+  const target = targetForPacket(first)!;
+  const reply = quic('93.184.216.34', 443, '10.0.0.1', 51000, 4);
+  // The same connection after the client's address changed: a migration.
+  const migrated = quic('10.0.0.1', 51999, '93.184.216.34', 443, 4);
+  const migratedHost = quic('10.7.7.7', 51000, '93.184.216.34', 443, 4);
+  const otherConnection = quic('10.0.0.1', 51000, '93.184.216.34', 443, 5);
+  const plainUdp = packet('10.0.0.1', 51000, '93.184.216.34', 443, ['udp'], { fields: { 'udp.stream': 9 } });
+  const all = [first, reply, migrated, migratedHost, otherConnection, plainUdp];
+  check('follow: a QUIC target filters by connection number, so a migrated connection keeps its frames',
+    streamPackets(all, target).map((p) => p.id), [first.id, reply.id, migrated.id, migratedHost.id]);
+  check('...and another connection on the same five-tuple is not on it',
+    streamPackets(all, target).includes(otherConnection), false);
+  check('...nor is a datagram that is not QUIC', streamPackets(all, target).includes(plainUdp), false);
+  check('the QUIC display filter is the connection number',
+    conversationFilter({ streamId: 4 } as Conversation, 'quic'), 'quic.connection.number == 4');
 }
 
 // --- selection -------------------------------------------------------------------

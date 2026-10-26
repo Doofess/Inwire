@@ -38,6 +38,7 @@
  */
 import { ChunkDirectory, PrefixBlock, applyPrefixes, chunkStoresLinkType, decodeChunk, prefixBlockBytes } from './chunkCodec';
 import type { CaptureIndex } from './captureIndex';
+import { flowKeyOf } from '../conversation/flowSummary';
 import { readExact, type BlockFile } from './blockFile';
 import { dataFilesOf, type CaptureFiles, type DataFiles } from './captureWriter';
 import type { Packet } from '../../types/packet';
@@ -318,6 +319,34 @@ export class CaptureReader {
       const block = new PrefixBlock(this.inflate(packed), record.frameCount);
       for (let i = 0; i < record.frameCount; i++) {
         if (block.streamId(i) === streamId && block.hasLayer(i, 'tcp')) ordinals.push(record.firstOrdinal + i);
+      }
+    }
+    return { ordinals, nextChunk: chunk < this.index.chunkCount ? chunk : null };
+  }
+
+  /**
+   * Positions of the frames of UDP flow or QUIC connection `key`, by
+   * `flowKeyOf`: the one routing rule the digest folds by.
+   *
+   * The prefix holds only `tcp.stream`, so this decodes the ROWS of each chunk
+   * in `[fromId, toId]` and paged by chunk exactly as `streamOrdinals` is, but
+   * with a smaller `maxChunks`, because a chunk of rows costs far more than a
+   * chunk of prefix. It reads sealed chunks and keeps no state of its own.
+   */
+  flowOrdinals(
+    kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number, maxChunks: number,
+  ): { ordinals: number[]; nextChunk: number | null } {
+    const ordinals: number[] = [];
+    let chunk = Math.max(startChunk, this.index.floorChunk, this.index.chunkForId(fromId));
+    const stop = Math.min(this.index.chunkCount, chunk + maxChunks);
+    for (; chunk < stop; chunk++) {
+      const record = this.index.record(chunk);
+      if (record.firstId > toId) return { ordinals, nextChunk: null };
+      if (record.lastId < fromId) continue;
+      const packets = this.readRows(chunk);
+      for (let i = 0; i < packets.length; i++) {
+        const flow = flowKeyOf(packets[i]);
+        if (flow !== null && flow.kind === kind && flow.key === key) ordinals.push(record.firstOrdinal + i);
       }
     }
     return { ordinals, nextChunk: chunk < this.index.chunkCount ? chunk : null };

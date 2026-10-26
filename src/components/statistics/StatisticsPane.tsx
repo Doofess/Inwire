@@ -175,9 +175,9 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     ? digestScopeNote(kind, held, held.rebuilding, held.partial ?? false)
     : null;
   const transport = kind === 'tcp' || kind === 'udp' || kind === 'quic';
-  /** A TCP or UDP row is one stream; an address row is many, with no single one to open. */
+  /** A TCP, UDP or QUIC row is one stream; an address row is many, with no single one to open. */
   const streamOf = (r: Conversation): StreamTarget | undefined =>
-    (kind === 'tcp' || kind === 'udp') && r.portA !== undefined && r.portB !== undefined
+    (kind === 'tcp' || kind === 'udp' || kind === 'quic') && r.portA !== undefined && r.portB !== undefined
       ? { kind, addressA: r.addressA, portA: r.portA, addressB: r.addressB, portB: r.portB, streamId: r.streamId }
       : undefined;
   const endpointRows = useMemo(() => endpoints(packets, kind), [packets, kind]);

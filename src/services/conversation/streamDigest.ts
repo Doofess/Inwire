@@ -23,7 +23,7 @@ import {
   type TcpSegment, type TcpState, type TcpTransition,
 } from './tcpStates';
 import {
-  foldQuic, foldUdp, openQuic, openUdp, type QuicSummary, type UdpSummary,
+  flowKeyOf, foldQuic, foldUdp, openQuic, openUdp, type QuicSummary, type UdpSummary,
 } from './flowSummary';
 
 export interface DirectionTotals {
@@ -187,15 +187,10 @@ export class StreamDigest {
     const protocols = row.frameProtocols;
     if (protocols === undefined) return;
     if (protocols.includes('tcp')) { this.feedTcp(row); return; }
-    if (!protocols.includes('udp') || row.sourcePort === undefined || row.destPort === undefined) return;
-    if (protocols.includes('quic')) {
-      const connection = fieldValue(row, 'quic.connection.number');
-      if (typeof connection === 'number') { this.feedQuic(row, connection); return; }
-    }
-    // Without `udp.stream` a row is no flow: folding it under 0 would merge
-    // every such datagram into one.
-    const stream = fieldValue(row, 'udp.stream');
-    if (typeof stream === 'number') this.feedUdp(row, stream);
+    const flow = flowKeyOf(row);
+    if (flow === null) return;
+    if (flow.kind === 'quic') this.feedQuic(row, flow.key);
+    else this.feedUdp(row, flow.key);
   }
 
   private feedUdp(row: Packet, key: number): void {

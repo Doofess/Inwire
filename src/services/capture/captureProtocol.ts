@@ -204,6 +204,24 @@ export type ToCapture =
       startChunk: number;
     }
   /**
+   * The positions of the frames of UDP flow or QUIC connection `key` (kind
+   * `kind`: `udp.stream` or `quic.connection.number`, by `flowKeyOf`), ids
+   * `[fromId, toId]`, from chunk `startChunk` onward. Answered with
+   * `flowOrdinals`, a bounded page of chunks at a time, even when no capture is
+   * open, because the caller holds a promise. The prefix holds only
+   * `tcp.stream`, so this decodes the ROWS of those chunks; it is the dearer
+   * read and it never reads, waits for or cancels a running scan.
+   */
+  | {
+      type: 'flowOrdinals';
+      requestId: number;
+      kind: 'udp' | 'quic';
+      key: number;
+      fromId: number;
+      toId: number;
+      startChunk: number;
+    }
+  /**
    * Replaces the open capture's whole set of marked frame ids and persists it
    * (ADR 0067). One-way: the renderer holds the live set and the store keeps
    * the file, so there is nothing to answer. Ignored when `captureId` is not
@@ -360,6 +378,8 @@ export type FromCapture =
    * end. Empty and null when the read failed, which is reported separately.
    */
   | { type: 'streamOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null }
+  /** One page of a `flowOrdinals`, with `streamOrdinals`'s `nextChunk` meaning. */
+  | { type: 'flowOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null }
   /**
    * How far a scan has got. Sent every `SCAN_PROGRESS_FRAMES`, not per slice.
    *

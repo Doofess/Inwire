@@ -2,7 +2,7 @@
  * The ladder and the state map over real streams, photographed - for looking
  * at, not asserting (ADR 0055).
  *
- *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light]
+ *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light] [--kinds tcp,udp,quic]
  *
  * Imports the `inwire` fixture into the built app and opens a stream that
  * closed cleanly and one that was reset, then the `bulk` fixture for one
@@ -18,6 +18,12 @@
  * takes a few minutes. What it does print is whether the hover lit an edge
  * and whether the click brought the frame in, which is the pass the brief
  * asks for and the eye cannot do from a still.
+ *
+ * Stage 2's kinds ride the same import: a two-way UDP flow, an established
+ * QUIC connection and one joined mid-stream, each opened on the ladder (no
+ * state map; QUIC's phase line, then a click on its last phase), the packet
+ * list filtered to it, and Statistics' UDP and QUIC levels with a row's click.
+ * `--kinds` picks which of the three to shoot.
  */
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,6 +31,7 @@ import path from 'node:path';
 import type { Page } from 'playwright';
 import { arrive, FIXTURES } from '../pipeline/arrival';
 import { StreamDigest, type StreamSummary } from '../../src/services/conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
 import { startStubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
 
@@ -36,6 +43,7 @@ const arg = (name: string, fallback: string) => {
 };
 const WIDTHS = arg('widths', '1024,1600').split(',').map(Number);
 const THEMES = arg('themes', 'dark,light').split(',');
+const KINDS = arg('kinds', 'tcp,udp,quic').split(',');
 mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -57,19 +65,29 @@ interface Case {
   summary: StreamSummary;
 }
 
+/** A UDP flow or QUIC connection: opened the same way, with no state map to drive. */
+interface FlowCase {
+  name: string;
+  fixture: { path: string; frames: number };
+  summary: UdpSummary | QuicSummary;
+}
+
 /** The fixture's streams as the digest folds them, which is the fold the store runs. */
-async function digestOf(fixturePath: string): Promise<{ summaries: StreamSummary[]; frames: number }> {
+async function digestOf(fixturePath: string): Promise<{
+  summaries: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; frames: number;
+}> {
   const { arrived } = await arrive(fixturePath);
   const digest = new StreamDigest();
   for (const a of arrived) digest.feed(a.packet);
   // Every summary: each has a version above zero once a row has been folded.
-  return { summaries: digest.changedSince(0).tcp, frames: arrived.length };
+  const changes = digest.changedSince(0);
+  return { summaries: changes.tcp, udp: changes.udp, quic: changes.quic, frames: arrived.length };
 }
 
 console.log('folding the fixtures through the digest...');
 const inwireDigest = await digestOf(inwire.path);
 const bulkDigest = await digestOf(bulk.path);
-const total = (s: StreamSummary) => s.toServer.packets + s.toClient.packets;
+const total = (s: { toServer: { packets: number }; toClient: { packets: number } }) => s.toServer.packets + s.toClient.packets;
 // A stream with a few dozen frames reads on one ladder; thousands fold into bands.
 const pick = (list: StreamSummary[], want: (s: StreamSummary) => boolean) =>
   [...list].filter(want).sort((a, b) => Math.abs(total(a) - 40) - Math.abs(total(b) - 40))[0];
@@ -77,15 +95,30 @@ const cases: Case[] = [];
 const closed = pick(inwireDigest.summaries, (s) => s.outcome === 'closed cleanly' && !s.joinedMidStream && total(s) >= 8);
 const reset = pick(inwireDigest.summaries, (s) => s.outcome.startsWith('reset by') && !s.joinedMidStream && total(s) >= 6);
 const joined = pick(bulkDigest.summaries, (s) => s.joinedMidStream && total(s) >= 8);
-if (closed) cases.push({ name: 'closed-cleanly', fixture: { path: inwire.path, frames: inwireDigest.frames }, summary: closed });
-if (reset) cases.push({ name: 'reset', fixture: { path: inwire.path, frames: inwireDigest.frames }, summary: reset });
-if (joined) cases.push({ name: 'joined-mid-stream', fixture: { path: bulk.path, frames: bulkDigest.frames }, summary: joined });
+if (KINDS.includes('tcp') && closed) cases.push({ name: 'closed-cleanly', fixture: { path: inwire.path, frames: inwireDigest.frames }, summary: closed });
+if (KINDS.includes('tcp') && reset) cases.push({ name: 'reset', fixture: { path: inwire.path, frames: inwireDigest.frames }, summary: reset });
+if (KINDS.includes('tcp') && joined) cases.push({ name: 'joined-mid-stream', fixture: { path: bulk.path, frames: bulkDigest.frames }, summary: joined });
+
+const near40 = <T extends UdpSummary | QuicSummary>(list: T[], want: (s: T) => boolean): T | undefined =>
+  [...list].filter(want).sort((a, b) => Math.abs(total(a) - 40) - Math.abs(total(b) - 40))[0];
+const inwireFixture = { path: inwire.path, frames: inwireDigest.frames };
+const flowCases: FlowCase[] = [];
+const udpFlow = near40(inwireDigest.udp, (s) => s.outcome === 'two-way' && total(s) >= 8);
+const quicConn = near40(inwireDigest.quic, (s) => s.outcome === 'established' && !s.joinedMidStream && total(s) >= 8);
+const quicJoined = near40(inwireDigest.quic, (s) => s.joinedMidStream);
+if (KINDS.includes('udp') && udpFlow) flowCases.push({ name: 'udp-two-way', fixture: inwireFixture, summary: udpFlow });
+if (KINDS.includes('quic') && quicConn) flowCases.push({ name: 'quic-established', fixture: inwireFixture, summary: quicConn });
+if (KINDS.includes('quic') && quicJoined) flowCases.push({ name: 'quic-joined', fixture: inwireFixture, summary: quicJoined });
+for (const c of flowCases) {
+  console.log(`  ${c.name}: ${c.summary.kind} #${c.summary.key}, frames #${c.summary.firstId}..#${c.summary.lastId}, `
+    + `${total(c.summary)} frames, ${c.summary.outcome}${c.summary.kind === 'quic' ? `, ${c.summary.phases.length} phases` : ''}`);
+}
 for (const c of cases) {
   console.log(`  ${c.name}: stream #${c.summary.streamId}, frames #${c.summary.firstId}..#${c.summary.lastId}, `
     + `${total(c.summary)} frames, ${c.summary.outcome}${c.summary.joinedMidStream ? ' (joined mid-stream)' : ''}, `
     + `${c.summary.steps.length} steps`);
 }
-if (cases.length === 0) { console.log('no streams to photograph'); process.exit(1); }
+if (cases.length === 0 && flowCases.length === 0) { console.log('no streams to photograph'); process.exit(1); }
 
 const PIPE = String.raw`\\.\pipe\inwire-stream-shots-` + process.pid;
 const agent = await startStubAgent(PIPE, 5);
@@ -266,6 +299,94 @@ try {
             const opened = await p.locator('[data-state-map]').waitFor({ timeout: 10_000 }).then(() => true, () => false);
             console.log(`  row click opened the stream: ${opened}`);
             await shot('stats-5-row-opened');
+          }
+        }
+
+        for (const c of flowCases) {
+          if (imported !== c.fixture.path) {
+            console.log(`${tag}: importing ${path.basename(c.fixture.path)}`);
+            const ok = await importFixture(p, c.fixture);
+            console.log(`  imported: ${ok}`);
+            imported = c.fixture.path;
+          }
+          const { summary } = c;
+          const filter = p.getByPlaceholder('e.g. tcp.port == 443');
+          await filter.fill(`frame.number == ${summary.firstId}`);
+          await filter.press('Enter');
+          const row = p.locator(`#packet-row-${summary.firstId}`);
+          await row.waitFor({ timeout: 30_000 });
+          await row.click();
+          await sleep(300);
+          await p.getByRole('button', { name: 'Follow Stream' }).click();
+          await sleep(500);
+          await p.getByRole('radio', { name: 'Ladder' }).click();
+          await p.waitForFunction(() => !/reading \d/i.test(document.body.innerText), undefined, { timeout: 60_000 }).catch(() => {});
+          await sleep(800);
+          const title = await p.getByText(/^Follow (UDP|QUIC) (Stream|Connection)/).first().textContent({ timeout: 30_000 }).catch(() => null);
+          const mapShown = await p.locator('[data-state-map]').count();
+          console.log(`  title: ${title ?? 'NONE'}; state map present: ${mapShown}`);
+          await shot(`${c.name}-1-ladder`);
+
+          if (summary.kind === 'quic') {
+            const phases = p.locator('[aria-label="QUIC phases"]');
+            const shown = await phases.waitFor({ timeout: 30_000 }).then(() => true, () => false);
+            const buttons = await phases.getByRole('button').count();
+            console.log(`  phase line: ${shown}, ${buttons} buttons (summary has ${summary.phases.length})`);
+            const last = summary.phases[summary.phases.length - 1];
+            if (shown && last !== undefined) {
+              const before = await p.locator(`[data-frame="${last.frameId}"]`).count();
+              await phases.getByRole('button').last().click();
+              await sleep(800);
+              const after = await p.locator(`[data-frame="${last.frameId}"]`).count();
+              console.log(`  click ${last.phase}/${last.side} (frame #${last.frameId}): arrow on screen before ${before}, after ${after}`);
+              await shot(`${c.name}-2-picked`);
+              await phases.getByRole('button').first().hover();
+              await sleep(600);
+              await shot(`${c.name}-3-phase-hover`);
+              await phases.getByRole('button').first().focus();
+              await p.keyboard.press('Tab');
+              await sleep(300);
+              await shot(`${c.name}-4-phase-focus`);
+              await p.mouse.move(5, 5);
+            }
+          }
+
+          await p.keyboard.press('Escape');
+          await sleep(400);
+          await filter.fill(summary.kind === 'quic' ? `quic.connection.number == ${summary.key}` : `udp.stream == ${summary.key}`);
+          await filter.press('Enter');
+          await p.locator(`#packet-row-${summary.firstId}`).waitFor({ timeout: 30_000 }).catch(() => {});
+          await sleep(800);
+          await shot(`${c.name}-5-list`);
+        }
+
+        // Statistics' UDP and QUIC levels, read from the digest, and a row's
+        // click, which must land on Follow Stream for both.
+        if (flowCases.length > 0) {
+          const filter = p.getByPlaceholder('e.g. tcp.port == 443');
+          await filter.fill('');
+          await filter.press('Enter');
+          for (const level of ['UDP', 'QUIC'].filter((l) => KINDS.includes(l.toLowerCase()))) {
+            await p.getByRole('button', { name: /^Statistics/ }).click();
+            await p.getByRole('button', { name: 'Conversations' }).click();
+            await p.getByRole('button', { name: level, exact: true }).click();
+            const note = await p.getByText(/^(Whole capture|Rebuilding the stream digest)/).first().textContent({ timeout: 30_000 }).catch(() => null);
+            console.log(`  statistics ${level} scope note: ${note ?? 'NONE'}`);
+            await sleep(500);
+            await shot(`stats-${level.toLowerCase()}-1-level`);
+            await p.getByRole('button', { name: 'Outcome', exact: true }).click();
+            await sleep(300);
+            await shot(`stats-${level.toLowerCase()}-2-by-outcome`);
+            await p.locator('tbody tr').filter({ has: p.getByRole('button', { name: 'Filter to this conversation' }) })
+              .first().locator('td').first().click();
+            const opened = await p.getByText(/^Follow (UDP|QUIC) (Stream|Connection)/).first()
+              .waitFor({ timeout: 10_000 }).then(() => true, () => false);
+            await p.waitForFunction(() => !/reading \d/i.test(document.body.innerText), undefined, { timeout: 60_000 }).catch(() => {});
+            await sleep(800);
+            console.log(`  ${level} row click opened Follow Stream: ${opened}`);
+            await shot(`stats-${level.toLowerCase()}-3-row-opened`);
+            await p.keyboard.press('Escape');
+            await sleep(400);
           }
         }
       } finally {

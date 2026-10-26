@@ -232,6 +232,10 @@ console.log('\n--- the scope note for each level ---\n');
   }
   check('the pane follows streams from the row and the menu', follows.length >= 3, true);
   check('...and no follow then returns to Packets', follows.filter((f) => f.includes('onReturnToPackets')).length, 0);
+  // A QUIC row opens the stream like a TCP or UDP one: the interim filter-on-click is gone.
+  const streamOf = pane.slice(pane.indexOf('const streamOf'), pane.indexOf('const endpointRows'));
+  check('a QUIC row is a stream to follow, like TCP and UDP rows', /'quic'/.test(streamOf) && /streamId: r\.streamId/.test(streamOf), true);
+  check('...and it is built with the kind of its own level', /\{ kind,/.test(streamOf), true);
 
   // The level buttons are how the TCP level is reached. At a 1024 window with
   // the side bar open the tab row is wider than the pane, and the pane clips:
@@ -254,6 +258,9 @@ check('streamDigest falls back to nothing, at the version it was asked from',
   { captureId: null, version: 42, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
 check('streamOrdinals falls back to nothing, with no next page',
   await captureStore.streamOrdinals(3, 12, 40, 0),
+  { ordinals: [], nextChunk: null });
+check('flowOrdinals falls back to nothing, with no next page',
+  await captureStore.flowOrdinals('quic', 3, 12, 40, 0),
   { ordinals: [], nextChunk: null });
 
 console.log('\n--- the client, over a real port ---\n');
@@ -298,8 +305,20 @@ answer = (message) => {
   if (message.type === 'streamOrdinals') {
     return { type: 'streamOrdinals', requestId: message.requestId, ordinals: [100, 101, 104], nextChunk: 2 };
   }
+  if (message.type === 'flowOrdinals') {
+    return { type: 'flowOrdinals', requestId: message.requestId, ordinals: [7, 9], nextChunk: null };
+  }
   return null;
 };
+
+{
+  const page = await captureStore.flowOrdinals('udp', 4, 12, 40, 1);
+  const sent = received.find((m) => m.type === 'flowOrdinals');
+  check('flowOrdinals sends the protocol\'s request',
+    sent && { ...sent, requestId: undefined },
+    { type: 'flowOrdinals', requestId: undefined, kind: 'udp', key: 4, fromId: 12, toId: 40, startChunk: 1 });
+  check('...and settles on the page it was given', page, { ordinals: [7, 9], nextChunk: null });
+}
 
 {
   const digest = await captureStore.streamDigest(0);
@@ -337,12 +356,14 @@ console.log('\n--- the store goes away with requests in flight ---\n');
   answer = () => null;
   const digest = captureStore.streamDigest(7);
   const page = captureStore.streamOrdinals(3, 12, 40, 0);
-  // Both requests are on the wire before the store dies: the client awaits
+  const flowPage = captureStore.flowOrdinals('quic', 3, 12, 40, 0);
+  // All three requests are on the wire before the store dies: the client awaits
   // the port before registering, so give it a turn.
   await new Promise((resolve) => setTimeout(resolve, 20));
-  check('both requests reached the store', received.slice(-2).map((m) => m.type), ['streamDigest', 'streamOrdinals']);
+  check('all requests reached the store', received.slice(-3).map((m) => m.type), ['streamDigest', 'streamOrdinals', 'flowOrdinals']);
   check('the exit callback was registered', onExit !== null, true);
   onExit!('the capture store stopped');
+  check('a pending flowOrdinals settles with its fallback', await flowPage, { ordinals: [], nextChunk: null });
   check('a pending streamDigest settles with its fallback', await digest,
     { captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
   check('a pending streamOrdinals settles with its fallback', await page, { ordinals: [], nextChunk: null });

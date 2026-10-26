@@ -10,7 +10,7 @@
  * state both the way the dissector leaves them.
  */
 import { RECENT_FRAMES, StreamDigest } from '../../src/services/conversation/streamDigest';
-import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
+import { flowKeyOf, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -302,6 +302,31 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   check('...with the same throughId and version', [back.throughId, back.version], [d.throughId, d.version]);
   back.feed(udpRow({ fromClient: false, time: 50 }));
   check('a restored digest keeps folding all kinds', [udpOf(back).outcome, back.captureEnd], ['request/response', 50]);
+}
+
+// ---- flowKeyOf is the one routing rule.
+{
+  nextId = 1;
+  check('flowKeyOf is the digest\'s rule: a UDP row is its udp.stream',
+    flowKeyOf(udpRow({ fromClient: true }, 5)), { kind: 'udp', key: 5 });
+  check('...a QUIC row with a connection number is that connection',
+    flowKeyOf(quicRow({ fromClient: true, conn: 4 })), { kind: 'quic', key: 4 });
+  check('...a QUIC row without a connection number is UDP',
+    flowKeyOf(quicRow({ fromClient: true, conn: null })), { kind: 'udp', key: 9 });
+  check('...a row without udp.stream is nothing', flowKeyOf(udpRow({ fromClient: true }, null)), null);
+  check('...a QUIC row with neither number is nothing', flowKeyOf({ ...quicRow({ fromClient: true, conn: null }), fields: {} } as Packet), null);
+  check('...a TCP row is nothing', flowKeyOf({ ...udpRow({ fromClient: true }), frameProtocols: ['eth', 'ip', 'tcp'] } as Packet), null);
+  check('...a UDP row without ports is nothing', flowKeyOf({ ...udpRow({ fromClient: true }), sourcePort: undefined } as Packet), null);
+  // The digest and the function agree on every row above.
+  const rows = [
+    udpRow({ fromClient: true }, 5), quicRow({ fromClient: true, conn: 4 }), quicRow({ fromClient: true, conn: null }),
+    udpRow({ fromClient: true }, null),
+  ];
+  const d = fresh();
+  for (const r of rows) d.feed(r);
+  const folded = [...d.changedSince(0).udp.map((s) => `udp:${s.key}`), ...d.changedSince(0).quic.map((s) => `quic:${s.key}`)].sort();
+  const keyed = rows.flatMap((r) => { const k = flowKeyOf(r); return k === null ? [] : [`${k.kind}:${k.key}`]; });
+  check('the digest folds exactly the rows flowKeyOf keys', folded, [...new Set(keyed)].sort());
 }
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`);

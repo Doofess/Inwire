@@ -209,6 +209,12 @@ export interface CaptureHostOptions {
    * test can see the paging on a capture of a few chunks.
    */
   streamOrdinalChunks?: number;
+  /**
+   * Chunks one `flowOrdinals` answer may cover. Default 4: it decodes each
+   * chunk's rows, where `streamOrdinals` reads a prefix, so a page is dearer
+   * and the store's queue must not be held for the 32 a prefix read takes.
+   */
+  flowOrdinalChunks?: number;
   /** Rows held back while a rebuild runs. Default `DIGEST_DEFERRED_MAX`. Settable so a test can overflow it. */
   digestDeferredMax?: number;
   /**
@@ -243,6 +249,7 @@ export class CaptureHost {
   private readonly deflate: ((bytes: Uint8Array) => Uint8Array) | undefined;
   private readonly inflate: (bytes: Uint8Array) => Uint8Array;
   private readonly streamOrdinalChunks: number;
+  private readonly flowOrdinalChunks: number;
   private readonly writerOptions: Partial<CaptureWriterOptions>;
 
   constructor(
@@ -254,6 +261,7 @@ export class CaptureHost {
     this.deflate = options.deflate;
     this.inflate = options.inflate ?? inflateSync;
     this.streamOrdinalChunks = options.streamOrdinalChunks ?? 32;
+    this.flowOrdinalChunks = options.flowOrdinalChunks ?? 4;
     this.digestDeferredMax = options.digestDeferredMax ?? DIGEST_DEFERRED_MAX;
     this.writerOptions = options.writer ?? {};
   }
@@ -420,6 +428,7 @@ export class CaptureHost {
         case 'stats': return this.reportStats();
         case 'streamDigest': return this.onStreamDigest(message);
         case 'streamOrdinals': return this.onStreamOrdinals(message);
+        case 'flowOrdinals': return this.onFlowOrdinals(message);
         case 'marks': return this.onMarks(message);
         case 'markMatches': return this.onMarkMatches(message);
       }
@@ -766,6 +775,26 @@ export class CaptureHost {
       page = { ordinals: [], nextChunk: null };
     }
     this.post({ type: 'streamOrdinals', requestId: message.requestId, ...page });
+  }
+
+  /**
+   * A page of one UDP flow's or QUIC connection's positions, decoded from the
+   * rows of its chunks. Answered like `onStreamOrdinals`, and like it it never
+   * touches a scan: it reads the sealed chunks and nothing of the scan's state.
+   */
+  private onFlowOrdinals(message: Extract<ToCapture, { type: 'flowOrdinals' }>): void {
+    let page: { ordinals: number[]; nextChunk: number | null } = { ordinals: [], nextChunk: null };
+    try {
+      if (this.open !== null) {
+        page = this.open.reader.flowOrdinals(
+          message.kind, message.key, message.fromId, message.toId, message.startChunk, this.flowOrdinalChunks,
+        );
+      }
+    } catch (error) {
+      this.fail(describe(error), false);
+      page = { ordinals: [], nextChunk: null };
+    }
+    this.post({ type: 'flowOrdinals', requestId: message.requestId, ...page });
   }
 
   /**
