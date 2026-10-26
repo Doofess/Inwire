@@ -1,8 +1,6 @@
 /**
  * What the pipeline Worker and its TCP shards say to each other (ADR 0053
- * phase 3). Every message is a structured clone; a frame's bytes are
- * transferred both ways - into the shard to be dissected, and back with its
- * row - so the only copy of a frame is the one the store needs.
+ * phase 3). Every message is a structured clone.
  *
  * **A batch of frames is packed, not a list of objects.** It was a list: each
  * frame an object holding its numbers, two conversation answers and their
@@ -10,7 +8,14 @@
  * deserializing them, a fifth of its time, before dissecting anything
  * (`scripts/perf/parallel-threads.ts`). Now every number a frame carries is a
  * slot in one `Float64Array`, every string is an index into one list that
- * holds each string once per batch, and the bytes ride beside them.
+ * holds each string once per batch, and the frames' bytes are one slab beside
+ * them: copied in as each frame is written, and cut by `ends`. A batch is then
+ * three transferred buffers however many frames it holds, where a buffer a
+ * frame cost a transfer apiece (#17).
+ *
+ * **The bytes go one way.** A shard keeps no frame for the merge: the
+ * coordinator still holds each frame's own bytes, because the shard was given
+ * a copy, and the row comes back as a pack without them (`ShardResult`).
  */
 import type { ConversationFacts } from '../dissect/sequencer';
 import type { BarrierHint, BarrierReport } from '../dissect/shardNumbering';
@@ -80,8 +85,13 @@ const SLOTS = 25;
 export interface OpBatch {
   nums: Float64Array;
   strings: string[];
-  /** One per frame op, in order. */
-  bytes: Uint8Array[];
+  /**
+   * Every frame's bytes, end to end in the order the frames were written. A
+   * buffer of its own, exactly sized: it is transferred whole.
+   */
+  bytes: Uint8Array;
+  /** One per frame op, in order: where that frame's bytes end in `bytes`. A frame begins where the one before ended. */
+  ends: Uint32Array;
 }
 
 /** Builds one batch, op by op, in frame order. */
@@ -90,7 +100,10 @@ export class OpWriter {
   private count = 0;
   private readonly strings: string[] = [];
   private readonly stringAt = new Map<string, number>();
-  private readonly bytes: Uint8Array[] = [];
+  /** The frames' bytes so far; grows by doubling. */
+  private slab = new Uint8Array(16384);
+  private used = 0;
+  private ends = new Uint32Array(64);
   /** Frame ops written - what a batch is sized by. */
   frames = 0;
 
@@ -133,9 +146,26 @@ export class OpWriter {
     nums[at + ETH_B] = this.intern(eth.b);
     nums[at + IP_A] = this.intern(ip.a);
     nums[at + IP_B] = this.intern(ip.b);
-    this.bytes.push(frame.bytes);
-    this.frames += 1;
+    this.append(frame.bytes);
     return at;
+  }
+
+  /** Copies one frame's bytes onto the slab: the caller keeps its own view, whole. */
+  private append(bytes: Uint8Array): void {
+    const end = this.used + bytes.length;
+    if (end > this.slab.length) {
+      const grown = new Uint8Array(Math.max(end, this.slab.length * 2));
+      grown.set(this.slab.subarray(0, this.used));
+      this.slab = grown;
+    }
+    if (this.frames === this.ends.length) {
+      const grown = new Uint32Array(this.ends.length * 2);
+      grown.set(this.ends);
+      this.ends = grown;
+    }
+    this.slab.set(bytes, this.used);
+    this.used = end;
+    this.ends[this.frames++] = end;
   }
 
   /** A plain TCP segment, numbered whole. */
@@ -163,9 +193,19 @@ export class OpWriter {
     return this.count === 0;
   }
 
-  /** The batch, ready to send: its numbers and bytes are what a transfer list moves. */
+  /**
+   * The batch, ready to send: its numbers, bytes and ends are what a transfer
+   * list moves. Each is copied out to a buffer of its own, exactly sized - the
+   * growing ones are larger than what they hold, and a transfer moves a buffer
+   * whole.
+   */
   seal(): OpBatch {
-    return { nums: this.nums.slice(0, this.count * SLOTS), strings: this.strings, bytes: this.bytes };
+    return {
+      nums: this.nums.slice(0, this.count * SLOTS),
+      strings: this.strings,
+      bytes: this.slab.slice(0, this.used),
+      ends: this.ends.slice(0, this.frames),
+    };
   }
 }
 
@@ -194,7 +234,7 @@ export interface ReadOp {
 
 /** Every op of a batch, in order. */
 export function* readOps(batch: OpBatch): Generator<ReadOp> {
-  const { nums, strings, bytes } = batch;
+  const { nums, strings, bytes, ends } = batch;
   let frame = 0;
   for (let at = 0; at < nums.length; at += SLOTS) {
     const kind = nums[at + KIND];
@@ -205,8 +245,12 @@ export function* readOps(batch: OpBatch): Generator<ReadOp> {
     const nanos = nums[at + NANOS];
     const iface = nums[at + IFACE];
     const hole = nums[at + HOLE];
+    // A view into the slab, not a copy: it is the frame's own bytes to the
+    // dissector, and the slab lives as long as the batch does.
+    const from = frame === 0 ? 0 : ends[frame - 1];
+    const to = ends[frame++];
     const wire: WireFrame = {
-      id: nums[at + ID], bytes: bytes[frame++], tsUs: nums[at + TS_US], relativeTime: nums[at + RELATIVE],
+      id: nums[at + ID], bytes: bytes.subarray(from, to), tsUs: nums[at + TS_US], relativeTime: nums[at + RELATIVE],
       timeDelta: nums[at + DELTA], origLen: nums[at + ORIG_LEN], linktype: nums[at + LINKTYPE],
       ...(iface >= 0 ? { iface } : {}),
       ...(Number.isNaN(nanos) && hole < 0 ? {} : {
@@ -279,8 +323,6 @@ export interface ShardResult {
   id: number;
   /** This frame's index in the batch's pack. Absent when it failed to dissect. */
   row?: number;
-  /** The frame's bytes, which travel beside the pack rather than in its row. */
-  bytes?: Uint8Array;
   /**
    * What the merge needs from this row without decoding it: the fingerprint's
    * and facts' inputs, a `tls.stream` still a placeholder (`rowSteps.ts`).
