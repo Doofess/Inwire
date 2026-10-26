@@ -59,6 +59,7 @@ import { readExact, type BlockFile } from './blockFile';
 import { StreamDigest, type StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import type { TlsSummary } from '../conversation/tlsSummary';
+import type { DhcpSummary } from '../conversation/dhcpSummary';
 import { decodeDigest, encodeDigest } from '../conversation/digestCodec';
 import { decodeMarks, encodeMarks } from '../marks';
 import { PackReader } from '../pipeline/rowPack';
@@ -731,6 +732,7 @@ export class CaptureHost {
     let udp: UdpSummary[] = [];
     let quic: QuicSummary[] = [];
     let tls: TlsSummary[] = [];
+    let dhcp: DhcpSummary[] = [];
     let captureEnd = 0;
     let version = 0;
     let rebuilding: { done: number; total: number } | null = null;
@@ -741,6 +743,7 @@ export class CaptureHost {
         udp = changed.udp;
         quic = changed.quic;
         tls = changed.tls;
+        dhcp = changed.dhcp;
         captureEnd = open.digest.captureEnd;
         version = open.digest.version;
         const rebuild = open.rebuild;
@@ -752,11 +755,11 @@ export class CaptureHost {
       }
     } catch (error) {
       this.fail(describe(error), false);
-      summaries = []; udp = []; quic = []; tls = [];
+      summaries = []; udp = []; quic = []; tls = []; dhcp = [];
     }
     this.post({
       type: 'streamDigest', requestId: message.requestId, captureId: open?.id ?? null,
-      version, summaries, udp, quic, tls, captureEnd, rebuilding, partial: open?.digestPartial ?? false,
+      version, summaries, udp, quic, tls, dhcp, captureEnd, rebuilding, partial: open?.digestPartial ?? false,
     });
   }
 

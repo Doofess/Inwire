@@ -7,7 +7,7 @@
  *
  * Format 4 is a header, four numbers, and a run of independently deflated
  * chunks of at most `CHUNK_ENTRIES` entries each; each entry is tagged with its
- * kind (TCP stream, UDP flow, QUIC connection, TLS summary). Format 3 had no TLS
+ * kind (TCP stream, UDP flow, QUIC connection, TLS summary, DHCP exchange). Format 3 had no TLS
  * kind and reads as null, or a reopened capture would claim no TLS. Format 2 had no captureEnd and
  * untagged TCP entries, and reads as null like any other format. Format 1 was one JSON text
  * of every entry, which V8 refuses past about 512 MB ("Invalid string length"):

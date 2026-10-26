@@ -206,6 +206,28 @@ function quicUdpRow(id: number, fromClient: boolean, over: Record<string, number
   mustBeNull('a format 3 snapshot is refused', old);
 }
 
+// Stage 3: a DHCP exchange rides beside the others, its xid above 2^31 intact.
+{
+  nextId = 1;
+  const d = new StreamDigest();
+  const dhcp = (type: number, fromClient: boolean, extra: Record<string, number | string> = {}): Packet => ({
+    ...row(fromClient, 'A'),
+    protocol: 'UDP', protocolLabel: 'DHCP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'dhcp'], streamId: undefined,
+    sourcePort: fromClient ? 68 : 67, destPort: fromClient ? 67 : 68,
+    fields: { 'udp.stream': 2, 'dhcp.id': 0xdeadbeef, 'dhcp.option.dhcp': type, 'dhcp.hw.mac_addr': '00:11:22:33:44:55', ...extra },
+  });
+  for (const r of [
+    dhcp(1, true, { 'dhcp.option.hostname': 'laptop' }), dhcp(2, false, { 'dhcp.ip.your': '192.168.1.50' }),
+    dhcp(3, true), dhcp(5, false, { 'dhcp.ip.your': '192.168.1.50', 'dhcp.option.dhcp_server_id': '192.168.1.1' }),
+  ]) d.feed(r);
+  const withDhcp = d.snapshot();
+  check('a snapshot holds a UDP entry and a DHCP entry', withDhcp.entries.map((e) => e.kind).sort(), ['dhcp', 'udp']);
+  const back = decodeDigest(encodeDigest(withDhcp, deflate), inflate);
+  check('round-trips DHCP entries', back, withDhcp);
+  const restored = back && StreamDigest.restore(back);
+  check('...and restores the exchange, outcome and xid', [restored?.getDhcp(0xdeadbeef)?.outcome, restored?.getDhcp(0xdeadbeef)?.server.address], ['acked', '192.168.1.1']);
+}
+
 mustBeNull('a body one byte short',encoded.slice(0, encoded.length - 1));
 
 const flipped = encoded.slice();

@@ -145,7 +145,7 @@ console.log('--- 1. every request answers ---\n');
   h.send({ type: 'streamOrdinals', requestId: 2, streamId: 7, fromId: 1, toId: 100, startChunk: 0 });
   await h.store.drain();
   check('streamDigest with nothing open answers empty', h.of('streamDigest'), [
-    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false },
+    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false },
   ]);
   check('streamOrdinals with nothing open answers empty', h.of('streamOrdinals'), [
     { type: 'streamOrdinals', requestId: 2, ordinals: [], nextChunk: null },
@@ -551,6 +551,46 @@ console.log('\n--- 14b. TLS reaches the answer, and survives a reopen ---\n');
   check('no handle leaked', tlsVolume.outstanding, 0);
 }
 
+console.log('\n--- 14c. DHCP reaches the answer, and survives a reopen ---\n');
+
+{
+  const DHCP_CAPTURE = 'cap-20261027-130000-dig12';
+  const dhcpVolume = new MemoryVolume();
+  const dhcpRow = (type: number, time: number): Packet => {
+    const id = nextId++;
+    const fromClient = type === 1 || type === 3;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time,
+      source: fromClient ? '0.0.0.0' : '192.168.1.1', destination: fromClient ? '255.255.255.255' : '192.168.1.50',
+      sourcePort: fromClient ? 68 : 67, destPort: fromClient ? 67 : 68,
+      protocol: 'UDP', protocolLabel: 'DHCP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'dhcp'],
+      fields: {
+        'udp.stream': 4, 'dhcp.id': 0xdeadbeef, 'dhcp.option.dhcp': type, 'dhcp.hw.mac_addr': '00:11:22:33:44:55',
+        ...(fromClient ? {} : { 'dhcp.ip.your': '192.168.1.50' }),
+      },
+      length: 342, info: '', status: 'ok', interfaceName: 'eth0', layers: [], rawBytes: new Uint8Array([id & 0xff, 0, 0, 0]),
+    } as Packet;
+  };
+  nextId = 1;
+  const rows = [dhcpRow(1, 1), dhcpRow(2, 2), dhcpRow(3, 3), dhcpRow(5, 4)];
+  const h = host({}, dhcpVolume);
+  h.send({ type: 'open', captureId: DHCP_CAPTURE });
+  h.send({ type: 'append', packets: crossed(rows) });
+  const live = await ask(h, 0, 2100);
+  const seen = (a: typeof live) => a?.dhcp.map((s) => [s.key, s.outcome, s.phases.map((p) => `${p.side}:${p.message}`)]);
+  const expected = [[0xdeadbeef, 'acked', ['client:Discover', 'server:Offer', 'client:Request', 'server:ACK']]];
+  check('an import\'s DHCP rows reach the answer', seen(live), expected);
+  const quiet = await ask(h, live?.version ?? 0, 2101);
+  check('...and a poll with nothing new carries no DHCP', quiet?.dhcp, []);
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  h.send({ type: 'open', captureId: DHCP_CAPTURE });
+  const restored = await ask(h, 0, 2102);
+  check('a reopen restores DHCP', [restored?.rebuilding, seen(restored)], [null, expected]);
+  h.store.close();
+  check('no handle leaked', dhcpVolume.outstanding, 0);
+}
+
 console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from the rows ---\n');
 
 {
@@ -560,6 +600,8 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
   // come from how the rows were made and not from the code under test.
   const FLOWS_ID = 'cap-20261026-120000-flo1';
   const total = 3 * CHUNK_FRAMES + 50;
+  /** Above 2^31: the key must be the unsigned value on the wire and in the rows. */
+  const DHCP_XID = 0xdeadbeef;
   nextId = 1;
   const plan: string[] = [];
   const flowRows: Packet[] = [];
@@ -596,6 +638,13 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
       flowRows.push(base(fromClient, {
         protocol: 'QUIC', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'quic'], fields: { 'udp.stream': 5 },
       }));
+    } else if (i % 17 === 0) {
+      // A DHCP exchange across the chunks, in its own UDP flow (stream 12).
+      plan.push('dhcp:xid');
+      flowRows.push(base(fromClient, {
+        protocol: 'UDP', protocolLabel: 'DHCP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'dhcp'],
+        fields: { 'udp.stream': 12, 'dhcp.id': DHCP_XID, 'dhcp.option.dhcp': fromClient ? 3 : 5 },
+      }));
     } else {
       plan.push('tcp');
       flowRows.push(row(fromClient, 'A', { seq: i, ack: 1, len: 10, streamId: 5 }));
@@ -606,7 +655,7 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
   const FIRST = flowRows[0].id;
 
   /** Walks `flowOrdinals` page by page from chunk 0, as `loadStreamFrames` does. */
-  async function walk(h: Host, kind: 'udp' | 'quic', key: number, fromId: number, toId: number, firstRequestId: number) {
+  async function walk(h: Host, kind: 'udp' | 'quic' | 'dhcp', key: number, fromId: number, toId: number, firstRequestId: number) {
     const got: number[] = [];
     let startChunk: number | null = 0;
     let pages = 0;
@@ -652,6 +701,9 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
   check('...and a UDP key of the same number is not a QUIC one', (await walk(h, 'quic', 5, FIRST, lastId, 300)).got, []);
   check('...and a UDP flow carries its QUIC rows too (udp.stream 9 holds the connection\'s datagrams)',
     (await walk(h, 'udp', 9, FIRST, lastId, 400)).got, ordinalsOf('quic:2'));
+  check('flowOrdinals returns a DHCP exchange\'s ordinals', (await walk(h, 'dhcp', DHCP_XID, FIRST, lastId, 800)).got, ordinalsOf('dhcp:xid'));
+  check('...and another xid, or the same number as a UDP key, is not it',
+    [(await walk(h, 'dhcp', 12, FIRST, lastId, 900)).got, (await walk(h, 'udp', DHCP_XID, FIRST, lastId, 1000)).got], [[], []]);
   check('flowOrdinals reports how far it has searched: a sparse flow over four chunks',
     await (async () => {
       const sparseIds = flowRows.filter((p) => p.fields?.['udp.stream'] === 8).map((p) => p.id);

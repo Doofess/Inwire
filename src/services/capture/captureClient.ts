@@ -38,6 +38,7 @@ import { plainForStore } from './storePacket';
 import type { StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import type { TlsSummary } from '../conversation/tlsSummary';
+import type { DhcpSummary } from '../conversation/dhcpSummary';
 
 /** What a `streamDigest` poll gets back (ADR 0055). */
 export interface StreamDigestAnswer {
@@ -48,6 +49,7 @@ export interface StreamDigestAnswer {
   udp: UdpSummary[];
   quic: QuicSummary[];
   tls: TlsSummary[];
+  dhcp: DhcpSummary[];
   /** The digest's latest frame time, which "went quiet" is measured against. */
   captureEnd: number;
   rebuilding: { done: number; total: number } | null;
@@ -350,6 +352,7 @@ class CaptureClient {
           udp: message.udp,
           quic: message.quic,
           tls: message.tls,
+          dhcp: message.dhcp,
           captureEnd: message.captureEnd,
           rebuilding: message.rebuilding,
           partial: message.partial,
@@ -662,7 +665,7 @@ class CaptureClient {
     return this.request(
       this.pendingDigest as never,
       (requestId) => ({ type: 'streamDigest', requestId, since }),
-      { captureId: null, version: since, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false } as StreamDigestAnswer,
+      { captureId: null, version: since, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false } as StreamDigestAnswer,
     );
   }
 
@@ -692,7 +695,7 @@ class CaptureClient {
    * Empty with no next page when there is no store.
    */
   flowOrdinals(
-    kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number,
+    kind: 'udp' | 'quic' | 'dhcp', key: number, fromId: number, toId: number, startChunk: number,
   ): Promise<FlowOrdinalsPage> {
     return this.request(
       this.pendingFlowOrdinals as never,
@@ -795,7 +798,7 @@ class CaptureClient {
     // poller reads the null id as "start again" and asks the next capture
     // from zero.
     for (const settle of this.pendingDigest.values()) {
-      settle({ captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false });
+      settle({ captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false });
     }
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);

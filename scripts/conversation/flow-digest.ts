@@ -12,6 +12,7 @@
 import { RECENT_FRAMES, StreamDigest } from '../../src/services/conversation/streamDigest';
 import { flowKeyOf, inFlow, quicKeyOf, udpKeyOf, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
 import { tlsNote, type TlsSummary } from '../../src/services/conversation/tlsSummary';
+import { dhcpKeyOf } from '../../src/services/conversation/dhcpSummary';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -275,7 +276,7 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   const c = d.changedSince(v);
   check('one shared version covers every kind', [c.tcp.length, c.udp.length, c.quic.length, d.version > v], [0, 1, 1, true]);
   check('changedSince(0) returns all three (the QUIC datagram is also a UDP flow)', [d.changedSince(0).udp.length, d.changedSince(0).quic.length], [2, 1]);
-  check('changedSince at the current version is empty', Object.values(d.changedSince(d.version)).map((a) => a.length), [0, 0, 0, 0]);
+  check('changedSince at the current version is empty', Object.values(d.changedSince(d.version)).map((a) => a.length), [0, 0, 0, 0, 0]);
 }
 {
   nextId = 1;
@@ -531,6 +532,147 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
     d.feed(dnsRow(true, 7, undefined, 1, 5353));
     d.feed(dnsRow(false, 7, 0, 1.1, 5353));
     check('dns: mDNS keeps the UDP outcome', [udpOf(d).dns, udpOf(d).outcome], [undefined, 'request/response']);
+  }
+}
+
+// ---- DHCP exchanges by transaction id (stage 3).
+{
+  const XID = 0x3903f326;
+  const MAC = '00:11:22:33:44:55';
+  const GATEWAY = '192.168.1.1';
+  /**
+   * A DHCPv4 row as the dissector writes it. `type` is option 53; the addresses
+   * and ports are given, because a side is never read from them.
+   */
+  const dhcpRow = (type: number, from: [string, number], to: [string, number], fields: Record<string, number | string> = {}, time?: number, xid = XID): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time ?? id / 1000,
+      source: from[0], destination: to[0], sourcePort: from[1], destPort: to[1],
+      protocol: 'UDP', protocolLabel: 'DHCP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'dhcp'],
+      fields: { 'udp.stream': 3, 'dhcp.id': xid, 'dhcp.option.dhcp': type, 'dhcp.hw.mac_addr': MAC, ...fields },
+      length: 342, info: '', status: 'ok',
+    } as unknown as Packet;
+  };
+  const toServer = (type: number, fields: Record<string, number | string> = {}, time?: number): Packet =>
+    dhcpRow(type, ['0.0.0.0', 68], ['255.255.255.255', 67], fields, time);
+  const toClient = (type: number, fields: Record<string, number | string> = {}, time?: number): Packet =>
+    dhcpRow(type, [GATEWAY, 67], ['192.168.1.50', 68], { 'dhcp.ip.your': '192.168.1.50', ...fields }, time);
+  const dhcpOf = (d: StreamDigest, key = XID) => d.getDhcp(key);
+  const steps = (d: StreamDigest) => dhcpOf(d)?.phases.map((p) => `${p.side}:${p.message}`);
+
+  {
+    const d = fresh();
+    d.feed(toServer(1, { 'dhcp.option.hostname': 'laptop' }, 1));
+    d.feed(toClient(2, {}, 2));
+    d.feed(toServer(3, { 'dhcp.option.dhcp_server_id': GATEWAY }, 3));
+    d.feed(toClient(5, {}, 4));
+    const s = dhcpOf(d)!;
+    check('dhcp: DORA is acked', [s.outcome, steps(d)], ['acked', ['client:Discover', 'server:Offer', 'client:Request', 'server:ACK']]);
+    check('...keyed by the transaction id, with a client by MAC and a server on 67',
+      [s.kind, s.key, s.client, s.server, s.hostname, s.offered],
+      ['dhcp', XID, { address: MAC, port: 68 }, { address: GATEWAY, port: 67 }, 'laptop', '192.168.1.50']);
+    check('...and its totals go by message type', [s.toServer.packets, s.toClient.packets, s.firstId, s.lastId, s.start, s.end], [2, 2, 1, 4, 1, 4]);
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    d.feed(toClient(2));
+    check('dhcp: an offer and no request is offer not taken', dhcpOf(d)?.outcome, 'offer not taken');
+    d.feed(toServer(3));
+    check('...and a request after it with no answer is no reply', dhcpOf(d)?.outcome, 'no reply');
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1, {}, 1));
+    d.feed(toServer(1, {}, 4));
+    check('dhcp: discovers alone are no offer', [dhcpOf(d)?.outcome, steps(d), dhcpOf(d)?.toServer.packets], ['no offer', ['client:Discover'], 2]);
+  }
+  {
+    const d = fresh();
+    d.feed(dhcpRow(3, ['192.168.1.5', 68], [GATEWAY, 67], { 'dhcp.option.dhcp_server_id': GATEWAY }));
+    check('dhcp: an unanswered renewal is no reply', [dhcpOf(d)?.outcome, dhcpOf(d)?.server.address], ['no reply', GATEWAY]);
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(3));
+    d.feed(toClient(6));
+    check('dhcp: a NAK after a request is NAK', dhcpOf(d)?.outcome, 'NAK');
+    d.feed(toServer(1));
+    d.feed(toServer(3));
+    d.feed(toClient(5));
+    check('...and a later ACK decides instead', dhcpOf(d)?.outcome, 'acked');
+    d.feed(toServer(4));
+    check('...a Decline after the ACK is declined', dhcpOf(d)?.outcome, 'declined');
+    const rel = fresh();
+    rel.feed(toServer(3));
+    rel.feed(toClient(5));
+    rel.feed(toServer(7));
+    check('...a Release is released', dhcpOf(rel)?.outcome, 'released');
+    const decl = fresh();
+    decl.feed(toServer(4));
+    check('...a Decline with no ACK before it is not declined', dhcpOf(decl)?.outcome, 'no offer');
+  }
+  {
+    // A relay forwards every message 67 to 67; the side is the message's, not the port's.
+    const d = fresh();
+    d.feed(dhcpRow(1, ['10.9.0.1', 67], ['10.0.0.1', 67], {}, 1));
+    d.feed(dhcpRow(2, ['10.0.0.1', 67], ['10.9.0.1', 67], { 'dhcp.ip.your': '10.9.0.50' }, 2));
+    d.feed(dhcpRow(3, ['10.9.0.1', 67], ['10.0.0.1', 67], {}, 3));
+    d.feed(dhcpRow(5, ['10.0.0.1', 67], ['10.9.0.1', 67], { 'dhcp.ip.your': '10.9.0.50' }, 4));
+    const s = dhcpOf(d)!;
+    check('dhcp: a relayed exchange takes sides by message type',
+      [steps(d), s.toServer.packets, s.toClient.packets, s.outcome, s.server.address],
+      [['client:Discover', 'server:Offer', 'client:Request', 'server:ACK'], 2, 2, 'acked', '10.0.0.1']);
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    d.feed(dhcpRow(2, ['192.168.1.9', 67], ['192.168.1.50', 68], { 'dhcp.option.dhcp_server_id': GATEWAY }));
+    check('dhcp: the server is the server identifier option', dhcpOf(d)?.server, { address: GATEWAY, port: 67 });
+    const bare = fresh();
+    bare.feed(toServer(1));
+    check('...with no server message yet it is empty', dhcpOf(bare)?.server, { address: '', port: 67 });
+    bare.feed(toClient(2));
+    check('...and from the first server message\'s source when no row names it', dhcpOf(bare)?.server, { address: GATEWAY, port: 67 });
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    d.feed(toClient(2));
+    const flow = udpOf(d);
+    check('dhcp: a DHCP row still counts in its UDP flow', [flow.toServer.packets + flow.toClient.packets, d.getDhcp(XID) !== undefined], [2, true]);
+  }
+  {
+    const big = 0xdeadbeef;
+    const d = fresh();
+    d.feed(dhcpRow(1, ['0.0.0.0', 68], ['255.255.255.255', 67], {}, 1, big));
+    d.feed(dhcpRow(2, [GATEWAY, 67], ['192.168.1.50', 68], {}, 2, big));
+    check('dhcp: an xid above 2^31 keeps its value',
+      [dhcpOf(d, big)?.key, dhcpOf(d, big)?.phases.length, [...d.changedSince(0).dhcp.map((s) => s.key)], inFlow(toServer(1, {}), 'dhcp', XID)],
+      [big, 2, [big], true]);
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    const first = d.version;
+    d.feed(toClient(2));
+    check('dhcp: changedSince answers an exchange changed after a version',
+      [d.changedSince(0).dhcp.length, d.changedSince(first).dhcp.map((s) => s.key), d.changedSince(d.version).dhcp.length], [1, [XID], 0]);
+    const back = StreamDigest.restore(JSON.parse(JSON.stringify(d.snapshot())));
+    check('dhcp: a snapshot round trip restores the map', back.getDhcp(XID), d.getDhcp(XID));
+    back.feed(toServer(3));
+    check('...and a restored digest keeps folding', back.getDhcp(XID)?.phases.map((p) => p.message), ['Discover', 'Offer', 'Request']);
+  }
+  {
+    // Not DHCP: DHCPv6 carries no id or message type, and a v4 row lacking either is a UDP flow only.
+    const d = fresh();
+    d.feed({ ...toServer(1), frameProtocols: ['eth', 'ethertype', 'ipv6', 'udp', 'dhcpv6'] });
+    d.feed(toServer(1, { 'dhcp.option.dhcp': 9 }));
+    const noType = toServer(1);
+    delete noType.fields!['dhcp.option.dhcp'];
+    d.feed(noType);
+    check('dhcp: only a DHCPv4 row with an id and a message type 1..8 is folded', [d.changedSince(0).dhcp, dhcpKeyOf(noType)], [[], null]);
   }
 }
 

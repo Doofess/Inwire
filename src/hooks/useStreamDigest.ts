@@ -23,6 +23,7 @@ import { captureStore } from '../services/capture/captureClient';
 import type { StreamSummary } from '../services/conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../services/conversation/flowSummary';
 import type { TlsSummary } from '../services/conversation/tlsSummary';
+import type { DhcpSummary } from '../services/conversation/dhcpSummary';
 
 const POLL_MS = 1000;
 
@@ -31,6 +32,7 @@ export function useStreamDigest(enabled: boolean) {
   const [udp, setUdp] = useState<Map<number, UdpSummary>>(() => new Map());
   const [quic, setQuic] = useState<Map<number, QuicSummary>>(() => new Map());
   const [tls, setTls] = useState<Map<number, TlsSummary>>(() => new Map());
+  const [dhcp, setDhcp] = useState<Map<number, DhcpSummary>>(() => new Map());
   const [captureEnd, setCaptureEnd] = useState(0);
   const [rebuilding, setRebuilding] = useState<{ done: number; total: number } | null>(null);
   const [partial, setPartial] = useState(false);
@@ -54,6 +56,7 @@ export function useStreamDigest(enabled: boolean) {
         setUdp(new Map());
         setQuic(new Map());
         setTls(new Map());
+        setDhcp(new Map());
         setCaptureEnd(0);
         if (since !== 0) {
           // It was asked with the last capture's version, so this answer is
@@ -97,6 +100,13 @@ export function useStreamDigest(enabled: boolean) {
           return next;
         });
       }
+      if (answer.dhcp.length > 0) {
+        setDhcp((current) => {
+          const next = new Map(current);
+          for (const s of answer.dhcp) next.set(s.key, s);
+          return next;
+        });
+      }
       setCaptureEnd(answer.captureEnd);
       setRebuilding(answer.rebuilding);
       setPartial(answer.partial);
@@ -114,6 +124,7 @@ export function useStreamDigest(enabled: boolean) {
       setUdp(new Map());
       setQuic(new Map());
       setTls(new Map());
+      setDhcp(new Map());
       setCaptureEnd(0);
       setCaptureId(null);
       setRebuilding(null);
@@ -121,5 +132,5 @@ export function useStreamDigest(enabled: boolean) {
     };
   }, [enabled]);
 
-  return { summaries, udp, quic, tls, captureEnd, rebuilding, partial, captureId };
+  return { summaries, udp, quic, tls, dhcp, captureEnd, rebuilding, partial, captureId };
 }

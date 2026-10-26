@@ -310,7 +310,7 @@ const { captureStore } = await import('../../src/services/capture/captureClient'
 
 check('streamDigest falls back to nothing, at the version it was asked from',
   await captureStore.streamDigest(42),
-  { captureId: null, version: 42, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false });
+  { captureId: null, version: 42, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false });
 check('streamOrdinals falls back to nothing, with no next page',
   await captureStore.streamOrdinals(3, 12, 40, 0),
   { ordinals: [], nextChunk: null });
@@ -354,7 +354,7 @@ answer = (message) => {
   if (message.type === 'streamDigest') {
     return {
       type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd',
-      version: 5, summaries: [changed], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: { done: 3, total: 9 }, partial: true,
+      version: 5, summaries: [changed], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: { done: 3, total: 9 }, partial: true,
     };
   }
   if (message.type === 'streamOrdinals') {
@@ -399,10 +399,10 @@ answer = (message) => {
   // A `since` the store has nothing past: the answer is empty and the version
   // is whatever the store says, which the hook takes as its next `since`.
   answer = (message) => message.type === 'streamDigest'
-    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false }
+    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false }
     : null;
   check('an empty answer settles too', await captureStore.streamDigest(5),
-    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false });
+    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false });
 }
 
 console.log('\n--- the store goes away with requests in flight ---\n');
@@ -420,12 +420,12 @@ console.log('\n--- the store goes away with requests in flight ---\n');
   onExit!('the capture store stopped');
   check('a pending flowOrdinals settles with its fallback', await flowPage, { ordinals: [], nextChunk: null, searched: 1 });
   check('a pending streamDigest settles with its fallback', await digest,
-    { captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false });
+    { captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false });
   check('a pending streamOrdinals settles with its fallback', await page, { ordinals: [], nextChunk: null });
   check('the store is reported gone', captureStore.snapshot.error, 'the capture store stopped');
   check('and nothing is asked of it again',
     [await captureStore.streamDigest(1), received.filter((m) => m.type === 'streamDigest').length],
-    [{ captureId: null, version: 1, summaries: [], udp: [], quic: [], tls: [], captureEnd: 0, rebuilding: null, partial: false }, 3]);
+    [{ captureId: null, version: 1, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false }, 3]);
 }
 
 port1.close();

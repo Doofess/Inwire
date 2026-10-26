@@ -1036,6 +1036,23 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
     [['tls', 6, ['client:ClientHello', 'server:ServerHello']]]);
   check('...and an answer with no TLS carries an empty list', answer.tls, []);
   tlsHost.store.close();
+  // DHCP rides it too (stage 3), with an xid above 2^31 across the v8 boundary.
+  const dhcpHost = host();
+  const dhcp = (id: number, type: number) => frame(id, {
+    protocol: 'UDP', protocolLabel: 'DHCP', frameProtocols: ['eth', 'ip', 'udp', 'dhcp'],
+    fields: { 'udp.stream': 7, 'dhcp.id': 0xdeadbeef, 'dhcp.option.dhcp': type, 'dhcp.hw.mac_addr': '00:11:22:33:44:55' },
+    source: type === 1 ? '0.0.0.0' : '192.168.1.1', destination: type === 1 ? '255.255.255.255' : '192.168.1.50',
+    sourcePort: type === 1 ? 68 : 67, destPort: type === 1 ? 67 : 68,
+  });
+  dhcpHost.send({ type: 'open', captureId: 'cap-20261027-020000-0003' });
+  dhcpHost.send({ type: 'append', packets: crossed([dhcp(1, 1), dhcp(2, 2)]) });
+  dhcpHost.send({ type: 'streamDigest', requestId: 2, since: 0 });
+  await dhcpHost.store.drain();
+  const dhcpAnswer = deserialize(serialize(dhcpHost.of('streamDigest')[0])) as Extract<FromCapture, { type: 'streamDigest' }>;
+  check('the v8 round trip carries dhcp: one exchange, keyed by the unsigned xid, with its outcome',
+    dhcpAnswer.dhcp.map((s) => [s.kind, s.key, s.outcome]), [['dhcp', 0xdeadbeef, 'offer not taken']]);
+  check('...and an answer with no DHCP carries an empty list', [none.of('streamDigest')[0]?.dhcp, answer.dhcp], [[], []]);
+  dhcpHost.store.close();
 
   // `flowOrdinals` answers over the same port, and through v8 as well. It reads
   // sealed chunks, so the capture is finished first.
@@ -1043,6 +1060,8 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
   h.send({ type: 'flowOrdinals', requestId: 3, kind: 'quic', key: 2, fromId: 1, toId: 4, startChunk: 0 });
   h.send({ type: 'flowOrdinals', requestId: 4, kind: 'udp', key: 4, fromId: 1, toId: 4, startChunk: 0 });
   h.send({ type: 'flowOrdinals', requestId: 5, kind: 'udp', key: 5, fromId: 1, toId: 4, startChunk: 0 });
+  // A kind the capture holds none of answers whole and empty, not as a failure.
+  h.send({ type: 'flowOrdinals', requestId: 6, kind: 'dhcp', key: 0xdeadbeef, fromId: 1, toId: 4, startChunk: 0 });
   await h.store.drain();
   const pages = deserialize(serialize(h.of('flowOrdinals'))) as Extract<FromCapture, { type: 'flowOrdinals' }>[];
   check('flowOrdinals answers a QUIC connection and a UDP flow, whole, on the wire (the QUIC rows are in their UDP flow too)',
@@ -1050,6 +1069,7 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
       { type: 'flowOrdinals', requestId: 3, ordinals: [2, 3], nextChunk: null, searched: 1 },
       { type: 'flowOrdinals', requestId: 4, ordinals: [0, 1], nextChunk: null, searched: 1 },
       { type: 'flowOrdinals', requestId: 5, ordinals: [2, 3], nextChunk: null, searched: 1 },
+      { type: 'flowOrdinals', requestId: 6, ordinals: [], nextChunk: null, searched: 1 },
     ]);
   h.store.close();
 }

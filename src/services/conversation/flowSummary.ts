@@ -15,6 +15,7 @@ import { fieldValue } from '../dissect/fieldAccess';
 import { chooseClient, type ClientEndBasis, type Endpoint } from './clientSide';
 import type { Side } from './tcpStates';
 import type { DirectionTotals } from './streamDigest';
+import { dhcpKeyOf } from './dhcpSummary';
 
 export type UdpOutcome = 'one-way' | 'request/response' | 'two-way';
 export type QuicOutcome = 'no reply' | 'handshake unfinished' | 'established' | 'closed by client' | 'closed by server';
@@ -99,13 +100,13 @@ export function quicKeyOf(row: Packet): number | null {
 }
 
 /**
- * Whether a row is in UDP flow or QUIC connection `key`: the one membership
- * test. `StreamDigest.feed` folds by the same two keys, the store's
+ * Whether a row is in UDP flow, QUIC connection or DHCP exchange `key`: the one
+ * membership test. `StreamDigest.feed` folds by the same three keys, the store's
  * `flowOrdinals` matches with this and Follow Stream's RAM tail filters with
  * it, so the three cannot disagree.
  */
-export function inFlow(row: Packet, kind: 'udp' | 'quic', key: number): boolean {
-  return kind === 'udp' ? udpKeyOf(row) === key : quicKeyOf(row) === key;
+export function inFlow(row: Packet, kind: 'udp' | 'quic' | 'dhcp', key: number): boolean {
+  return kind === 'udp' ? udpKeyOf(row) === key : kind === 'quic' ? quicKeyOf(row) === key : dhcpKeyOf(row) === key;
 }
 
 /**

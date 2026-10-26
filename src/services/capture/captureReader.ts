@@ -339,7 +339,7 @@ export class CaptureReader {
    * would otherwise have no progress to show. Exactly 1 when `nextChunk` is null.
    */
   flowOrdinals(
-    kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number, maxChunks: number,
+    kind: 'udp' | 'quic' | 'dhcp', key: number, fromId: number, toId: number, startChunk: number, maxChunks: number,
   ): { ordinals: number[]; nextChunk: number | null; searched: number } {
     const ordinals: number[] = [];
     const first = Math.max(this.index.floorChunk, this.index.chunkForId(fromId));

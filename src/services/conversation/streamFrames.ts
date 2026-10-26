@@ -23,7 +23,7 @@ export interface StreamFrameSource {
   streamOrdinals(streamId: number, fromId: number, toId: number, startChunk: number):
     Promise<{ ordinals: number[]; nextChunk: number | null }>;
   /** A UDP flow's or QUIC connection's positions, a bounded page of chunks, from the rows. */
-  flowOrdinals(kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number):
+  flowOrdinals(kind: 'udp' | 'quic' | 'dhcp', key: number, fromId: number, toId: number, startChunk: number):
     Promise<{ ordinals: number[]; nextChunk: number | null; searched: number }>;
   readRowsFor(ordinals: readonly number[]): Promise<Map<number, Packet>>;
 }
