@@ -110,6 +110,8 @@ const TSHARK_KIND: Record<ConversationKind, { tap: string; title: string; ported
   ipv6: { tap: 'ipv6', title: 'IPv6', ported: false },
   tcp: { tap: 'tcp', title: 'TCP', ported: true },
   udp: { tap: 'udp', title: 'UDP', ported: true },
+  // Not compared: only the digest knows a QUIC connection, and KINDS leaves it out.
+  quic: { tap: 'udp', title: 'QUIC', ported: true },
 };
 const KINDS: readonly ConversationKind[] = ['eth', 'ipv4', 'ipv6', 'tcp', 'udp'];
 

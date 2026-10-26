@@ -30,7 +30,7 @@
 import { Packet } from '../types/packet';
 import { fieldValue } from './dissect/fieldAccess';
 
-export type ConversationKind = 'eth' | 'ipv4' | 'ipv6' | 'tcp' | 'udp';
+export type ConversationKind = 'eth' | 'ipv4' | 'ipv6' | 'tcp' | 'udp' | 'quic';
 
 export interface Endpoint {
   address: string;
@@ -114,6 +114,9 @@ function addressesFor(packet: Packet, kind: ConversationKind): { a: string; b: s
       if (typeof sp !== 'number' || typeof dp !== 'number') return null;
       return { a: packet.source, b: packet.destination, pa: sp, pb: dp };
     }
+    // Only the digest knows a connection, which spans address changes.
+    case 'quic':
+      return null;
   }
 }
 
@@ -210,6 +213,7 @@ export class ConversationTable {
 }
 
 export function conversations(packets: readonly Packet[], kind: ConversationKind): Conversation[] {
+  if (kind === 'quic') return [];
   const table = new ConversationTable(kind);
   for (const packet of packets) table.add(packet);
   return table.result();
@@ -497,6 +501,9 @@ export function conversationFilter(c: Conversation, kind: ConversationKind): str
     case 'udp':
       return `addr == ${quote(c.addressA)} && ${kind}.port == ${c.portA}`
         + ` && addr == ${quote(c.addressB)} && ${kind}.port == ${c.portB}`;
+    // A connection, not an address pair: it survives a migration.
+    case 'quic':
+      return `quic.connection.number == ${c.streamId}`;
   }
 }
 
@@ -509,8 +516,9 @@ export function endpointFilter(e: Endpoint, kind: ConversationKind): string {
     case 'ipv6': return `ipv6.addr == ${quote(e.address)}`;
     case 'tcp':
     case 'udp':
+    case 'quic':
       return e.port === undefined
         ? `addr == ${quote(e.address)}`
-        : `addr == ${quote(e.address)} && ${kind}.port == ${e.port}`;
+        : `addr == ${quote(e.address)} && ${kind === 'quic' ? 'udp' : kind}.port == ${e.port}`;
   }
 }

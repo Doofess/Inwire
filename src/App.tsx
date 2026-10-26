@@ -3726,10 +3726,10 @@ export default function App() {
                 expert={expertLog}
                 onApplyFilter={handleQuickFilter}
                 onFollowStream={handleFollowStream}
-                // The TCP level reads the store's digest, the whole capture
-                // with each stream's outcome - the one table here that does
-                // not count the buffer (ADR 0055).
-                tcpDigest={streamDigest}
+                // The TCP, UDP and QUIC levels read the store's digest, the
+                // whole capture with each flow's outcome - the tables here
+                // that do not count the buffer (ADR 0055).
+                digest={streamDigest}
                 onSelectFrame={goToFrame}
                 droppedBuffer={droppedBuffer}
                 // Every row here is a filter, so applying one means going to look

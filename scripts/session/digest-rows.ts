@@ -18,8 +18,9 @@
  *   its fallback, or the hook's poll hangs for the life of the window.
  */
 import { readFileSync } from 'node:fs';
-import { conversationRows, digestConversation, outcomeText, tcpScopeNote } from '../../src/services/conversation/digestRows';
+import { QUIET_SECONDS, conversationRows, digestConversation, digestScopeNote, outcomeText } from '../../src/services/conversation/digestRows';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
 import type { ToCapture, FromCapture } from '../../src/services/capture/captureProtocol';
 
 let failures = 0;
@@ -54,6 +55,38 @@ function summary(overrides: Partial<StreamSummary> = {}): StreamSummary {
     ...overrides,
   };
 }
+
+/** A UDP flow the store would summarise: a query and its answer. */
+function udpSummary(overrides: Partial<UdpSummary> = {}): UdpSummary {
+  return {
+    kind: 'udp', key: 5,
+    client: { address: '10.0.0.5', port: 50000 }, server: { address: '93.184.216.34', port: 5353 },
+    clientBasis: 'well-known-port',
+    toServer: { packets: 1, bytes: 80, first: 10, last: 10 },
+    toClient: { packets: 1, bytes: 120, first: 10.1, last: 10.1 },
+    firstId: 30, lastId: 31, start: 10, end: 10.1, protocol: 'DNS', version: 3,
+    outcome: 'request/response',
+    ...overrides,
+  };
+}
+
+/** A QUIC connection, established. */
+function quicSummary(overrides: Partial<QuicSummary> = {}): QuicSummary {
+  return {
+    kind: 'quic', key: 2,
+    client: { address: '10.0.0.5', port: 50001 }, server: { address: '93.184.216.34', port: 443 },
+    clientBasis: 'well-known-port',
+    toServer: { packets: 10, bytes: 3_000, first: 20, last: 25 },
+    toClient: { packets: 12, bytes: 9_000, first: 20.1, last: 25 },
+    firstId: 50, lastId: 90, start: 20, end: 25, protocol: 'QUIC', version: 4,
+    outcome: 'established', quicVersion: 1, phases: [], joinedMidStream: false, migrated: false,
+    ...overrides,
+  } as QuicSummary;
+}
+
+const NO_FLOWS = { udp: new Map<number, UdpSummary>(), quic: new Map<number, QuicSummary>(), captureEnd: 0 };
+const flows = (over: { summaries?: ReadonlyMap<number, StreamSummary>; udp?: ReadonlyMap<number, UdpSummary>; quic?: ReadonlyMap<number, QuicSummary>; captureEnd?: number }) =>
+  ({ summaries: new Map<number, StreamSummary>(), ...NO_FLOWS, ...over });
 
 console.log('\n--- a summary as the conversation table\'s row ---\n');
 
@@ -105,24 +138,86 @@ check('the row itself is enough', outcomeText(digestConversation(summary())), 'c
 console.log('\n--- the conversation table, TCP from the digest ---\n');
 
 {
-  const digest = new Map([[3, summary()], [4, summary({ streamId: 4 })]]);
-  check('TCP reads the digest, one row per stream', conversationRows('tcp', digest)?.map((r) => r.streamId), [3, 4]);
-  check('...and an empty digest leaves TCP to the buffer', conversationRows('tcp', new Map()), null);
-  check('UDP has no digest and reads the buffer', conversationRows('udp', digest), null);
-  check('so do the address levels', [conversationRows('ipv4', digest), conversationRows('eth', digest)], [null, null]);
+  const tcp = flows({ summaries: new Map([[3, summary()], [4, summary({ streamId: 4 })]]) });
+  check('TCP reads the digest, one row per stream', conversationRows('tcp', tcp)?.map((r) => r.streamId), [3, 4]);
+  check('...and an empty digest leaves TCP to the buffer', conversationRows('tcp', flows({})), null);
+  check('UDP with nothing in the digest reads the buffer', conversationRows('udp', tcp), null);
+  check('so do the address levels', [conversationRows('ipv4', tcp), conversationRows('eth', tcp)], [null, null]);
 
   // The ADR: the pane says which scope it is showing.
-  check('a digest answers for the whole capture', tcpScopeNote(digest, null), 'Whole capture');
-  check('a rebuild says how far it has got', tcpScopeNote(digest, { done: 3, total: 12 }),
+  check('a digest answers for the whole capture', digestScopeNote('tcp', tcp, null), 'Whole capture');
+  check('a rebuild says how far it has got', digestScopeNote('tcp', tcp, { done: 3, total: 12 }),
     'Rebuilding the stream digest: 3 of 12 chunks');
-  check('...even before its first summary', tcpScopeNote(new Map(), { done: 0, total: 12 }),
+  check('...even before its first summary', digestScopeNote('tcp', flows({}), { done: 0, total: 12 }),
     'Rebuilding the stream digest: 0 of 12 chunks');
-  check('a rebuild that dropped rows says the answer is not the whole capture', tcpScopeNote(digest, null, true),
+  check('a rebuild that dropped rows says the answer is not the whole capture', digestScopeNote('tcp', tcp, null, true),
     'Not the whole capture: the stream digest missed some frames while rebuilding. Reopen the capture to rebuild it');
-  check('...but a rebuild still running reports its progress first', tcpScopeNote(digest, { done: 1, total: 2 }, true),
+  check('...but a rebuild still running reports its progress first', digestScopeNote('tcp', tcp, { done: 1, total: 2 }, true),
     'Rebuilding the stream digest: 1 of 2 chunks');
-  check('...and partial with nothing to show makes no claim', tcpScopeNote(new Map(), null, true), null);
-  check('no digest, no claim: the buffer\'s own note stands', tcpScopeNote(new Map(), null), null);
+  check('...and partial with nothing to show makes no claim', digestScopeNote('tcp', flows({}), null, true), null);
+  check('no digest, no claim: the buffer\'s own note stands', digestScopeNote('tcp', flows({}), null), null);
+}
+
+console.log('\n--- UDP and QUIC from the digest ---\n');
+
+{
+  const udp = flows({ udp: new Map([[5, udpSummary()], [6, udpSummary({ key: 6 })]]), captureEnd: 11 });
+  const rows = conversationRows('udp', udp);
+  check('udp rows come from the digest: one per flow, keyed udp:<key>', rows?.map((r) => r.key), ['udp:5', 'udp:6']);
+  const row = rows![0];
+  check('...the client is A, the server B', [row.addressA, row.portA, row.addressB, row.portB],
+    ['10.0.0.5', 50000, '93.184.216.34', 5353]);
+  check('...streamId is the flow\'s key, protocol and first frame come from the summary',
+    [row.streamId, row.protocol, row.firstFrame], [5, 'DNS', 30]);
+  check('...never joined mid-stream', row.joinedMidStream, false);
+  check('...counts and times from both directions', [row.packets, row.bytes, row.startRel, row.duration],
+    [2, 200, 10, 10.1 - 10]);
+  check('...outcome rides along', row.outcome, 'request/response');
+  check('...and the TCP level is left alone by a UDP-only digest', conversationRows('tcp', udp), null);
+
+  const quic = flows({ quic: new Map([[2, quicSummary()]]), captureEnd: 25 });
+  const q = conversationRows('quic', quic);
+  check('quic rows come from the digest, keyed quic:<key>', q?.map((r) => [r.key, r.streamId, r.protocol, r.outcome]),
+    [['quic:2', 2, 'QUIC', 'established']]);
+  check('...and an empty QUIC map leaves the level to the buffer, which has none', conversationRows('quic', flows({})), null);
+}
+
+console.log('\n--- went quiet ---\n');
+
+{
+  const flow = (end: number) => digestConversation(udpSummary({ end }) as UdpSummary);
+  check('went quiet at 30 s, not at 29.9 s',
+    [outcomeText(flow(10), 40), outcomeText(flow(10), 39.9)],
+    ['request/response · went quiet', 'request/response']);
+  check('QUIET_SECONDS is 30', QUIET_SECONDS, 30);
+  // The same flow, the live capture moving on: quiet while the capture's end
+  // is 30 s past it, and not once the flow itself speaks at the capture's end.
+  check('went quiet follows the capture\'s end',
+    [outcomeText(flow(10), 10 + QUIET_SECONDS), outcomeText(flow(10 + QUIET_SECONDS), 10 + QUIET_SECONDS)],
+    ['request/response · went quiet', 'request/response']);
+  check('a TCP row never says it went quiet',
+    outcomeText(digestConversation(summary({ end: 1 })), 1000), 'closed cleanly');
+  const q = (over: Partial<QuicSummary>) => digestConversation(quicSummary(over));
+  check('joined mid-stream and migrated read in that order, then went quiet',
+    outcomeText(q({ joinedMidStream: true, migrated: true }), 100),
+    'established · joined mid-stream · migrated · went quiet');
+  check('migrated alone', outcomeText(q({ migrated: true }), 25), 'established · migrated');
+  check('a UDP row is never joined mid-stream', outcomeText(digestConversation(udpSummary()), 10.1), 'request/response');
+}
+
+console.log('\n--- the scope note for each level ---\n');
+
+{
+  const all = flows({
+    summaries: new Map([[3, summary()]]), udp: new Map([[5, udpSummary()]]), quic: new Map([[2, quicSummary()]]),
+  });
+  check('the scope note names the whole capture for udp and quic, nothing for ipv4',
+    [digestScopeNote('udp', all, null), digestScopeNote('quic', all, null), digestScopeNote('ipv4', all, null),
+      digestScopeNote('ipv6', all, null), digestScopeNote('eth', all, { done: 1, total: 2 })],
+    ['Whole capture', 'Whole capture', null, null, null]);
+  check('...an empty level and no rebuild makes no claim', [digestScopeNote('udp', flows({}), null), digestScopeNote('quic', flows({ udp: all.udp }), null)], [null, null]);
+  check('...a rebuild is reported on udp and quic too', digestScopeNote('quic', flows({}), { done: 1, total: 4 }),
+    'Rebuilding the stream digest: 1 of 4 chunks');
 }
 
 // Following a conversation lands on the stream. The pane's
@@ -156,7 +251,7 @@ const { captureStore } = await import('../../src/services/capture/captureClient'
 
 check('streamDigest falls back to nothing, at the version it was asked from',
   await captureStore.streamDigest(42),
-  { captureId: null, version: 42, summaries: [], rebuilding: null, partial: false });
+  { captureId: null, version: 42, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
 check('streamOrdinals falls back to nothing, with no next page',
   await captureStore.streamOrdinals(3, 12, 40, 0),
   { ordinals: [], nextChunk: null });
@@ -197,7 +292,7 @@ answer = (message) => {
   if (message.type === 'streamDigest') {
     return {
       type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd',
-      version: 5, summaries: [changed], rebuilding: { done: 3, total: 9 }, partial: true,
+      version: 5, summaries: [changed], udp: [], quic: [], captureEnd: 0, rebuilding: { done: 3, total: 9 }, partial: true,
     };
   }
   if (message.type === 'streamOrdinals') {
@@ -230,10 +325,10 @@ answer = (message) => {
   // A `since` the store has nothing past: the answer is empty and the version
   // is whatever the store says, which the hook takes as its next `since`.
   answer = (message) => message.type === 'streamDigest'
-    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], rebuilding: null, partial: false }
+    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false }
     : null;
   check('an empty answer settles too', await captureStore.streamDigest(5),
-    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], rebuilding: null, partial: false });
+    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
 }
 
 console.log('\n--- the store goes away with requests in flight ---\n');
@@ -249,12 +344,12 @@ console.log('\n--- the store goes away with requests in flight ---\n');
   check('the exit callback was registered', onExit !== null, true);
   onExit!('the capture store stopped');
   check('a pending streamDigest settles with its fallback', await digest,
-    { captureId: null, version: 0, summaries: [], rebuilding: null, partial: false });
+    { captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
   check('a pending streamOrdinals settles with its fallback', await page, { ordinals: [], nextChunk: null });
   check('the store is reported gone', captureStore.snapshot.error, 'the capture store stopped');
   check('and nothing is asked of it again',
     [await captureStore.streamDigest(1), received.filter((m) => m.type === 'streamDigest').length],
-    [{ captureId: null, version: 1, summaries: [], rebuilding: null, partial: false }, 3]);
+    [{ captureId: null, version: 1, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false }, 3]);
 }
 
 port1.close();
