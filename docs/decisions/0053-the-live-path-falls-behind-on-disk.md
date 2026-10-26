@@ -536,6 +536,31 @@ kept up at 60,000 (58,950 of 59,200) and advanced 56,900 f/s at 90,000. It
 too skipped nothing and showed every frame (4.2M), and was level 14.5 s
 after the stop.
 
+**#17, second part: frame slabs, 2026-10-26.** Profiled at 60,000 f/s on
+the seek, the coordinator kept up but was only 34.9% idle. `postMessage` was
+17.5% of its time, nearly all of it per-frame buffers: one transfer per frame
+to the renderer, one per frame to and from each shard, one clone per frame to
+the store. `retain`, which copied every frame out of the agent's batch, was
+another 5.7%. Now a frame stays a view into its batch from the pipe to the
+flush, and every hop takes one slab. The store gets a columnar
+`appendBytes` (`FrameSlab`: ids, times, rings, ends and one byte buffer),
+copied, since nothing is transferred into its process. The window gets one
+transferred bytes slab per flush, cut by `PackedRows.ends`. A shard batch is
+three transferred buffers, and a shard sends no bytes back: the coordinator
+keeps each routed frame's view and puts it on the row the shard returns. A
+bench of 1,000 frames a message measured a buffer per frame at 455 ns
+cloned and 474 ns transferred, and the columnar form at 160 and 3.
+Re-profiled at 60,000, the coordinator was 47.6% idle and `postMessage` 8.5%.
+`retain` is gone. The largest new cost is `OpWriter.frame`, 6.1%, which now
+copies each frame onto its shard's slab. Three 60,000-then-90,000 follow
+runs, with no ring. Each kept up at 60,000 (58,218 of 58,279, 58,546 of
+58,627 and 58,489 of 58,605), with lag flat at 16,000-29,000 frames and long
+tasks 1% of wall time. At 90,000 the view advanced 68,900, 74,000 and
+72,900 f/s, against 56,900 before. Nothing was skipped, every frame was
+shown (4.0-4.1M), and the view was level 5.8-6.2 s after the stop, against
+14.5 s. `scripts/pipeline/frame-views.ts` holds every fixture frame's tree
+and row from a view at an odd offset to its own-buffer dissection.
+
 **The equality tests.**
 - `scripts/pipeline/parallel.ts`: packed rows against the single Worker on
   every fixture and the burst.
