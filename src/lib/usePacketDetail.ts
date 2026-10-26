@@ -58,7 +58,10 @@ export async function replayBundleFor(
     relativeTime: p.relativeTime,
     timeDelta: p.timeDelta,
     origLen: p.length,
-    bytes: bytesById.get(p.id) ?? p.rawBytes,
+    // Copied: a live row's bytes are a view into its flush's slab, and the
+    // clone of a view sends its whole buffer - every flush the conversation
+    // touched (#17).
+    bytes: (bytesById.get(p.id) ?? p.rawBytes).slice(),
     // Absent for an Ethernet frame, which is every frame off an ordinary
     // adapter. Carried per frame rather than per bundle because a conversation
     // is one adapter's in practice but nothing in the five-tuple says so.
