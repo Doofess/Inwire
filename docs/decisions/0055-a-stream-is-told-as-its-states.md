@@ -5,7 +5,9 @@ digest and `streams.iwdig`, the ladder, the docked state map and the
 conversation list's TCP level. Stage 2 (UDP and QUIC) landed 2026-10-26: the
 digest folds UDP flows and QUIC connections too, the conversation list's UDP
 and QUIC levels are the whole capture, and Follow Stream reads either from
-disk (section 7). TLS, DNS and DHCP phases (stage 3) are not started. The owner asked for
+disk (section 7). Stage 3 (TLS, DNS and DHCP) landed 2026-10-27: a TLS phase
+line on a TCP stream, a DNS flow's answer tally with marks on the ladder, and a
+DHCP level by transaction with Follow Stream on an exchange (section 8). The owner asked for
 a Conversations pane that shows "the networking that's going on" in a stream,
 pointing at the RFC 793 state diagram, and the same idea for UDP and for any
 other protocol that has a stream.
@@ -214,6 +216,72 @@ And these, which the stage's work settled:
   states to show, and both kinds band by direction and colour rule alone.
 - Ethernet and IP stay the RAM window: an address pair is many streams, and
   nothing about it is a state.
+
+**8. Stage 3: TLS, DNS and DHCP.** Three protocols that name their own phases,
+told in the view stages 1 and 2 built. The owner chose, 2026-10-26: TLS as a
+phase line plus a note on the TCP outcome only when TLS failed, no TLS level;
+DNS as a count per answer kind with marks on the ladder; DHCP as its own level
+keyed by transaction, with a phase line. One digest still folds them all at the
+same `feed`, from fields a row already carries, and the snapshot is format 4.
+
+- **S3-1: TLS facts from a row.** Only rows with both `tcp` and `tls` fold;
+  QUIC's TLS is QUIC's phases. ClientHello is `tls.handshake.ja4` present,
+  ServerHello `tls.handshake.ja3s`, Certificate `tls.x509.subject_cn` (plaintext
+  TLS 1.2 or a decrypted record), application data content type 23 or a
+  decrypted record. A readable alert of description 0 is `close_notify`, any
+  other `alert: <name>`, and level 2 is fatal; content type 21 with no
+  description is `encrypted alert`, never `close_notify` and never a failure.
+  The hello and certificate facts are read only on a handshake record or a
+  decrypted one. A row shows only its first record's type, so application data
+  behind a handshake record is first seen a row later. The TLS map sits beside
+  the TCP map, never inside it, so TCP's summaries stay byte for byte.
+- **S3-2: the TLS notes.** ` · TLS alert` after the TCP outcome for a readable
+  fatal alert from either side; ` · TLS unanswered` for a ClientHello with no
+  ServerHello when the TCP outcome is not `open`. Nothing else is appended.
+- **S3-3: classic DNS only.** A flow is tallied when one of its ports is 53.
+  mDNS and LLMNR keep the plain UDP outcome, because their answers come from
+  other flows; DNS over TCP is a TCP stream.
+- **S3-4: queries are matched by `dns.id` within the flow**, not by the
+  tracker's `dns.response_to`, so the tally does not depend on tracker eviction
+  or shards. A repeated open id counts once; a response with no open query
+  counts by its rcode; at most 64 stay open (`MAX_OPEN_QUERIES`) and an evicted
+  one counts as unanswered. An open query is `unanswered` once 5 s
+  (`DNS_WAIT_SECONDS`) separate it from the capture's last frame, otherwise
+  `waiting`, decided at render time as "went quiet" is.
+- **S3-5: a DNS flow's text is its tally alone**, e.g. `40 answered · 1 error`,
+  with no "went quiet": a finished query is not a flow that stopped. The ladder
+  marks an error answer with its rcode name and an unanswered query with
+  `no answer`.
+- **S3-6: DHCPv4 only.** DHCPv6 rows carry no message type or transaction id,
+  so DHCPv6 stays a UDP flow.
+- **S3-7: a DHCP side comes from the message type**, not from ports or
+  addresses, which change mid-exchange (0.0.0.0, broadcast, the offered
+  address) and lie through a relay. Discover, Request, Decline, Release and
+  Inform are the client's; Offer, ACK and NAK the server's. The client is its
+  hardware address on port 68, written without the port. The server is the
+  server identifier option, else the first server message's source, else where
+  a client message was sent when that was not a broadcast (a renewal goes to
+  its server), else not seen.
+- **S3-8: a DHCP outcome**, folded message by message: the last ACK or NAK
+  decides `acked` or `NAK`; a Decline after the ACK is `declined`; a Release is
+  `released`; otherwise an Offer is `offer not taken`, unless a Request
+  followed it, which with a Request or Inform alone is `no reply`; otherwise
+  `no offer`. A client that reuses a transaction id for a later exchange merges
+  the two into one row; accepted.
+- **S3-9: TLS and DHCP are not kept in the relabel ring.** Their protocol label
+  never matters to them, and DHCP's 32-bit key would not fit the ring.
+
+And these, which the stage's work settled:
+
+- **The phase line is one component.** QUIC's line became `PhaseLine`, which
+  TLS (`TLS phases`) and DHCP (`DHCP phases`) reuse with the same classes and
+  no new colours.
+- **A DHCP exchange is its own level and its own target.** Conversations →
+  DHCP is the whole capture, client as A (the hostname when a row carried one,
+  else the MAC); Follow Stream opens `Follow DHCP Exchange 0x<xid>`, filtered by
+  `dhcp.id`, and a DHCP row still counts in its UDP flow.
+- **The snapshot is format 4.** A format 3 snapshot is refused and the digest
+  rebuilt from the rows.
 
 ## Considered and rejected
 
