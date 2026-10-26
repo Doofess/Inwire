@@ -1,6 +1,6 @@
 /**
- * One summary per TCP stream, UDP flow and QUIC connection, folded from rows
- * (ADR 0055).
+ * One summary per TCP stream, UDP flow and QUIC connection, and a TLS summary
+ * per TCP stream that shows TLS, folded from rows (ADR 0055).
  *
  * The capture store owns one of these. Rows reach it from a live capture after
  * the shards' merge and from an import alike, in id order, so this is the one
@@ -10,7 +10,9 @@
  *
  * TCP is keyed by `tcp.stream`, UDP by `udp.stream` and QUIC by
  * `quic.connection.number`, in three maps; a row is folded into at most one.
- * The UDP and QUIC steps are in `flowSummary.ts`.
+ * The UDP and QUIC steps are in `flowSummary.ts`. TLS has a fourth map, keyed by
+ * `tcp.stream` and beside the TCP one, never inside it (`tlsSummary.ts`): a TCP
+ * row is folded into its TCP summary and then, if it shows a TLS phase, its TLS one.
  *
  * Derived data: `snapshot()` is what the store persists, and a capture whose
  * snapshot is missing or stale is folded again from its rows.
@@ -25,6 +27,8 @@ import {
 import {
   foldQuic, foldUdp, openQuic, openUdp, quicKeyOf, udpKeyOf, type QuicSummary, type UdpSummary,
 } from './flowSummary';
+import { foldTls, openTls, type TlsSummary } from './tlsSummary';
+import { dhcpKeyOf, foldDhcp, openDhcp, type DhcpSummary } from './dhcpSummary';
 
 export interface DirectionTotals {
   packets: number;
@@ -116,11 +120,15 @@ type Entry = DigestEntry;
 export type TaggedEntry =
   | { kind: 'tcp'; entry: DigestEntry }
   | { kind: 'udp'; summary: UdpSummary }
-  | { kind: 'quic'; summary: QuicSummary };
+  | { kind: 'quic'; summary: QuicSummary }
+  | { kind: 'tls'; summary: TlsSummary }
+  | { kind: 'dhcp'; summary: DhcpSummary };
 
 export type FlowKind = 'udp' | 'quic';
 /** What `changedSince` answers: every summary of each kind changed after a version. */
-export interface DigestChanges { tcp: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[] }
+export interface DigestChanges {
+  tcp: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; tls: TlsSummary[]; dhcp: DhcpSummary[];
+}
 
 const KIND_TCP = 0;
 const KIND_UDP = 1;
@@ -150,6 +158,16 @@ export class StreamDigest {
   private readonly udps = new Map<number, UdpSummary>();
   private readonly quics = new Map<number, QuicSummary>();
   /**
+   * Keyed by `tcp.stream`. Not remembered in the relabel ring (ruling S3-9): a
+   * protocol label never matters to it.
+   */
+  private readonly tlss = new Map<number, TlsSummary>();
+  /**
+   * Keyed by `dhcp.id`, unsigned. Not remembered in the relabel ring either
+   * (ruling S3-9): a 32-bit key would not fit its `Int32Array`.
+   */
+  private readonly dhcps = new Map<number, DhcpSummary>();
+  /**
    * The last `RECENT_FRAMES` ids folded and the stream each was in, as three
    * rings: ids ascend, so a lookup is a binary search, and a fold costs three
    * stores where a Map's insert and delete were most of `feed`. A key is only
@@ -177,6 +195,14 @@ export class StreamDigest {
     return this.streams.get(streamId)?.summary;
   }
 
+  getTls(streamId: number): TlsSummary | undefined {
+    return this.tlss.get(streamId);
+  }
+
+  getDhcp(xid: number): DhcpSummary | undefined {
+    return this.dhcps.get(xid);
+  }
+
   getFlow(kind: FlowKind, key: number): UdpSummary | QuicSummary | undefined {
     return kind === 'udp' ? this.udps.get(key) : this.quics.get(key);
   }
@@ -195,6 +221,18 @@ export class StreamDigest {
     if (stream !== null) this.feedUdp(row, stream);
     const connection = quicKeyOf(row);
     if (connection !== null) this.feedQuic(row, connection);
+    // A DHCP row is also an exchange, whatever flow it is in.
+    if (protocols.includes('dhcp')) {
+      const xid = dhcpKeyOf(row);
+      if (xid !== null) this.feedDhcp(row, xid);
+    }
+  }
+
+  private feedDhcp(row: Packet, key: number): void {
+    let s = this.dhcps.get(key);
+    if (s === undefined) { s = openDhcp(row, key); this.dhcps.set(key, s); }
+    foldDhcp(s, row);
+    s.version = ++this.versionValue;
   }
 
   private feedUdp(row: Packet, key: number): void {
@@ -263,7 +301,18 @@ export class StreamDigest {
     s.outcome = outcomeOf(entry.machine);
     s.version = ++this.versionValue;
 
+    if (row.frameProtocols?.includes('tls') === true) this.feedTls(row, streamId, side);
+
     this.remember(row.id, streamId, KIND_TCP);
+  }
+
+  /** Created on the first row that changes it: a stream with no TLS phase has no entry. */
+  private feedTls(row: Packet, streamId: number, side: Side): void {
+    const existing = this.tlss.get(streamId);
+    const t = existing ?? openTls(streamId);
+    if (!foldTls(t, row, side)) return;
+    if (existing === undefined) this.tlss.set(streamId, t);
+    t.version = ++this.versionValue;
   }
 
   /** The ring slot a recently folded frame was written to, or -1. */
@@ -324,7 +373,11 @@ export class StreamDigest {
     for (const s of this.udps.values()) if (s.version > version) udp.push(s);
     const quic: QuicSummary[] = [];
     for (const s of this.quics.values()) if (s.version > version) quic.push(s);
-    return { tcp, udp, quic };
+    const tls: TlsSummary[] = [];
+    for (const s of this.tlss.values()) if (s.version > version) tls.push(s);
+    const dhcp: DhcpSummary[] = [];
+    for (const s of this.dhcps.values()) if (s.version > version) dhcp.push(s);
+    return { tcp, udp, quic, tls, dhcp };
   }
 
   /**
@@ -339,6 +392,8 @@ export class StreamDigest {
     for (const entry of this.streams.values()) entries.push({ kind: 'tcp', entry });
     for (const summary of this.udps.values()) entries.push({ kind: 'udp', summary });
     for (const summary of this.quics.values()) entries.push({ kind: 'quic', summary });
+    for (const summary of this.tlss.values()) entries.push({ kind: 'tls', summary });
+    for (const summary of this.dhcps.values()) entries.push({ kind: 'dhcp', summary });
     return { throughId: this.through, version: this.versionValue, captureEnd: this.captureEndValue, entries };
   }
 
@@ -356,7 +411,9 @@ export class StreamDigest {
     for (const tagged of data.entries) {
       if (tagged.kind === 'tcp') d.streams.set(tagged.entry.summary.streamId, tagged.entry);
       else if (tagged.kind === 'udp') d.udps.set(tagged.summary.key, tagged.summary);
-      else d.quics.set(tagged.summary.key, tagged.summary);
+      else if (tagged.kind === 'quic') d.quics.set(tagged.summary.key, tagged.summary);
+      else if (tagged.kind === 'tls') d.tlss.set(tagged.summary.key, tagged.summary);
+      else d.dhcps.set(tagged.summary.key, tagged.summary);
     }
     return d;
   }

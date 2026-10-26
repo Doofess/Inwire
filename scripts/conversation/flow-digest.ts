@@ -11,6 +11,8 @@
  */
 import { RECENT_FRAMES, StreamDigest } from '../../src/services/conversation/streamDigest';
 import { flowKeyOf, inFlow, quicKeyOf, udpKeyOf, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
+import { tlsNote, type TlsSummary } from '../../src/services/conversation/tlsSummary';
+import { dhcpKeyOf } from '../../src/services/conversation/dhcpSummary';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -274,7 +276,7 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   const c = d.changedSince(v);
   check('one shared version covers every kind', [c.tcp.length, c.udp.length, c.quic.length, d.version > v], [0, 1, 1, true]);
   check('changedSince(0) returns all three (the QUIC datagram is also a UDP flow)', [d.changedSince(0).udp.length, d.changedSince(0).quic.length], [2, 1]);
-  check('changedSince at the current version is empty', Object.values(d.changedSince(d.version)).map((a) => a.length), [0, 0, 0]);
+  check('changedSince at the current version is empty', Object.values(d.changedSince(d.version)).map((a) => a.length), [0, 0, 0, 0, 0]);
 }
 {
   nextId = 1;
@@ -348,6 +350,347 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   check('the digest folds exactly the flows the keys name', folded, [...new Set(keyed)].sort());
   const counts = [...d.changedSince(0).udp].map((s) => [s.key, s.toServer.packets]).sort();
   check('...and counts every UDP row with a stream in its UDP flow', counts, [[5, 1], [9, 2]]);
+}
+
+// ---- TLS on a TCP stream (stage 3).
+{
+  const TLS_STREAM = 11;
+  /** A TCP row that carries TLS facts. `fields` are exactly what the dissector writes. */
+  const tlsRow = (fromClient: boolean, fields: Record<string, number | string>, time?: number, over: Partial<Packet> = {}): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time ?? id / 1000,
+      source: fromClient ? CLIENT : SERVER, destination: fromClient ? SERVER : CLIENT,
+      sourcePort: fromClient ? 50000 : 443, destPort: fromClient ? 443 : 50000,
+      protocol: 'TCP', protocolLabel: 'TLSv1.2', frameProtocols: ['eth', 'ethertype', 'ip', 'tcp', 'tls'],
+      fields: { 'tcp.flags.ack': 1, 'tcp.len': 100, ...fields }, length: 154, info: '', status: 'ok',
+      streamId: TLS_STREAM, ...over,
+    } as Packet;
+  };
+  const hello = (): Record<string, number | string> => ({ 'tls.record.content_type': 22, 'tls.handshake.type': 1, 'tls.handshake.ja4': 't13d1516h2_x_y' });
+  const serverHello = (): Record<string, number | string> => ({ 'tls.record.content_type': 22, 'tls.handshake.type': 2, 'tls.handshake.ja3s': 'abc' });
+  const alert = (desc: number, level: number): Record<string, number | string> =>
+    ({ 'tls.record.content_type': 21, 'tls.alert_message.level': level, 'tls.alert_message.desc': desc });
+  const app = (): Record<string, number | string> => ({ 'tls.record.content_type': 23 });
+  const tlsOf = (d: StreamDigest, n = TLS_STREAM): TlsSummary | undefined => d.getTls(n);
+  const steps = (s: TlsSummary | undefined) => s?.phases.map((p) => `${p.side}:${p.phase}`);
+
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello(), 1));
+    d.feed(tlsRow(false, serverHello(), 2));
+    const s = tlsOf(d)!;
+    check('tls: ClientHello and ServerHello are two phases with their sides', steps(s), ['client:ClientHello', 'server:ServerHello']);
+    check('...each with the first frame and time that showed it', s.phases.map((p) => [p.frameId, p.time]), [[1, 1], [2, 2]]);
+    check('...keyed by tcp.stream, and no alert', [s.kind, s.key, s.fatalAlert], ['tls', TLS_STREAM, null]);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, serverHello()));
+    d.feed(tlsRow(false, { 'tls.record.content_type': 22, 'tls.handshake.type': 11, 'tls.x509.subject_cn': 'example.test' }));
+    d.feed(tlsRow(true, app()));
+    d.feed(tlsRow(false, app()));
+    d.feed(tlsRow(true, app()));
+    check('tls: application data from each side is a step each',
+      steps(tlsOf(d)), ['client:ClientHello', 'server:ServerHello', 'server:Certificate', 'client:application data', 'server:application data']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, { 'tls.record.content_type': 22, 'inwire.tls.decrypted': 1 }));
+    check('tls: a decrypted record is application data', steps(tlsOf(d)), ['client:application data']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, alert(0, 1)));
+    const s = tlsOf(d)!;
+    check('tls: a readable close_notify is close_notify, not an alert',
+      [steps(s), s.fatalAlert, s.phases[1].alertName], [['client:ClientHello', 'server:close_notify'], null, undefined]);
+    d.feed(tlsRow(true, alert(0, 2)));
+    check('...and a close_notify never sets fatalAlert, whatever its level', tlsOf(d)!.fatalAlert, null);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, alert(40, 2)));
+    d.feed(tlsRow(true, alert(42, 2)));
+    const s = tlsOf(d)!;
+    check('tls: a fatal alert names itself and sets fatalAlert',
+      [steps(s), s.phases[1].alertName, s.fatalAlert],
+      [['client:ClientHello', 'server:alert', 'client:alert'], 'Handshake Failure', { side: 'server', name: 'Handshake Failure' }]);
+    const warn = fresh();
+    warn.feed(tlsRow(false, alert(112, 1)));
+    check('...a warning alert is a step and not fatal', [steps(tlsOf(warn)), tlsOf(warn)!.fatalAlert], [['server:alert'], null]);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, serverHello()));
+    d.feed(tlsRow(false, app()));
+    d.feed(tlsRow(true, { 'tls.record.content_type': 21 }));
+    const s = tlsOf(d)!;
+    check('tls: an encrypted alert is not a failure',
+      [steps(s), s.fatalAlert, tlsNote(s, 'closed cleanly')],
+      [['client:ClientHello', 'server:ServerHello', 'server:application data', 'client:encrypted alert'], null, '']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, app(), 1));
+    const v1 = tlsOf(d)!.version;
+    d.feed(tlsRow(true, app(), 2));
+    d.feed(tlsRow(true, app(), 3));
+    check('tls: a repeated phase from the same side is not a second step', [steps(tlsOf(d)), tlsOf(d)!.phases[0].frameId], [['client:application data'], 1]);
+    check('...and a row that changes nothing leaves the TLS version alone', tlsOf(d)!.version, v1);
+  }
+  {
+    // QUIC's TLS is QUIC's phases (ruling S3-1): a row with no tcp is not folded.
+    const d = fresh();
+    d.feed(tlsRow(true, hello(), 1, { frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'quic', 'tls'], protocol: 'QUIC', streamId: undefined }));
+    check('tls: TLS inside QUIC is not folded as TLS', [d.changedSince(0).tls, tlsOf(d)], [[], undefined]);
+    const noTls = fresh();
+    noTls.feed(tlsRow(true, hello(), 1, { frameProtocols: ['eth', 'ethertype', 'ip', 'tcp'] }));
+    check('...nor is a TCP row that does not list tls', noTls.changedSince(0).tls, []);
+    const plain = fresh();
+    plain.feed(tlsRow(true, { 'tls.record.content_type': 22 }));
+    check('...nor a TLS row that shows no phase', [plain.changedSince(0).tls, plain.get(TLS_STREAM) !== undefined], [[], true]);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    const s = tlsOf(d)!;
+    check('tlsNote: unanswered only once the TCP stream is not open',
+      [tlsNote(s, 'open'), tlsNote(s, 'no reply'), tlsNote(s, 'half-closed by client'), tlsNote(s, 'reset by server'), tlsNote(undefined, 'reset by server')],
+      ['', ' · TLS unanswered', ' · TLS unanswered', ' · TLS unanswered', '']);
+    d.feed(tlsRow(false, serverHello()));
+    check('...an answered hello is no note', tlsNote(tlsOf(d), 'reset by server'), '');
+    d.feed(tlsRow(false, alert(40, 2)));
+    check('...a fatal alert is its own note, open or not', [tlsNote(tlsOf(d), 'open'), tlsNote(tlsOf(d), 'closed cleanly')], [' · TLS alert', ' · TLS alert']);
+  }
+  {
+    // The ServerHello's record lost a segment, so it never reassembled and no
+    // hello was read; the server's later records still show it answered.
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, { 'tls.record.content_type': 23 }));
+    check('tlsNote: a server that spoke TLS is not unanswered, though its hello was never read',
+      [steps(tlsOf(d)!), tlsNote(tlsOf(d), 'reset by server')], [['client:ClientHello', 'server:application data'], '']);
+  }
+  {
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    const first = d.version;
+    d.feed(tlsRow(false, serverHello()));
+    check('changedSince answers a TLS summary changed after a version',
+      [d.changedSince(0).tls.length, d.changedSince(first).tls.map((s) => s.key), d.changedSince(d.version).tls.length], [1, [TLS_STREAM], 0]);
+    const back = StreamDigest.restore(JSON.parse(JSON.stringify(d.snapshot())));
+    check('a snapshot round trip restores the TLS map', back.getTls(TLS_STREAM), d.getTls(TLS_STREAM));
+    back.feed(tlsRow(true, app()));
+    check('...and a restored digest keeps folding TLS', steps(back.getTls(TLS_STREAM)), ['client:ClientHello', 'server:ServerHello', 'client:application data']);
+    const lone = StreamDigest.restore({
+      throughId: 5, version: 5, captureEnd: 1,
+      entries: [{ kind: 'tls', summary: { kind: 'tls', key: 99, phases: [], fatalAlert: null, version: 3 } }],
+    });
+    check('restore keeps a TLS entry whose TCP stream is absent', [lone.getTls(99)?.key, lone.get(99)], [99, undefined]);
+  }
+}
+
+// ---- DNS answers on a UDP flow (stage 3).
+{
+  /** A classic DNS row: the server is on port 53. */
+  const dnsRow = (fromClient: boolean, id: number, rcode?: number, time?: number, port = 53): Packet => udpRow({
+    fromClient, time,
+    fields: { 'dns.id': id, 'dns.flags.response': fromClient ? 0 : 1, ...(fromClient || rcode === undefined ? {} : { 'dns.flags.rcode': rcode }) },
+    extra: fromClient ? { destPort: port } : { sourcePort: port },
+  });
+  const tally = (d: StreamDigest) => udpOf(d).dns;
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1));
+    d.feed(dnsRow(false, 7, 0, 1.1));
+    check('dns: a query and its answer is one answered', tally(d), { answered: 1, errors: 0, evictedUnanswered: 0, open: [] });
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1));
+    d.feed(dnsRow(true, 7, undefined, 2));
+    d.feed(dnsRow(false, 7, 0, 2.1));
+    check('dns: a retried query answered once is one answered', tally(d), { answered: 1, errors: 0, evictedUnanswered: 0, open: [] });
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 8, undefined, 1));
+    d.feed(dnsRow(false, 8, 3, 1.1));
+    check('dns: an NXDOMAIN answer is an error', [tally(d)?.answered, tally(d)?.errors, tally(d)?.open.length], [0, 1, 0]);
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(false, 9, 0, 1));
+    d.feed(dnsRow(false, 10, 2, 1.1));
+    check('dns: an answer to a query before the capture counts', [tally(d)?.answered, tally(d)?.errors], [1, 1]);
+  }
+  {
+    const d = fresh();
+    for (let i = 0; i < 65; i++) d.feed(dnsRow(true, 100 + i, undefined, i));
+    const t = tally(d)!;
+    check('dns: the 65th open query evicts the oldest as unanswered',
+      [t.open.length, t.evictedUnanswered, t.open[0].id, t.open[63].id], [64, 1, 101, 164]);
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1, 5353));
+    d.feed(dnsRow(false, 7, 0, 1.1, 5353));
+    check('dns: mDNS keeps the UDP outcome', [udpOf(d).dns, udpOf(d).outcome], [undefined, 'request/response']);
+  }
+}
+
+// ---- DHCP exchanges by transaction id (stage 3).
+{
+  const XID = 0x3903f326;
+  const MAC = '00:11:22:33:44:55';
+  const GATEWAY = '192.168.1.1';
+  /**
+   * A DHCPv4 row as the dissector writes it. `type` is option 53; the addresses
+   * and ports are given, because a side is never read from them.
+   */
+  const dhcpRow = (type: number, from: [string, number], to: [string, number], fields: Record<string, number | string> = {}, time?: number, xid = XID): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time ?? id / 1000,
+      source: from[0], destination: to[0], sourcePort: from[1], destPort: to[1],
+      protocol: 'UDP', protocolLabel: 'DHCP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'dhcp'],
+      fields: { 'udp.stream': 3, 'dhcp.id': xid, 'dhcp.option.dhcp': type, 'dhcp.hw.mac_addr': MAC, ...fields },
+      length: 342, info: '', status: 'ok',
+    } as unknown as Packet;
+  };
+  const toServer = (type: number, fields: Record<string, number | string> = {}, time?: number): Packet =>
+    dhcpRow(type, ['0.0.0.0', 68], ['255.255.255.255', 67], fields, time);
+  const toClient = (type: number, fields: Record<string, number | string> = {}, time?: number): Packet =>
+    dhcpRow(type, [GATEWAY, 67], ['192.168.1.50', 68], { 'dhcp.ip.your': '192.168.1.50', ...fields }, time);
+  const dhcpOf = (d: StreamDigest, key = XID) => d.getDhcp(key);
+  const steps = (d: StreamDigest) => dhcpOf(d)?.phases.map((p) => `${p.side}:${p.message}`);
+
+  {
+    const d = fresh();
+    d.feed(toServer(1, { 'dhcp.option.hostname': 'laptop' }, 1));
+    d.feed(toClient(2, {}, 2));
+    d.feed(toServer(3, { 'dhcp.option.dhcp_server_id': GATEWAY }, 3));
+    d.feed(toClient(5, {}, 4));
+    const s = dhcpOf(d)!;
+    check('dhcp: DORA is acked', [s.outcome, steps(d)], ['acked', ['client:Discover', 'server:Offer', 'client:Request', 'server:ACK']]);
+    check('...keyed by the transaction id, with a client by MAC and a server on 67',
+      [s.kind, s.key, s.client, s.server, s.hostname, s.offered],
+      ['dhcp', XID, { address: MAC, port: 68 }, { address: GATEWAY, port: 67 }, 'laptop', '192.168.1.50']);
+    check('...and its totals go by message type', [s.toServer.packets, s.toClient.packets, s.firstId, s.lastId, s.start, s.end], [2, 2, 1, 4, 1, 4]);
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    d.feed(toClient(2));
+    check('dhcp: an offer and no request is offer not taken', dhcpOf(d)?.outcome, 'offer not taken');
+    d.feed(toServer(3));
+    check('...and a request after it with no answer is no reply', dhcpOf(d)?.outcome, 'no reply');
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1, {}, 1));
+    d.feed(toServer(1, {}, 4));
+    check('dhcp: discovers alone are no offer', [dhcpOf(d)?.outcome, steps(d), dhcpOf(d)?.toServer.packets], ['no offer', ['client:Discover'], 2]);
+  }
+  {
+    const d = fresh();
+    d.feed(dhcpRow(3, ['192.168.1.5', 68], [GATEWAY, 67], { 'dhcp.option.dhcp_server_id': GATEWAY }));
+    check('dhcp: an unanswered renewal is no reply', [dhcpOf(d)?.outcome, dhcpOf(d)?.server.address], ['no reply', GATEWAY]);
+  }
+  {
+    const d = fresh();
+    d.feed(dhcpRow(3, ['192.168.1.5', 68], [GATEWAY, 67]));
+    check('dhcp: a unicast renewal names its server by where it was sent', dhcpOf(d)?.server, { address: GATEWAY, port: 67 });
+    const b = fresh();
+    b.feed(toServer(1));
+    check('...a broadcast names none', dhcpOf(b)?.server.address, '');
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(3));
+    d.feed(toClient(6));
+    check('dhcp: a NAK after a request is NAK', dhcpOf(d)?.outcome, 'NAK');
+    d.feed(toServer(1));
+    d.feed(toServer(3));
+    d.feed(toClient(5));
+    check('...and a later ACK decides instead', dhcpOf(d)?.outcome, 'acked');
+    d.feed(toServer(4));
+    check('...a Decline after the ACK is declined', dhcpOf(d)?.outcome, 'declined');
+    const rel = fresh();
+    rel.feed(toServer(3));
+    rel.feed(toClient(5));
+    rel.feed(toServer(7));
+    check('...a Release is released', dhcpOf(rel)?.outcome, 'released');
+    const decl = fresh();
+    decl.feed(toServer(4));
+    check('...a Decline with no ACK before it is not declined', dhcpOf(decl)?.outcome, 'no offer');
+  }
+  {
+    // A relay forwards every message 67 to 67; the side is the message's, not the port's.
+    const d = fresh();
+    d.feed(dhcpRow(1, ['10.9.0.1', 67], ['10.0.0.1', 67], {}, 1));
+    d.feed(dhcpRow(2, ['10.0.0.1', 67], ['10.9.0.1', 67], { 'dhcp.ip.your': '10.9.0.50' }, 2));
+    d.feed(dhcpRow(3, ['10.9.0.1', 67], ['10.0.0.1', 67], {}, 3));
+    d.feed(dhcpRow(5, ['10.0.0.1', 67], ['10.9.0.1', 67], { 'dhcp.ip.your': '10.9.0.50' }, 4));
+    const s = dhcpOf(d)!;
+    check('dhcp: a relayed exchange takes sides by message type',
+      [steps(d), s.toServer.packets, s.toClient.packets, s.outcome, s.server.address],
+      [['client:Discover', 'server:Offer', 'client:Request', 'server:ACK'], 2, 2, 'acked', '10.0.0.1']);
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    d.feed(dhcpRow(2, ['192.168.1.9', 67], ['192.168.1.50', 68], { 'dhcp.option.dhcp_server_id': GATEWAY }));
+    check('dhcp: the server is the server identifier option', dhcpOf(d)?.server, { address: GATEWAY, port: 67 });
+    const bare = fresh();
+    bare.feed(toServer(1));
+    check('...with no server message yet it is empty', dhcpOf(bare)?.server, { address: '', port: 67 });
+    bare.feed(toClient(2));
+    check('...and from the first server message\'s source when no row names it', dhcpOf(bare)?.server, { address: GATEWAY, port: 67 });
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    d.feed(toClient(2));
+    const flow = udpOf(d);
+    check('dhcp: a DHCP row still counts in its UDP flow', [flow.toServer.packets + flow.toClient.packets, d.getDhcp(XID) !== undefined], [2, true]);
+  }
+  {
+    const big = 0xdeadbeef;
+    const d = fresh();
+    d.feed(dhcpRow(1, ['0.0.0.0', 68], ['255.255.255.255', 67], {}, 1, big));
+    d.feed(dhcpRow(2, [GATEWAY, 67], ['192.168.1.50', 68], {}, 2, big));
+    check('dhcp: an xid above 2^31 keeps its value',
+      [dhcpOf(d, big)?.key, dhcpOf(d, big)?.phases.length, [...d.changedSince(0).dhcp.map((s) => s.key)], inFlow(toServer(1, {}), 'dhcp', XID)],
+      [big, 2, [big], true]);
+  }
+  {
+    const d = fresh();
+    d.feed(toServer(1));
+    const first = d.version;
+    d.feed(toClient(2));
+    check('dhcp: changedSince answers an exchange changed after a version',
+      [d.changedSince(0).dhcp.length, d.changedSince(first).dhcp.map((s) => s.key), d.changedSince(d.version).dhcp.length], [1, [XID], 0]);
+    const back = StreamDigest.restore(JSON.parse(JSON.stringify(d.snapshot())));
+    check('dhcp: a snapshot round trip restores the map', back.getDhcp(XID), d.getDhcp(XID));
+    back.feed(toServer(3));
+    check('...and a restored digest keeps folding', back.getDhcp(XID)?.phases.map((p) => p.message), ['Discover', 'Offer', 'Request']);
+  }
+  {
+    // Not DHCP: DHCPv6 carries no id or message type, and a v4 row lacking either is a UDP flow only.
+    const d = fresh();
+    d.feed({ ...toServer(1), frameProtocols: ['eth', 'ethertype', 'ipv6', 'udp', 'dhcpv6'] });
+    d.feed(toServer(1, { 'dhcp.option.dhcp': 9 }));
+    const noType = toServer(1);
+    delete noType.fields!['dhcp.option.dhcp'];
+    d.feed(noType);
+    check('dhcp: only a DHCPv4 row with an id and a message type 1..8 is folded', [d.changedSince(0).dhcp, dhcpKeyOf(noType)], [[], null]);
+  }
 }
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`);

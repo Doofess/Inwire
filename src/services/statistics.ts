@@ -30,7 +30,7 @@
 import { Packet } from '../types/packet';
 import { fieldValue } from './dissect/fieldAccess';
 
-export type ConversationKind = 'eth' | 'ipv4' | 'ipv6' | 'tcp' | 'udp' | 'quic';
+export type ConversationKind = 'eth' | 'ipv4' | 'ipv6' | 'tcp' | 'udp' | 'quic' | 'dhcp';
 
 export interface Endpoint {
   address: string;
@@ -114,8 +114,10 @@ function addressesFor(packet: Packet, kind: ConversationKind): { a: string; b: s
       if (typeof sp !== 'number' || typeof dp !== 'number') return null;
       return { a: packet.source, b: packet.destination, pa: sp, pb: dp };
     }
-    // Only the digest knows a connection, which spans address changes.
+    // Only the digest knows a connection, which spans address changes, and
+    // an exchange, which spans the addresses a client holds along the way.
     case 'quic':
+    case 'dhcp':
       return null;
   }
 }
@@ -213,7 +215,7 @@ export class ConversationTable {
 }
 
 export function conversations(packets: readonly Packet[], kind: ConversationKind): Conversation[] {
-  if (kind === 'quic') return [];
+  if (kind === 'quic' || kind === 'dhcp') return [];
   const table = new ConversationTable(kind);
   for (const packet of packets) table.add(packet);
   return table.result();
@@ -504,6 +506,9 @@ export function conversationFilter(c: Conversation, kind: ConversationKind): str
     // A connection, not an address pair: it survives a migration.
     case 'quic':
       return `quic.connection.number == ${c.streamId}`;
+    // A transaction, not an address pair: the client's address changes mid-exchange.
+    case 'dhcp':
+      return `dhcp.id == 0x${(c.streamId! >>> 0).toString(16).padStart(8, '0')}`;
   }
 }
 
@@ -517,8 +522,9 @@ export function endpointFilter(e: Endpoint, kind: ConversationKind): string {
     case 'tcp':
     case 'udp':
     case 'quic':
+    case 'dhcp':
       return e.port === undefined
         ? `addr == ${quote(e.address)}`
-        : `addr == ${quote(e.address)} && ${kind === 'quic' ? 'udp' : kind}.port == ${e.port}`;
+        : `addr == ${quote(e.address)} && ${kind === 'quic' || kind === 'dhcp' ? 'udp' : kind}.port == ${e.port}`;
   }
 }

@@ -20,7 +20,9 @@
 import { readFileSync } from 'node:fs';
 import { QUIET_SECONDS, conversationRows, digestConversation, digestScopeNote, outcomeText } from '../../src/services/conversation/digestRows';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
-import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
+import type { DnsTally, QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
+import type { TlsPhaseStep, TlsSummary } from '../../src/services/conversation/tlsSummary';
+import type { DhcpSummary } from '../../src/services/conversation/dhcpSummary';
 import type { ToCapture, FromCapture } from '../../src/services/capture/captureProtocol';
 
 let failures = 0;
@@ -84,8 +86,32 @@ function quicSummary(overrides: Partial<QuicSummary> = {}): QuicSummary {
   } as QuicSummary;
 }
 
-const NO_FLOWS = { udp: new Map<number, UdpSummary>(), quic: new Map<number, QuicSummary>(), captureEnd: 0 };
-const flows = (over: { summaries?: ReadonlyMap<number, StreamSummary>; udp?: ReadonlyMap<number, UdpSummary>; quic?: ReadonlyMap<number, QuicSummary>; captureEnd?: number }) =>
+/** A TLS summary with the given phases (words only), all from the client. */
+function tlsSummary(key: number, phases: TlsPhaseStep[], fatalAlert: TlsSummary['fatalAlert'] = null): TlsSummary {
+  return { kind: 'tls', key, phases, fatalAlert, version: 1 };
+}
+const step = (phase: TlsPhaseStep['phase'], side: TlsPhaseStep['side'] = 'client', alertName?: string): TlsPhaseStep =>
+  ({ phase, side, frameId: 1, time: 0.1, ...(alertName === undefined ? {} : { alertName }) });
+
+/** A DHCP exchange, acked, with a hostname. The key is past 2^31 on purpose: it is unsigned. */
+function dhcpSummary(overrides: Partial<DhcpSummary> = {}): DhcpSummary {
+  return {
+    kind: 'dhcp', key: 0xdeadbeef,
+    client: { address: '02:00:00:00:00:01', port: 68 }, server: { address: '192.0.2.1', port: 67 },
+    hostname: 'host-a', offered: '192.0.2.50',
+    toServer: { packets: 2, bytes: 684, first: 1, last: 1.2 },
+    toClient: { packets: 2, bytes: 684, first: 1.1, last: 1.3 },
+    firstId: 60, lastId: 63, start: 1, end: 1.3,
+    phases: [], outcome: 'acked', version: 5,
+    ...overrides,
+  };
+}
+
+const NO_FLOWS = {
+  udp: new Map<number, UdpSummary>(), quic: new Map<number, QuicSummary>(),
+  tls: new Map<number, TlsSummary>(), dhcp: new Map<number, DhcpSummary>(), captureEnd: 0,
+};
+const flows = (over: { summaries?: ReadonlyMap<number, StreamSummary>; udp?: ReadonlyMap<number, UdpSummary>; quic?: ReadonlyMap<number, QuicSummary>; tls?: ReadonlyMap<number, TlsSummary>; dhcp?: ReadonlyMap<number, DhcpSummary>; captureEnd?: number }) =>
   ({ summaries: new Map<number, StreamSummary>(), ...NO_FLOWS, ...over });
 
 console.log('\n--- a summary as the conversation table\'s row ---\n');
@@ -182,6 +208,26 @@ console.log('\n--- UDP and QUIC from the digest ---\n');
   check('...and an empty QUIC map leaves the level to the buffer, which has none', conversationRows('quic', flows({})), null);
 }
 
+console.log('\n--- DHCP exchanges from the digest ---\n');
+
+{
+  const dhcp = flows({ dhcp: new Map([[0xdeadbeef, dhcpSummary()]]), captureEnd: 2 });
+  const rows = conversationRows('dhcp', dhcp);
+  check('dhcp rows come from the digest, client as A',
+    rows?.map((r) => [r.key, r.streamId, r.kind, r.protocol, r.addressA, r.portA, r.addressB, r.portB, r.outcome]),
+    [['dhcp:3735928559', 3735928559, 'dhcp', 'DHCP', 'host-a', 68, '192.0.2.1', 67, 'acked']]);
+  const row = rows![0];
+  check('...A to B is toServer, B to A is toClient',
+    [row.packetsAtoB, row.bytesAtoB, row.packetsBtoA, row.bytesBtoA, row.packets, row.firstFrame],
+    [2, 684, 2, 684, 4, 60]);
+  const noName = conversationRows('dhcp', flows({ dhcp: new Map([[7, dhcpSummary({ key: 7, hostname: null })]]) }));
+  check('...with no hostname, A is the client MAC', noName?.[0].addressA, '02:00:00:00:00:01');
+  check('...the outcome is the summary\'s alone, with no modifier even long after the end',
+    outcomeText(row, 9_999), 'acked');
+  check('...an empty DHCP map leaves the level to the buffer', conversationRows('dhcp', flows({})), null);
+  check('...and a DHCP-only digest leaves the UDP level alone', conversationRows('udp', dhcp), null);
+}
+
 console.log('\n--- went quiet ---\n');
 
 {
@@ -205,6 +251,50 @@ console.log('\n--- went quiet ---\n');
   check('a UDP row is never joined mid-stream', outcomeText(digestConversation(udpSummary()), 10.1), 'request/response');
 }
 
+console.log('\n--- TLS on a TCP row ---\n');
+
+{
+  const rowText = (s: StreamSummary, tls?: TlsSummary) => {
+    const rows = conversationRows('tcp', flows({
+      summaries: new Map([[s.streamId, s]]), tls: new Map(tls === undefined ? [] : [[s.streamId, tls]]),
+    }))!;
+    return outcomeText(rows[0]);
+  };
+  const alert = tlsSummary(3, [step('ClientHello'), step('ServerHello', 'server'), step('alert', 'server', 'handshake_failure')],
+    { side: 'server', name: 'handshake_failure' });
+  check('a TCP row says TLS alert after its outcome',
+    rowText(summary({ outcome: 'closed cleanly', joinedMidStream: true }), alert),
+    'closed cleanly · joined mid-stream · TLS alert');
+  check('a TCP row with a ClientHello and no answer says TLS unanswered once closed',
+    rowText(summary({ outcome: 'reset by server' }), tlsSummary(3, [step('ClientHello')])),
+    'reset by server · TLS unanswered');
+  check('an open TCP row with no ServerHello yet says nothing about TLS',
+    rowText(summary({ outcome: 'open' }), tlsSummary(3, [step('ClientHello')])), 'open');
+  check('a UDP row never takes a TLS note',
+    outcomeText(digestConversation(udpSummary()), 10.1), 'request/response');
+}
+
+console.log('\n--- DNS answers on a UDP row ---\n');
+
+{
+  const dnsRow = (dns: DnsTally, end = 10) => digestConversation(udpSummary({ dns, end }));
+  const q = (id: number, time: number) => ({ id, frameId: id, time });
+  const open1 = dnsRow({ answered: 0, errors: 0, evictedUnanswered: 0, open: [q(1, 100)] });
+  check('dns: waiting turns unanswered as the capture\'s end moves',
+    [outcomeText(open1, 104.9), outcomeText(open1, 105)], ['1 waiting', '1 unanswered']);
+  check('dns: the text orders answered, errors, unanswered, waiting and drops zeros',
+    [
+      outcomeText(dnsRow({ answered: 11, errors: 2, evictedUnanswered: 1, open: [q(1, 100), q(2, 104)] }), 105),
+      outcomeText(dnsRow({ answered: 1, errors: 1, evictedUnanswered: 0, open: [] }), 105),
+      outcomeText(dnsRow({ answered: 3, errors: 0, evictedUnanswered: 0, open: [] }), 105),
+    ],
+    ['11 answered · 2 errors · 2 unanswered · 1 waiting', '1 answered · 1 error', '3 answered']);
+  check('dns: a DNS flow never says went quiet',
+    outcomeText(dnsRow({ answered: 2, errors: 0, evictedUnanswered: 0, open: [] }, 10), 1000), '2 answered');
+  check('dns: an empty tally falls back to the UDP text',
+    outcomeText(dnsRow({ answered: 0, errors: 0, evictedUnanswered: 0, open: [] }), 10.1), 'request/response');
+}
+
 console.log('\n--- the scope note for each level ---\n');
 
 {
@@ -216,6 +306,11 @@ console.log('\n--- the scope note for each level ---\n');
       digestScopeNote('ipv6', all, null), digestScopeNote('eth', all, { done: 1, total: 2 })],
     ['Whole capture', 'Whole capture', null, null, null]);
   check('...an empty level and no rebuild makes no claim', [digestScopeNote('udp', flows({}), null), digestScopeNote('quic', flows({ udp: all.udp }), null)], [null, null]);
+  const withDhcp = flows({ dhcp: new Map([[1, dhcpSummary({ key: 1 })]]) });
+  check('the scope note names the whole capture for dhcp',
+    [digestScopeNote('dhcp', withDhcp, null), digestScopeNote('dhcp', flows({}), null),
+      digestScopeNote('dhcp', flows({}), { done: 1, total: 4 })],
+    ['Whole capture', null, 'Rebuilding the stream digest: 1 of 4 chunks']);
   check('...a rebuild is reported on udp and quic too', digestScopeNote('quic', flows({}), { done: 1, total: 4 }),
     'Rebuilding the stream digest: 1 of 4 chunks');
 }
@@ -255,7 +350,7 @@ const { captureStore } = await import('../../src/services/capture/captureClient'
 
 check('streamDigest falls back to nothing, at the version it was asked from',
   await captureStore.streamDigest(42),
-  { captureId: null, version: 42, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
+  { captureId: null, version: 42, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false });
 check('streamOrdinals falls back to nothing, with no next page',
   await captureStore.streamOrdinals(3, 12, 40, 0),
   { ordinals: [], nextChunk: null });
@@ -299,7 +394,7 @@ answer = (message) => {
   if (message.type === 'streamDigest') {
     return {
       type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd',
-      version: 5, summaries: [changed], udp: [], quic: [], captureEnd: 0, rebuilding: { done: 3, total: 9 }, partial: true,
+      version: 5, summaries: [changed], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: { done: 3, total: 9 }, partial: true,
     };
   }
   if (message.type === 'streamOrdinals') {
@@ -344,10 +439,10 @@ answer = (message) => {
   // A `since` the store has nothing past: the answer is empty and the version
   // is whatever the store says, which the hook takes as its next `since`.
   answer = (message) => message.type === 'streamDigest'
-    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false }
+    ? { type: 'streamDigest', requestId: message.requestId, captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false }
     : null;
   check('an empty answer settles too', await captureStore.streamDigest(5),
-    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
+    { captureId: 'cap-20261009-120000-abcd', version: 5, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false });
 }
 
 console.log('\n--- the store goes away with requests in flight ---\n');
@@ -365,12 +460,12 @@ console.log('\n--- the store goes away with requests in flight ---\n');
   onExit!('the capture store stopped');
   check('a pending flowOrdinals settles with its fallback', await flowPage, { ordinals: [], nextChunk: null, searched: 1 });
   check('a pending streamDigest settles with its fallback', await digest,
-    { captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
+    { captureId: null, version: 0, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false });
   check('a pending streamOrdinals settles with its fallback', await page, { ordinals: [], nextChunk: null });
   check('the store is reported gone', captureStore.snapshot.error, 'the capture store stopped');
   check('and nothing is asked of it again',
     [await captureStore.streamDigest(1), received.filter((m) => m.type === 'streamDigest').length],
-    [{ captureId: null, version: 1, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false }, 3]);
+    [{ captureId: null, version: 1, summaries: [], udp: [], quic: [], tls: [], dhcp: [], captureEnd: 0, rebuilding: null, partial: false }, 3]);
 }
 
 port1.close();

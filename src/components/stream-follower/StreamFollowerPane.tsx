@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { saveGeneratedBlob } from '../../lib/saveFile';
 import {
-  clientEnd, isFromClient, streamPackets as framesOnStream,
+  clientEnd, endpointText, sideOf, streamPackets as framesOnStream,
   type ClientEnd, type StreamTarget,
 } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
@@ -26,6 +26,10 @@ import { Segmented } from '../ui/segmented';
 import { LadderView, type ScrollRequest } from '../ladder/LadderView';
 import { TcpStateMap } from '../ladder/TcpStateMap';
 import { copyText } from '../ui/CopyButton';
+import { PhaseLine } from './PhaseLine';
+import { dnsMarks } from '../../services/conversation/dnsMarks';
+import type { TlsSummary } from '../../services/conversation/tlsSummary';
+import type { DhcpSummary } from '../../services/conversation/dhcpSummary';
 
 /**
  * One conversation's frames, both directions, in order.
@@ -130,11 +134,17 @@ function searchedSuffix(searched: number | undefined): string {
   return searched !== undefined && searched < 1 ? ` · ${Math.floor(searched * 100)}% searched` : '';
 }
 
-type AnySummary = StreamSummary | UdpSummary | QuicSummary;
+type AnySummary = StreamSummary | UdpSummary | QuicSummary | DhcpSummary;
 
 /** What names a stream within one capture: its kind and the key the digest holds it under. */
-const streamKey = (kind: 'tcp' | 'udp' | 'quic', id: number): string => `${kind}:${id}`;
+const streamKey = (kind: StreamTarget['kind'], id: number): string => `${kind}:${id}`;
 const summaryKey = (s: AnySummary): string => ('kind' in s ? streamKey(s.kind, s.key) : streamKey('tcp', s.streamId));
+
+/**
+ * A DHCP exchange's client is a hardware address and its side comes from the
+ * message type, so the "client is a guess" notice has nothing to disclose.
+ */
+const DHCP_BASIS = 'well-known-port' as const;
 
 /** The words for a QUIC phase. Inferred from what the frames carry, so the tooltip says so. */
 const PHASE_LABEL: Record<QuicPhaseStep['phase'], string> = {
@@ -145,13 +155,15 @@ interface StreamFollowerPaneProps {
   target: StreamTarget | null;
   packets: Packet[];
   /**
-   * The digest's summary of the target's stream, UDP flow or QUIC connection
+   * The digest's summary of the target's stream, UDP flow, QUIC connection or DHCP exchange
    * (ADR 0055), or null when there is none to have: a capture with no store, a
    * digest that has not answered yet, or a target the digest does not hold.
    * With one, the pane reads the stream's frames from the whole capture;
    * without, it shows what the buffer holds, as it always did.
    */
-  summary: StreamSummary | UdpSummary | QuicSummary | null;
+  summary: AnySummary | null;
+  /** The digest's TLS phases for a TCP target, from the same poll as `summary`. */
+  tls?: TlsSummary | null;
   /**
    * The capture the digest is answering for, or null when none has answered.
    * Everything this pane keeps per stream belongs to one capture, and a stream
@@ -159,6 +171,8 @@ interface StreamFollowerPaneProps {
    * drops it all.
    */
   captureId: string | null;
+  /** The digest's capture end, which decides when a DNS query stops waiting. */
+  captureEnd?: number;
   /** The packet list's own colouring, so an arrow looks like its row. */
   colorEngine: ColorRulesEngine;
   packetTheme: PacketTheme;
@@ -187,7 +201,9 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   target,
   packets,
   summary,
+  tls,
   captureId,
+  captureEnd = 0,
   colorEngine,
   packetTheme,
   selectedId,
@@ -395,8 +411,10 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   const chosen = target === null
     ? null
     : summary !== null
-      ? { ...summary.client, basis: summary.clientBasis }
-      : clientEnd(frames, target);
+      ? { ...summary.client, basis: 'clientBasis' in summary ? summary.clientBasis : DHCP_BASIS }
+      : target.kind === 'dhcp'
+        ? { ...clientEnd(frames, target), basis: DHCP_BASIS }
+        : clientEnd(frames, target);
   const clientAddress = chosen?.address ?? '';
   const clientPort = chosen?.port ?? 0;
   const clientBasis = chosen?.basis ?? 'first-speaker';
@@ -413,15 +431,27 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     [serverAddress, serverPort],
   );
 
+  // DNS marks, only for a UDP flow whose digest summary has a tally. The capture's
+  // end moves a waiting query to unanswered, so it is a dependency.
+  // None while pages are still arriving: a query whose answer is on a later page
+  // would read `no answer` until it came.
+  const hasDnsTally = summary !== null && 'kind' in summary && summary.kind === 'udp' && summary.dns !== undefined;
+  const stillReading = loaded?.loading != null;
+  const notes = useMemo(
+    () => (hasDnsTally && !stillReading ? dnsMarks(frames, captureEnd) : undefined),
+    [hasDnsTally, stillReading, frames, captureEnd],
+  );
+
+  const targetKind = target === null ? 'tcp' : target.kind;
   const totals = useMemo(() => {
     let toServer = 0;
     let toClient = 0;
     for (const p of frames) {
-      if (isFromClient(p, client)) toServer += p.length;
+      if (sideOf(targetKind, p, client) === 'client') toServer += p.length;
       else toClient += p.length;
     }
     return { toServer, toClient };
-  }, [frames, client]);
+  }, [frames, client, targetKind]);
 
   const toggleBand = useCallback((firstId: number) => {
     setExpanded((current) => {
@@ -480,8 +510,12 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   // states and a QUIC connection has phases, shown as the line above the ladder.
   const tcpSummary = summary !== null && !('kind' in summary) ? summary : null;
   const quicSummary = summary !== null && 'kind' in summary && summary.kind === 'quic' ? summary : null;
-  // The noun in the title: a QUIC target is a connection, the others streams.
-  const noun = target.kind === 'quic' ? 'Connection' : 'Stream';
+  const dhcpSummary = summary !== null && 'kind' in summary && summary.kind === 'dhcp' ? summary : null;
+  // The noun in the title: a QUIC target is a connection, a DHCP one an exchange, the others streams.
+  const noun = target.kind === 'quic' ? 'Connection' : target.kind === 'dhcp' ? 'Exchange' : 'Stream';
+  // A DHCP exchange is named by its transaction id as the packet list shows it, in hex.
+  const idLabel = target.streamId === undefined ? ''
+    : target.kind === 'dhcp' ? ` 0x${(target.streamId >>> 0).toString(16).padStart(8, '0')}` : ` #${target.streamId}`;
 
   /**
    * One frame as one line, and the same line the pane draws.
@@ -495,7 +529,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
    * rather than O(stream) on every render.
    */
   const summaryLine = (p: Packet): string => {
-    const arrow = isFromClient(p, client) ? '-->' : '<--';
+    const arrow = sideOf(target.kind, p, client) === 'client' ? '-->' : '<--';
     return [
       `#${p.id}`,
       `${p.relativeTime.toFixed(6)}s`,
@@ -508,8 +542,8 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
 
   const streamText = (): string => {
     const header = `# Follow ${target.kind.toUpperCase()} ${noun.toLowerCase()}`
-      + `${target.streamId !== undefined ? ` #${target.streamId}` : ''}`
-      + `  ${client.address} <-> ${server.address}:${server.port}\n`
+      + idLabel
+      + `  ${endpointText(client, target.kind, 'client')} <-> ${endpointText(server, target.kind)}\n`
       + `# frame\ttime\tdir\tsource\tdestination\tlength\n`;
     return header + frames.map(summaryLine).join('\n') + '\n';
   };
@@ -530,7 +564,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     // dialog's own failure already put in front of the person).
     void saveGeneratedBlob(
       blob,
-      `${target.kind}_stream_${target.streamId ?? `${target.portA}-${target.portB}`}_frames.txt`,
+      `${target.kind}_${noun.toLowerCase()}_${target.streamId ?? `${target.portA}-${target.portB}`}_frames.txt`,
     );
   };
 
@@ -550,7 +584,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               <div className="flex items-center gap-2 font-bold text-sm">
                 <span>
                   Follow {target.kind.toUpperCase()} {noun}
-                  {target.streamId !== undefined ? ` #${target.streamId}` : ''}
+                  {idLabel}
                 </span>
                 <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80">
                   {loading !== null
@@ -560,8 +594,9 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               </div>
               <p className="text-xs text-muted-foreground">
                 <span className="font-mono">
-                  {client.address} <span className="text-muted-foreground">⇄</span> {server.address}
-                  :{portLabel(server.port, target.kind === 'quic' ? 'udp' : target.kind, true)}
+                  {client.address} <span className="text-muted-foreground">⇄</span> {server.address === ''
+                    ? 'server not seen'
+                    : <>{server.address}:{portLabel(server.port, target.kind === 'tcp' ? 'tcp' : 'udp', true)}</>}
                 </span>
               </p>
             </div>
@@ -655,27 +690,39 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               decrypted CONNECTION_CLOSE, never a guess. It wraps rather than
               scrolling, so at the 1024 minimum window nothing leaves the pane. */}
           {loaded !== null && quicSummary !== null && quicSummary.phases.length > 0 && (
-            <div
-              aria-label="QUIC phases"
-              className="px-4 py-2 border-b border-border flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs"
-            >
-              <span className="text-muted-foreground mr-1">Phases</span>
-              {quicSummary.phases.map((step, i) => (
-                <React.Fragment key={`${step.phase}:${step.side}`}>
-                  {i > 0 && <span className="text-muted-foreground" aria-hidden="true">→</span>}
-                  <button
-                    type="button"
-                    onClick={() => pickState(step.frameId)}
-                    title={`Frame #${step.frameId} at ${step.time.toFixed(3)} s, as read from the frames`}
-                    className="px-2 py-0.5 rounded border border-border bg-secondary/50 text-foreground/90
-                      hover:bg-accent active:opacity-70
-                      focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    {PHASE_LABEL[step.phase]} <span className="text-muted-foreground">{step.side}</span>
-                  </button>
-                </React.Fragment>
-              ))}
-            </div>
+            <PhaseLine
+              label="QUIC phases"
+              steps={quicSummary.phases.map((step) => ({
+                key: `${step.phase}:${step.side}`, text: PHASE_LABEL[step.phase],
+                side: step.side, frameId: step.frameId, time: step.time,
+              }))}
+              onPick={pickState}
+            />
+          )}
+          {/* A DHCP exchange's messages, in the order each was first seen, as
+              the same line: the message names are the option 53 type's own. */}
+          {loaded !== null && dhcpSummary !== null && dhcpSummary.phases.length > 0 && (
+            <PhaseLine
+              label="DHCP phases"
+              steps={dhcpSummary.phases.map((step) => ({
+                key: `${step.message}:${step.side}`, text: step.message,
+                side: step.side, frameId: step.frameId, time: step.time,
+              }))}
+              onPick={pickState}
+            />
+          )}
+          {/* A TCP stream's TLS phases, between the state map's dock and the
+              ladder: the same line, read from the digest's TLS summary. */}
+          {loaded !== null && tcpSummary !== null && tls != null && tls.phases.length > 0 && (
+            <PhaseLine
+              label="TLS phases"
+              steps={tls.phases.map((step) => ({
+                key: `${step.phase}:${step.side}`,
+                text: step.phase === 'alert' ? `alert: ${step.alertName ?? 'Unknown'}` : step.phase,
+                side: step.side, frameId: step.frameId, time: step.time,
+              }))}
+              onPick={pickState}
+            />
           )}
           <div className="flex-1 min-h-0 flex @container">
             <LadderView
@@ -698,6 +745,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               expanded={expanded}
               onToggleBand={toggleBand}
               onOpenBand={openBand}
+              notes={notes}
             />
             {loaded !== null && tcpSummary !== null && (
               <>
@@ -764,7 +812,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
                 <>
                   <div style={{ height: view.topSpacerHeight }} />
                   {frames.slice(view.startIndex, view.endIndex).map((p) => {
-                    const isClient = isFromClient(p, client);
+                    const isClient = sideOf(target.kind, p, client) === 'client';
                     return (
                       <div
                         key={p.id}

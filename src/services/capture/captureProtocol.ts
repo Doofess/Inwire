@@ -12,6 +12,8 @@ import type { WriterStats } from './captureWriter';
 import type { FrameSlab } from './frameSlab';
 import type { StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
+import type { TlsSummary } from '../conversation/tlsSummary';
+import type { DhcpSummary } from '../conversation/dhcpSummary';
 import type { PackedRows } from '../pipeline/rowPack';
 
 export type ToCapture =
@@ -204,8 +206,9 @@ export type ToCapture =
       startChunk: number;
     }
   /**
-   * The positions of the frames of UDP flow or QUIC connection `key` (kind
-   * `kind`: `udp.stream` or `quic.connection.number`, by `inFlow`), ids
+   * The positions of the frames of UDP flow, QUIC connection or DHCP exchange
+   * `key` (kind `kind`: `udp.stream`, `quic.connection.number` or `dhcp.id`, by
+   * `inFlow`), ids
    * `[fromId, toId]`, from chunk `startChunk` onward. Answered with
    * `flowOrdinals`, a bounded page of chunks at a time, even when no capture is
    * open, because the caller holds a promise. The prefix holds only
@@ -215,7 +218,7 @@ export type ToCapture =
   | {
       type: 'flowOrdinals';
       requestId: number;
-      kind: 'udp' | 'quic';
+      kind: 'udp' | 'quic' | 'dhcp';
       key: number;
       fromId: number;
       toId: number;
@@ -366,6 +369,10 @@ export type FromCapture =
       udp: UdpSummary[];
       /** QUIC connections changed since, keyed by `key` (`quic.connection.number`). */
       quic: QuicSummary[];
+      /** TLS summaries changed since, keyed by `key` (`tcp.stream`); a TCP stream with no TLS phase has none. */
+      tls: TlsSummary[];
+      /** DHCP exchanges changed since, keyed by `key` (`dhcp.id`, unsigned). */
+      dhcp: DhcpSummary[];
       /** The largest `relativeTime` the digest has folded; 0 with nothing open. */
       captureEnd: number;
       rebuilding: { done: number; total: number } | null;

@@ -783,7 +783,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   // A new capture drops everything the pane keeps per stream, because every
   // one of those is keyed by a frame id and ids start again from one.
   checkTrue('the digest hook returns the capture it is answering for',
-    /return \{ summaries, udp, quic, captureEnd, rebuilding, partial, captureId \}/.test(hook));
+    /return \{ summaries, udp, quic, tls, dhcp, captureEnd, rebuilding, partial, captureId \}/.test(hook));
   const reset = pane.match(/const seenCapture = useRef\(captureId\);[\s\S]*?\}, \[captureId\]\);/)?.[0] ?? '';
   checkTrue('the pane has an effect keyed on the capture id', reset.length > 0);
   for (const call of ['cache.current.clear()', 'setStream(null)', 'setExpanded(NONE_EXPANDED)']) {
@@ -796,7 +796,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the load is cancelled and begun again when the capture changes',
     pane.includes('}, [captureId, summaryId]);'));
   checkTrue('the digest hook keeps nothing across a disable',
-    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setUdp\(new Map\(\)\);\s*setQuic\(new Map\(\)\);\s*setCaptureEnd\(0\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*setPartial\(false\);\s*\};/.test(hook));
+    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setUdp\(new Map\(\)\);\s*setQuic\(new Map\(\)\);\s*setTls\(new Map\(\)\);\s*setDhcp\(new Map\(\)\);\s*setCaptureEnd\(0\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*setPartial\(false\);\s*\};/.test(hook));
 
   // A page of a stream that was left is never published, and the summary goes
   // only with the frames it describes.
@@ -806,11 +806,13 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
     pane.includes('summary={loaded !== null ? tcpSummary : null}'));
   checkTrue('...the state map is docked for a TCP summary alone, never for UDP or QUIC',
     /\{loaded !== null && tcpSummary !== null && \(\s*<>\s*<aside/.test(pane) && !/<TcpStateMap\s+summary=\{summary\}/.test(pane));
-  checkTrue('...the ladder is told what it is folding', pane.includes('kind={target.kind}') && view.includes("foldRuns(frames, client, ruleKeyOf, expanded, kind)"));
+  checkTrue('DNS marks wait for the last page: a query whose answer is on a later page is not marked no answer',
+    pane.includes('hasDnsTally && !stillReading ? dnsMarks(frames, captureEnd)') && pane.includes('const stillReading = loaded?.loading != null;'));
+  checkTrue('...the ladder is told what it is folding', pane.includes('kind={target.kind}') && view.includes("foldRuns(frames, client, ruleKeyOf, expanded, kind, notes)"));
   checkTrue('...and frames cached for a stream are keyed by kind as well as key',
     pane.includes('new Map<string, Packet[]>()') && pane.includes('streamKey(target.kind, target.streamId)'));
   checkTrue('...a QUIC connection\'s phase line scrolls through the state map\'s request',
-    /quicSummary\.phases\.map[\s\S]*?pickState\(step\.frameId\)/.test(pane));
+    /label="QUIC phases"[\s\S]*?onPick=\{pickState\}/.test(pane));
   checkTrue('a failed read falls back to the buffer rather than reading "Reading 0 of N" for good',
     /\.catch\(\(error: unknown\) => \{[\s\S]*?setStream\(null\);/.test(pane));
 
@@ -944,6 +946,17 @@ const udpRun = (n: number, fromClient: boolean, rule = 'a') => Array.from({ leng
     ['frame', ...Array(4).fill('frame'), 'frame', 'band(4)', 'frame', 'band(4)', 'frame']);
 }
 {
+  // Five unanswered queries in a row: each carries a `no answer` note, and a
+  // band would hide the very marks the ladder draws them for.
+  nextId = 1;
+  const frames = [...udpRun(1, true), ...udpRun(5, true), ...udpRun(1, false)];
+  const notes = new Map(frames.slice(1, 6).map((p) => [p.id, 'no answer'] as const));
+  check('a frame with a note stands alone, so a run of unanswered queries keeps its marks',
+    shape(foldRuns(frames, CLIENT, ruleKeyOf, NONE, 'udp', notes)), frames.map(() => 'frame'));
+  check('...and without notes the same run folds', shape(foldRuns(frames, CLIENT, ruleKeyOf, NONE, 'udp')),
+    ['frame', 'band(5)', 'frame']);
+}
+{
   // A TCP stream's pure ACK rides a band; a UDP datagram that merely looks like one does not.
   nextId = 1;
   const tcp = [row(true, 'A', { len: 100 }), ...data(4), row(false, 'A', { len: 0 }), ...data(4), row(true, 'FA')];
@@ -951,6 +964,36 @@ const udpRun = (n: number, fromClient: boolean, rule = 'a') => Array.from({ leng
     foldRuns(tcp, CLIENT, ruleKeyOf, NONE).flatMap((i) => (i.kind === 'band' ? [i.acks] : [])), [1]);
   check('...and as an explicit tcp kind, the same',
     shape(foldRuns(tcp, CLIENT, ruleKeyOf, NONE, 'tcp')), shape(foldRuns(tcp, CLIENT, ruleKeyOf, NONE)));
+}
+
+{
+  // A DHCP exchange's client is a MAC, which no frame's source is, so a lane
+  // comes from the message type (ruling S3-7): a unicast renewal's request
+  // comes from the offered address and still goes the client's way.
+  nextId = 1;
+  const MAC_CLIENT = { address: '02:00:00:00:00:01', port: 68 };
+  const dhcpRow = (src: string, sport: number, dst: string, dport: number, type: number): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: id / 1000,
+      source: src, destination: dst, sourcePort: sport, destPort: dport,
+      protocol: 'DHCP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp', 'dhcp'],
+      fields: { 'dhcp.id': 0xdeadbeef, 'dhcp.option.dhcp': type },
+      length: 342, info: '', status: 'ok',
+    } as unknown as Packet;
+  };
+  const frames = [
+    dhcpRow('0.0.0.0', 68, '255.255.255.255', 67, 1),
+    dhcpRow('192.0.2.1', 67, '192.0.2.50', 68, 2),
+    dhcpRow('0.0.0.0', 68, '255.255.255.255', 67, 3),
+    dhcpRow('192.0.2.1', 67, '192.0.2.50', 68, 5),
+    dhcpRow('192.0.2.50', 68, '192.0.2.1', 67, 3),
+    dhcpRow('192.0.2.7', 67, '192.0.2.1', 67, 5),
+  ];
+  const items = foldRuns(frames, MAC_CLIENT, ruleKeyOf, NONE, 'dhcp');
+  check('a DHCP ladder draws a renewal\'s request from the client',
+    items.map((i) => i.from), ['client', 'server', 'client', 'server', 'client', 'server']);
+  check('...every exchange row is drawn as itself', shape(items), frames.map(() => 'frame'));
 }
 
 await (async () => {

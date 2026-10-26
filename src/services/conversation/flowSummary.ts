@@ -15,6 +15,7 @@ import { fieldValue } from '../dissect/fieldAccess';
 import { chooseClient, type ClientEndBasis, type Endpoint } from './clientSide';
 import type { Side } from './tcpStates';
 import type { DirectionTotals } from './streamDigest';
+import { dhcpKeyOf } from './dhcpSummary';
 
 export type UdpOutcome = 'one-way' | 'request/response' | 'two-way';
 export type QuicOutcome = 'no reply' | 'handshake unfinished' | 'established' | 'closed by client' | 'closed by server';
@@ -37,7 +38,20 @@ interface FlowBase {
   version: number;
 }
 
-export interface UdpSummary extends FlowBase { kind: 'udp'; outcome: UdpOutcome }
+/** A classic DNS flow's answers (rulings S3-3, S3-4). Plain JSON, so the snapshot carries it. */
+export interface DnsTally {
+  answered: number;
+  errors: number;
+  /** Queries pushed out of `open` by `MAX_OPEN_QUERIES`; each counts as unanswered. */
+  evictedUnanswered: number;
+  /** Queries with no answer yet, oldest first. */
+  open: { id: number; frameId: number; time: number }[];
+}
+
+export const DNS_WAIT_SECONDS = 5;
+export const MAX_OPEN_QUERIES = 64;
+
+export interface UdpSummary extends FlowBase { kind: 'udp'; outcome: UdpOutcome; dns?: DnsTally }
 
 export interface QuicPhaseStep { phase: 'initial' | 'handshake' | '1-rtt' | 'closed'; side: Side; frameId: number; time: number }
 
@@ -86,13 +100,13 @@ export function quicKeyOf(row: Packet): number | null {
 }
 
 /**
- * Whether a row is in UDP flow or QUIC connection `key`: the one membership
- * test. `StreamDigest.feed` folds by the same two keys, the store's
+ * Whether a row is in UDP flow, QUIC connection or DHCP exchange `key`: the one
+ * membership test. `StreamDigest.feed` folds by the same three keys, the store's
  * `flowOrdinals` matches with this and Follow Stream's RAM tail filters with
  * it, so the three cannot disagree.
  */
-export function inFlow(row: Packet, kind: 'udp' | 'quic', key: number): boolean {
-  return kind === 'udp' ? udpKeyOf(row) === key : quicKeyOf(row) === key;
+export function inFlow(row: Packet, kind: 'udp' | 'quic' | 'dhcp', key: number): boolean {
+  return kind === 'udp' ? udpKeyOf(row) === key : kind === 'quic' ? quicKeyOf(row) === key : dhcpKeyOf(row) === key;
 }
 
 /**
@@ -164,6 +178,31 @@ export function openUdp(row: Packet, key: number): UdpSummary {
 export function foldUdp(s: UdpSummary, row: Packet): void {
   foldTotals(s, row, row.source === s.client.address && row.sourcePort === s.client.port);
   s.outcome = udpOutcome(s);
+  foldDns(s, row);
+}
+
+/**
+ * Counts a DNS row in a classic DNS flow (a port is 53). A query opens by its
+ * `dns.id` and a response with that id closes it; a response with none open
+ * counts by its rcode. Matching by id, not the tracker's `dns.response_to`,
+ * keeps the tally independent of tracker eviction (S3-4).
+ */
+function foldDns(s: UdpSummary, row: Packet): void {
+  if (s.client.port !== 53 && s.server.port !== 53) return;
+  const id = num(row, 'dns.id');
+  const response = num(row, 'dns.flags.response');
+  if (id === undefined || response === undefined) return;
+  const t = s.dns ??= { answered: 0, errors: 0, evictedUnanswered: 0, open: [] };
+  if (response === 0) {
+    if (t.open.some((q) => q.id === id)) return;
+    t.open.push({ id, frameId: row.id, time: row.relativeTime });
+    if (t.open.length > MAX_OPEN_QUERIES) { t.open.shift(); t.evictedUnanswered++; }
+    return;
+  }
+  const at = t.open.findIndex((q) => q.id === id);
+  if (at >= 0) t.open.splice(at, 1);
+  if ((num(row, 'dns.flags.rcode') ?? 0) === 0) t.answered++;
+  else t.errors++;
 }
 
 /**

@@ -33,7 +33,7 @@
  */
 import type { Packet } from '../../types/packet';
 import { fieldValue } from '../../services/dissect/fieldAccess';
-import { isFromClient } from '../../services/followStream';
+import { sideOf, type StreamTarget } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
 import type { Lane } from './ladderLayout';
 
@@ -82,7 +82,8 @@ export function itemPacket(item: LadderItem): Packet {
  */
 export function foldRuns(
   frames: readonly Packet[], client: Endpoint, ruleKeyOf: (p: Packet) => string,
-  expanded: ReadonlySet<number>, kind: 'tcp' | 'udp' | 'quic' = 'tcp',
+  expanded: ReadonlySet<number>, kind: StreamTarget['kind'] = 'tcp',
+  notes?: ReadonlyMap<number, string>,
 ): LadderItem[] {
   // TCP's flags, its pure ACKs and their riders are TCP's. A UDP flow or QUIC
   // connection has only same-direction runs under one rule, broken by an
@@ -114,8 +115,10 @@ export function foldRuns(
   };
 
   frames.forEach((p, i) => {
-    const from: Lane = isFromClient(p, client) ? 'client' : 'server';
-    if ((tcp ? standsAlone(p) : flowStandsAlone(p)) || i === 0 || i === frames.length - 1) {
+    const from: Lane = sideOf(kind, p, client);
+    // A frame with a note (a DNS query's `no answer`, an error's rcode) is one
+    // somebody opened the flow to find, so it never folds, as a flag never does.
+    if ((tcp ? standsAlone(p) : flowStandsAlone(p)) || notes?.has(p.id) === true || i === 0 || i === frames.length - 1) {
       flush();
       items.push({ kind: 'frame', packet: p, from });
       return;

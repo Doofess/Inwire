@@ -6,7 +6,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { scaleLinear } from 'd3';
 import { TriangleAlert } from 'lucide-react';
 import type { Packet } from '../../types/packet';
-import type { ClientEnd } from '../../services/followStream';
+import { endpointText, type ClientEnd } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
 import type { ColorRulesEngine } from '../../services/colorRules';
@@ -128,7 +128,7 @@ interface LadderViewProps {
    */
   summary: StreamSummary | null;
   /** What the frames are, which decides how a quiet run folds (`foldRuns`). Default TCP. */
-  kind?: 'tcp' | 'udp' | 'quic';
+  kind?: 'tcp' | 'udp' | 'quic' | 'dhcp';
   colorEngine: ColorRulesEngine;
   packetTheme: PacketTheme;
   /** The frame selected elsewhere, highlighted here. */
@@ -151,12 +151,14 @@ interface LadderViewProps {
   onToggleBand: (firstId: number) => void;
   /** Opens a band and never closes one: for a frame named from outside that a closed band is hiding. */
   onOpenBand: (firstId: number) => void;
+  /** A word per frame id, appended to that arrow's sub-line (DNS: no answer, an rcode). A frame with one never folds into a band. */
+  notes?: ReadonlyMap<number, string>;
 }
 
 export const LadderView: React.FC<LadderViewProps> = ({
   frames, loading, client, server, summary, kind = 'tcp', colorEngine, packetTheme,
   selectedId, onSelectFrame, highlightFrameId, onHoverFrame, scrollTo,
-  expanded, onToggleBand, onOpenBand,
+  expanded, onToggleBand, onOpenBand, notes,
 }) => {
   const scrollToFrameId = scrollTo?.frameId ?? null;
   // A band breaks where the matched rule changes, so its chip takes one rule's
@@ -164,8 +166,8 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // the fold asks the chain once per frame and the chips not at all.
   const ruleKeyOf = useCallback((p: Packet) => colorEngine.getMatchedRuleName(p) ?? '', [colorEngine]);
   const items = useMemo(
-    () => foldRuns(frames, client, ruleKeyOf, expanded, kind),
-    [frames, client, ruleKeyOf, expanded, kind],
+    () => foldRuns(frames, client, ruleKeyOf, expanded, kind, notes),
+    [frames, client, ruleKeyOf, expanded, kind, notes],
   );
   const extent = useMemo(() => ladderExtent(items), [items]);
   // Read by the opening-window effect, which must not re-run on every fold:
@@ -421,7 +423,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
           <div className="text-foreground font-semibold">
             {client.basis === 'first-speaker' ? 'client is a guess: first to speak' : 'client'}
           </div>
-          <div className="text-muted-foreground truncate">{client.address}:{client.port}</div>
+          <div className="text-muted-foreground truncate">{endpointText(client, kind, 'client')}</div>
         </div>
         <span className="text-muted-foreground text-center pt-px">
           {loading !== null
@@ -431,7 +433,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
         </span>
         <div className="min-w-0 max-w-[260px] text-right">
           <div className="text-foreground font-semibold">server</div>
-          <div className="text-muted-foreground truncate">{server.address}:{server.port}</div>
+          <div className="text-muted-foreground truncate">{endpointText(server, kind)}</div>
         </div>
       </div>
 
@@ -514,6 +516,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
                   surface={packetTheme.surface}
                   selected={isFrame && packet.id === selectedId}
                   highlighted={isFrame && packet.id === highlightFrameId}
+                  note={isFrame ? notes?.get(packet.id) : undefined}
                   onSelect={onSelectFrame} onToggleBand={onToggleBand} onHover={onHoverFrame} />
               );
             })}
@@ -590,7 +593,8 @@ const Arrow: React.FC<{
   /** A band opens and closes on a click; a frame selects. */
   onToggleBand: (firstId: number) => void;
   onHover?: (id: number | null) => void;
-}> = ({ arrow, clientX, serverX, charWidth, style, surface, selected, highlighted, onSelect, onToggleBand, onHover }) => {
+  note?: string;
+}> = ({ arrow, clientX, serverX, charWidth, style, surface, selected, highlighted, onSelect, onToggleBand, onHover, note }) => {
   const toServer = arrow.from === 'client';
   const x1 = toServer ? clientX : serverX;
   const x2 = toServer ? serverX : clientX;
@@ -692,7 +696,7 @@ const Arrow: React.FC<{
         x={mid} y={arrow.y + 11} textAnchor="middle" fontSize={9}
         fill="currentColor" fillOpacity={0.4}
       >
-        {rowMeta(number, arrow.length, arrow.crowded, span, charWidth)}
+        {rowMeta(number, arrow.length, arrow.crowded, span, charWidth)}{note === undefined ? '' : ` · ${note}`}
       </text>
       <title>
         {isBand

@@ -14,7 +14,8 @@
  * the labels and the colours of the whole window - the kind of wrong that
  * reads as a fact.
  */
-import { clientEnd, isFromClient, streamPackets, targetForPacket } from '../../src/services/followStream';
+import { clientEnd, endpointText, isFromClient, sideOf, streamPackets, targetForPacket } from '../../src/services/followStream';
+import { compile } from '../../src/services/filter/compile';
 import { conversationFilter, type Conversation } from '../../src/services/statistics';
 import type { Packet, ProtocolType } from '../../src/types/packet';
 
@@ -95,6 +96,68 @@ function packet(
   check('...nor is a datagram that is not QUIC', streamPackets(all, target).includes(plainUdp), false);
   check('the QUIC display filter is the connection number',
     conversationFilter({ streamId: 4 } as Conversation, 'quic'), 'quic.connection.number == 4');
+}
+
+// --- a DHCP exchange is its own kind of stream (ADR 0055 stage 3) -------------------
+
+{
+  nextId = 1;
+  const XID = 0xdeadbeef;
+  const dhcp = (src: string, sport: number, dst: string, dport: number, type: number, xid = XID) =>
+    packet(src, sport, dst, dport, ['udp', 'dhcp'], {
+      protocol: 'DHCP' as ProtocolType,
+      fields: { 'udp.stream': 4, 'dhcp.id': xid, 'dhcp.option.dhcp': type },
+    });
+  const discover = dhcp('0.0.0.0', 68, '255.255.255.255', 67, 1);
+  const offer = dhcp('192.0.2.1', 67, '192.0.2.50', 68, 2);
+  const request = dhcp('0.0.0.0', 68, '255.255.255.255', 67, 3);
+  const other = dhcp('0.0.0.0', 68, '255.255.255.255', 67, 1, 0x12345678);
+  const noType = packet('0.0.0.0', 68, '255.255.255.255', 67, ['udp', 'dhcp'],
+    { fields: { 'udp.stream': 4, 'dhcp.id': XID } });
+
+  const target = targetForPacket(discover);
+  check('follow: a DHCP row opens its exchange',
+    target, { kind: 'dhcp', addressA: '0.0.0.0', portA: 68, addressB: '255.255.255.255', portB: 67, streamId: XID });
+  check('...a DHCP row with no message type is only its UDP flow', targetForPacket(noType)?.kind, 'udp');
+  check('...a plain UDP row stays UDP', targetForPacket(packet('10.0.0.1', 5000, '10.0.0.2', 5001, ['udp']))?.kind, 'udp');
+
+  // The offer and the discover share nothing but the transaction id.
+  const all = [discover, offer, request, other, noType];
+  check('...the exchange is every row with its transaction id, whatever the addresses',
+    streamPackets(all, target!).map((p) => p.id), [discover.id, offer.id, request.id]);
+
+  const filter = conversationFilter({ streamId: XID } as Conversation, 'dhcp');
+  check('follow: a DHCP target filters by dhcp.id in hex', filter, 'dhcp.id == 0xdeadbeef');
+  check('...zero-padded to eight digits',
+    conversationFilter({ streamId: 0x2a } as Conversation, 'dhcp'), 'dhcp.id == 0x0000002a');
+  const accepts = compile(filter);
+  check('...and the filter compiler selects exactly the exchange\'s rows',
+    all.filter((p) => accepts(p)).map((p) => p.id), [discover.id, offer.id, request.id, noType.id]);
+
+  const flows = [discover, offer];
+  const client = { address: '0.0.0.0', port: 68 };
+  check('follow: sideOf reads a DHCP side from the message type',
+    [sideOf('dhcp', offer, client), sideOf('dhcp', discover, client), sideOf('dhcp', request, client)],
+    ['server', 'client', 'client']);
+  check('...a unicast renewal from the offered address is still the client\'s',
+    sideOf('dhcp', dhcp('192.0.2.50', 68, '192.0.2.1', 67, 3), client), 'client');
+  check('...a relayed reply, 67 to 67, is still the server\'s',
+    sideOf('dhcp', dhcp('192.0.2.7', 67, '192.0.2.1', 67, 5), client), 'server');
+  check('...other kinds keep reading the endpoint',
+    [sideOf('udp', flows[1], client), sideOf('udp', flows[0], client), sideOf('tcp', flows[0], client)],
+    ['server', 'client', 'client']);
+}
+
+{
+  check('follow: endpointText writes address and port',
+    [endpointText({ address: '192.0.2.1', port: 67 }, 'udp'), endpointText({ address: '192.0.2.1', port: 443 }, 'tcp')],
+    ['192.0.2.1:67', '192.0.2.1:443']);
+  check('...a DHCP client is its hardware address alone',
+    endpointText({ address: '02:00:00:00:00:03', port: 68 }, 'dhcp', 'client'), '02:00:00:00:00:03');
+  check('...a DHCP server keeps its port',
+    endpointText({ address: '192.0.2.1', port: 67 }, 'dhcp', 'server'), '192.0.2.1:67');
+  check('...an address not seen says so rather than a bare port',
+    endpointText({ address: '', port: 67 }, 'dhcp', 'server'), 'not seen');
 }
 
 // --- selection -------------------------------------------------------------------

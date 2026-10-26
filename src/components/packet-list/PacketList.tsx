@@ -1855,8 +1855,10 @@ export const PacketList: React.FC<PacketListProps> = ({
                 <ContextMenuItem onSelect={() => onFollowStream(streamTarget)}>
                   <MessageSquare className="w-3.5 h-3.5" />
                   <span>
-                    Follow {streamTarget.kind.toUpperCase()} Stream
-                    {streamTarget.streamId !== undefined ? ` (#${streamTarget.streamId})` : ''}
+                    {streamTarget.kind === 'dhcp'
+                      ? 'Follow DHCP Exchange'
+                      : `Follow ${streamTarget.kind.toUpperCase()} Stream${
+                        streamTarget.streamId !== undefined ? ` (#${streamTarget.streamId})` : ''}`}
                   </span>
                 </ContextMenuItem>
               )}
