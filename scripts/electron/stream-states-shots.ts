@@ -2,7 +2,7 @@
  * The ladder and the state map over real streams, photographed - for looking
  * at, not asserting (ADR 0055).
  *
- *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light] [--kinds tcp,udp,quic,tls]
+ *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light] [--kinds tcp,udp,quic,tls,dns]
  *
  * Imports the `inwire` fixture into the built app and opens a stream that
  * closed cleanly and one that was reset, then the `bulk` fixture for one
@@ -31,7 +31,10 @@ import path from 'node:path';
 import type { Page } from 'playwright';
 import { arrive, FIXTURES } from '../pipeline/arrival';
 import { StreamDigest, type StreamSummary } from '../../src/services/conversation/streamDigest';
-import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
+import { inFlow, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
+import { dnsMarks } from '../../src/services/conversation/dnsMarks';
+import type { Packet } from '../../src/types/packet';
+import { dnsOutcomeText } from '../../src/services/conversation/digestRows';
 import type { TlsSummary } from '../../src/services/conversation/tlsSummary';
 import { startStubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
@@ -75,14 +78,14 @@ interface FlowCase {
 
 /** The fixture's streams as the digest folds them, which is the fold the store runs. */
 async function digestOf(fixturePath: string): Promise<{
-  summaries: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; tls: TlsSummary[]; frames: number;
+  summaries: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; tls: TlsSummary[]; frames: number; rows: Packet[];
 }> {
   const { arrived } = await arrive(fixturePath);
   const digest = new StreamDigest();
   for (const a of arrived) digest.feed(a.packet);
   // Every summary: each has a version above zero once a row has been folded.
   const changes = digest.changedSince(0);
-  return { summaries: changes.tcp, udp: changes.udp, quic: changes.quic, tls: changes.tls, frames: arrived.length };
+  return { summaries: changes.tcp, udp: changes.udp, quic: changes.quic, tls: changes.tls, frames: arrived.length, rows: arrived.map((a) => a.packet) };
 }
 
 console.log('folding the fixtures through the digest...');
@@ -131,7 +134,24 @@ if (KINDS.includes('tls')) {
     ? '  tls: no stream with a ServerHello'
     : `  tls: stream #${tlsCase.summary.streamId}, phases ${tlsCase.tls.phases.map((p) => `${p.phase === 'alert' ? `alert: ${p.alertName}` : p.phase} (${p.side})`).join(' -> ')}`);
 }
-if (cases.length === 0 && flowCases.length === 0 && tlsCase === undefined) { console.log('no streams to photograph'); process.exit(1); }
+// Stage 3: the UDP flow with a DNS tally and the most queries.
+let dnsCase: UdpSummary | undefined;
+// The frame the ladder is opened on: a marked one when the flow has any, so the shot shows a mark.
+let dnsFrame = 0;
+if (KINDS.includes('dns')) {
+  const queries = (u: UdpSummary) => (u.dns === undefined ? -1 : u.dns.answered + u.dns.errors + u.dns.evictedUnanswered + u.dns.open.length);
+  dnsCase = [...inwireDigest.udp].filter((u) => u.dns !== undefined).sort((a, b) => queries(b) - queries(a))[0];
+  console.log(dnsCase === undefined
+    ? '  dns: no UDP flow with a tally'
+    : `  dns: udp #${dnsCase.key}, ${dnsOutcomeText(dnsCase.dns!, Math.max(...inwireDigest.udp.map((u) => u.end)))}`);
+  if (dnsCase !== undefined) {
+    const key = dnsCase.key;
+    const marks = dnsMarks(inwireDigest.rows.filter((r) => inFlow(r, 'udp', key)), Math.max(...inwireDigest.rows.map((r) => r.relativeTime)));
+    dnsFrame = [...marks.keys()][0] ?? dnsCase.firstId;
+    console.log(`  dns: opened on frame #${dnsFrame}${marks.has(dnsFrame) ? `, marked "${marks.get(dnsFrame)}"` : ''}`);
+  }
+}
+if (cases.length === 0 && flowCases.length === 0 && tlsCase === undefined && dnsCase === undefined) { console.log('no streams to photograph'); process.exit(1); }
 
 const PIPE = String.raw`\\.\pipe\inwire-stream-shots-` + process.pid;
 const agent = await startStubAgent(PIPE, 5);
@@ -412,6 +432,40 @@ try {
           const notes = await p.locator('tbody tr').filter({ hasText: /TLS (alert|unanswered)/ }).count();
           console.log(`  TCP rows with a TLS note: ${notes}`);
           await shot('stats-tcp-tls');
+        }
+
+        // Stage 3: Follow Stream on the DNS flow, then Statistics' UDP level by Outcome.
+        if (dnsCase !== undefined) {
+          if (imported !== inwire.path) {
+            console.log(`${tag}: importing ${path.basename(inwire.path)}`);
+            console.log(`  imported: ${await importFixture(p, inwireFixture)}`);
+            imported = inwire.path;
+          }
+          const filter = p.getByPlaceholder('e.g. tcp.port == 443');
+          await filter.fill(`frame.number == ${dnsFrame}`);
+          await filter.press('Enter');
+          const row = p.locator(`#packet-row-${dnsFrame}`);
+          await row.waitFor({ timeout: 30_000 });
+          await row.click();
+          await sleep(300);
+          await p.getByRole('button', { name: 'Follow Stream' }).click();
+          await sleep(500);
+          await p.getByRole('radio', { name: 'Ladder' }).click();
+          await p.waitForFunction(() => !/reading \d/i.test(document.body.innerText), undefined, { timeout: 60_000 }).catch(() => {});
+          await sleep(800);
+          await shot('dns-1-ladder');
+
+          await p.keyboard.press('Escape');
+          await sleep(400);
+          await filter.fill('');
+          await filter.press('Enter');
+          await p.getByRole('button', { name: /^Statistics/ }).click();
+          await p.getByRole('button', { name: 'Conversations' }).click();
+          await p.getByRole('button', { name: 'UDP', exact: true }).click();
+          await sleep(500);
+          await p.getByRole('button', { name: 'Outcome', exact: true }).click();
+          await sleep(300);
+          await shot('stats-udp-dns');
         }
 
         // Statistics' UDP and QUIC levels, read from the digest, and a row's

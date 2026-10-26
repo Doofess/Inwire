@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs';
 import { QUIET_SECONDS, conversationRows, digestConversation, digestScopeNote, outcomeText } from '../../src/services/conversation/digestRows';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
-import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
+import type { DnsTally, QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
 import type { TlsPhaseStep, TlsSummary } from '../../src/services/conversation/tlsSummary';
 import type { ToCapture, FromCapture } from '../../src/services/capture/captureProtocol';
 
@@ -237,6 +237,27 @@ console.log('\n--- TLS on a TCP row ---\n');
     rowText(summary({ outcome: 'open' }), tlsSummary(3, [step('ClientHello')])), 'open');
   check('a UDP row never takes a TLS note',
     outcomeText(digestConversation(udpSummary()), 10.1), 'request/response');
+}
+
+console.log('\n--- DNS answers on a UDP row ---\n');
+
+{
+  const dnsRow = (dns: DnsTally, end = 10) => digestConversation(udpSummary({ dns, end }));
+  const q = (id: number, time: number) => ({ id, frameId: id, time });
+  const open1 = dnsRow({ answered: 0, errors: 0, evictedUnanswered: 0, open: [q(1, 100)] });
+  check('dns: waiting turns unanswered as the capture\'s end moves',
+    [outcomeText(open1, 104.9), outcomeText(open1, 105)], ['1 waiting', '1 unanswered']);
+  check('dns: the text orders answered, errors, unanswered, waiting and drops zeros',
+    [
+      outcomeText(dnsRow({ answered: 11, errors: 2, evictedUnanswered: 1, open: [q(1, 100), q(2, 104)] }), 105),
+      outcomeText(dnsRow({ answered: 1, errors: 1, evictedUnanswered: 0, open: [] }), 105),
+      outcomeText(dnsRow({ answered: 3, errors: 0, evictedUnanswered: 0, open: [] }), 105),
+    ],
+    ['11 answered · 2 errors · 2 unanswered · 1 waiting', '1 answered · 1 error', '3 answered']);
+  check('dns: a DNS flow never says went quiet',
+    outcomeText(dnsRow({ answered: 2, errors: 0, evictedUnanswered: 0, open: [] }, 10), 1000), '2 answered');
+  check('dns: an empty tally falls back to the UDP text',
+    outcomeText(dnsRow({ answered: 0, errors: 0, evictedUnanswered: 0, open: [] }), 10.1), 'request/response');
 }
 
 console.log('\n--- the scope note for each level ---\n');

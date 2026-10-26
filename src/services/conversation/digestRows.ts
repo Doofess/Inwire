@@ -12,7 +12,7 @@
  */
 import type { Conversation, ConversationKind } from '../statistics';
 import type { StreamSummary } from './streamDigest';
-import type { QuicOutcome, QuicSummary, UdpOutcome, UdpSummary } from './flowSummary';
+import { DNS_WAIT_SECONDS, type DnsTally, type QuicOutcome, type QuicSummary, type UdpOutcome, type UdpSummary } from './flowSummary';
 import type { TcpOutcome } from './tcpStates';
 import { tlsNote, type TlsSummary } from './tlsSummary';
 
@@ -112,6 +112,28 @@ export function digestScopeNote(
     : 'Whole capture';
 }
 
+function dnsTallyOf(summary: unknown): DnsTally | undefined {
+  return typeof summary === 'object' && summary !== null && 'dns' in summary
+    ? (summary as { dns?: DnsTally }).dns : undefined;
+}
+
+/**
+ * A DNS flow's answers in words: answered, errors, unanswered, waiting, zeros
+ * left out. A query open for `DNS_WAIT_SECONDS` of the capture's end is
+ * unanswered, decided here against the moving end. Empty when all are zero.
+ */
+export function dnsOutcomeText(t: DnsTally, captureEnd: number): string {
+  const stale = t.open.filter((q) => captureEnd - q.time >= DNS_WAIT_SECONDS).length;
+  const unanswered = t.evictedUnanswered + stale;
+  const waiting = t.open.length - stale;
+  return [
+    t.answered > 0 ? `${t.answered} answered` : '',
+    t.errors > 0 ? `${t.errors} ${t.errors === 1 ? 'error' : 'errors'}` : '',
+    unanswered > 0 ? `${unanswered} unanswered` : '',
+    waiting > 0 ? `${waiting} waiting` : '',
+  ].filter((p) => p !== '').join(' · ');
+}
+
 /**
  * The outcome in the ADR's words, with its modifiers. A UDP or QUIC row also
  * says when it went quiet: its last frame is `QUIET_SECONDS` or more before the
@@ -121,9 +143,16 @@ export function outcomeText(
   r: {
     outcome: string; joinedMidStream: boolean; startExpired?: boolean;
     kind?: DigestKind; migrated?: boolean; end?: number; tls?: TlsSummary;
+    summary?: unknown;
   },
   captureEnd = 0,
 ): string {
+  // A DNS flow's text is its tally alone (S3-5): no modifier, no went quiet.
+  const tally = r.kind === 'udp' ? dnsTallyOf(r.summary) : undefined;
+  if (tally !== undefined) {
+    const dns = dnsOutcomeText(tally, captureEnd);
+    if (dns !== '') return dns;
+  }
   let text: string = r.outcome;
   if (r.joinedMidStream) {
     text += r.startExpired === true ? ' · start removed by the ring' : ' · joined mid-stream';

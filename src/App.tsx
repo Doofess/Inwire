@@ -3796,6 +3796,7 @@ export default function App() {
                 summary={streamSummary}
                 tls={streamSummary !== null && !('kind' in streamSummary) ? streamDigest.tls.get(streamSummary.streamId) ?? null : null}
                 captureId={streamDigest.captureId}
+                captureEnd={streamDigest.captureEnd}
                 colorEngine={colorEngine}
                 packetTheme={packetTheme}
                 initialTab={streamView}

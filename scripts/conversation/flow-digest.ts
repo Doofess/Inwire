@@ -485,5 +485,54 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   }
 }
 
+// ---- DNS answers on a UDP flow (stage 3).
+{
+  /** A classic DNS row: the server is on port 53. */
+  const dnsRow = (fromClient: boolean, id: number, rcode?: number, time?: number, port = 53): Packet => udpRow({
+    fromClient, time,
+    fields: { 'dns.id': id, 'dns.flags.response': fromClient ? 0 : 1, ...(fromClient || rcode === undefined ? {} : { 'dns.flags.rcode': rcode }) },
+    extra: fromClient ? { destPort: port } : { sourcePort: port },
+  });
+  const tally = (d: StreamDigest) => udpOf(d).dns;
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1));
+    d.feed(dnsRow(false, 7, 0, 1.1));
+    check('dns: a query and its answer is one answered', tally(d), { answered: 1, errors: 0, evictedUnanswered: 0, open: [] });
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1));
+    d.feed(dnsRow(true, 7, undefined, 2));
+    d.feed(dnsRow(false, 7, 0, 2.1));
+    check('dns: a retried query answered once is one answered', tally(d), { answered: 1, errors: 0, evictedUnanswered: 0, open: [] });
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 8, undefined, 1));
+    d.feed(dnsRow(false, 8, 3, 1.1));
+    check('dns: an NXDOMAIN answer is an error', [tally(d)?.answered, tally(d)?.errors, tally(d)?.open.length], [0, 1, 0]);
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(false, 9, 0, 1));
+    d.feed(dnsRow(false, 10, 2, 1.1));
+    check('dns: an answer to a query before the capture counts', [tally(d)?.answered, tally(d)?.errors], [1, 1]);
+  }
+  {
+    const d = fresh();
+    for (let i = 0; i < 65; i++) d.feed(dnsRow(true, 100 + i, undefined, i));
+    const t = tally(d)!;
+    check('dns: the 65th open query evicts the oldest as unanswered',
+      [t.open.length, t.evictedUnanswered, t.open[0].id, t.open[63].id], [64, 1, 101, 164]);
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1, 5353));
+    d.feed(dnsRow(false, 7, 0, 1.1, 5353));
+    check('dns: mDNS keeps the UDP outcome', [udpOf(d).dns, udpOf(d).outcome], [undefined, 'request/response']);
+  }
+}
+
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

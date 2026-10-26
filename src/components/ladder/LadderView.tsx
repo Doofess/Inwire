@@ -151,12 +151,14 @@ interface LadderViewProps {
   onToggleBand: (firstId: number) => void;
   /** Opens a band and never closes one: for a frame named from outside that a closed band is hiding. */
   onOpenBand: (firstId: number) => void;
+  /** A word per frame id, appended to that arrow's sub-line (DNS: no answer, an rcode). A band shows none. */
+  notes?: ReadonlyMap<number, string>;
 }
 
 export const LadderView: React.FC<LadderViewProps> = ({
   frames, loading, client, server, summary, kind = 'tcp', colorEngine, packetTheme,
   selectedId, onSelectFrame, highlightFrameId, onHoverFrame, scrollTo,
-  expanded, onToggleBand, onOpenBand,
+  expanded, onToggleBand, onOpenBand, notes,
 }) => {
   const scrollToFrameId = scrollTo?.frameId ?? null;
   // A band breaks where the matched rule changes, so its chip takes one rule's
@@ -514,6 +516,7 @@ export const LadderView: React.FC<LadderViewProps> = ({
                   surface={packetTheme.surface}
                   selected={isFrame && packet.id === selectedId}
                   highlighted={isFrame && packet.id === highlightFrameId}
+                  note={isFrame ? notes?.get(packet.id) : undefined}
                   onSelect={onSelectFrame} onToggleBand={onToggleBand} onHover={onHoverFrame} />
               );
             })}
@@ -590,7 +593,8 @@ const Arrow: React.FC<{
   /** A band opens and closes on a click; a frame selects. */
   onToggleBand: (firstId: number) => void;
   onHover?: (id: number | null) => void;
-}> = ({ arrow, clientX, serverX, charWidth, style, surface, selected, highlighted, onSelect, onToggleBand, onHover }) => {
+  note?: string;
+}> = ({ arrow, clientX, serverX, charWidth, style, surface, selected, highlighted, onSelect, onToggleBand, onHover, note }) => {
   const toServer = arrow.from === 'client';
   const x1 = toServer ? clientX : serverX;
   const x2 = toServer ? serverX : clientX;
@@ -692,7 +696,7 @@ const Arrow: React.FC<{
         x={mid} y={arrow.y + 11} textAnchor="middle" fontSize={9}
         fill="currentColor" fillOpacity={0.4}
       >
-        {rowMeta(number, arrow.length, arrow.crowded, span, charWidth)}
+        {rowMeta(number, arrow.length, arrow.crowded, span, charWidth)}{note === undefined ? '' : ` · ${note}`}
       </text>
       <title>
         {isBand

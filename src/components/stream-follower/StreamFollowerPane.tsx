@@ -27,6 +27,7 @@ import { LadderView, type ScrollRequest } from '../ladder/LadderView';
 import { TcpStateMap } from '../ladder/TcpStateMap';
 import { copyText } from '../ui/CopyButton';
 import { PhaseLine } from './PhaseLine';
+import { dnsMarks } from '../../services/conversation/dnsMarks';
 import type { TlsSummary } from '../../services/conversation/tlsSummary';
 
 /**
@@ -163,6 +164,8 @@ interface StreamFollowerPaneProps {
    * drops it all.
    */
   captureId: string | null;
+  /** The digest's capture end, which decides when a DNS query stops waiting. */
+  captureEnd?: number;
   /** The packet list's own colouring, so an arrow looks like its row. */
   colorEngine: ColorRulesEngine;
   packetTheme: PacketTheme;
@@ -193,6 +196,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   summary,
   tls,
   captureId,
+  captureEnd = 0,
   colorEngine,
   packetTheme,
   selectedId,
@@ -416,6 +420,14 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   const server = useMemo<Endpoint>(
     () => ({ address: serverAddress, port: serverPort }),
     [serverAddress, serverPort],
+  );
+
+  // DNS marks, only for a UDP flow whose digest summary has a tally. The capture's
+  // end moves a waiting query to unanswered, so it is a dependency.
+  const hasDnsTally = summary !== null && 'kind' in summary && summary.kind === 'udp' && summary.dns !== undefined;
+  const notes = useMemo(
+    () => (hasDnsTally ? dnsMarks(frames, captureEnd) : undefined),
+    [hasDnsTally, frames, captureEnd],
   );
 
   const totals = useMemo(() => {
@@ -703,6 +715,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               expanded={expanded}
               onToggleBand={toggleBand}
               onOpenBand={openBand}
+              notes={notes}
             />
             {loaded !== null && tcpSummary !== null && (
               <>
