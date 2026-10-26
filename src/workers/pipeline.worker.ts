@@ -22,7 +22,7 @@
 
 import { OrderingWindow, type Orderable } from '../services/dissect/orderingWindow';
 import { keyLog } from '../services/tls/keyLog';
-import { decodePacketBatch, isPacketBatch, retain } from '../services/agentBinary';
+import { decodePacketBatch, isPacketBatch } from '../services/agentBinary';
 import { encodeAgentCommand, parseAgentMessage } from '../services/agentProtocol';
 import type { FromAgentLink, ToAgentLink } from '../services/agentLink';
 import { decodeRawEthernetPacket, type InfoPatch } from '../services/pcapParser';
@@ -1431,16 +1431,18 @@ function receiveBatch(bytes: Uint8Array, batch: number | undefined): void {
   for (const frame of frames) {
     // Not dissected here: frames wait in the ordering window and are dissected
     // by the flush, in capture order - unless the stream skipped and the view
-    // is catching up from the file, which has these (`catchUp.ts`). `retain`
-    // copies the bytes out of the batch, which one held frame would otherwise
-    // keep alive in full.
+    // is catching up from the file, which has these (`catchUp.ts`). The bytes
+    // stay a view into the batch, not a copy (#17): every hop past the window
+    // copies into a slab of its own (the store's, the window's, a shard's),
+    // so a held frame keeps its batch alive only until its flush. Frames are
+    // held in order, so what they keep is mostly themselves.
     lastLiveIface = frame.iface;
     router.arrive({
       tsUs: frame.tsUs,
       tsNsRem: frame.tsNsRem,
       seq: frame.seq,
       arrivedAt,
-      bytes: retain(frame),
+      bytes: frame.bytes,
       origLen: frame.origLen,
       iface: frame.iface,
       ring: ringFiling.partOf(frame.seq),

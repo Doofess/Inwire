@@ -50,8 +50,14 @@ export interface Arrival {
   ms: number;
 }
 
-/** The importer's own loop over a real capture, with a recorder in front. */
-export async function arrive(path: string): Promise<Arrival> {
+/**
+ * The importer's own loop over a real capture, with a recorder in front.
+ *
+ * `view` hands each frame to the dissector as a live frame arrives: a view at
+ * an odd offset into a bigger buffer, with junk on both sides, as a frame sits
+ * in the agent's batch (`scripts/pipeline/frame-views.ts`).
+ */
+export async function arrive(path: string, options: { view?: boolean } = {}): Promise<Arrival> {
   const file = new File([new Uint8Array(readFileSync(path))], 'fixture.pcap');
   const { frames } = await PcapService.extractFrames(file, Number.POSITIVE_INFINITY);
   const host = PcapService.inferHostFromFrames(frames);
@@ -78,7 +84,7 @@ export async function arrive(path: string): Promise<Arrival> {
     // done - what the live Worker does when it moves a flush's bytes to the
     // renderer. A tracker that kept a view of an earlier frame then reads
     // empty here as it would there, and a recorder asked to write one throws.
-    const own = frame.rawBytes.slice();
+    const own = options.view ? inBatch(frame.rawBytes, id) : frame.rawBytes.slice();
     recorder.begin();
     const { packet, icmpMatchedRequestFrameId, infoPatches } = withDissectEnv(src.env, () =>
       decodeRawEthernetPacket(own, id, tsUs, relativeTime, timeDelta, frame.origLen,
@@ -100,6 +106,14 @@ export async function arrive(path: string): Promise<Arrival> {
     }
   }
   return { arrived, patchesFor, host, ms: performance.now() - t0 };
+}
+
+/** The frame's bytes copied to an odd offset inside 0xA5 junk, as a view. */
+function inBatch(bytes: Uint8Array, id: number): Uint8Array {
+  const offset = 7 + (id % 13);
+  const batch = new Uint8Array(offset + bytes.length + 11).fill(0xa5);
+  batch.set(bytes, offset);
+  return batch.subarray(offset, offset + bytes.length);
 }
 
 /**

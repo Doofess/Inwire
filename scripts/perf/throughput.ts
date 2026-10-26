@@ -202,7 +202,7 @@ async function main() {
       boundary.add(((performance.now() - b0) * 1000) / count);
 
       // And the same batch with every frame's bytes moved rather than copied,
-      // which is what a transfer list does. `retain()` gives each frame an
+      // which is what a transfer list does. `.slice()` gives each frame an
       // exactly-sized buffer of its own, so they are safe to detach - the
       // question this answers is whether it is worth doing.
       const copies = pendingPackets.map((p) => ({ ...p, rawBytes: p.rawBytes.slice() }));

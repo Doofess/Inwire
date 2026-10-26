@@ -81,8 +81,8 @@ export interface BinaryFrame {
   /**
    * The frame itself, as a view over the received buffer - not a copy. The
    * dissector takes a view (`DissectInput.bytes`), so nothing is copied
-   * between the socket and the parser. A caller that keeps a frame past the
-   * batch must copy it; `retain` below is that copy.
+   * between the socket and the parser. Holding one holds the whole batch;
+   * the pipeline Worker holds it only until the flush copies it on (#17).
    */
   bytes: Uint8Array;
 }
@@ -224,15 +224,4 @@ export function decodePacketBatch(buffer: ArrayBuffer): BinaryFrame[] {
     throw new BinaryFrameError(`packet batch has ${buffer.byteLength - offset} bytes after its last record`);
   }
   return frames;
-}
-
-/**
- * A frame's bytes, detached from the batch buffer.
- *
- * A `BinaryFrame.bytes` is a view, so holding one holds the whole batch -
- * up to a quarter-megabyte for a single 60-byte ARP frame. Anything that
- * outlives the batch (the frame store, the ordering window) copies first.
- */
-export function retain(frame: BinaryFrame): Uint8Array {
-  return frame.bytes.slice();
 }
