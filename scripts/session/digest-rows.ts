@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs';
 import { QUIET_SECONDS, conversationRows, digestConversation, digestScopeNote, outcomeText } from '../../src/services/conversation/digestRows';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
+import type { TlsPhaseStep, TlsSummary } from '../../src/services/conversation/tlsSummary';
 import type { ToCapture, FromCapture } from '../../src/services/capture/captureProtocol';
 
 let failures = 0;
@@ -84,8 +85,18 @@ function quicSummary(overrides: Partial<QuicSummary> = {}): QuicSummary {
   } as QuicSummary;
 }
 
-const NO_FLOWS = { udp: new Map<number, UdpSummary>(), quic: new Map<number, QuicSummary>(), captureEnd: 0 };
-const flows = (over: { summaries?: ReadonlyMap<number, StreamSummary>; udp?: ReadonlyMap<number, UdpSummary>; quic?: ReadonlyMap<number, QuicSummary>; captureEnd?: number }) =>
+/** A TLS summary with the given phases (words only), all from the client. */
+function tlsSummary(key: number, phases: TlsPhaseStep[], fatalAlert: TlsSummary['fatalAlert'] = null): TlsSummary {
+  return { kind: 'tls', key, phases, fatalAlert, version: 1 };
+}
+const step = (phase: TlsPhaseStep['phase'], side: TlsPhaseStep['side'] = 'client', alertName?: string): TlsPhaseStep =>
+  ({ phase, side, frameId: 1, time: 0.1, ...(alertName === undefined ? {} : { alertName }) });
+
+const NO_FLOWS = {
+  udp: new Map<number, UdpSummary>(), quic: new Map<number, QuicSummary>(),
+  tls: new Map<number, TlsSummary>(), captureEnd: 0,
+};
+const flows = (over: { summaries?: ReadonlyMap<number, StreamSummary>; udp?: ReadonlyMap<number, UdpSummary>; quic?: ReadonlyMap<number, QuicSummary>; tls?: ReadonlyMap<number, TlsSummary>; captureEnd?: number }) =>
   ({ summaries: new Map<number, StreamSummary>(), ...NO_FLOWS, ...over });
 
 console.log('\n--- a summary as the conversation table\'s row ---\n');
@@ -203,6 +214,29 @@ console.log('\n--- went quiet ---\n');
     'established · joined mid-stream · migrated · went quiet');
   check('migrated alone', outcomeText(q({ migrated: true }), 25), 'established · migrated');
   check('a UDP row is never joined mid-stream', outcomeText(digestConversation(udpSummary()), 10.1), 'request/response');
+}
+
+console.log('\n--- TLS on a TCP row ---\n');
+
+{
+  const rowText = (s: StreamSummary, tls?: TlsSummary) => {
+    const rows = conversationRows('tcp', flows({
+      summaries: new Map([[s.streamId, s]]), tls: new Map(tls === undefined ? [] : [[s.streamId, tls]]),
+    }))!;
+    return outcomeText(rows[0]);
+  };
+  const alert = tlsSummary(3, [step('ClientHello'), step('ServerHello', 'server'), step('alert', 'server', 'handshake_failure')],
+    { side: 'server', name: 'handshake_failure' });
+  check('a TCP row says TLS alert after its outcome',
+    rowText(summary({ outcome: 'closed cleanly', joinedMidStream: true }), alert),
+    'closed cleanly · joined mid-stream · TLS alert');
+  check('a TCP row with a ClientHello and no answer says TLS unanswered once closed',
+    rowText(summary({ outcome: 'reset by server' }), tlsSummary(3, [step('ClientHello')])),
+    'reset by server · TLS unanswered');
+  check('an open TCP row with no ServerHello yet says nothing about TLS',
+    rowText(summary({ outcome: 'open' }), tlsSummary(3, [step('ClientHello')])), 'open');
+  check('a UDP row never takes a TLS note',
+    outcomeText(digestConversation(udpSummary()), 10.1), 'request/response');
 }
 
 console.log('\n--- the scope note for each level ---\n');

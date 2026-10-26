@@ -3794,6 +3794,7 @@ export default function App() {
                 target={streamToFollow}
                 packets={packets}
                 summary={streamSummary}
+                tls={streamSummary !== null && !('kind' in streamSummary) ? streamDigest.tls.get(streamSummary.streamId) ?? null : null}
                 captureId={streamDigest.captureId}
                 colorEngine={colorEngine}
                 packetTheme={packetTheme}

@@ -2,7 +2,7 @@
  * The ladder and the state map over real streams, photographed - for looking
  * at, not asserting (ADR 0055).
  *
- *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light] [--kinds tcp,udp,quic]
+ *   npx tsx scripts/electron/stream-states-shots.ts <out-dir> [--widths 1024,1600] [--themes dark,light] [--kinds tcp,udp,quic,tls]
  *
  * Imports the `inwire` fixture into the built app and opens a stream that
  * closed cleanly and one that was reset, then the `bulk` fixture for one
@@ -32,6 +32,7 @@ import type { Page } from 'playwright';
 import { arrive, FIXTURES } from '../pipeline/arrival';
 import { StreamDigest, type StreamSummary } from '../../src/services/conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
+import type { TlsSummary } from '../../src/services/conversation/tlsSummary';
 import { startStubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
 
@@ -74,14 +75,14 @@ interface FlowCase {
 
 /** The fixture's streams as the digest folds them, which is the fold the store runs. */
 async function digestOf(fixturePath: string): Promise<{
-  summaries: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; frames: number;
+  summaries: StreamSummary[]; udp: UdpSummary[]; quic: QuicSummary[]; tls: TlsSummary[]; frames: number;
 }> {
   const { arrived } = await arrive(fixturePath);
   const digest = new StreamDigest();
   for (const a of arrived) digest.feed(a.packet);
   // Every summary: each has a version above zero once a row has been folded.
   const changes = digest.changedSince(0);
-  return { summaries: changes.tcp, udp: changes.udp, quic: changes.quic, frames: arrived.length };
+  return { summaries: changes.tcp, udp: changes.udp, quic: changes.quic, tls: changes.tls, frames: arrived.length };
 }
 
 console.log('folding the fixtures through the digest...');
@@ -118,7 +119,19 @@ for (const c of cases) {
     + `${total(c.summary)} frames, ${c.summary.outcome}${c.summary.joinedMidStream ? ' (joined mid-stream)' : ''}, `
     + `${c.summary.steps.length} steps`);
 }
-if (cases.length === 0 && flowCases.length === 0) { console.log('no streams to photograph'); process.exit(1); }
+// Stage 3: the first TCP stream whose TLS summary has a ServerHello step.
+let tlsCase: { summary: StreamSummary; tls: TlsSummary } | undefined;
+if (KINDS.includes('tls')) {
+  for (const t of inwireDigest.tls) {
+    if (!t.phases.some((p) => p.phase === 'ServerHello')) continue;
+    const s = inwireDigest.summaries.find((x) => x.streamId === t.key);
+    if (s !== undefined) { tlsCase = { summary: s, tls: t }; break; }
+  }
+  console.log(tlsCase === undefined
+    ? '  tls: no stream with a ServerHello'
+    : `  tls: stream #${tlsCase.summary.streamId}, phases ${tlsCase.tls.phases.map((p) => `${p.phase === 'alert' ? `alert: ${p.alertName}` : p.phase} (${p.side})`).join(' -> ')}`);
+}
+if (cases.length === 0 && flowCases.length === 0 && tlsCase === undefined) { console.log('no streams to photograph'); process.exit(1); }
 
 const PIPE = String.raw`\\.\pipe\inwire-stream-shots-` + process.pid;
 const agent = await startStubAgent(PIPE, 5);
@@ -358,6 +371,47 @@ try {
           await p.locator(`#packet-row-${summary.firstId}`).waitFor({ timeout: 30_000 }).catch(() => {});
           await sleep(800);
           await shot(`${c.name}-5-list`);
+        }
+
+        // Stage 3: a TCP stream with a ServerHello, opened on the ladder with
+        // its TLS line, then Statistics' TCP level sorted by Outcome.
+        if (tlsCase !== undefined) {
+          if (imported !== inwire.path) {
+            console.log(`${tag}: importing ${path.basename(inwire.path)}`);
+            console.log(`  imported: ${await importFixture(p, inwireFixture)}`);
+            imported = inwire.path;
+          }
+          const { summary } = tlsCase;
+          const filter = p.getByPlaceholder('e.g. tcp.port == 443');
+          await filter.fill(`frame.number == ${summary.firstId}`);
+          await filter.press('Enter');
+          const row = p.locator(`#packet-row-${summary.firstId}`);
+          await row.waitFor({ timeout: 30_000 });
+          await row.click();
+          await sleep(300);
+          await p.getByRole('button', { name: 'Follow Stream' }).click();
+          await sleep(500);
+          await p.getByRole('radio', { name: 'Ladder' }).click();
+          await p.waitForFunction(() => !/reading \d/i.test(document.body.innerText), undefined, { timeout: 60_000 }).catch(() => {});
+          await sleep(800);
+          const line = p.locator('[aria-label="TLS phases"]');
+          const shown = await line.waitFor({ timeout: 30_000 }).then(() => true, () => false);
+          console.log(`  TLS line: ${shown}, ${shown ? await line.getByRole('button').count() : 0} buttons (summary has ${tlsCase.tls.phases.length})`);
+          await shot('tls-1-ladder');
+
+          await p.keyboard.press('Escape');
+          await sleep(400);
+          await filter.fill('');
+          await filter.press('Enter');
+          await p.getByRole('button', { name: /^Statistics/ }).click();
+          await p.getByRole('button', { name: 'Conversations' }).click();
+          await p.getByRole('button', { name: 'TCP', exact: true }).click();
+          await sleep(500);
+          await p.getByRole('button', { name: 'Outcome', exact: true }).click();
+          await sleep(300);
+          const notes = await p.locator('tbody tr').filter({ hasText: /TLS (alert|unanswered)/ }).count();
+          console.log(`  TCP rows with a TLS note: ${notes}`);
+          await shot('stats-tcp-tls');
         }
 
         // Statistics' UDP and QUIC levels, read from the digest, and a row's

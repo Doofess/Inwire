@@ -783,7 +783,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   // A new capture drops everything the pane keeps per stream, because every
   // one of those is keyed by a frame id and ids start again from one.
   checkTrue('the digest hook returns the capture it is answering for',
-    /return \{ summaries, udp, quic, captureEnd, rebuilding, partial, captureId \}/.test(hook));
+    /return \{ summaries, udp, quic, tls, captureEnd, rebuilding, partial, captureId \}/.test(hook));
   const reset = pane.match(/const seenCapture = useRef\(captureId\);[\s\S]*?\}, \[captureId\]\);/)?.[0] ?? '';
   checkTrue('the pane has an effect keyed on the capture id', reset.length > 0);
   for (const call of ['cache.current.clear()', 'setStream(null)', 'setExpanded(NONE_EXPANDED)']) {
@@ -796,7 +796,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the load is cancelled and begun again when the capture changes',
     pane.includes('}, [captureId, summaryId]);'));
   checkTrue('the digest hook keeps nothing across a disable',
-    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setUdp\(new Map\(\)\);\s*setQuic\(new Map\(\)\);\s*setCaptureEnd\(0\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*setPartial\(false\);\s*\};/.test(hook));
+    /return \(\) => \{\s*alive = false;[\s\S]*?setSummaries\(new Map\(\)\);\s*setUdp\(new Map\(\)\);\s*setQuic\(new Map\(\)\);\s*setTls\(new Map\(\)\);\s*setCaptureEnd\(0\);\s*setCaptureId\(null\);\s*setRebuilding\(null\);\s*setPartial\(false\);\s*\};/.test(hook));
 
   // A page of a stream that was left is never published, and the summary goes
   // only with the frames it describes.
@@ -810,7 +810,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('...and frames cached for a stream are keyed by kind as well as key',
     pane.includes('new Map<string, Packet[]>()') && pane.includes('streamKey(target.kind, target.streamId)'));
   checkTrue('...a QUIC connection\'s phase line scrolls through the state map\'s request',
-    /quicSummary\.phases\.map[\s\S]*?pickState\(step\.frameId\)/.test(pane));
+    /label="QUIC phases"[\s\S]*?onPick=\{pickState\}/.test(pane));
   checkTrue('a failed read falls back to the buffer rather than reading "Reading 0 of N" for good',
     /\.catch\(\(error: unknown\) => \{[\s\S]*?setStream\(null\);/.test(pane));
 

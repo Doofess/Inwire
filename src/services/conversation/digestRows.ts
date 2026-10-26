@@ -14,6 +14,7 @@ import type { Conversation, ConversationKind } from '../statistics';
 import type { StreamSummary } from './streamDigest';
 import type { QuicOutcome, QuicSummary, UdpOutcome, UdpSummary } from './flowSummary';
 import type { TcpOutcome } from './tcpStates';
+import { tlsNote, type TlsSummary } from './tlsSummary';
 
 /** A flow with no frame this long before the capture's last frame has gone quiet. */
 export const QUIET_SECONDS = 30;
@@ -30,6 +31,8 @@ export interface DigestConversation extends Conversation {
   end: number;
   startExpired?: boolean;
   summary: StreamSummary | UdpSummary | QuicSummary;
+  /** TCP only: the stream's TLS phases, when the digest read any. */
+  tls?: TlsSummary;
 }
 
 /** A digest summary as the conversation table's row, client as A (ADR 0055). */
@@ -62,6 +65,7 @@ export interface DigestMaps {
   summaries: ReadonlyMap<number, StreamSummary>;
   udp: ReadonlyMap<number, UdpSummary>;
   quic: ReadonlyMap<number, QuicSummary>;
+  tls: ReadonlyMap<number, TlsSummary>;
 }
 
 function mapFor(kind: ConversationKind, digest: DigestMaps): ReadonlyMap<number, StreamSummary | UdpSummary | QuicSummary> | null {
@@ -82,7 +86,12 @@ function mapFor(kind: ConversationKind, digest: DigestMaps): ReadonlyMap<number,
 export function conversationRows(kind: ConversationKind, digest: DigestMaps): DigestConversation[] | null {
   const map = mapFor(kind, digest);
   if (map === null || map.size === 0) return null;
-  return [...map.values()].map(digestConversation);
+  if (kind !== 'tcp') return [...map.values()].map(digestConversation);
+  return [...map.values()].map((s) => {
+    const row = digestConversation(s);
+    const tls = digest.tls.get(row.streamId!);
+    return tls === undefined ? row : { ...row, tls };
+  });
 }
 
 /**
@@ -111,7 +120,7 @@ export function digestScopeNote(
 export function outcomeText(
   r: {
     outcome: string; joinedMidStream: boolean; startExpired?: boolean;
-    kind?: DigestKind; migrated?: boolean; end?: number;
+    kind?: DigestKind; migrated?: boolean; end?: number; tls?: TlsSummary;
   },
   captureEnd = 0,
 ): string {
@@ -123,5 +132,6 @@ export function outcomeText(
   if ((r.kind === 'udp' || r.kind === 'quic') && r.end !== undefined && captureEnd - r.end >= QUIET_SECONDS) {
     text += ' · went quiet';
   }
+  if (r.kind === 'tcp') text += tlsNote(r.tls, r.outcome as TcpOutcome);
   return text;
 }

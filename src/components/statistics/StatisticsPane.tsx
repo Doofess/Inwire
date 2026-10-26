@@ -14,6 +14,7 @@ import type { StreamTarget } from '../../services/followStream';
 import { conversationRows, digestScopeNote, outcomeText, type DigestConversation } from '../../services/conversation/digestRows';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../../services/conversation/flowSummary';
+import type { TlsSummary } from '../../services/conversation/tlsSummary';
 import { NameLookup, SOURCE_LABELS } from '../../services/nameResolution';
 import {
   CATEGORY_HINTS, CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TEXT,
@@ -53,6 +54,7 @@ const NO_DIGEST = {
   summaries: new Map<number, StreamSummary>() as ReadonlyMap<number, StreamSummary>,
   udp: new Map<number, UdpSummary>() as ReadonlyMap<number, UdpSummary>,
   quic: new Map<number, QuicSummary>() as ReadonlyMap<number, QuicSummary>,
+  tls: new Map<number, TlsSummary>() as ReadonlyMap<number, TlsSummary>,
   captureEnd: 0,
   rebuilding: null as { done: number; total: number } | null,
   partial: false,
@@ -90,6 +92,7 @@ interface StatisticsPaneProps {
     summaries: ReadonlyMap<number, StreamSummary>;
     udp: ReadonlyMap<number, UdpSummary>;
     quic: ReadonlyMap<number, QuicSummary>;
+    tls: ReadonlyMap<number, TlsSummary>;
     /** The latest frame time folded, which "went quiet" is measured against. */
     captureEnd: number;
     rebuilding: { done: number; total: number } | null;
@@ -164,7 +167,7 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
   // The digest's rows where it answers the level, the buffer's count elsewhere.
   const digestRows = useMemo(
     () => conversationRows(kind, held),
-    [kind, held.summaries, held.udp, held.quic],
+    [kind, held.summaries, held.udp, held.quic, held.tls],
   );
   const bufferRows = useMemo(
     () => (digestRows === null ? conversations(packets, kind) : []),

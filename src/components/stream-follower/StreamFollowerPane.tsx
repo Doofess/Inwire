@@ -26,6 +26,8 @@ import { Segmented } from '../ui/segmented';
 import { LadderView, type ScrollRequest } from '../ladder/LadderView';
 import { TcpStateMap } from '../ladder/TcpStateMap';
 import { copyText } from '../ui/CopyButton';
+import { PhaseLine } from './PhaseLine';
+import type { TlsSummary } from '../../services/conversation/tlsSummary';
 
 /**
  * One conversation's frames, both directions, in order.
@@ -152,6 +154,8 @@ interface StreamFollowerPaneProps {
    * without, it shows what the buffer holds, as it always did.
    */
   summary: StreamSummary | UdpSummary | QuicSummary | null;
+  /** The digest's TLS phases for a TCP target, from the same poll as `summary`. */
+  tls?: TlsSummary | null;
   /**
    * The capture the digest is answering for, or null when none has answered.
    * Everything this pane keeps per stream belongs to one capture, and a stream
@@ -187,6 +191,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   target,
   packets,
   summary,
+  tls,
   captureId,
   colorEngine,
   packetTheme,
@@ -655,27 +660,27 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               decrypted CONNECTION_CLOSE, never a guess. It wraps rather than
               scrolling, so at the 1024 minimum window nothing leaves the pane. */}
           {loaded !== null && quicSummary !== null && quicSummary.phases.length > 0 && (
-            <div
-              aria-label="QUIC phases"
-              className="px-4 py-2 border-b border-border flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs"
-            >
-              <span className="text-muted-foreground mr-1">Phases</span>
-              {quicSummary.phases.map((step, i) => (
-                <React.Fragment key={`${step.phase}:${step.side}`}>
-                  {i > 0 && <span className="text-muted-foreground" aria-hidden="true">→</span>}
-                  <button
-                    type="button"
-                    onClick={() => pickState(step.frameId)}
-                    title={`Frame #${step.frameId} at ${step.time.toFixed(3)} s, as read from the frames`}
-                    className="px-2 py-0.5 rounded border border-border bg-secondary/50 text-foreground/90
-                      hover:bg-accent active:opacity-70
-                      focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    {PHASE_LABEL[step.phase]} <span className="text-muted-foreground">{step.side}</span>
-                  </button>
-                </React.Fragment>
-              ))}
-            </div>
+            <PhaseLine
+              label="QUIC phases"
+              steps={quicSummary.phases.map((step) => ({
+                key: `${step.phase}:${step.side}`, text: PHASE_LABEL[step.phase],
+                side: step.side, frameId: step.frameId, time: step.time,
+              }))}
+              onPick={pickState}
+            />
+          )}
+          {/* A TCP stream's TLS phases, between the state map's dock and the
+              ladder: the same line, read from the digest's TLS summary. */}
+          {loaded !== null && tcpSummary !== null && tls != null && tls.phases.length > 0 && (
+            <PhaseLine
+              label="TLS phases"
+              steps={tls.phases.map((step) => ({
+                key: `${step.phase}:${step.side}`,
+                text: step.phase === 'alert' ? `alert: ${step.alertName ?? 'Unknown'}` : step.phase,
+                side: step.side, frameId: step.frameId, time: step.time,
+              }))}
+              onPick={pickState}
+            />
           )}
           <div className="flex-1 min-h-0 flex @container">
             <LadderView
