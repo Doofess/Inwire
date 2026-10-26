@@ -53,6 +53,13 @@ export const RENDERER_BACKLOG_FRAMES = 60_000;
  */
 export const HOLE_MIN_FRAMES = 16;
 
+/**
+ * How far below the next number a skew gap is remembered, waiting for the
+ * late frame that fills it. A frame later than this is not two adapters'
+ * race, and its gap is only counted, as before (#18).
+ */
+export const LATE_WINDOW = 64;
+
 export class LiveFlow {
   /** Main's batch id to the frames in it not yet dissected. */
   private readonly remaining = new Map<number, number>();
@@ -64,6 +71,11 @@ export class LiveFlow {
   private received = 0;
   /** Frames known skipped since the last frame delivered, waiting to be marked on the next. */
   private unmarked = 0;
+  /**
+   * Numbers below `nextSeq` a skew gap left and no frame has filled yet. The
+   * late frame usually comes; at the edge of a shed batch it was in it (#18).
+   */
+  private readonly late = new Set<number>();
 
   private storeOwed = 0;
   private readonly storeAcks = new Map<number, number>();
@@ -134,13 +146,40 @@ export class LiveFlow {
       this.nextSeq = seq + 1;
       this.received = 1;
       this.unmarked = 0;
+      this.late.clear();
       return 0;
     }
     this.received++;
-    const gap = Math.max(0, seq - this.nextSeq) + this.unmarked;
+    const skew = Math.max(0, seq - this.nextSeq);
+    if (skew > 0 && skew < HOLE_MIN_FRAMES) for (let n = this.nextSeq; n < seq; n++) this.late.add(n);
+    else if (skew === 0 && this.late.size > 0) this.late.delete(seq);
+    // A known loss is marked however small; only a skew gap waits to be filled.
+    const known = this.unmarked;
+    const gap = skew + known;
     this.unmarked = 0;
     if (seq + 1 > this.nextSeq) this.nextSeq = seq + 1;
-    return gap >= HOLE_MIN_FRAMES ? gap : 0;
+    if (this.late.size > 0) for (const n of this.late) if (n < this.nextSeq - LATE_WINDOW) this.late.delete(n);
+    return gap >= HOLE_MIN_FRAMES || known > 0 ? gap : 0;
+  }
+
+  /**
+   * The numbers in [`from`, `below`) a skew gap left and no frame has filled,
+   * given up here: a catch-up reads them from the file, or the shed batch
+   * held them and the caller marks them (`noteLost`).
+   */
+  takeLate(from: number, below: number): number[] {
+    const out: number[] = [];
+    for (const n of this.late) if (n >= from && n < below) out.push(n);
+    for (const n of out) this.late.delete(n);
+    return out.sort((a, b) => a - b);
+  }
+
+  /**
+   * Frames already counted as skipped that are now known lost: marked on the
+   * next frame delivered, however few.
+   */
+  noteLost(frames: number): void {
+    if (frames > 0) this.unmarked += frames;
   }
 
   /**
@@ -183,6 +222,7 @@ export class LiveFlow {
     this.nextSeq = 0;
     this.received = 0;
     this.unmarked = 0;
+    this.late.clear();
   }
 
   // -- the store ----------------------------------------------------------------
