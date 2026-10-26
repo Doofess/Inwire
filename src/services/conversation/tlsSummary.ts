@@ -117,13 +117,16 @@ function push(s: TlsSummary, row: Packet, phase: TlsPhase, side: Side, alertName
 
 /**
  * What TLS adds to a TCP outcome (ruling S3-2): ` · TLS alert` for a readable
- * fatal alert from either side, ` · TLS unanswered` for a ClientHello that never
- * got a ServerHello once the stream is no longer open, else nothing.
+ * fatal alert from either side, ` · TLS unanswered` for a ClientHello the server
+ * never answered in TLS at all once the stream is no longer open, else nothing.
+ * Any server step counts as an answer: a ServerHello whose record lost a
+ * segment is never read, but the server's later records still show it spoke.
  */
 export function tlsNote(tls: TlsSummary | undefined, tcpOutcome: TcpOutcome): string {
   if (tls === undefined) return '';
   if (tls.fatalAlert !== null) return ' · TLS alert';
   if (tcpOutcome === 'open') return '';
-  const heard = (phase: TlsPhase): boolean => tls.phases.some((p) => p.phase === phase);
-  return heard('ClientHello') && !heard('ServerHello') ? ' · TLS unanswered' : '';
+  const asked = tls.phases.some((p) => p.phase === 'ClientHello');
+  const answered = tls.phases.some((p) => p.side === 'server');
+  return asked && !answered ? ' · TLS unanswered' : '';
 }

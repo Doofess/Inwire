@@ -236,8 +236,11 @@ same `feed`, from fields a row already carries, and the snapshot is format 4.
   behind a handshake record is first seen a row later. The TLS map sits beside
   the TCP map, never inside it, so TCP's summaries stay byte for byte.
 - **S3-2: the TLS notes.** ` · TLS alert` after the TCP outcome for a readable
-  fatal alert from either side; ` · TLS unanswered` for a ClientHello with no
-  ServerHello when the TCP outcome is not `open`. Nothing else is appended.
+  fatal alert from either side; ` · TLS unanswered` for a ClientHello the server
+  never answered in TLS at all when the TCP outcome is not `open`. Any server
+  step counts as an answer, because a ServerHello whose record lost a segment
+  is never read while the server's later records still show it spoke. Nothing
+  else is appended.
 - **S3-3: classic DNS only.** A flow is tallied when one of its ports is 53.
   mDNS and LLMNR keep the plain UDP outcome, because their answers come from
   other flows; DNS over TCP is a TCP stream.
@@ -251,7 +254,8 @@ same `feed`, from fields a row already carries, and the snapshot is format 4.
 - **S3-5: a DNS flow's text is its tally alone**, e.g. `40 answered · 1 error`,
   with no "went quiet": a finished query is not a flow that stopped. The ladder
   marks an error answer with its rcode name and an unanswered query with
-  `no answer`.
+  `no answer`, once every page of the flow has been read. A frame with a mark
+  never folds into a band.
 - **S3-6: DHCPv4 only.** DHCPv6 rows carry no message type or transaction id,
   so DHCPv6 stays a UDP flow.
 - **S3-7: a DHCP side comes from the message type**, not from ports or

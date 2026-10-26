@@ -806,7 +806,9 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
     pane.includes('summary={loaded !== null ? tcpSummary : null}'));
   checkTrue('...the state map is docked for a TCP summary alone, never for UDP or QUIC',
     /\{loaded !== null && tcpSummary !== null && \(\s*<>\s*<aside/.test(pane) && !/<TcpStateMap\s+summary=\{summary\}/.test(pane));
-  checkTrue('...the ladder is told what it is folding', pane.includes('kind={target.kind}') && view.includes("foldRuns(frames, client, ruleKeyOf, expanded, kind)"));
+  checkTrue('DNS marks wait for the last page: a query whose answer is on a later page is not marked no answer',
+    pane.includes('hasDnsTally && !stillReading ? dnsMarks(frames, captureEnd)') && pane.includes('const stillReading = loaded?.loading != null;'));
+  checkTrue('...the ladder is told what it is folding', pane.includes('kind={target.kind}') && view.includes("foldRuns(frames, client, ruleKeyOf, expanded, kind, notes)"));
   checkTrue('...and frames cached for a stream are keyed by kind as well as key',
     pane.includes('new Map<string, Packet[]>()') && pane.includes('streamKey(target.kind, target.streamId)'));
   checkTrue('...a QUIC connection\'s phase line scrolls through the state map\'s request',
@@ -942,6 +944,17 @@ const udpRun = (n: number, fromClient: boolean, rule = 'a') => Array.from({ leng
     shape(foldRuns(withTcpFields, CLIENT, ruleKeyOf, NONE, 'udp')), ['frame', 'band(7)', 'frame', 'band(2)', 'frame']);
   check('an opened UDP band is its frames', shape(foldRuns(frames, CLIENT, ruleKeyOf, new Set([frames[1].id]), 'udp')),
     ['frame', ...Array(4).fill('frame'), 'frame', 'band(4)', 'frame', 'band(4)', 'frame']);
+}
+{
+  // Five unanswered queries in a row: each carries a `no answer` note, and a
+  // band would hide the very marks the ladder draws them for.
+  nextId = 1;
+  const frames = [...udpRun(1, true), ...udpRun(5, true), ...udpRun(1, false)];
+  const notes = new Map(frames.slice(1, 6).map((p) => [p.id, 'no answer'] as const));
+  check('a frame with a note stands alone, so a run of unanswered queries keeps its marks',
+    shape(foldRuns(frames, CLIENT, ruleKeyOf, NONE, 'udp', notes)), frames.map(() => 'frame'));
+  check('...and without notes the same run folds', shape(foldRuns(frames, CLIENT, ruleKeyOf, NONE, 'udp')),
+    ['frame', 'band(5)', 'frame']);
 }
 {
   // A TCP stream's pure ACK rides a band; a UDP datagram that merely looks like one does not.

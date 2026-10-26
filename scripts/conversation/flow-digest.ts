@@ -468,6 +468,15 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
     check('...a fatal alert is its own note, open or not', [tlsNote(tlsOf(d), 'open'), tlsNote(tlsOf(d), 'closed cleanly')], [' · TLS alert', ' · TLS alert']);
   }
   {
+    // The ServerHello's record lost a segment, so it never reassembled and no
+    // hello was read; the server's later records still show it answered.
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, { 'tls.record.content_type': 23 }));
+    check('tlsNote: a server that spoke TLS is not unanswered, though its hello was never read',
+      [steps(tlsOf(d)!), tlsNote(tlsOf(d), 'reset by server')], [['client:ClientHello', 'server:application data'], '']);
+  }
+  {
     const d = fresh();
     d.feed(tlsRow(true, hello()));
     const first = d.version;

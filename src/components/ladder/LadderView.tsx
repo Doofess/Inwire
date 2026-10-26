@@ -151,7 +151,7 @@ interface LadderViewProps {
   onToggleBand: (firstId: number) => void;
   /** Opens a band and never closes one: for a frame named from outside that a closed band is hiding. */
   onOpenBand: (firstId: number) => void;
-  /** A word per frame id, appended to that arrow's sub-line (DNS: no answer, an rcode). A band shows none. */
+  /** A word per frame id, appended to that arrow's sub-line (DNS: no answer, an rcode). A frame with one never folds into a band. */
   notes?: ReadonlyMap<number, string>;
 }
 
@@ -166,8 +166,8 @@ export const LadderView: React.FC<LadderViewProps> = ({
   // the fold asks the chain once per frame and the chips not at all.
   const ruleKeyOf = useCallback((p: Packet) => colorEngine.getMatchedRuleName(p) ?? '', [colorEngine]);
   const items = useMemo(
-    () => foldRuns(frames, client, ruleKeyOf, expanded, kind),
-    [frames, client, ruleKeyOf, expanded, kind],
+    () => foldRuns(frames, client, ruleKeyOf, expanded, kind, notes),
+    [frames, client, ruleKeyOf, expanded, kind, notes],
   );
   const extent = useMemo(() => ladderExtent(items), [items]);
   // Read by the opening-window effect, which must not re-run on every fold:

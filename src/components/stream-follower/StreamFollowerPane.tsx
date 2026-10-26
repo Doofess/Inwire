@@ -433,10 +433,13 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
 
   // DNS marks, only for a UDP flow whose digest summary has a tally. The capture's
   // end moves a waiting query to unanswered, so it is a dependency.
+  // None while pages are still arriving: a query whose answer is on a later page
+  // would read `no answer` until it came.
   const hasDnsTally = summary !== null && 'kind' in summary && summary.kind === 'udp' && summary.dns !== undefined;
+  const stillReading = loaded?.loading != null;
   const notes = useMemo(
-    () => (hasDnsTally ? dnsMarks(frames, captureEnd) : undefined),
-    [hasDnsTally, frames, captureEnd],
+    () => (hasDnsTally && !stillReading ? dnsMarks(frames, captureEnd) : undefined),
+    [hasDnsTally, stillReading, frames, captureEnd],
   );
 
   const targetKind = target === null ? 'tcp' : target.kind;
