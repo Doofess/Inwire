@@ -57,6 +57,7 @@ import type { Packet } from '../../types/packet';
 import { recordRefs } from '../dissect/recordHeader';
 import { readExact, type BlockFile } from './blockFile';
 import { StreamDigest, type StreamSummary } from '../conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import { decodeDigest, encodeDigest } from '../conversation/digestCodec';
 import { decodeMarks, encodeMarks } from '../marks';
 import { PackReader } from '../pipeline/rowPack';
@@ -717,12 +718,18 @@ export class CaptureHost {
   private onStreamDigest(message: Extract<ToCapture, { type: 'streamDigest' }>): void {
     const open = this.open;
     let summaries: StreamSummary[] = [];
+    let udp: UdpSummary[] = [];
+    let quic: QuicSummary[] = [];
+    let captureEnd = 0;
     let version = 0;
     let rebuilding: { done: number; total: number } | null = null;
     try {
       if (open !== null) {
-        // TCP only for now: the answer carries the other kinds in a later task.
-        summaries = open.digest.changedSince(message.since).tcp;
+        const changed = open.digest.changedSince(message.since);
+        summaries = changed.tcp;
+        udp = changed.udp;
+        quic = changed.quic;
+        captureEnd = open.digest.captureEnd;
         version = open.digest.version;
         const rebuild = open.rebuild;
         if (rebuild !== null) {
@@ -733,11 +740,11 @@ export class CaptureHost {
       }
     } catch (error) {
       this.fail(describe(error), false);
-      summaries = [];
+      summaries = []; udp = []; quic = [];
     }
     this.post({
       type: 'streamDigest', requestId: message.requestId, captureId: open?.id ?? null,
-      version, summaries, rebuilding, partial: open?.digestPartial ?? false,
+      version, summaries, udp, quic, captureEnd, rebuilding, partial: open?.digestPartial ?? false,
     });
   }
 

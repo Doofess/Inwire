@@ -145,7 +145,7 @@ console.log('--- 1. every request answers ---\n');
   h.send({ type: 'streamOrdinals', requestId: 2, streamId: 7, fromId: 1, toId: 100, startChunk: 0 });
   await h.store.drain();
   check('streamDigest with nothing open answers empty', h.of('streamDigest'), [
-    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], rebuilding: null, partial: false },
+    { type: 'streamDigest', requestId: 1, captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false },
   ]);
   check('streamOrdinals with nothing open answers empty', h.of('streamOrdinals'), [
     { type: 'streamOrdinals', requestId: 2, ordinals: [], nextChunk: null },
@@ -464,6 +464,51 @@ console.log('\n--- 13. a missed row does not cost every open a rebuild ---\n');
     again.store.close();
   }
   check('no handle leaked', missVolume.outstanding, 0);
+}
+
+console.log('\n--- 14. UDP and QUIC reach the answer, and survive a reopen ---\n');
+
+{
+  // Copied from `scripts/conversation/flow-digest.ts`: a script imports no other script.
+  const FLOWS = 'cap-20261026-120000-dig10';
+  const flowVolume = new MemoryVolume();
+  const udpRow = (fromClient: boolean, time: number): Packet => {
+    const id = nextId++;
+    return {
+      id, tsUs: id * 1000, timeDelta: 0, relativeTime: time,
+      source: fromClient ? '10.0.0.2' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.2',
+      sourcePort: fromClient ? 50000 : 5353, destPort: fromClient ? 5353 : 50000,
+      protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'], fields: { 'udp.stream': 3 },
+      length: 80, info: '', status: 'ok', interfaceName: 'eth0', layers: [], rawBytes: new Uint8Array([id & 0xff, 0, 0, 0]),
+    } as Packet;
+  };
+  const quicRow = (fromClient: boolean, time: number, type?: number): Packet => {
+    const r = udpRow(fromClient, time);
+    r.sourcePort = fromClient ? 50001 : 443; r.destPort = fromClient ? 443 : 50001;
+    r.fields = { 'udp.stream': 9, 'quic.connection.number': 0, 'quic.version': 1, ...(type === undefined ? {} : { 'quic.long.packet_type': type }) };
+    r.protocol = 'QUIC'; r.frameProtocols = ['eth', 'ethertype', 'ip', 'udp', 'quic'];
+    return r;
+  };
+  nextId = 1;
+  const rows = [udpRow(true, 1), udpRow(false, 2), quicRow(true, 3, 0), quicRow(false, 4, 0), quicRow(true, 12.5)];
+  const h = host({}, flowVolume);
+  h.send({ type: 'open', captureId: FLOWS });
+  h.send({ type: 'append', packets: crossed(rows) });
+  const live = await ask(h, 0, 1000);
+  check('an import\'s UDP and QUIC rows reach the answer: one UDP flow, one QUIC connection',
+    [live?.udp.map((s) => [s.key, s.outcome]), live?.quic.map((s) => [s.key, s.outcome])],
+    [[[3, 'request/response']], [[0, 'established']]]);
+  check('captureEnd rides every answer', live?.captureEnd, 12.5);
+  const quiet = await ask(h, live?.version ?? 0, 1001);
+  check('...including one with nothing new', [quiet?.udp, quiet?.quic, quiet?.captureEnd], [[], [], 12.5]);
+  h.send({ type: 'finish' });
+  await h.store.drain();
+  h.send({ type: 'open', captureId: FLOWS });
+  const restored = await ask(h, 0, 1002);
+  check('a reopen restores UDP and QUIC from the snapshot, with no rebuild',
+    [restored?.rebuilding, restored?.udp, restored?.quic, restored?.captureEnd], [null, live?.udp, live?.quic, 12.5]);
+  h.store.close();
+  check('no handle leaked', flowVolume.outstanding, 0);
 }
 
 console.log(failures === 0

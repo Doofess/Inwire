@@ -11,6 +11,7 @@ import type { InfoPatch } from '../dissect/types';
 import type { WriterStats } from './captureWriter';
 import type { FrameSlab } from './frameSlab';
 import type { StreamSummary } from '../conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import type { PackedRows } from '../pipeline/rowPack';
 
 export type ToCapture =
@@ -343,6 +344,12 @@ export type FromCapture =
       captureId: string | null;
       version: number;
       summaries: StreamSummary[];
+      /** UDP flows changed since, keyed by `key` (`udp.stream`). */
+      udp: UdpSummary[];
+      /** QUIC connections changed since, keyed by `key` (`quic.connection.number`). */
+      quic: QuicSummary[];
+      /** The largest `relativeTime` the digest has folded; 0 with nothing open. */
+      captureEnd: number;
       rebuilding: { done: number; total: number } | null;
       /** A rebuild dropped rows: the summaries are not the whole capture, and no snapshot will be written. */
       partial: boolean;

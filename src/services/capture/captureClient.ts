@@ -36,6 +36,7 @@ import { freshCaptureStorageState } from './captureProtocol';
 import { MatchSet } from './matchSet';
 import { plainForStore } from './storePacket';
 import type { StreamSummary } from '../conversation/streamDigest';
+import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 
 /** What a `streamDigest` poll gets back (ADR 0055). */
 export interface StreamDigestAnswer {
@@ -43,6 +44,10 @@ export interface StreamDigestAnswer {
   captureId: string | null;
   version: number;
   summaries: StreamSummary[];
+  udp: UdpSummary[];
+  quic: QuicSummary[];
+  /** The digest's latest frame time, which "went quiet" is measured against. */
+  captureEnd: number;
   rebuilding: { done: number; total: number } | null;
   /** A rebuild dropped rows: these summaries are not the whole capture. */
   partial: boolean;
@@ -333,6 +338,9 @@ class CaptureClient {
           captureId: message.captureId,
           version: message.version,
           summaries: message.summaries,
+          udp: message.udp,
+          quic: message.quic,
+          captureEnd: message.captureEnd,
           rebuilding: message.rebuilding,
           partial: message.partial,
         });
@@ -637,7 +645,7 @@ class CaptureClient {
     return this.request(
       this.pendingDigest as never,
       (requestId) => ({ type: 'streamDigest', requestId, since }),
-      { captureId: null, version: since, summaries: [], rebuilding: null, partial: false } as StreamDigestAnswer,
+      { captureId: null, version: since, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false } as StreamDigestAnswer,
     );
   }
 
@@ -752,7 +760,7 @@ class CaptureClient {
     // poller reads the null id as "start again" and asks the next capture
     // from zero.
     for (const settle of this.pendingDigest.values()) {
-      settle({ captureId: null, version: 0, summaries: [], rebuilding: null, partial: false });
+      settle({ captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
     }
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);

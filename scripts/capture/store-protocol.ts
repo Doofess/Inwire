@@ -980,6 +980,39 @@ console.log('\n--- packed rows kept in their packs, and decoded (packNative) ---
   check('a new capture drops it (packsReset) and reads its own packs to the end', [native.heldAfterSecond, decoded.heldAfterSecond], [0, 0]);
 }
 
+console.log('\n--- the stream digest answer carries every kind ---\n');
+
+{
+  const none = host();
+  none.send({ type: 'streamDigest', requestId: 1, since: 0 });
+  await none.store.drain();
+  check('no capture: the answer has empty udp, quic and a zero captureEnd',
+    [none.of('streamDigest')[0]?.udp, none.of('streamDigest')[0]?.quic, none.of('streamDigest')[0]?.captureEnd], [[], [], 0]);
+
+  const h = host();
+  const udp = (id: number, fromClient: boolean) => frame(id, {
+    protocol: 'UDP', frameProtocols: ['eth', 'ip', 'udp'], fields: { 'udp.stream': 4 },
+    source: fromClient ? '10.0.0.4' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.4',
+    sourcePort: fromClient ? 50000 : 5353, destPort: fromClient ? 5353 : 50000,
+  });
+  const quic = (id: number, fromClient: boolean) => frame(id, {
+    protocol: 'QUIC', frameProtocols: ['eth', 'ip', 'udp', 'quic'],
+    fields: { 'udp.stream': 5, 'quic.connection.number': 2, 'quic.long.packet_type': 0, 'quic.version': 1 },
+    source: fromClient ? '10.0.0.4' : '93.184.216.34', destination: fromClient ? '93.184.216.34' : '10.0.0.4',
+    sourcePort: fromClient ? 50001 : 443, destPort: fromClient ? 443 : 50001,
+  });
+  h.send({ type: 'open', captureId: 'cap-20261026-010000-0001' });
+  h.send({ type: 'append', packets: crossed([udp(1, true), udp(2, false), quic(3, true), quic(4, false)]) });
+  h.send({ type: 'streamDigest', requestId: 2, since: 0 });
+  await h.store.drain();
+  // The answer is what the store's process posts, so it goes through v8 as well.
+  const answer = deserialize(serialize(h.of('streamDigest')[0])) as Extract<FromCapture, { type: 'streamDigest' }>;
+  check('an open capture: one UDP flow, keyed by udp.stream', answer.udp.map((s) => [s.kind, s.key]), [['udp', 4]]);
+  check('...one QUIC connection, keyed by its number', answer.quic.map((s) => [s.kind, s.key]), [['quic', 2]]);
+  check('...and the capture\'s end is the newest row\'s time', answer.captureEnd, 4 / 1000);
+  h.store.close();
+}
+
 console.log('\n--- progress ---\n');
 
 {
