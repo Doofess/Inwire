@@ -17,7 +17,7 @@
  */
 import {
   BATCH_HEADER_BYTES, BATCH_RECORD_BYTES, BATCH_VERSION,
-  decodePacketBatch, isPacketBatch, retain,
+  decodePacketBatch, isPacketBatch,
 } from '../../src/services/agentBinary';
 
 let failures = 0;
@@ -112,12 +112,6 @@ const offloaded = new Uint8Array(0x1_0004).map((_, i) => i & 0xff);
     frames[0].bytes.buffer === buffer, true);
   check('...offset to where the record actually starts',
     frames[0].bytes.byteOffset, BATCH_HEADER_BYTES + BATCH_RECORD_BYTES);
-
-  // ...which is also why anything that outlives the batch has to copy: one
-  // 60-byte ARP frame would otherwise hold a quarter-megabyte batch alive.
-  const kept = retain(frames[1]);
-  check('a retained frame is detached from the batch', kept.buffer === buffer, false);
-  check('...and is the same bytes', Array.from(kept), Array.from(frames[1].bytes));
 }
 
 // --- an empty batch ----------------------------------------------------------

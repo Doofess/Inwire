@@ -165,8 +165,14 @@ interface Entry {
   /** The shard's row for this frame, decoded when it had to be, and the pack it came from. */
   packet?: Packet;
   packed?: PackedRef;
-  /** A light row's bytes and side record, from its result. */
+  /**
+   * A shard frame's own bytes, kept from the moment it was routed: the shard
+   * was given a copy, and sends none back. They go on the row it returns, and
+   * on a light row, whose pack has none. Absent for a frame dissected here,
+   * whose bytes are `d.packet.rawBytes`.
+   */
   bytes?: Uint8Array;
+  /** A light row's side record, from its result. */
   side?: RowSide;
   error?: string;
   tls?: number[];
@@ -317,13 +323,12 @@ export class Coordinator {
       if (result.row !== undefined && pack !== null) {
         if (rows !== null) {
           const packet = rows[result.row];
-          packet.rawBytes = result.bytes ?? new Uint8Array(0);
+          packet.rawBytes = entry.bytes ?? new Uint8Array(0);
           entry.packet = packet;
           entry.packed = { pack, index: result.row, mark: overlayMark(packet) };
         } else {
           // Light: the row stays where the shard put it.
           entry.packed = { pack, index: result.row };
-          entry.bytes = result.bytes ?? new Uint8Array(0);
           if (result.side !== undefined) entry.side = result.side;
         }
       }
@@ -539,7 +544,7 @@ export class Coordinator {
     this.writers[shard].tcp(frame, lane.family,
       { a: lane.srcMac, b: lane.dstMac, facts: eth }, { a: lane.src, b: lane.dst, facts: ip }, lane.key, streamId);
     this.queued(shard);
-    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false });
+    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes });
   }
 
   private routeFragment(frame: CoordFrame, lane: TcpFragmentLane): void {
@@ -572,7 +577,7 @@ export class Coordinator {
     this.writers[shard].fragment(frame, lane.family,
       { a: lane.srcMac, b: lane.dstMac, facts: eth }, { a: lane.src, b: lane.dst, facts: ip }, hint);
     this.queued(shard);
-    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false });
+    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes });
     this.barrier = { id: frame.id, shard, hint };
   }
 
@@ -704,14 +709,12 @@ export class Coordinator {
     const patches = this.patches[shard];
     if (batch === null && settle.length === 0 && rows.length === 0 && patches.length === 0) return;
     if (this.dead.has(shard)) return;
+    // A batch is three buffers, each its own: the slab is a copy of the frames,
+    // which this thread still holds (`Entry.bytes`). An empty slab is a legal
+    // transfer, so a batch of empty frames needs no case of its own.
     const transfer: ArrayBuffer[] = [];
     if (batch !== null) {
-      transfer.push(batch.nums.buffer as ArrayBuffer);
-      for (const bytes of batch.bytes) {
-        if (bytes.byteLength > 0 && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-          transfer.push(bytes.buffer as ArrayBuffer);
-        }
-      }
+      transfer.push(batch.nums.buffer as ArrayBuffer, batch.bytes.buffer as ArrayBuffer, batch.ends.buffer as ArrayBuffer);
     }
     this.settles[shard] = [];
     this.rows[shard] = [];

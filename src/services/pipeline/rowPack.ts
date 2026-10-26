@@ -63,8 +63,15 @@ export interface PackedRows {
   order: Int32Array;
   /** `[position in this flush, overlay]` for packed rows the merge wrote to. */
   overlays: [number, RowOverlay][];
-  /** One per packed row, in order of appearance: its `rawBytes`, or null for none. */
-  bytes: (Uint8Array | null)[];
+  /**
+   * Every row's `rawBytes`, packed and object alike, back to back in one
+   * exactly-sized buffer (byteOffset 0), so a flush transfers one buffer rather
+   * than one per frame (#17). Row i is `bytes.subarray(i === 0 ? 0 : ends[i - 1], ends[i])`;
+   * an empty range means the row brings none.
+   */
+  bytes: Uint8Array;
+  /** One entry per row of the flush, in order: where its bytes end in `bytes`. */
+  ends: Uint32Array;
   /** A new capture: drop every pack held before reading this flush's. */
   packsReset?: true;
 }
@@ -76,11 +83,14 @@ export class PackedFlush {
   /** Each pack this flush names, and how many of its rows. */
   private readonly used = new Map<number, { pack: RowPack; rows: number }>();
   private readonly overlays: [number, RowOverlay][] = [];
+  /** One per row, in order: its bytes, or null for none. */
   private readonly bytes: (Uint8Array | null)[] = [];
 
-  object(packet: Packet): void {
+  /** `bytes` null or empty both mean none: the reader leaves the object's own `rawBytes`. */
+  object(packet: Packet, bytes: Uint8Array | null): void {
     this.order.push(-1, this.objects.length);
     this.objects.push(packet);
+    this.bytes.push(bytes);
   }
 
   packed(pack: RowPack, index: number, bytes: Uint8Array | null, overlay: RowOverlay | null): void {
@@ -114,9 +124,20 @@ export class PackedFlush {
       if (left > 0) sent.set(key, left);
       else sent.delete(key);
     }
-    return {
-      packs, objects: this.objects, order: Int32Array.from(this.order), overlays: this.overlays, bytes: this.bytes,
-    };
+    const ends = new Uint32Array(this.bytes.length);
+    let total = 0;
+    for (let i = 0; i < this.bytes.length; i++) {
+      total += this.bytes[i]?.byteLength ?? 0;
+      ends[i] = total;
+    }
+    const bytes = new Uint8Array(total);
+    for (let i = 0, at = 0; i < this.bytes.length; i++) {
+      const row = this.bytes[i];
+      if (row === null || row.byteLength === 0) continue;
+      bytes.set(row, at);
+      at += row.byteLength;
+    }
+    return { packs, objects: this.objects, order: Int32Array.from(this.order), overlays: this.overlays, bytes, ends };
   }
 }
 
@@ -182,7 +203,8 @@ export class PackReader {
    * the same rows in the same order as the store's writer is handed them. A
    * packed row's slot keeps the pack, the position, the flush's overlay for it
    * (or null) and its id, and carries `rawBytes` only when the flush brought
-   * some; an object row is the object itself. The writer holds the pack beyond
+   * some (a view into the flush's slab); an object row is the object itself, given
+   * its slab bytes when it has any. The writer holds the pack beyond
    * this reader's `left` count, which is the reader's own bookkeeping.
    */
   readSlots(flush: PackedRows): { rows: Packet[]; slots: RowIn[] } {
@@ -195,22 +217,25 @@ export class PackReader {
   private take(flush: PackedRows, slots: RowIn[] | null): Packet[] {
     if (flush.packsReset) this.packs.clear();
     for (const pack of flush.packs) this.packs.set(pack.key, { pack, rows: unpackRows(pack, this.split), left: pack.count });
-    const { order, objects, bytes } = flush;
+    const { order, objects, bytes, ends } = flush;
     const out: Packet[] = new Array(order.length / 2);
-    let packed = 0;
     for (let i = 0, at = 0; at < order.length; i++, at += 2) {
       const key = order[at];
       const index = order[at + 1];
+      const end = ends[i];
+      const start = i === 0 ? 0 : ends[i - 1];
+      const frameBytes = end > start ? bytes.subarray(start, end) : null;
       if (key < 0) {
-        out[i] = objects[index];
-        if (slots !== null) slots[i] = objects[index];
+        const object = objects[index];
+        if (frameBytes !== null) object.rawBytes = frameBytes;
+        out[i] = object;
+        if (slots !== null) slots[i] = object;
         continue;
       }
       const held = this.packs.get(key);
       // A protocol error, and said so: a missing pack must not render as a blank row.
       if (held === undefined) throw new Error(`packed rows: no pack ${key} for row ${index}`);
       const row = held.rows[index];
-      const frameBytes = bytes[packed++];
       if (frameBytes !== null) row.rawBytes = frameBytes;
       if (slots !== null) {
         const slot: PackedRowIn = { pack: held.pack, index, overlay: null, id: row.id };

@@ -26,6 +26,7 @@ import { deflateSync, inflateSync } from 'fflate';
 import { serialize, deserialize } from 'node:v8';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { Packet } from '../../src/types/packet';
+import { packFrames } from '../../src/services/capture/frameSlab';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -360,7 +361,7 @@ console.log('\n--- I2. a rebuild of a ring capture: the removed start is not "jo
           ? { id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }
           : { id: p.id, tsUs: p.tsUs, bytes: p.rawBytes, ring: part });
       }
-      send({ type: 'appendBytes', frames });
+      send({ type: 'appendBytes', slab: packFrames(frames) });
       send({ type: 'append', packets: batch.map((p) => plainForStore(p)) });
     }
     const live = await ask(h, 0, 700);

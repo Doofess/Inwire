@@ -168,7 +168,9 @@ export class Shard {
     for (const patch of message.patches ?? []) this.patchTree(patch);
 
     const results: ShardResult[] = [];
-    // The batch's rows, in result order, and how long each one's bytes were.
+    // The batch's rows, in result order, and how long each one's bytes were
+    // (the pack records the length; the bytes stay with the coordinator, which
+    // sent them).
     const rows: Packet[] = [];
     const capLengths: number[] = [];
     const transfer = new Set<ArrayBuffer>();
@@ -188,10 +190,9 @@ export class Shard {
       if (op.kind === OP_FRAGMENT) result.barrier = report ?? { created: false, streamAsked: false };
       conversations.clear();
       if (packet !== undefined) {
-        // The bytes ride beside the pack, not in it: the row is packed without them.
-        const bytes = packet.rawBytes;
-        result.bytes = bytes;
-        capLengths.push(bytes.length);
+        // The row is packed without its bytes, and they do not come back: the
+        // coordinator holds the frame it sent and puts them back on the row.
+        capLengths.push(packet.rawBytes.length);
         packet.rawBytes = new Uint8Array(0);
         result.row = rows.length;
         rows.push(packet);
@@ -208,7 +209,7 @@ export class Shard {
     this.post({ type: 'results', epoch: this.epoch, results, pack }, [...transfer]);
   }
 
-  /** The frame's result, and its row (with its bytes, no tree) when it dissected. */
+  /** The frame's result, and its row (with its bytes in hand, no tree) when it dissected. */
   private dissect(frame: WireFrame): [ShardResult, Packet?] {
     const id = frame.id;
     let result: ShardResult;
@@ -270,10 +271,10 @@ export class Shard {
 
 /** A result's buffers, for the transfer list: never one twice, never a view into a bigger one. */
 export function collect(
-  result: { bytes?: Uint8Array; record?: Uint8Array; derived?: Uint8Array | null },
+  result: { record?: Uint8Array; derived?: Uint8Array | null },
   transfer: Set<ArrayBuffer>,
 ): void {
-  for (const bytes of [result.bytes, result.record, result.derived]) whole(bytes, transfer);
+  for (const bytes of [result.record, result.derived]) whole(bytes, transfer);
 }
 
 /** A view's buffer, only when the view is all of it; any other is copied by the clone. */

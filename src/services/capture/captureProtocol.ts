@@ -8,7 +8,8 @@
  */
 import type { Packet } from '../../types/packet';
 import type { InfoPatch } from '../dissect/types';
-import type { RawFrame, WriterStats } from './captureWriter';
+import type { WriterStats } from './captureWriter';
+import type { FrameSlab } from './frameSlab';
 import type { StreamSummary } from '../conversation/streamDigest';
 import type { PackedRows } from '../pipeline/rowPack';
 
@@ -84,7 +85,8 @@ export type ToCapture =
    */
   | { type: 'appendPacked'; rows: PackedRows; sent: Uint8Array }
   /**
-   * Frames as they arrived, before anything dissected them.
+   * Frames as they arrived, before anything dissected them, as one columnar
+   * `FrameSlab` (#17): five buffers cross the port, not an object a frame.
    *
    * **The capture path's write, and the reason it no longer waits for a
    * dissector** (ADR 0038). `append` above carries bytes AND a row together,
@@ -104,9 +106,9 @@ export type ToCapture =
    */
   | {
       type: 'appendBytes';
-      frames: RawFrame[];
+      slab: FrameSlab;
       /**
-       * Answered with `bytesTaken` once the writer has these frames, on the
+       * Answered with `bytesTaken` once the writer has this slab's frames, on the
        * port that sent them - the pipeline Worker's (ADR 0053). Its count of
        * unanswered appends is the store's backlog, and past a budget it stops
        * sending. Absent from a sender that keeps no count.

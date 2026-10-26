@@ -172,7 +172,12 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       if (m.lane === 0 && m.packet !== undefined) annotatePacket(m.packet, annotations);
       const layers = m.lane === 0 ? m.packet?.layers : m.layers;
       const packet = m.packet ?? (m.packed !== undefined ? rebuilt(m) : undefined);
-      digests[m.id - 1] = digest(packet, layers, m.record, m.derived, m.icmpMatchedRequestFrameId, m.infoPatches, m.error);
+      // A shard sends no bytes back: the row's are the coordinator's own copy of
+      // the frame, and they must be the frame the capture holds.
+      const sent = capture.inputs[m.id - 1].bytes;
+      const bytesAgree = packet === undefined || Buffer.from(packet.rawBytes).equals(sent);
+      digests[m.id - 1] = digest(packet, layers, m.record, m.derived, m.icmpMatchedRequestFrameId, m.infoPatches, m.error)
+        + (bytesAgree ? '' : '\nbytes differ from the frame');
       if (keep) merged.push({ ...m, layers });
       const bytes = packet?.rawBytes;
       if (bytes && bytes.byteLength > 0 && !keep) structuredClone(bytes.buffer, { transfer: [bytes.buffer as ArrayBuffer] });
@@ -396,8 +401,64 @@ function holeRidesInTheOp(): void {
     JSON.stringify(ops));
 }
 
+/**
+ * A batch's frame bytes travel as one slab: copied into the writer as written,
+ * sealed to an exactly sized buffer of their own, transferred with the numbers,
+ * and read back as views of it. The inputs are views at odd offsets into
+ * larger buffers with junk around them, so a writer that took `.buffer` whole
+ * (or transferred the input's) would carry the junk, or detach the sender's.
+ */
+function batchBytesAreOneSlab(): void {
+  const facts = { index: 0, pnum: 1, sinceFirst: 0, sincePrev: 0 };
+  const pair = { a: 'a', b: 'b', facts };
+  const lengths = Array.from({ length: 50 }, (_, i) => (i % 9 === 4 ? 0 : (i * 97 + 13) % 1501));
+  const inputs = lengths.map((length, i) => {
+    const backing = new Uint8Array(length + 40).fill(0xa5);
+    const at = 7 + (i % 13);
+    const view = backing.subarray(at, at + length);
+    for (let k = 0; k < length; k++) view[k] = (i * 31 + k * 7) & 0xff;
+    return view;
+  });
+  const want = inputs.map((view) => Buffer.from(view).toString('hex'));
+  const writer = new OpWriter();
+  inputs.forEach((bytes, i) => {
+    const frame = { id: i + 1, bytes, tsUs: i, relativeTime: 0, timeDelta: 0, origLen: bytes.length, linktype: 1 };
+    if (i % 5 === 3) writer.fragment(frame, 'ip', pair, pair, { nextStreamId: 1, forgets: null });
+    else writer.tcp(frame, 'ip', pair, pair, 'k', 0);
+    // A forget between frames takes no entry in `ends`.
+    if (i % 7 === 6) writer.forget('k');
+  });
+  const batch = writer.seal();
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  check('a shard batch carries its bytes as one slab: sealed exactly sized, from offset 0, one end per frame',
+    batch.bytes instanceof Uint8Array && batch.bytes.byteOffset === 0
+      && batch.bytes.byteLength === total && batch.bytes.buffer.byteLength === total
+      && batch.ends instanceof Uint32Array && batch.ends.length === 50 && batch.ends[49] === total,
+    `${batch.bytes instanceof Uint8Array ? `${batch.bytes.byteOffset}+${batch.bytes.byteLength} of ${batch.bytes.buffer.byteLength}` : 'not a Uint8Array'}, want ${total}`);
+  let clone: typeof batch | undefined;
+  let problem = '';
+  try {
+    const bytesBuffer = batch.bytes.buffer as ArrayBuffer;
+    clone = structuredClone(batch, { transfer: [batch.nums.buffer as ArrayBuffer, bytesBuffer, batch.ends.buffer as ArrayBuffer] });
+    if (bytesBuffer.byteLength !== 0) problem = 'the slab was copied, not transferred';
+  } catch (err) {
+    problem = String(err);
+  }
+  const got = clone === undefined ? [] : [...readOps(clone)].filter((op) => op.frame !== undefined)
+    .map((op) => Buffer.from(op.frame!.bytes).toString('hex'));
+  const wrong = got.findIndex((hex, i) => hex !== want[i]);
+  check('a shard batch carries its bytes as one slab: every frame reads back equal after the transfer',
+    problem === '' && got.length === 50 && wrong === -1,
+    problem !== '' ? problem : `${got.length} frames read, first wrong ${wrong}`);
+  const intact = inputs.findIndex((view, i) => view.byteLength !== lengths[i] || Buffer.from(view).toString('hex') !== want[i]);
+  check('a shard batch carries its bytes as one slab: the sender\'s own views still read after the transfer',
+    intact === -1 && inputs.every((view) => view.buffer.byteLength > 0),
+    `first changed ${intact}`);
+}
+
 async function main(): Promise<void> {
   holeRidesInTheOp();
+  batchBytesAreOneSlab();
   const captures: Capture[] = [];
   for (const fixture of FIXTURES) {
     if (!existsSync(fixture.path)) {

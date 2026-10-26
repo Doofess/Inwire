@@ -29,6 +29,7 @@ import { loadRealCaptures } from '../export/realCaptures';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
 import type { RawFrame } from '../../src/services/capture/captureWriter';
 import type { Packet } from '../../src/types/packet';
+import { packFrames } from '../../src/services/capture/frameSlab';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -145,7 +146,7 @@ function feedRing(
         ? { id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }
         : { id: p.id, tsUs: p.tsUs, bytes: p.rawBytes, ring: part });
     }
-    store.send({ type: 'appendBytes', frames });
+    store.send({ type: 'appendBytes', slab: packFrames(frames) });
     store.send({ type: 'append', packets: batch.map(plainForStore) });
   }
   return { filing, deleted };
@@ -286,7 +287,7 @@ async function main(): Promise<void> {
   plain.send({ type: 'open', captureId: plainId });
   for (let at = 0; at < packets.length; at += BATCH) {
     const batch = packets.slice(at, at + BATCH);
-    plain.send({ type: 'appendBytes', frames: batch.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes })) });
+    plain.send({ type: 'appendBytes', slab: packFrames(batch.map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }))) });
     plain.send({ type: 'append', packets: batch.map(plainForStore) });
   }
   plain.send({ type: 'ringDeleted', epoch: 1, lastSeq: packets.length });

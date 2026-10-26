@@ -137,7 +137,7 @@ function interleaving(rows: Packet[]): void {
   for (let at = 0, flush = 0; at < steps.length; at += 97, flush++) {
     const builder = new PackedFlush();
     for (const step of steps.slice(at, at + 97)) {
-      if (step.kind === 'object') builder.object(step.row);
+      if (step.kind === 'object') builder.object(step.row, null);
       else builder.packed(packs[step.lane], step.index, bytesOf(step.lane, step.index), null);
     }
     const message = cross(builder.seal(sent));
@@ -298,6 +298,76 @@ function bounded(rows: Packet[]): void {
     `tracked ${sending.tracked}, held ${reader.held}`);
 }
 
+const bytesAt = (seed: number, length: number) => Uint8Array.from({ length }, (_, i) => (seed * 31 + i) & 0xff);
+const same8 = (a: Uint8Array, b: Uint8Array) => a.byteLength === b.byteLength && a.every((v, i) => v === b[i]);
+
+/** A flush's row bytes cross as one exactly-sized buffer with an end offset per row (#17). */
+function slab(rows: Packet[]): void {
+  const lane = rows.slice(0, 10);
+  const p = pack(21, lane, lane.map(() => 60));
+  const objects = [0, 1, 2].map((i) => ({ ...rows[20 + i], rawBytes: NO_BYTES }));
+  // packed, object, packed, zero-length object, packed, object
+  const input = [bytesAt(1, 60), bytesAt(2, 70), bytesAt(3, 5), NO_BYTES, bytesAt(4, 90), bytesAt(5, 33)];
+  const builder = new PackedFlush();
+  builder.packed(p, 0, input[0], null);
+  builder.object(objects[0], input[1]);
+  builder.packed(p, 1, input[2], null);
+  builder.object(objects[1], input[3]);
+  builder.packed(p, 2, input[4], null);
+  builder.object(objects[2], input[5]);
+  // Sized as sealed: `v8.deserialize` lands every view of a message in one shared
+  // buffer, which a real `postMessage` transfer does not.
+  const sealed = builder.seal(new Map());
+  const message = cross(sealed);
+  const total = input.reduce((n, b) => n + b.byteLength, 0);
+  check('a flush\'s bytes are one slab: exactly sized, at offset 0, one end per row',
+    sealed.bytes.byteLength === total && sealed.bytes.byteOffset === 0 && sealed.bytes.buffer.byteLength === total
+      && sealed.ends.length === input.length && message.bytes.byteLength === total,
+    `byteLength ${sealed.bytes.byteLength}, offset ${sealed.bytes.byteOffset}, buffer ${sealed.bytes.buffer.byteLength}, ends ${sealed.ends?.length}`);
+  const out = new PackReader().read(message);
+  check('...and every row reads back with its input bytes', out.every((row, i) => same8(row.rawBytes, input[i])));
+  check('...a zero-length object keeps its own empty bytes', out[3].rawBytes.byteLength === 0);
+}
+
+function twoFlushes(rows: Packet[]): void {
+  const lane = rows.slice(0, 8);
+  const p = pack(22, lane, lane.map(() => 60));
+  const reader = new PackReader();
+  const sent = new Map<number, number>();
+  const bytes = lane.map((_, i) => bytesAt(10 + i, 20 + i));
+  const front = new PackedFlush();
+  for (let i = 0; i < 5; i++) front.packed(p, i, bytes[i], null);
+  const back = new PackedFlush();
+  for (let i = 5; i < 8; i++) back.packed(p, i, bytes[i], null);
+  const a = reader.read(cross(front.seal(sent)));
+  const b = reader.read(cross(back.seal(sent)));
+  check('a pack across two flushes keeps its bytes, each flush in its own slab',
+    [...a, ...b].every((row, i) => same8(row.rawBytes, bytes[i])) && reader.held === 0);
+}
+
+function slots(rows: Packet[]): void {
+  const lane = rows.slice(0, 4);
+  const p = pack(23, lane, lane.map(() => 60));
+  const meta = { ...rows[30], rawBytes: NO_BYTES };
+  const withBytes = { ...rows[31], rawBytes: NO_BYTES };
+  const kept = bytesAt(7, 40);
+  const builder = new PackedFlush();
+  builder.packed(p, 0, null, null);
+  builder.object(meta, NO_BYTES);
+  builder.packed(p, 1, kept, null);
+  builder.object(withBytes, bytesAt(8, 12));
+  const message = cross(builder.seal(new Map()));
+  const { rows: read, slots: got } = new PackReader().readSlots(message);
+  const sentRun = got[0] as { rawBytes?: Uint8Array; pack?: unknown };
+  check('a sent-run packed row gets a slot without rawBytes', sentRun.pack !== undefined && sentRun.rawBytes === undefined
+    && read[0].rawBytes.byteLength === 0);
+  check('...a metadata-only object is the object with empty rawBytes', got[1] === read[1] && read[1].rawBytes.byteLength === 0);
+  const slot = got[2] as { rawBytes?: Uint8Array };
+  check('...a packed row with bytes has them on row and slot', slot.rawBytes !== undefined && same8(slot.rawBytes, kept)
+    && same8(read[2].rawBytes, kept));
+  check('...and an object with bytes is given them', got[3] === read[3] && same8(read[3].rawBytes, bytesAt(8, 12)));
+}
+
 async function main(): Promise<void> {
   const sample = await roundTrips();
   interleaving(sample);
@@ -306,6 +376,9 @@ async function main(): Promise<void> {
   reset(sample);
   sender(sample);
   bounded(sample);
+  slab(sample);
+  twoFlushes(sample);
+  slots(sample);
   console.log(failures === 0 ? '\nAll row-pack checks passed.' : `\n${failures} check(s) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
