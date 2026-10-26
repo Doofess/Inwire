@@ -168,7 +168,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | "Marked only" export asks the store for the held marked ordinals and never starts a scan, so the list's filter scan keeps running | `scripts/export/marked-scope.ts` |
 | A row's source and destination filters use `ipv6.*` on IPv6 rows and `eth.*` on rows with no IP | `scripts/filter/row-terms.ts` |
 | The ladder opens a band for a named frame once per id, never once per fold | `scripts/session/ladder-runs.ts` |
-| One rule routes a row to its UDP flow or QUIC connection (`flowKeyOf`): the digest, the store's `flowOrdinals` and Follow Stream's RAM tail all use it (ADR 0055) | `scripts/conversation/flow-digest.ts`, `scripts/capture/stream-digest-store.ts` |
+| One rule says which UDP flow and QUIC connection a row is in (`udpKeyOf`, `quicKeyOf`, `inFlow`): the digest, the store's `flowOrdinals` and Follow Stream's RAM tail all use it, and a numbered QUIC datagram counts in both (ADR 0055) | `scripts/conversation/flow-digest.ts`, `scripts/capture/stream-digest-store.ts` |
 | `flowOrdinals` answers with no capture open, pages by chunk to `nextChunk: null`, and never touches the scan | `scripts/capture/stream-digest-store.ts`, `scripts/capture/store-protocol.ts` |
 | No state-map label hides most of its own edge | `scripts/session/state-map.ts` |
 | The conversation list's Follow Stream and Show conversation never return to Packets | `scripts/session/digest-rows.ts` (reads the handlers) |

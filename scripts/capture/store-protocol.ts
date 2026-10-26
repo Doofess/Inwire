@@ -191,7 +191,7 @@ console.log('--- every request answers, especially when it fails ---\n');
   h.send({ type: 'flowOrdinals', requestId: 7, kind: 'udp', key: 1, fromId: 1, toId: 2, startChunk: 0 });
   await h.store.drain();
   check('a flowOrdinals answers empty, with no next page', h.of('flowOrdinals'), [
-    { type: 'flowOrdinals', requestId: 7, ordinals: [], nextChunk: null },
+    { type: 'flowOrdinals', requestId: 7, ordinals: [], nextChunk: null, searched: 1 },
   ]);
 
   check('a read with no capture open answers empty', h.of('bytes'), [
@@ -1011,7 +1011,7 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
   await h.store.drain();
   // The answer is what the store's process posts, so it goes through v8 as well.
   const answer = deserialize(serialize(h.of('streamDigest')[0])) as Extract<FromCapture, { type: 'streamDigest' }>;
-  check('an open capture: one UDP flow, keyed by udp.stream', answer.udp.map((s) => [s.kind, s.key]), [['udp', 4]]);
+  check('an open capture: two UDP flows, keyed by udp.stream (the QUIC datagrams are one)', answer.udp.map((s) => [s.kind, s.key]), [['udp', 4], ['udp', 5]]);
   check('...one QUIC connection, keyed by its number', answer.quic.map((s) => [s.kind, s.key]), [['quic', 2]]);
   check('...and the capture\'s end is the newest row\'s time', answer.captureEnd, 4 / 1000);
   // `flowOrdinals` answers over the same port, and through v8 as well. It reads
@@ -1019,12 +1019,14 @@ console.log('\n--- the stream digest answer carries every kind ---\n');
   h.send({ type: 'finish' });
   h.send({ type: 'flowOrdinals', requestId: 3, kind: 'quic', key: 2, fromId: 1, toId: 4, startChunk: 0 });
   h.send({ type: 'flowOrdinals', requestId: 4, kind: 'udp', key: 4, fromId: 1, toId: 4, startChunk: 0 });
+  h.send({ type: 'flowOrdinals', requestId: 5, kind: 'udp', key: 5, fromId: 1, toId: 4, startChunk: 0 });
   await h.store.drain();
   const pages = deserialize(serialize(h.of('flowOrdinals'))) as Extract<FromCapture, { type: 'flowOrdinals' }>[];
-  check('flowOrdinals answers a QUIC connection and a UDP flow, whole, on the wire',
+  check('flowOrdinals answers a QUIC connection and a UDP flow, whole, on the wire (the QUIC rows are in their UDP flow too)',
     pages, [
-      { type: 'flowOrdinals', requestId: 3, ordinals: [2, 3], nextChunk: null },
-      { type: 'flowOrdinals', requestId: 4, ordinals: [0, 1], nextChunk: null },
+      { type: 'flowOrdinals', requestId: 3, ordinals: [2, 3], nextChunk: null, searched: 1 },
+      { type: 'flowOrdinals', requestId: 4, ordinals: [0, 1], nextChunk: null, searched: 1 },
+      { type: 'flowOrdinals', requestId: 5, ordinals: [2, 3], nextChunk: null, searched: 1 },
     ]);
   h.store.close();
 }

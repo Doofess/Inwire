@@ -10,7 +10,7 @@
  * state both the way the dissector leaves them.
  */
 import { RECENT_FRAMES, StreamDigest } from '../../src/services/conversation/streamDigest';
-import { flowKeyOf, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
+import { flowKeyOf, inFlow, quicKeyOf, udpKeyOf, type QuicSummary, type UdpSummary } from '../../src/services/conversation/flowSummary';
 import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
@@ -111,7 +111,14 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
 {
   const d = fresh();
   d.feed(quicRow({ fromClient: true, type: 0, version: V1, conn: 4 }));
-  check('udp: a QUIC datagram is not a UDP flow', [d.getFlow('udp', 9), d.changedSince(0).udp.length, d.changedSince(0).quic.length], [undefined, 0, 1]);
+  d.feed(quicRow({ fromClient: false, type: 2, version: V1, conn: 4 }));
+  const u = d.getFlow('udp', 9) as UdpSummary;
+  check('udp: a QUIC datagram also counts in its UDP flow',
+    [u.toServer.packets, u.toClient.packets, u.outcome, d.changedSince(0).udp.length, d.changedSince(0).quic.length],
+    [1, 1, 'request/response', 1, 1]);
+  check('...and the QUIC summary is unchanged by it',
+    [(d.getFlow('quic', 4) as QuicSummary).toServer.packets, (d.getFlow('quic', 4) as QuicSummary).toClient.packets, (d.getFlow('quic', 4) as QuicSummary).outcome],
+    [1, 1, 'handshake unfinished']);
   const bare = fresh();
   bare.feed(quicRow({ fromClient: true, type: 0, version: V1, conn: null }));
   check('udp: a QUIC row with no connection number stays UDP', [bare.changedSince(0).udp.length, bare.changedSince(0).quic.length], [1, 0]);
@@ -265,8 +272,8 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   const v = d.version;
   d.feed(quicRow({ fromClient: true, type: 0, version: V1 }));
   const c = d.changedSince(v);
-  check('one shared version covers every kind', [c.tcp.length, c.udp.length, c.quic.length, d.version > v], [0, 0, 1, true]);
-  check('changedSince(0) returns all three', [d.changedSince(0).udp.length, d.changedSince(0).quic.length], [1, 1]);
+  check('one shared version covers every kind', [c.tcp.length, c.udp.length, c.quic.length, d.version > v], [0, 1, 1, true]);
+  check('changedSince(0) returns all three (the QUIC datagram is also a UDP flow)', [d.changedSince(0).udp.length, d.changedSince(0).quic.length], [2, 1]);
   check('changedSince at the current version is empty', Object.values(d.changedSince(d.version)).map((a) => a.length), [0, 0, 0]);
 }
 {
@@ -285,6 +292,7 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   d.relabel(2, 'HTTP3');
   d.relabel(4, 'HTTP3');
   check('...each by its own id', [udpOf(d).protocol, quicOf(d).protocol], ['DNS', 'HTTP3']);
+  check('...a QUIC datagram\'s relabel reaches both its flows', [(d.getFlow('udp', 9) as UdpSummary).protocol, quicOf(d).protocol], ['HTTP3', 'HTTP3']);
   d.relabel(3, 'UDP');
   check('...and UDP or TCP is never a better label', udpOf(d).protocol, 'DNS');
   check('the ring is still wide enough for the horizon', RECENT_FRAMES >= 100_000, true);
@@ -304,29 +312,42 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   check('a restored digest keeps folding all kinds', [udpOf(back).outcome, back.captureEnd], ['request/response', 50]);
 }
 
-// ---- flowKeyOf is the one routing rule.
+// ---- udpKeyOf, quicKeyOf and inFlow are the one membership rule.
 {
   nextId = 1;
-  check('flowKeyOf is the digest\'s rule: a UDP row is its udp.stream',
-    flowKeyOf(udpRow({ fromClient: true }, 5)), { kind: 'udp', key: 5 });
-  check('...a QUIC row with a connection number is that connection',
-    flowKeyOf(quicRow({ fromClient: true, conn: 4 })), { kind: 'quic', key: 4 });
-  check('...a QUIC row without a connection number is UDP',
-    flowKeyOf(quicRow({ fromClient: true, conn: null })), { kind: 'udp', key: 9 });
-  check('...a row without udp.stream is nothing', flowKeyOf(udpRow({ fromClient: true }, null)), null);
-  check('...a QUIC row with neither number is nothing', flowKeyOf({ ...quicRow({ fromClient: true, conn: null }), fields: {} } as Packet), null);
-  check('...a TCP row is nothing', flowKeyOf({ ...udpRow({ fromClient: true }), frameProtocols: ['eth', 'ip', 'tcp'] } as Packet), null);
-  check('...a UDP row without ports is nothing', flowKeyOf({ ...udpRow({ fromClient: true }), sourcePort: undefined } as Packet), null);
-  // The digest and the function agree on every row above.
+  const tcp = { ...udpRow({ fromClient: true }), frameProtocols: ['eth', 'ip', 'tcp'] } as Packet;
+  check('a UDP row is in its udp.stream and not in a QUIC connection',
+    [udpKeyOf(udpRow({ fromClient: true }, 5)), quicKeyOf(udpRow({ fromClient: true }, 5))], [5, null]);
+  check('a QUIC row with a connection number is in both',
+    [udpKeyOf(quicRow({ fromClient: true, conn: 4 })), quicKeyOf(quicRow({ fromClient: true, conn: 4 }))], [9, 4]);
+  check('a QUIC row without a connection number is UDP only',
+    [udpKeyOf(quicRow({ fromClient: true, conn: null })), quicKeyOf(quicRow({ fromClient: true, conn: null }))], [9, null]);
+  const noStream = { ...quicRow({ fromClient: true, conn: 4 }), fields: { 'quic.connection.number': 4 } } as Packet;
+  check('a row without udp.stream is in no UDP flow (a QUIC one is still in its connection)',
+    [udpKeyOf(udpRow({ fromClient: true }, null)), udpKeyOf(noStream), quicKeyOf(noStream)], [null, null, 4]);
+  check('a QUIC row with neither number is in nothing',
+    [udpKeyOf({ ...noStream, fields: {} } as Packet), quicKeyOf({ ...noStream, fields: {} } as Packet)], [null, null]);
+  check('a TCP row is in none', [udpKeyOf(tcp), quicKeyOf(tcp)], [null, null]);
+  check('a UDP row without ports is in none',
+    [udpKeyOf({ ...udpRow({ fromClient: true }), sourcePort: undefined } as Packet), quicKeyOf({ ...quicRow({ fromClient: true, conn: 4 }), destPort: undefined } as Packet)], [null, null]);
+  const q = quicRow({ fromClient: true, conn: 4 });
+  check('inFlow is the two keys\' equality',
+    [inFlow(q, 'udp', 9), inFlow(q, 'quic', 4), inFlow(q, 'udp', 4), inFlow(q, 'quic', 9), inFlow(tcp, 'udp', 3)], [true, true, false, false, false]);
+  check('flowKeyOf is the flow a frame opens as: QUIC first, then UDP',
+    [flowKeyOf(q), flowKeyOf(quicRow({ fromClient: true, conn: null })), flowKeyOf(udpRow({ fromClient: true }, 5)), flowKeyOf(tcp)],
+    [{ kind: 'quic', key: 4 }, { kind: 'udp', key: 9 }, { kind: 'udp', key: 5 }, null]);
+  // The digest and the membership test agree on every row.
   const rows = [
     udpRow({ fromClient: true }, 5), quicRow({ fromClient: true, conn: 4 }), quicRow({ fromClient: true, conn: null }),
-    udpRow({ fromClient: true }, null),
+    udpRow({ fromClient: true }, null), noStream,
   ];
   const d = fresh();
   for (const r of rows) d.feed(r);
   const folded = [...d.changedSince(0).udp.map((s) => `udp:${s.key}`), ...d.changedSince(0).quic.map((s) => `quic:${s.key}`)].sort();
-  const keyed = rows.flatMap((r) => { const k = flowKeyOf(r); return k === null ? [] : [`${k.kind}:${k.key}`]; });
-  check('the digest folds exactly the rows flowKeyOf keys', folded, [...new Set(keyed)].sort());
+  const keyed = rows.flatMap((r) => [udpKeyOf(r), quicKeyOf(r)].flatMap((k, i) => k === null ? [] : [`${i === 0 ? 'udp' : 'quic'}:${k}`]));
+  check('the digest folds exactly the flows the keys name', folded, [...new Set(keyed)].sort());
+  const counts = [...d.changedSince(0).udp].map((s) => [s.key, s.toServer.packets]).sort();
+  check('...and counts every UDP row with a stream in its UDP flow', counts, [[5, 1], [9, 2]]);
 }
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`);

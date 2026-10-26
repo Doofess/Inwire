@@ -186,11 +186,14 @@ snapshot file and the same view, with these rulings.
 
 And these, which the stage's work settled:
 
-- **One routing rule.** `flowKeyOf` decides which flow a row belongs to: a
-  QUIC datagram with a connection number is that connection's, any other UDP
-  row with `udp.stream` is that flow's, and a row with neither is no flow. The
-  digest folds by it, the store's `flowOrdinals` matches by it and Follow
-  Stream's RAM tail filters by it, so the three cannot disagree.
+- **One routing rule.** The UDP level counts every UDP row with a
+  `udp.stream`, a QUIC datagram included (Wireshark's UDP tab and Endpoints →
+  UDP do the same), and a QUIC datagram with a `quic.connection.number` also
+  counts in that connection; a row with neither number is no flow. `inFlow`
+  (`udpKeyOf` and `quicKeyOf`) is the one membership test: the digest folds by
+  it, the store's `flowOrdinals` matches with it and Follow Stream's RAM tail
+  filters with it, so the three cannot disagree. `flowKeyOf` is only which of
+  the two a click on a frame opens, the connection first.
 - **The client end.** A well-known port outranks the first Initial, as it
   outranks a SYN for TCP: a server's Initial heard first means the client's
   was missed, and the connection is marked joined mid-stream.
@@ -198,7 +201,9 @@ And these, which the stage's work settled:
   or more before the capture's last frame says so after its outcome.
 - **A flow's frames come from the rows.** The prefix holds only `tcp.stream`,
   so `flowOrdinals` decodes the rows of the flow's chunks, a few chunks per
-  answer, and like `streamOrdinals` never touches the filter bar's scan.
+  answer, and like `streamOrdinals` never touches the filter bar's scan. Each
+  answer says how far through the flow's chunks it has searched, so a sparse
+  flow over a long capture shows "N% searched" rather than a count stuck at 0.
 - **Only rows the writer stored are folded.** A row held for its bytes is
   folded when they come. A row sealed as missed is not, because its slot is a
   placeholder; before this, such a row made the next open rebuild.

@@ -783,7 +783,7 @@ export class CaptureHost {
    * touches a scan: it reads the sealed chunks and nothing of the scan's state.
    */
   private onFlowOrdinals(message: Extract<ToCapture, { type: 'flowOrdinals' }>): void {
-    let page: { ordinals: number[]; nextChunk: number | null } = { ordinals: [], nextChunk: null };
+    let page: { ordinals: number[]; nextChunk: number | null; searched: number } = { ordinals: [], nextChunk: null, searched: 1 };
     try {
       if (this.open !== null) {
         page = this.open.reader.flowOrdinals(
@@ -792,7 +792,7 @@ export class CaptureHost {
       }
     } catch (error) {
       this.fail(describe(error), false);
-      page = { ordinals: [], nextChunk: null };
+      page = { ordinals: [], nextChunk: null, searched: 1 };
     }
     this.post({ type: 'flowOrdinals', requestId: message.requestId, ...page });
   }

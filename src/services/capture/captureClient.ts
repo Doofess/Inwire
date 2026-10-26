@@ -59,6 +59,11 @@ export interface StreamOrdinalsPage {
   nextChunk: number | null;
 }
 
+/** One page of a flow's frame positions, and how far (0..1) its search has got. */
+export interface FlowOrdinalsPage extends StreamOrdinalsPage {
+  searched: number;
+}
+
 /** One decoded chunk, and where it starts in the capture. */
 export interface RowBlock {
   firstOrdinal: number;
@@ -170,6 +175,7 @@ const NONE = new Map<number, Uint8Array>();
 const NO_ROWS = new Map<number, Packet>();
 /** The same, for a stream's positions. */
 const NO_ORDINALS: StreamOrdinalsPage = { ordinals: [], nextChunk: null };
+const NO_FLOW_ORDINALS: FlowOrdinalsPage = { ordinals: [], nextChunk: null, searched: 1 };
 
 class CaptureClient {
   /**
@@ -198,7 +204,7 @@ class CaptureClient {
   private readonly pendingLocate = new Map<number, (ordinal: number) => void>();
   private readonly pendingDigest = new Map<number, (answer: StreamDigestAnswer) => void>();
   private readonly pendingStreamOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
-  private readonly pendingFlowOrdinals = new Map<number, (page: StreamOrdinalsPage) => void>();
+  private readonly pendingFlowOrdinals = new Map<number, (page: FlowOrdinalsPage) => void>();
   private readonly pendingMarkMatches = new Map<number, (matches: MatchSet) => void>();
   /** The scan in flight. At most one - the store enforces the same. */
   private readonly pendingScan = new Map<number, {
@@ -358,7 +364,7 @@ class CaptureClient {
         const settle = this.pendingFlowOrdinals.get(message.requestId);
         if (settle === undefined) break;
         this.pendingFlowOrdinals.delete(message.requestId);
-        settle({ ordinals: message.ordinals, nextChunk: message.nextChunk });
+        settle({ ordinals: message.ordinals, nextChunk: message.nextChunk, searched: message.searched });
         break;
       }
       case 'markMatches': {
@@ -684,11 +690,11 @@ class CaptureClient {
    */
   flowOrdinals(
     kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number,
-  ): Promise<StreamOrdinalsPage> {
+  ): Promise<FlowOrdinalsPage> {
     return this.request(
       this.pendingFlowOrdinals as never,
       (requestId) => ({ type: 'flowOrdinals', requestId, kind, key, fromId, toId, startChunk }),
-      NO_ORDINALS,
+      NO_FLOW_ORDINALS,
     );
   }
 
@@ -791,7 +797,7 @@ class CaptureClient {
     this.pendingDigest.clear();
     for (const settle of this.pendingStreamOrdinals.values()) settle(NO_ORDINALS);
     this.pendingStreamOrdinals.clear();
-    for (const settle of this.pendingFlowOrdinals.values()) settle(NO_ORDINALS);
+    for (const settle of this.pendingFlowOrdinals.values()) settle(NO_FLOW_ORDINALS);
     this.pendingFlowOrdinals.clear();
     for (const settle of this.pendingMarkMatches.values()) settle(new MatchSet(0).seal());
     this.pendingMarkMatches.clear();

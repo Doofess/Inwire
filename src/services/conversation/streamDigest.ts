@@ -23,7 +23,7 @@ import {
   type TcpSegment, type TcpState, type TcpTransition,
 } from './tcpStates';
 import {
-  flowKeyOf, foldQuic, foldUdp, openQuic, openUdp, type QuicSummary, type UdpSummary,
+  foldQuic, foldUdp, openQuic, openUdp, quicKeyOf, udpKeyOf, type QuicSummary, type UdpSummary,
 } from './flowSummary';
 
 export interface DirectionTotals {
@@ -153,7 +153,8 @@ export class StreamDigest {
    * The last `RECENT_FRAMES` ids folded and the stream each was in, as three
    * rings: ids ascend, so a lookup is a binary search, and a fold costs three
    * stores where a Map's insert and delete were most of `feed`. A key is only
-   * unique within its kind, so the kind rides beside it.
+   * unique within its kind, so the kind rides beside it. A QUIC datagram is in
+   * two flows and takes two adjacent slots with the same id.
    */
   private readonly recentIds = new Float64Array(RECENT_FRAMES);
   private readonly recentKeys = new Int32Array(RECENT_FRAMES);
@@ -187,10 +188,13 @@ export class StreamDigest {
     const protocols = row.frameProtocols;
     if (protocols === undefined) return;
     if (protocols.includes('tcp')) { this.feedTcp(row); return; }
-    const flow = flowKeyOf(row);
-    if (flow === null) return;
-    if (flow.kind === 'quic') this.feedQuic(row, flow.key);
-    else this.feedUdp(row, flow.key);
+    // Two independent memberships (`inFlow`): every UDP row with a
+    // `udp.stream` counts in its UDP flow, and a QUIC datagram with a
+    // connection number also counts in that connection.
+    const stream = udpKeyOf(row);
+    if (stream !== null) this.feedUdp(row, stream);
+    const connection = quicKeyOf(row);
+    if (connection !== null) this.feedQuic(row, connection);
   }
 
   private feedUdp(row: Packet, key: number): void {
@@ -296,15 +300,20 @@ export class StreamDigest {
   /** An `InfoPatch.protocolLabel` for a frame already folded. */
   relabel(frameId: number, label: string): void {
     if (label === 'TCP' || label === 'UDP') return;
-    const slot = this.recentSlot(frameId);
-    if (slot < 0) return;
-    const key = this.recentKeys[slot];
-    const kind = this.recentKinds[slot];
-    const s = kind === KIND_TCP ? this.streams.get(key)?.summary
-      : kind === KIND_UDP ? this.udps.get(key) : this.quics.get(key);
-    if (s === undefined) return;
-    s.protocol = label;
-    s.version = ++this.versionValue;
+    const found = this.recentSlot(frameId);
+    if (found < 0) return;
+    // A QUIC datagram is remembered twice, in its UDP flow and in its QUIC
+    // connection, under the same id and next to each other: relabel both.
+    for (const slot of [found, (found - 1) & (RECENT_FRAMES - 1), (found + 1) & (RECENT_FRAMES - 1)]) {
+      if (this.recentIds[slot] !== frameId) continue;
+      const key = this.recentKeys[slot];
+      const kind = this.recentKinds[slot];
+      const s = kind === KIND_TCP ? this.streams.get(key)?.summary
+        : kind === KIND_UDP ? this.udps.get(key) : this.quics.get(key);
+      if (s === undefined) continue;
+      s.protocol = label;
+      s.version = ++this.versionValue;
+    }
   }
 
   /** Every summary changed after `version`, for a poll. */

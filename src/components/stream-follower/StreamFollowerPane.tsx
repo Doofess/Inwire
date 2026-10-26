@@ -121,7 +121,13 @@ interface LoadedStream {
   /** `streamKey`: a TCP stream id and a UDP key are both small integers, so the kind rides in it. */
   key: string;
   frames: Packet[];
-  loading: { loaded: number; total: number } | null;
+  /** `searched` (0..1): how far a sparse UDP or QUIC flow's search has got, when it reports one. */
+  loading: { loaded: number; total: number; searched?: number } | null;
+}
+
+/** " · 40% searched" while a flow's search is under way, else nothing. */
+function searchedSuffix(searched: number | undefined): string {
+  return searched !== undefined && searched < 1 ? ` · ${Math.floor(searched * 100)}% searched` : '';
 }
 
 type AnySummary = StreamSummary | UdpSummary | QuicSummary;
@@ -318,10 +324,10 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
     // published, it would put the old frames under the new stream's summary.
     const publish = progressGate(signal, PUBLISH_MS);
     setStream({ key: streamId, frames: EMPTY_FRAMES, loading: { loaded: 0, total } });
-    void loadStreamFrames(summary, packets, captureStore, (loaded, soFar) => {
+    void loadStreamFrames(summary, packets, captureStore, (loaded, soFar, searched) => {
       if (!publish(performance.now())) return;
       // A copy: the array handed over is the one still being filled.
-      setStream({ key: streamId, frames: soFar.slice(), loading: { loaded, total } });
+      setStream({ key: streamId, frames: soFar.slice(), loading: { loaded, total, searched } });
     }, signal).then((frames) => {
       if (signal.cancelled) return;
       keepFrames(cache.current, streamId, frames);
@@ -548,7 +554,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
                 </span>
                 <span className="text-xs px-2 py-0.5 rounded bg-secondary text-foreground/80">
                   {loading !== null
-                    ? `reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()}`
+                    ? `reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()}${searchedSuffix(loading.searched)}`
                     : `${frames.length.toLocaleString()} ${frames.length === 1 ? 'frame' : 'frames'}`}
                 </span>
               </div>
@@ -749,7 +755,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               {frames.length === 0 ? (
                 <div className="text-center py-12 text-muted-foreground">
                   {loading !== null
-                    ? `Reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()} frames`
+                    ? `Reading ${loading.loaded.toLocaleString()} of ${loading.total.toLocaleString()} frames${searchedSuffix(loading.searched)}`
                     : summary !== null
                       ? 'No frames on this stream.'
                       : 'No frames on this stream are in the buffer.'}

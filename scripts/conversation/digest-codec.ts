@@ -144,7 +144,8 @@ function quicUdpRow(id: number, fromClient: boolean, over: Record<string, number
   ];
   for (const r of rows) d.feed(r);
   const mixed = d.snapshot();
-  check('a snapshot holds one entry of each kind', mixed.entries.map((e) => e.kind).sort(), ['quic', 'tcp', 'udp']);
+  // The QUIC datagrams count in their UDP flow too, so udp.stream 5 is a second UDP entry.
+  check('a snapshot holds an entry per flow, a QUIC datagram\'s UDP flow too', mixed.entries.map((e) => e.kind).sort(), ['quic', 'tcp', 'udp', 'udp']);
   const bytes = encodeDigest(mixed, deflate);
   const back = decodeDigest(bytes, inflate);
   check('round-trips all three kinds', back, mixed);

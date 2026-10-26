@@ -261,7 +261,7 @@ check('streamOrdinals falls back to nothing, with no next page',
   { ordinals: [], nextChunk: null });
 check('flowOrdinals falls back to nothing, with no next page',
   await captureStore.flowOrdinals('quic', 3, 12, 40, 0),
-  { ordinals: [], nextChunk: null });
+  { ordinals: [], nextChunk: null, searched: 1 });
 
 console.log('\n--- the client, over a real port ---\n');
 
@@ -306,7 +306,7 @@ answer = (message) => {
     return { type: 'streamOrdinals', requestId: message.requestId, ordinals: [100, 101, 104], nextChunk: 2 };
   }
   if (message.type === 'flowOrdinals') {
-    return { type: 'flowOrdinals', requestId: message.requestId, ordinals: [7, 9], nextChunk: null };
+    return { type: 'flowOrdinals', requestId: message.requestId, ordinals: [7, 9], nextChunk: null, searched: 0.4 };
   }
   return null;
 };
@@ -317,7 +317,7 @@ answer = (message) => {
   check('flowOrdinals sends the protocol\'s request',
     sent && { ...sent, requestId: undefined },
     { type: 'flowOrdinals', requestId: undefined, kind: 'udp', key: 4, fromId: 12, toId: 40, startChunk: 1 });
-  check('...and settles on the page it was given', page, { ordinals: [7, 9], nextChunk: null });
+  check('...and settles on the page it was given, with how far it searched', page, { ordinals: [7, 9], nextChunk: null, searched: 0.4 });
 }
 
 {
@@ -363,7 +363,7 @@ console.log('\n--- the store goes away with requests in flight ---\n');
   check('all requests reached the store', received.slice(-3).map((m) => m.type), ['streamDigest', 'streamOrdinals', 'flowOrdinals']);
   check('the exit callback was registered', onExit !== null, true);
   onExit!('the capture store stopped');
-  check('a pending flowOrdinals settles with its fallback', await flowPage, { ordinals: [], nextChunk: null });
+  check('a pending flowOrdinals settles with its fallback', await flowPage, { ordinals: [], nextChunk: null, searched: 1 });
   check('a pending streamDigest settles with its fallback', await digest,
     { captureId: null, version: 0, summaries: [], udp: [], quic: [], captureEnd: 0, rebuilding: null, partial: false });
   check('a pending streamOrdinals settles with its fallback', await page, { ordinals: [], nextChunk: null });

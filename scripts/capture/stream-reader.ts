@@ -74,7 +74,7 @@ async function open(rows: Packet[], streamOrdinalChunks: number) {
     },
     async flowOrdinals(kind, key, fromId, toId, startChunk) {
       const a = await ask({ type: 'flowOrdinals', requestId: requestId++, kind, key, fromId, toId, startChunk }, 'flowOrdinals');
-      return { ordinals: a.ordinals, nextChunk: a.nextChunk };
+      return { ordinals: a.ordinals, nextChunk: a.nextChunk, searched: a.searched };
     },
     async readRowsFor(ordinals) {
       const a = await ask({ type: 'rowsForOrdinals', requestId: requestId++, ordinals: [...ordinals] }, 'rowsByOrdinal');

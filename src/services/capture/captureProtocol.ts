@@ -205,7 +205,7 @@ export type ToCapture =
     }
   /**
    * The positions of the frames of UDP flow or QUIC connection `key` (kind
-   * `kind`: `udp.stream` or `quic.connection.number`, by `flowKeyOf`), ids
+   * `kind`: `udp.stream` or `quic.connection.number`, by `inFlow`), ids
    * `[fromId, toId]`, from chunk `startChunk` onward. Answered with
    * `flowOrdinals`, a bounded page of chunks at a time, even when no capture is
    * open, because the caller holds a promise. The prefix holds only
@@ -378,8 +378,13 @@ export type FromCapture =
    * end. Empty and null when the read failed, which is reported separately.
    */
   | { type: 'streamOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null }
-  /** One page of a `flowOrdinals`, with `streamOrdinals`'s `nextChunk` meaning. */
-  | { type: 'flowOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null }
+  /**
+   * One page of a `flowOrdinals`, with `streamOrdinals`'s `nextChunk` meaning.
+   * `searched` (0..1) is how far through the flow's chunk range the walk has
+   * got, so a sparse flow that finds nothing for many pages still shows
+   * progress; 1 when `nextChunk` is null, and on the no-capture and failure answers.
+   */
+  | { type: 'flowOrdinals'; requestId: number; ordinals: number[]; nextChunk: number | null; searched: number }
   /**
    * How far a scan has got. Sent every `SCAN_PROGRESS_FRAMES`, not per slice.
    *

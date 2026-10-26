@@ -17,14 +17,14 @@
  */
 import type { Packet } from '../../types/packet';
 import type { StreamSummary } from './streamDigest';
-import { flowKeyOf, type QuicSummary, type UdpSummary } from './flowSummary';
+import { inFlow, type QuicSummary, type UdpSummary } from './flowSummary';
 
 export interface StreamFrameSource {
   streamOrdinals(streamId: number, fromId: number, toId: number, startChunk: number):
     Promise<{ ordinals: number[]; nextChunk: number | null }>;
   /** A UDP flow's or QUIC connection's positions, a bounded page of chunks, from the rows. */
   flowOrdinals(kind: 'udp' | 'quic', key: number, fromId: number, toId: number, startChunk: number):
-    Promise<{ ordinals: number[]; nextChunk: number | null }>;
+    Promise<{ ordinals: number[]; nextChunk: number | null; searched: number }>;
   readRowsFor(ordinals: readonly number[]): Promise<Map<number, Packet>>;
 }
 
@@ -92,11 +92,14 @@ export function progressGate(signal: { cancelled: boolean }, intervalMs: number)
  * `onProgress` is handed the count and the array being filled, by reference,
  * after each page of rows - so a view can draw the stream from its first page
  * rather than after its last. A caller that keeps what it was handed copies
- * it; the next page is appended to the same array.
+ * it; the next page is appended to the same array. A UDP flow or QUIC
+ * connection also reports after a page that found no frames, and adds how far
+ * the store's search has got (0..1) as a third argument: a sparse flow can sit
+ * on the same count for many pages.
  */
 export async function loadStreamFrames(
   summary: StreamSummary | UdpSummary | QuicSummary, ram: readonly Packet[], source: StreamFrameSource,
-  onProgress?: (loaded: number, soFar: readonly Packet[]) => void, signal?: { cancelled: boolean },
+  onProgress?: (loaded: number, soFar: readonly Packet[], searched?: number) => void, signal?: { cancelled: boolean },
 ): Promise<Packet[]> {
   // A TCP summary has no `kind`; a UDP or QUIC one names it and its key.
   const flow = 'kind' in summary ? summary : null;
@@ -106,9 +109,12 @@ export async function loadStreamFrames(
   // chunks before it.
   let chunk: number | null = 0;
   while (chunk !== null && !signal?.cancelled) {
-    const page: { ordinals: number[]; nextChunk: number | null } = flow === null
+    const page: { ordinals: number[]; nextChunk: number | null; searched?: number } = flow === null
       ? await source.streamOrdinals((summary as StreamSummary).streamId, summary.firstId, summary.lastId, chunk)
       : await source.flowOrdinals(flow.kind, flow.key, summary.firstId, summary.lastId, chunk);
+    // A sparse flow finds nothing for many pages, so progress by frames alone
+    // would sit still: a flow reports after EVERY page, with how far it has searched.
+    if (flow !== null && page.ordinals.length === 0 && !signal?.cancelled) onProgress?.(frames.length, frames, page.searched);
     for (let i = 0; i < page.ordinals.length && !signal?.cancelled; i += ROW_PAGE) {
       const ordinals = page.ordinals.slice(i, i + ROW_PAGE);
       const rows = await source.readRowsFor(ordinals);
@@ -118,7 +124,7 @@ export async function loadStreamFrames(
       }
       // A page that resolved after the cancel is not reported: the caller has
       // moved on, and what it is showing now is not this stream.
-      if (!signal?.cancelled) onProgress?.(frames.length, frames);
+      if (!signal?.cancelled) onProgress?.(frames.length, frames, page.searched); // undefined for TCP
     }
     chunk = page.nextChunk;
   }
@@ -129,9 +135,9 @@ export async function loadStreamFrames(
     if (flow === null) {
       if (p.streamId === (summary as StreamSummary).streamId && p.frameProtocols?.includes('tcp')) frames.push(p);
     } else {
-      // The digest's own routing, so a RAM frame is a flow's exactly when the store would have said so.
-      const of = flowKeyOf(p);
-      if (of !== null && of.kind === flow.kind && of.key === flow.key) frames.push(p);
+      // The digest's own membership test (`inFlow`, also the store's), so a RAM
+      // frame is a flow's exactly when the store would have said so.
+      if (inFlow(p, flow.kind, flow.key)) frames.push(p);
     }
   }
   return frames;

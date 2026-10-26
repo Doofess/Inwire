@@ -60,25 +60,51 @@ const REQUEST_RESPONSE_MAX = 2;
 const emptyTotals = (): DirectionTotals => ({ packets: 0, bytes: 0, first: null, last: null });
 
 /**
- * Which UDP flow or QUIC connection a row belongs to, or null: the one routing
- * rule. `StreamDigest.feed` folds by it, the store's `flowOrdinals` matches by
- * it and Follow Stream's RAM tail filters by it, so the three cannot disagree.
- *
- * A UDP row needs both ports. A QUIC datagram with a `quic.connection.number`
- * is that connection's; without one it is the UDP flow it rides in, and a row
- * with no `udp.stream` either is no flow at all - folding it under 0 would
- * merge every such datagram into one.
+ * The UDP flow a row counts in, or null: its `udp.stream`. Every UDP row with
+ * one counts, a QUIC datagram included (Wireshark's UDP tab and Endpoints →
+ * UDP do the same). A row with no `udp.stream` is in no flow - folding it
+ * under 0 would merge every such datagram into one. Needs both ports.
  */
-export function flowKeyOf(row: Packet): { kind: 'udp' | 'quic'; key: number } | null {
+export function udpKeyOf(row: Packet): number | null {
   const protocols = row.frameProtocols;
   if (protocols === undefined || protocols.includes('tcp') || !protocols.includes('udp')) return null;
   if (row.sourcePort === undefined || row.destPort === undefined) return null;
-  if (protocols.includes('quic')) {
-    const connection = fieldValue(row, 'quic.connection.number');
-    if (typeof connection === 'number') return { kind: 'quic', key: connection };
-  }
   const stream = fieldValue(row, 'udp.stream');
-  return typeof stream === 'number' ? { kind: 'udp', key: stream } : null;
+  return typeof stream === 'number' ? stream : null;
+}
+
+/**
+ * The QUIC connection a row also counts in, or null: its
+ * `quic.connection.number`. No `udp.stream` is needed. Needs both ports.
+ */
+export function quicKeyOf(row: Packet): number | null {
+  const protocols = row.frameProtocols;
+  if (protocols === undefined || protocols.includes('tcp') || !protocols.includes('udp') || !protocols.includes('quic')) return null;
+  if (row.sourcePort === undefined || row.destPort === undefined) return null;
+  const connection = fieldValue(row, 'quic.connection.number');
+  return typeof connection === 'number' ? connection : null;
+}
+
+/**
+ * Whether a row is in UDP flow or QUIC connection `key`: the one membership
+ * test. `StreamDigest.feed` folds by the same two keys, the store's
+ * `flowOrdinals` matches with this and Follow Stream's RAM tail filters with
+ * it, so the three cannot disagree.
+ */
+export function inFlow(row: Packet, kind: 'udp' | 'quic', key: number): boolean {
+  return kind === 'udp' ? udpKeyOf(row) === key : quicKeyOf(row) === key;
+}
+
+/**
+ * The flow a frame opens Follow Stream as, or null: its QUIC connection if it
+ * has one, else its UDP flow. Not a membership rule (a QUIC frame is in both;
+ * see `inFlow`), only which of the two a click on the frame shows.
+ */
+export function flowKeyOf(row: Packet): { kind: 'udp' | 'quic'; key: number } | null {
+  const connection = quicKeyOf(row);
+  if (connection !== null) return { kind: 'quic', key: connection };
+  const stream = udpKeyOf(row);
+  return stream !== null ? { kind: 'udp', key: stream } : null;
 }
 
 /** Ruling S2-2. */

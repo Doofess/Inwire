@@ -307,7 +307,7 @@ function fakeSource(disk: readonly Packet[], pageSize: number, onRead?: () => vo
       const from = startChunk * pageSize;
       const ordinals = Array.from({ length: Math.min(pageSize, disk.length - from) }, (_, i) => from + i);
       const nextChunk = from + pageSize < disk.length ? startChunk + 1 : null;
-      return Promise.resolve({ ordinals, nextChunk });
+      return Promise.resolve({ ordinals, nextChunk, searched: nextChunk === null ? 1 : (from + pageSize) / disk.length });
     },
     readRowsFor(ordinals) {
       source.rowCalls.push(ordinals.length);
@@ -999,6 +999,38 @@ await (async () => {
   const progress: number[] = [];
   const partial = await loadStreamFrames(udpSummary(big), [], cancelling, (n) => { progress.push(n); signal.cancelled = true; }, signal);
   check('a cancelled flow read stops at the next boundary, as a TCP one does', [partial.length, cancelling.flowCalls.length], [256, 1]);
+
+  // A sparse flow: pages with no frames still report how far the search has got.
+  nextId = 1;
+  const sparse = udpRun(3, true);
+  const pages = [
+    { ordinals: [] as number[], nextChunk: 1 as number | null, searched: 0.25 },
+    { ordinals: [], nextChunk: 2, searched: 0.5 },
+    { ordinals: [0, 1], nextChunk: 3, searched: 0.75 },
+    { ordinals: [2], nextChunk: null, searched: 1 },
+  ];
+  const sparseSource = (onPage?: () => void): StreamFrameSource => ({
+    streamOrdinals: () => Promise.resolve({ ordinals: [], nextChunk: null }),
+    flowOrdinals(_kind, _key, _fromId, _toId, startChunk) { onPage?.(); return Promise.resolve(pages[startChunk]); },
+    readRowsFor: (ordinals) => Promise.resolve(new Map(ordinals.map((o) => [o, sparse[o]]))),
+  });
+  const seen: [number, number | undefined][] = [];
+  const loaded = await loadStreamFrames(udpSummary(sparse), [], sparseSource(),
+    (n, _soFar, searched) => seen.push([n, searched]));
+  check('a flow\'s progress moves on a page with no frames',
+    seen, [[0, 0.25], [0, 0.5], [2, 0.75], [3, 1]]);
+  check('...and the frames are still all there', ids(loaded), ids(sparse));
+
+  const stop = { cancelled: false };
+  const afterCancel: number[] = [];
+  await loadStreamFrames(udpSummary(sparse), [], sparseSource(() => { if (afterCancel.length === 1) stop.cancelled = true; }),
+    (n) => afterCancel.push(n), stop);
+  check('...but not after a cancel', afterCancel, [0]);
+
+  const tcp = data(5);
+  const tcpArgs: unknown[][] = [];
+  await loadStreamFrames(summaryOf(tcp), [], fakeSource(tcp, 300), (...args) => tcpArgs.push(args));
+  check('a TCP stream\'s progress carries no searched fraction', tcpArgs.map((a) => a[2]), [undefined]);
 })();
 
 {

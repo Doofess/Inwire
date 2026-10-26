@@ -495,9 +495,9 @@ console.log('\n--- 14. UDP and QUIC reach the answer, and survive a reopen ---\n
   h.send({ type: 'open', captureId: FLOWS });
   h.send({ type: 'append', packets: crossed(rows) });
   const live = await ask(h, 0, 1000);
-  check('an import\'s UDP and QUIC rows reach the answer: one UDP flow, one QUIC connection',
+  check('an import\'s UDP and QUIC rows reach the answer: two UDP flows (the QUIC datagrams are one), one QUIC connection',
     [live?.udp.map((s) => [s.key, s.outcome]), live?.quic.map((s) => [s.key, s.outcome])],
-    [[[3, 'request/response']], [[0, 'established']]]);
+    [[[3, 'request/response'], [9, 'request/response']], [[0, 'established']]]);
   check('captureEnd rides every answer', live?.captureEnd, 12.5);
   const quiet = await ask(h, live?.version ?? 0, 1001);
   check('...including one with nothing new', [quiet?.udp, quiet?.quic, quiet?.captureEnd], [[], [], 12.5]);
@@ -535,7 +535,11 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
   };
   for (let i = 0; i < total; i++) {
     const fromClient = i % 2 === 0;
-    if (i % 5 === 0) {
+    if (i === 3 || i === total - 2) {
+      // A sparse flow, heard in the first chunk and in the last and nowhere between.
+      plan.push('udp:8');
+      flowRows.push(base(fromClient, { protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'], fields: { 'udp.stream': 8 } }));
+    } else if (i % 5 === 0) {
       plan.push('udp:5');
       flowRows.push(base(fromClient, { protocol: 'UDP', frameProtocols: ['eth', 'ethertype', 'ip', 'udp'], fields: { 'udp.stream': 5 } }));
     } else if (i % 7 === 0) {
@@ -568,6 +572,7 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
     let pages = 0;
     let requestId = firstRequestId;
     const chunks: (number | null)[] = [];
+    const searched: number[] = [];
     while (startChunk !== null && pages < 50) {
       h.send({ type: 'flowOrdinals', requestId, kind, key, fromId, toId, startChunk });
       await h.store.drain();
@@ -578,8 +583,9 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
       got.push(...answer.ordinals);
       startChunk = answer.nextChunk;
       chunks.push(startChunk);
+      searched.push(answer.searched);
     }
-    return { got, pages, chunks };
+    return { got, pages, chunks, searched };
   }
 
   {
@@ -587,7 +593,7 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
     h.send({ type: 'flowOrdinals', requestId: 3, kind: 'udp', key: 5, fromId: 1, toId: 100, startChunk: 0 });
     await h.store.drain();
     check('flowOrdinals answers with nothing open', h.of('flowOrdinals'), [
-      { type: 'flowOrdinals', requestId: 3, ordinals: [], nextChunk: null },
+      { type: 'flowOrdinals', requestId: 3, ordinals: [], nextChunk: null, searched: 1 },
     ]);
     h.store.close();
   }
@@ -604,7 +610,15 @@ console.log('\n--- 15. flowOrdinals reads a UDP flow or a QUIC connection from t
   const quic = await walk(h, 'quic', 2, FIRST, lastId, 200);
   check('flowOrdinals returns a QUIC connection\'s ordinals', quic.got, ordinalsOf('quic:2'));
   check('...and a UDP key of the same number is not a QUIC one', (await walk(h, 'quic', 5, FIRST, lastId, 300)).got, []);
-  check('...nor a QUIC row\'s udp.stream a UDP flow\'s', (await walk(h, 'udp', 9, FIRST, lastId, 400)).got, []);
+  check('...and a UDP flow carries its QUIC rows too (udp.stream 9 holds the connection\'s datagrams)',
+    (await walk(h, 'udp', 9, FIRST, lastId, 400)).got, ordinalsOf('quic:2'));
+  check('flowOrdinals reports how far it has searched: a sparse flow over four chunks',
+    await (async () => {
+      const sparseIds = flowRows.filter((p) => p.fields?.['udp.stream'] === 8).map((p) => p.id);
+      const sparse = await walk(h, 'udp', 8, sparseIds[0], sparseIds[sparseIds.length - 1], 700);
+      return { got: sparse.got, chunks: sparse.chunks, searched: sparse.searched };
+    })(),
+    { got: ordinalsOf('udp:8'), chunks: [1, 2, 3, null], searched: [0.25, 0.5, 0.75, 1] });
   check('flowOrdinals pages: nextChunk walks the flow\'s chunks to null',
     [udp.pages, udp.chunks], [4, [1, 2, 3, null]]);
   const second = await walk(h, 'udp', 6, flowRows[CHUNK_FRAMES].id, lastId, 500);
