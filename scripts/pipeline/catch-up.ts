@@ -156,6 +156,14 @@ interface Plan {
   edgeSkew?: Set<number>;
   /** No file to catch up from: every hole is marked. */
   noCatchUp?: boolean;
+  /** The capture's first frames, dropped before the Worker kept any - it did not know it was capturing yet. */
+  startDrops?: number;
+  /** The capture's first two frames arrive the wrong way round: two adapters racing at the start. */
+  startSwap?: boolean;
+  /** The Worker hears it is capturing only as its first kept frame is due - after the agent's first boundary, as a Start that told the agent first left it. */
+  capturingLate?: boolean;
+  /** Each file's boundary arrives before the agent says it is open. */
+  boundaryFirst?: boolean;
 }
 
 interface Run {
@@ -246,8 +254,13 @@ function run(frames: Frame[], plan: Plan): Run {
       const seq = frames[announced].seq;
       const index = fileIndexOf(seq);
       if (seq === 0 || fileIndexOf(seq - 1) !== index) {
+        // The agent's capture thread sends the boundary and its writer thread
+        // the open, so either can come first.
+        if (plan.boundaryFirst) known.boundary(index, seq);
         known.file(index, nameOf(index), 'open', null);
-        known.boundary(index, seq);
+        if (!plan.boundaryFirst) known.boundary(index, seq);
+        // As the Worker does: the first says where the capture's numbering begins.
+        router.boundary(index, seq);
         if (index > 1) {
           files.get(nameOf(index - 1))!.closed = true;
           known.file(index - 1, nameOf(index - 1), 'closed', null);
@@ -286,6 +299,7 @@ function run(frames: Frame[], plan: Plan): Run {
   // Batches in the port, not yet handled - a Worker running behind its own
   // file sees the file's frames before the live copies of them.
   const port: { no: number; group: Frame[] }[] = [];
+  let capturingHeard = false;
   const handle = ({ no: batchNo, group }: { no: number; group: Frame[] }) => {
     // `resetPipeline` in the Worker: a clear while catching up.
     if (plan.clearAtBatch === batchNo && catchUp.active) {
@@ -294,10 +308,15 @@ function run(frames: Frame[], plan: Plan): Run {
       router.clear();
     }
     if (plan.liveDrops) group = group.filter((f) => !plan.liveDrops!.has(f.seq));
+    if (plan.startDrops) group = group.filter((f) => f.seq >= plan.startDrops!);
+    if (group.length === 0) return;
+    // `capturing` in the Worker: a new run of the numbering, the router reset.
+    if (plan.capturingLate && !capturingHeard) { capturingHeard = true; flow.startCapture(); router.reset(); }
     if (plan.mainShed?.has(batchNo)) {
       router.shed(group[0].seq, group.length);
     } else if (!plan.agentShed?.has(batchNo)) {
       const order = group.slice();
+      if (plan.startSwap && batchNo === 0) [order[0], order[1]] = [order[1], order[0]];
       // Two adapters racing to the queue: neighbours a few places out of order.
       if (plan.skew) {
         for (let k = 0; k < 8; k++) {
@@ -379,6 +398,32 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     check(`${label}: no hole - every frame live, nothing read from the file`,
       sameFrames(frames, r.delivered) === null && r.catchUp.stats.started === 0 && r.liveDelivered === n);
   }
+  for (const lost of [1, 5, 40]) {
+    // The capture's first frames reached the Worker before it knew it was
+    // capturing, and were dropped there. The first boundary says where the
+    // numbering begins, so they are a hole however few, and the file has them.
+    const r = run(frames, { startDrops: lost });
+    const late = run(frames, { startDrops: lost, capturingLate: true, boundaryFirst: lost === 5 });
+    const lateDiff = sameFrames(frames, late.delivered);
+    check(`${label}: ...and when the boundary came before the Worker heard it was capturing`,
+      lateDiff === null && late.holes.length === 0 && late.skipped === 0,
+      lateDiff ?? JSON.stringify({ stats: late.catchUp.stats, holes: late.holes, skipped: late.skipped }));
+    const diff = sameFrames(frames, r.delivered);
+    check(`${label}: the capture's first ${lost} frame(s) never reached the Worker - read from the file`,
+      diff === null && r.holes.length === 0 && r.skipped === 0,
+      diff ?? JSON.stringify({ stats: r.catchUp.stats, holes: r.holes, skipped: r.skipped }));
+  }
+  {
+    // Nothing lost, but the second adapter's first frame came first: the file
+    // is read for the one before it, and the live copy that follows is not
+    // dissected twice.
+    const r = run(frames, { startSwap: true });
+    const bySeq = r.delivered.slice().sort((a, b) => a.seq - b.seq);
+    const diff = sameFrames(frames, bySeq);
+    check(`${label}: the capture's first two frames out of order - every frame once, no hole`,
+      diff === null && r.holes.length === 0 && r.skipped === 0 && holdsEveryLiveFrameOnce(r),
+      diff ?? JSON.stringify({ stats: r.catchUp.stats, holes: r.holes, skipped: r.skipped }));
+  }
 
   let caughtUp: Frame[] | null = null;
   {
@@ -386,6 +431,12 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     const r = run(frames, { mainShed: shed });
     const diff = sameFrames(frames, r.delivered);
     check(`${label}: main sheds five batches - the view is the straight run, frame for frame`, diff === null, diff ?? '');
+    {
+      const first = run(frames, { mainShed: shed, boundaryFirst: true });
+      const firstDiff = sameFrames(frames, first.delivered);
+      check(`${label}: ...and the same when the file's boundary came before its open`,
+        firstDiff === null && first.holes.length === 0, firstDiff ?? JSON.stringify({ stats: first.catchUp.stats, ended: first.ended }));
+    }
     check(`${label}: ...caught up once, rejoined once, and no hole left to mark`,
       r.catchUp.stats.started === 1 && r.catchUp.stats.rejoined === 1 && r.holes.length === 0,
       JSON.stringify({ stats: r.catchUp.stats, holes: r.holes }));

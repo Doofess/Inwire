@@ -1476,6 +1476,11 @@ function receiveControl(text: string): void {
   if (message.type === 'capture_boundary') {
     ringFiling.boundary(message.index, message.firstSeq);
     captureFiles.boundary(message.index, message.firstSeq);
+    // File 1's is where the capture's numbering begins, so frames missing at
+    // its start are a hole caught up from the file, not a later start. Taken
+    // whether or not this Worker has heard it is capturing yet: the router
+    // keeps it for the `capturing` reset.
+    router.boundary(message.index, message.firstSeq);
   }
   if (message.type === 'capture_file') captureFiles.file(message.index, message.name, message.state, message.firstSeq);
   if (message.type === 'capture_file' && message.state === 'deleted' && message.lastSeq !== null) {

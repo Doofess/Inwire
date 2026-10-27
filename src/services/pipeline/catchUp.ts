@@ -170,9 +170,13 @@ export class CaptureFiles {
   }
 
   file(index: number, name: string, state: 'open' | 'closed' | 'deleted', firstSeq: number | null): void {
-    // An `open` for file 1 after file 1 already held frames is a new run.
+    // An `open` for file 1 after file 1 was already open is a new run. Not
+    // after its boundary alone: the agent's capture thread sends that and its
+    // writer thread the open, so the boundary can come first - and taking its
+    // open for a new run forgot where file 1 begins, and no hole in it could
+    // be caught up.
     const known = this.files.get(index);
-    if (state === 'open' && index === 1 && known !== undefined && known.firstSeq !== null) this.reset();
+    if (state === 'open' && index === 1 && known !== undefined && known.name !== null) this.reset();
     const facts = this.facts(index);
     facts.name = name;
     if (firstSeq !== null && facts.firstSeq === null) facts.firstSeq = firstSeq;
@@ -813,6 +817,8 @@ export class CatchUpRouter<F extends SeqFrame> {
   /** The newest frame delivered, which the file's frame of that number must match. */
   private anchor: Anchor | null = null;
   private enabled = false;
+  /** Where file 1's boundary said this capture begins, until a `reset` uses it or the capture stops. */
+  private begins: number | null = null;
 
   constructor(
     private readonly flow: {
@@ -821,6 +827,7 @@ export class CatchUpRouter<F extends SeqFrame> {
       noteShed(firstSeq: number, frames: number): void;
       takeLate(from: number, below: number): number[];
       noteLost(frames: number): void;
+      captureBegins(firstSeq: number): void;
     },
     readonly catchUp: CatchUp<F>,
     private readonly fromFile: (frame: FileFrame) => F,
@@ -839,6 +846,8 @@ export class CatchUpRouter<F extends SeqFrame> {
   reset(): void {
     this.anchor = null;
     this.catchUp.reset();
+    if (this.begins !== null) this.flow.captureBegins(this.begins);
+    this.begins = null;
   }
 
   /** The view cleared while catching up: the numbering starts again, the files and where they were read go on. */
@@ -847,12 +856,30 @@ export class CatchUpRouter<F extends SeqFrame> {
     this.catchUp.clear();
   }
 
+  /**
+   * A `capture_boundary` from the agent: file 1's says where the capture's
+   * numbering begins. Kept until the capture stops, because it can arrive
+   * before the Worker hears it is capturing - whose `reset` starts the
+   * numbering again, and puts this back.
+   */
+  boundary(index: number, firstSeq: number): void {
+    if (index !== 1) return;
+    this.begins = firstSeq;
+    this.flow.captureBegins(firstSeq);
+  }
+
   /** A live frame off the pipe, or one handed back from a hold. */
   arrive(frame: F): void {
     if (!this.catchUp.active) {
       if (this.catchUp.live(frame) === 'drop') { this.release(frame); return; }
       const expected = this.flow.expectedSeq;
-      const hole = expected !== null && frame.seq - expected >= this.holeMin;
+      // Before the capture's first frame is delivered, from where its first
+      // boundary says it begins, any jump is a hole: frames the Worker dropped
+      // before it was capturing are rarely the dozen skew is told apart by.
+      // A late first frame from the other adapter is the file's copy's twin,
+      // and the first to arrive is kept.
+      const min = this.anchor === null ? 1 : this.holeMin;
+      const hole = expected !== null && frame.seq - expected >= min;
       if (!(hole && this.enabled && this.catchUp.start(expected, this.anchor, this.flow.takeLate(expected - LATE_WINDOW, expected)))) {
         this.pass(frame);
         return;
@@ -926,6 +953,7 @@ export class CatchUpRouter<F extends SeqFrame> {
    * left to catch up for.
    */
   stop(): void {
+    this.begins = null;
     const enabled = this.enabled;
     this.enabled = false;
     this.giveBack(this.catchUp.abort());

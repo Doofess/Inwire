@@ -62,6 +62,20 @@ console.log('--- the ledgers ---\n');
   const restarted = new LiveFlow();
   restarted.seqArrived(5000);
   check('a numbering that starts again is a new run, not a hole', restarted.seqArrived(1) === 0 && restarted.skippedFrames === 0);
+  const begun = new LiveFlow();
+  begun.captureBegins(100);
+  check('the first boundary says what the capture owes before any frame', begun.expectedSeq === 100);
+  begun.seqArrived(103);
+  check('...so frames missing at its start are skipped, not a later start', begun.skippedFrames === 3);
+  begun.captureBegins(5000);
+  check('the next ring file\'s boundary changes nothing', begun.expectedSeq === 104 && begun.skippedFrames === 3);
+  begun.captureBegins(0);
+  check('a lower one is a restarted agent\'s new run', begun.expectedSeq === 0 && begun.skippedFrames === 0);
+  const seeded = new LiveFlow();
+  seeded.captureBegins(50);
+  seeded.captureBegins(900);
+  check('before any frame a seed is only a seed: the agent\'s own boundary replaces one left from before',
+    seeded.expectedSeq === 900);
 }
 {
   const flow = new LiveFlow();

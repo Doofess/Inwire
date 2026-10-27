@@ -203,6 +203,24 @@ export class LiveFlow {
   }
 
   /**
+   * The agent's first `capture_boundary` of a capture: where its numbering
+   * begins. The agent sends it ahead of any frame in the file, so frames
+   * missing at the start - dropped before the Worker kept any - are a hole
+   * like any other, not a run that began later. Until a frame has arrived it
+   * is only a seed, and the agent's own boundary replaces one left from
+   * before; after, a higher one says nothing new and a lower one is a
+   * restarted agent's new run, as in `seqArrived`.
+   */
+  captureBegins(firstSeq: number): void {
+    if (this.firstSeq !== null && this.received > 0 && firstSeq >= this.firstSeq) return;
+    this.firstSeq = firstSeq;
+    this.nextSeq = firstSeq;
+    this.received = 0;
+    this.unmarked = 0;
+    this.late.clear();
+  }
+
+  /**
    * The next sequence number the stream owes, or null before the first frame
    * of a capture. A frame numbered well past it is the far side of a hole.
    */
