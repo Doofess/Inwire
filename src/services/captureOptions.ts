@@ -196,6 +196,25 @@ export function startCaptureCommand(options: CaptureOptions, captureId: string |
 }
 
 /**
+ * Starts a live capture: the Worker hears it is capturing, then the agent is
+ * told to start.
+ *
+ * In that order, and both through the pipeline Worker's one port, which keeps
+ * it. The Worker drops a batch that reaches it before it is capturing, and the
+ * first frame it keeps begins the capture's numbering - so a frame dropped
+ * ahead of it is no hole, is never read back from the agent's file, and is
+ * missing from the store with nothing said. Telling it from React's effect on
+ * `isCapturing`, after the start had gone, lost the capture's first frames.
+ */
+export function startLiveCapture(
+  pipeline: { setCapturing(capturing: boolean): void; command(command: AgentCommand): void },
+  start: AgentCommand,
+): void {
+  pipeline.setCapturing(true);
+  pipeline.command(start);
+}
+
+/**
  * What the panel says about the filter.
  *
  * - `none`: blank, so the capture takes everything the adapters see.

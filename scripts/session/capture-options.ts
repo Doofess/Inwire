@@ -17,7 +17,7 @@
 import {
   DEFAULT_CAPTURE_OPTIONS, MAX_CAPTURE_FILTER_CHARS, MAX_SNAPLEN, SUGGESTED_SNAPLEN,
   effectiveFilter, filterBlocksStart, filterVerdict, normalizeCaptureOptions, recordOf,
-  ringProblem, startCaptureCommand, type CaptureOptions,
+  ringProblem, startCaptureCommand, startLiveCapture, type CaptureOptions,
 } from '../../src/services/captureOptions';
 import { planResync } from '../../src/services/captureResync';
 import { metaEntries, type CaptureMeta } from '../../src/services/export/captureMeta';
@@ -38,6 +38,19 @@ function check(name: string, actual: unknown, expected: unknown) {
 const opts = (patch: Partial<CaptureOptions>): CaptureOptions => ({ ...DEFAULT_CAPTURE_OPTIONS, ...patch });
 
 console.log('--- what Start sends ---\n');
+
+{
+  // The Worker drops every frame that reaches it before it hears it is
+  // capturing, and the first frame it keeps starts the run, so the ones before
+  // it are no hole and are never read back from the file. Both go down one
+  // port, which keeps their order: capturing first, then the agent's start.
+  const heard: string[] = [];
+  startLiveCapture({
+    setCapturing: (on) => heard.push(`capturing ${on}`),
+    command: (command) => heard.push(command.type),
+  }, startCaptureCommand(DEFAULT_CAPTURE_OPTIONS, 'cap-1'));
+  check('Start tells the Worker it is capturing before the agent can send a frame', heard, ['capturing true', 'start_capture']);
+}
 
 check('nothing asked: the plain start it always was', startCaptureCommand(DEFAULT_CAPTURE_OPTIONS), { type: 'start_capture' });
 check('a filter travels trimmed', startCaptureCommand(opts({ filter: '  tcp port 443 ' })),

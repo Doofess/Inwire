@@ -257,7 +257,10 @@ try {
   const shellEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
   const owner = execFileSync('powershell', ['-NoProfile', '-Command', `(Get-Acl -LiteralPath '${pcapngPath}').Owner`],
     { encoding: 'utf8', env: shellEnv }).trim();
-  const me = execFileSync('whoami', { encoding: 'utf8' }).trim();
+  // Windows' own, by path: under Git Bash the PATH's first `whoami` is MSYS's,
+  // which leaves off the domain `Get-Acl` names.
+  const whoami = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe');
+  const me = execFileSync(whoami, { encoding: 'utf8' }).trim();
   console.log(`      owner ${owner}, this user ${me}`);
   check('the file is this user\'s, not SYSTEM\'s: written as the client', owner.toLowerCase(), me.toLowerCase());
 

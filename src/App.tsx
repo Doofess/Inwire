@@ -28,7 +28,7 @@ import { matchesOnDisk } from "./lib/captureRowSpace";
 import { MAX_CUSTOM_COLUMNS } from "./lib/packetColumns";
 import { usePreferenceStore, usePreferenceValue } from "./services/preferenceStore";
 import {
-  captureOptionsStore, effectiveFilter, filterBlocksStart, filterVerdict, recordOf, ringProblem, startCaptureCommand,
+  captureOptionsStore, effectiveFilter, filterBlocksStart, filterVerdict, recordOf, ringProblem, startCaptureCommand, startLiveCapture,
 } from "./services/captureOptions";
 import { keptFiles, stopReasonText } from "./services/captureFiles";
 import { packetColorSetStore } from "./services/themePrefs";
@@ -2466,8 +2466,10 @@ export default function App() {
       ...recordOf(captureOptionsRef.current),
     });
     // Named by its id, which is what has the agent write the capture's own
-    // pcapng into this capture's folder (ADR 0052).
-    sendAgentCommand(startCaptureCommand(captureOptionsRef.current, captureIdRef.current));
+    // pcapng into this capture's folder (ADR 0052). The Worker is told it is
+    // capturing first, not by the effect on `isCapturing` a render later, or
+    // the capture's first frames can reach it before it keeps any.
+    startLiveCapture(pipeline, startCaptureCommand(captureOptionsRef.current, captureIdRef.current));
     setIsCapturing(true);
   };
 

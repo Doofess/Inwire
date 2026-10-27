@@ -11,7 +11,9 @@ The live frame path between the pipe and the store; loaded when you work under `
 - A live frame's bytes are a view into the agent's batch, never a copy of their own (`receiveBatch`), and every hop past the window copies into its own slab. A dissector reads through the view's `byteOffset`; `scripts/pipeline/frame-views.ts` dissects every fixture frame from an odd offset inside junk and fails on any changed tree or row.
 - A tracker keeping bytes past its frame still `.slice()`s them: a kept view holds a whole batch alive, and a view of a transferred buffer reads empty. A TLS tracker that kept a view once lost its client random and left live connections undecrypted. `scripts/pipeline/moved-bytes.ts` dissects every real capture twice, detaching after each frame, and fails on any changed tree; `scripts/pipeline/arrival.ts` detaches too.
 
-## Stop and drain
+## Start, stop and drain
+
+- Start tells the Worker `capturing` before the agent's `start_capture`, both down the Worker's one port (`startLiveCapture`, `scripts/session/capture-options.ts`). The Worker drops a batch that arrives before it is capturing, and the first frame it keeps begins the run, so a dropped first frame is no hole and is never caught up. Sent from React's effect a render later, it lost a capture's first frames from the store (`scripts/electron/capture-file-drive.ts`).
 
 - Stop waits for the Worker's `drain` and flushes the last rows before the store `finish` (`stopCaptureAndSeal` in `src/App.tsx`, `handlePauseCapture`). Two ports into one process have no ordering between them.
 - `answerDrain` replies only after the store acks an empty `appendBytes` posted behind everything else on the Worker's port, bounded by `DRAIN_BARRIER_MS` (5000).
