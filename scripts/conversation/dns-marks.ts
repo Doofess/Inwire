@@ -38,6 +38,13 @@ check('a repeated query marks only its last copy',
   entries(dnsMarks([row(1, 10, 5, false), row(2, 11, 5, false)], 30)), [[2, 'no answer']]);
 check('a retried query answered is not marked',
   entries(dnsMarks([row(1, 10, 5, false), row(2, 11, 5, false), row(3, 11.1, 5, true, 0)], 30)), []);
+// A finished capture (a file, or a stopped or paused capture) gains no answers,
+// so a query still inside the wait window will never be answered.
+check('finished: a query inside the wait window is marked no answer',
+  entries(dnsMarks([row(1, 10, 5, false)], 14.9, true)), [[1, 'no answer']]);
+check('finished: an answered query is still not marked',
+  entries(dnsMarks([row(1, 10, 5, false), row(2, 10.1, 5, true, 0)], 14.9, true)), []);
+check('not finished is the default', entries(dnsMarks([row(1, 10, 5, false)], 14.9, false)), []);
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

@@ -3,7 +3,9 @@
  * answered, the rcode's name on an error answer. Paired by `dns.id` in frame
  * order, with the rules of the digest's tally (`foldDns`), except that a
  * repeated query marks only its last copy. A query still inside
- * `DNS_WAIT_SECONDS` of the capture's end is waiting and gets nothing.
+ * `DNS_WAIT_SECONDS` of the capture's end is waiting and gets nothing, unless
+ * the capture is `finished` (a file, or one that stopped or paused): no answer
+ * can arrive any more, so every open query is marked.
  */
 import type { Packet } from '../../types/packet';
 import { fieldValue } from '../dissect/fieldAccess';
@@ -15,7 +17,7 @@ const num = (row: Packet, abbrev: string): number | undefined => {
   return typeof v === 'number' ? v : undefined;
 };
 
-export function dnsMarks(frames: readonly Packet[], captureEnd: number): Map<number, string> {
+export function dnsMarks(frames: readonly Packet[], captureEnd: number, finished = false): Map<number, string> {
   const marks = new Map<number, string>();
   const open = new Map<number, Packet>();
   for (const row of frames) {
@@ -28,7 +30,7 @@ export function dnsMarks(frames: readonly Packet[], captureEnd: number): Map<num
     if (rcode !== 0) marks.set(row.id, DNS_RCODE_NAMES[rcode] ?? 'error');
   }
   for (const q of open.values()) {
-    if (captureEnd - q.relativeTime >= DNS_WAIT_SECONDS) marks.set(q.id, 'no answer');
+    if (finished || captureEnd - q.relativeTime >= DNS_WAIT_SECONDS) marks.set(q.id, 'no answer');
   }
   return new Map([...marks].sort((a, b) => a[0] - b[0]));
 }

@@ -28,6 +28,7 @@ import { TcpStateMap } from '../ladder/TcpStateMap';
 import { copyText } from '../ui/CopyButton';
 import { PhaseLine } from './PhaseLine';
 import { dnsMarks } from '../../services/conversation/dnsMarks';
+import { followNoun } from '../../services/conversation/digestRows';
 import type { TlsSummary } from '../../services/conversation/tlsSummary';
 import type { DhcpSummary } from '../../services/conversation/dhcpSummary';
 
@@ -173,6 +174,8 @@ interface StreamFollowerPaneProps {
   captureId: string | null;
   /** The digest's capture end, which decides when a DNS query stops waiting. */
   captureEnd?: number;
+  /** No capture is running, so a query still inside its wait will never be answered. */
+  captureFinished?: boolean;
   /** The packet list's own colouring, so an arrow looks like its row. */
   colorEngine: ColorRulesEngine;
   packetTheme: PacketTheme;
@@ -204,6 +207,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   tls,
   captureId,
   captureEnd = 0,
+  captureFinished = false,
   colorEngine,
   packetTheme,
   selectedId,
@@ -432,14 +436,15 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   );
 
   // DNS marks, only for a UDP flow whose digest summary has a tally. The capture's
-  // end moves a waiting query to unanswered, so it is a dependency.
+  // end moves a waiting query to unanswered, and a finished capture settles every
+  // open one, so both are dependencies.
   // None while pages are still arriving: a query whose answer is on a later page
   // would read `no answer` until it came.
   const hasDnsTally = summary !== null && 'kind' in summary && summary.kind === 'udp' && summary.dns !== undefined;
   const stillReading = loaded?.loading != null;
   const notes = useMemo(
-    () => (hasDnsTally && !stillReading ? dnsMarks(frames, captureEnd) : undefined),
-    [hasDnsTally, stillReading, frames, captureEnd],
+    () => (hasDnsTally && !stillReading ? dnsMarks(frames, captureEnd, captureFinished) : undefined),
+    [hasDnsTally, stillReading, frames, captureEnd, captureFinished],
   );
 
   const targetKind = target === null ? 'tcp' : target.kind;
@@ -511,8 +516,8 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   const tcpSummary = summary !== null && !('kind' in summary) ? summary : null;
   const quicSummary = summary !== null && 'kind' in summary && summary.kind === 'quic' ? summary : null;
   const dhcpSummary = summary !== null && 'kind' in summary && summary.kind === 'dhcp' ? summary : null;
-  // The noun in the title: a QUIC target is a connection, a DHCP one an exchange, the others streams.
-  const noun = target.kind === 'quic' ? 'Connection' : target.kind === 'dhcp' ? 'Exchange' : 'Stream';
+  // The noun in the title, the one the packet list's menu uses.
+  const noun = followNoun(target.kind);
   // A DHCP exchange is named by its transaction id as the packet list shows it, in hex.
   const idLabel = target.streamId === undefined ? ''
     : target.kind === 'dhcp' ? ` 0x${(target.streamId >>> 0).toString(16).padStart(8, '0')}` : ` #${target.streamId}`;

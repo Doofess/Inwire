@@ -5,9 +5,12 @@
  * older format, a checksum that does not match - reads as `null`, and the
  * store folds the digest again from the capture's rows.
  *
- * Format 4 is a header, four numbers, and a run of independently deflated
+ * Format 5 is a header, four numbers, and a run of independently deflated
  * chunks of at most `CHUNK_ENTRIES` entries each; each entry is tagged with its
- * kind (TCP stream, UDP flow, QUIC connection, TLS summary, DHCP exchange). Format 3 had no TLS
+ * kind (TCP stream, UDP flow, QUIC connection, TLS summary, DHCP exchange). Format 4 had
+ * a DNS tally without its evicted and settled ids and a TLS summary without `tls13`; read
+ * as it is, a reopened capture would count a late answer twice and mark a TLS 1.3 server
+ * early, so it reads as null. Format 3 had no TLS
  * kind and reads as null, or a reopened capture would claim no TLS. Format 2 had no captureEnd and
  * untagged TCP entries, and reads as null like any other format. Format 1 was one JSON text
  * of every entry, which V8 refuses past about 512 MB ("Invalid string length"):
@@ -25,7 +28,7 @@
 import { fnv1a } from '../dissect/frameRecord';
 import type { DigestSnapshot, DigestSnapshotData, TaggedEntry } from './streamDigest';
 
-export const DIGEST_FORMAT = 4;
+export const DIGEST_FORMAT = 5;
 const MAGIC = 0x47445749;
 const HEADER = 16;
 const META = 28;

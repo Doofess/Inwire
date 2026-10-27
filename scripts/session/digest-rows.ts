@@ -18,7 +18,7 @@
  *   its fallback, or the hook's poll hangs for the life of the window.
  */
 import { readFileSync } from 'node:fs';
-import { QUIET_SECONDS, conversationRows, digestConversation, digestScopeNote, outcomeText } from '../../src/services/conversation/digestRows';
+import { QUIET_SECONDS, conversationRows, digestConversation, digestScopeNote, dnsOutcomeText, followNoun, outcomeText } from '../../src/services/conversation/digestRows';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
 import type { DnsTally, QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
 import type { TlsPhaseStep, TlsSummary } from '../../src/services/conversation/tlsSummary';
@@ -215,13 +215,19 @@ console.log('\n--- DHCP exchanges from the digest ---\n');
   const rows = conversationRows('dhcp', dhcp);
   check('dhcp rows come from the digest, client as A',
     rows?.map((r) => [r.key, r.streamId, r.kind, r.protocol, r.addressA, r.portA, r.addressB, r.portB, r.outcome]),
-    [['dhcp:3735928559', 3735928559, 'dhcp', 'DHCP', 'host-a', 68, '192.0.2.1', 67, 'acked']]);
+    [['dhcp:3735928559', 3735928559, 'dhcp', 'DHCP', 'host-a (02:00:00:00:00:01)', 68, '192.0.2.1', 67, 'acked']]);
   const row = rows![0];
   check('...A to B is toServer, B to A is toClient',
     [row.packetsAtoB, row.bytesAtoB, row.packetsBtoA, row.bytesBtoA, row.packets, row.firstFrame],
     [2, 684, 2, 684, 4, 60]);
   const noName = conversationRows('dhcp', flows({ dhcp: new Map([[7, dhcpSummary({ key: 7, hostname: null })]]) }));
   check('...with no hostname, A is the client MAC', noName?.[0].addressA, '02:00:00:00:00:01');
+  // A server that never spoke has no address at all; an empty cell reads as a bug.
+  const unseen = conversationRows('dhcp', flows({ dhcp: new Map([[8, dhcpSummary({ key: 8, server: { address: '', port: 67 } })]]) }));
+  check('...a server never seen reads not seen in B', [unseen?.[0].addressB, unseen?.[0].portB], ['not seen', 67]);
+  check('...and a seen server keeps its address', rows![0].addressB, '192.0.2.1');
+  const udpUnseen = digestConversation(udpSummary({ server: { address: '', port: 53 } }));
+  check('...only a DHCP row says it: a UDP row\'s address is left alone', udpUnseen.addressB, '');
   check('...the outcome is the summary\'s alone, with no modifier even long after the end',
     outcomeText(row, 9_999), 'acked');
   check('...an empty DHCP map leaves the level to the buffer', conversationRows('dhcp', flows({})), null);
@@ -277,22 +283,56 @@ console.log('\n--- TLS on a TCP row ---\n');
 console.log('\n--- DNS answers on a UDP row ---\n');
 
 {
+  const tally = (over: Partial<DnsTally>): DnsTally =>
+    ({ answered: 0, errors: 0, evictedUnanswered: 0, evicted: [], settled: [], open: [], ...over });
   const dnsRow = (dns: DnsTally, end = 10) => digestConversation(udpSummary({ dns, end }));
   const q = (id: number, time: number) => ({ id, frameId: id, time });
-  const open1 = dnsRow({ answered: 0, errors: 0, evictedUnanswered: 0, open: [q(1, 100)] });
+  const open1 = dnsRow(tally({ open: [q(1, 100)] }));
   check('dns: waiting turns unanswered as the capture\'s end moves',
     [outcomeText(open1, 104.9), outcomeText(open1, 105)], ['1 waiting', '1 unanswered']);
   check('dns: the text orders answered, errors, unanswered, waiting and drops zeros',
     [
-      outcomeText(dnsRow({ answered: 11, errors: 2, evictedUnanswered: 1, open: [q(1, 100), q(2, 104)] }), 105),
-      outcomeText(dnsRow({ answered: 1, errors: 1, evictedUnanswered: 0, open: [] }), 105),
-      outcomeText(dnsRow({ answered: 3, errors: 0, evictedUnanswered: 0, open: [] }), 105),
+      outcomeText(dnsRow(tally({ answered: 11, errors: 2, evictedUnanswered: 1, open: [q(1, 100), q(2, 104)] })), 105),
+      outcomeText(dnsRow(tally({ answered: 1, errors: 1 })), 105),
+      outcomeText(dnsRow(tally({ answered: 3 })), 105),
     ],
     ['11 answered · 2 errors · 2 unanswered · 1 waiting', '1 answered · 1 error', '3 answered']);
   check('dns: a DNS flow never says went quiet',
-    outcomeText(dnsRow({ answered: 2, errors: 0, evictedUnanswered: 0, open: [] }, 10), 1000), '2 answered');
+    outcomeText(dnsRow(tally({ answered: 2 }), 10), 1000), '2 answered');
   check('dns: an empty tally falls back to the UDP text',
-    outcomeText(dnsRow({ answered: 0, errors: 0, evictedUnanswered: 0, open: [] }), 10.1), 'request/response');
+    outcomeText(dnsRow(tally({})), 10.1), 'request/response');
+  // A finished capture (a file, or a stopped or paused capture) gains no
+  // answers, so nothing in it is still waiting.
+  check('dns: in a finished capture a query inside the wait window is unanswered',
+    [outcomeText(open1, 104.9, true), outcomeText(open1, 104.9, false), outcomeText(open1, 104.9)],
+    ['1 unanswered', '1 waiting', '1 waiting']);
+  check('dns: finished counts evicted and stale queries too, and waiting never shows',
+    outcomeText(dnsRow(tally({ answered: 1, evictedUnanswered: 1, open: [q(1, 100), q(2, 104)] })), 105, true),
+    '1 answered · 3 unanswered');
+  check('dns: dnsOutcomeText takes finished too',
+    [dnsOutcomeText(tally({ open: [q(1, 100)] }), 100.1, true), dnsOutcomeText(tally({ open: [q(1, 100)] }), 100.1)],
+    ['1 unanswered', '1 waiting']);
+  // The Outcome column sorts by what its cell shows, not by the bare outcome.
+  const pane = readFileSync('src/components/statistics/StatisticsPane.tsx', 'utf8');
+  const outcomeColumn = pane.slice(pane.indexOf("key: 'outcome'"), pane.indexOf("key: 'packets'"));
+  check('the Outcome column sorts by the text it shows',
+    /sortValue: \(r: Conversation\) => outcomeText\(r as DigestConversation, held\.captureEnd, held\.finished\)/.test(outcomeColumn), true);
+  check('...and the pane hands the same finished flag to the cell',
+    /\{outcomeText\(d, held\.captureEnd, held\.finished\)\}/.test(outcomeColumn), true);
+}
+
+console.log('\n--- what Follow Stream calls each kind ---\n');
+
+{
+  check('a QUIC target is a connection, a DHCP one an exchange, the rest streams',
+    (['tcp', 'udp', 'quic', 'dhcp'] as const).map(followNoun), ['Stream', 'Stream', 'Connection', 'Exchange']);
+  // The menu and the pane's title are one word each from the one function.
+  const list = readFileSync('src/components/packet-list/PacketList.tsx', 'utf8');
+  const follower = readFileSync('src/components/stream-follower/StreamFollowerPane.tsx', 'utf8');
+  check('the packet list\'s menu item takes its noun from followNoun, for every kind',
+    [/\$\{followNoun\(streamTarget\.kind\)\}/.test(list), list.includes('Follow DHCP Exchange'), /UPPER|Stream\$\{/.test(list.slice(list.indexOf('onFollowStream(streamTarget)}'), list.indexOf('Show conversation')))],
+    [true, false, false]);
+  check('...and the pane\'s title from the same function', /const noun = followNoun\(target\.kind\)/.test(follower), true);
 }
 
 console.log('\n--- the scope note for each level ---\n');

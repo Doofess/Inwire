@@ -40,6 +40,8 @@ export interface TlsSummary {
   phases: TlsPhaseStep[];
   /** The first readable alert of level 2; a close_notify never sets it. */
   fatalAlert: { side: Side; name: string } | null;
+  /** A ServerHello row read as TLS 1.3 (`supported_version` 0x0304). Absent otherwise. */
+  tls13?: true;
   /** The digest's version when this summary last changed. */
   version: number;
 }
@@ -48,6 +50,7 @@ export const MAX_TLS_STEPS = 16;
 
 const CONTENT_ALERT = 21;
 const CONTENT_APPLICATION = 23;
+const TLS_1_3 = 0x0304;
 
 export function openTls(key: number): TlsSummary {
   return { kind: 'tls', key, phases: [], fatalAlert: null, version: 0 };
@@ -75,12 +78,21 @@ export function foldTls(s: TlsSummary, row: Packet, side: Side): boolean {
   // pays for the three lookups below.
   if (decrypted || fieldValue(row, 'tls.handshake.type') !== undefined) {
     if (!has(s, 'ClientHello', side) && fieldValue(row, 'tls.handshake.ja4') !== undefined) changed = push(s, row, 'ClientHello', side) || changed;
-    if (!has(s, 'ServerHello', side) && fieldValue(row, 'tls.handshake.ja3s') !== undefined) changed = push(s, row, 'ServerHello', side) || changed;
+    if (!has(s, 'ServerHello', side) && fieldValue(row, 'tls.handshake.ja3s') !== undefined) {
+      changed = push(s, row, 'ServerHello', side) || changed;
+      if (s.tls13 !== true && num(row, 'tls.handshake.extensions.supported_version') === TLS_1_3) { s.tls13 = true; changed = true; }
+    }
     if (!has(s, 'Certificate', side) && fieldValue(row, 'tls.x509.subject_cn') !== undefined) changed = push(s, row, 'Certificate', side) || changed;
   }
 
   const contentType = num(row, 'tls.record.content_type');
-  if (!has(s, 'application data', side) && (contentType === CONTENT_APPLICATION || decrypted)) {
+  if (!has(s, 'application data', side) && (contentType === CONTENT_APPLICATION || decrypted)
+    && !(s.tls13 === true && !decrypted && side === 'server' && !has(s, 'application data', 'client'))) {
+    // TLS 1.3 sends the server's EncryptedExtensions..Finished and the client's
+    // Finished as opaque type-23 records too. Without keys the client's first one
+    // is its Finished, which ends the handshake, so that is its application data
+    // (a 0-RTT record before it is early data and counts as well); the server's
+    // waits until it is held, or its handshake flight would read as data.
     changed = push(s, row, 'application data', side) || changed;
   }
 

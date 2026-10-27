@@ -58,6 +58,7 @@ const NO_DIGEST = {
   tls: new Map<number, TlsSummary>() as ReadonlyMap<number, TlsSummary>,
   dhcp: new Map<number, DhcpSummary>() as ReadonlyMap<number, DhcpSummary>,
   captureEnd: 0,
+  finished: false,
   rebuilding: null as { done: number; total: number } | null,
   partial: false,
 };
@@ -99,6 +100,8 @@ interface StatisticsPaneProps {
     dhcp: ReadonlyMap<number, DhcpSummary>;
     /** The latest frame time folded, which "went quiet" is measured against. */
     captureEnd: number;
+    /** No capture is running, so no answer can still arrive: a DNS query still open is unanswered. */
+    finished: boolean;
     rebuilding: { done: number; total: number } | null;
     /** A rebuild dropped rows, so these levels are not the whole capture. */
     partial?: boolean;
@@ -252,11 +255,13 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
           const d = r as DigestConversation;
           return (
             <span className={d.kind === 'tcp' && d.outcome === 'open' ? 'text-muted-foreground' : undefined}>
-              {outcomeText(d, held.captureEnd)}
+              {outcomeText(d, held.captureEnd, held.finished)}
             </span>
           );
         },
-        sortValue: (r: Conversation) => (r as DigestConversation).outcome,
+        // The text the cell shows, so the order matches what is read: the bare
+        // outcome has no tally, no "went quiet" and no TLS note.
+        sortValue: (r: Conversation) => outcomeText(r as DigestConversation, held.captureEnd, held.finished),
       }]
       : []),
     { key: 'packets', label: 'Packets', align: 'right', render: (r) => count(r.packets), sortValue: (r) => r.packets },

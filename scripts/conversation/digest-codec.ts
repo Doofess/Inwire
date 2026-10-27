@@ -153,7 +153,7 @@ function quicUdpRow(id: number, fromClient: boolean, over: Record<string, number
   const restored = back && StreamDigest.restore(back);
   check('...and restores each kind', restored && [restored.get(7)?.outcome, restored.getFlow('udp', 4)?.outcome, restored.getFlow('quic', 0)?.outcome],
     [d.get(7)?.outcome, d.getFlow('udp', 4)?.outcome, d.getFlow('quic', 0)?.outcome]);
-  check('format 4 is what is written', new DataView(bytes.buffer, bytes.byteOffset).getUint16(4, true), 4);
+  check('format 5 is what is written', new DataView(bytes.buffer, bytes.byteOffset).getUint16(4, true), 5);
 
   // A file written by stage 1: format 2, a 20-byte meta, untagged TCP entries,
   // every checksum and length right. Only its number is old, and it must read
@@ -204,6 +204,12 @@ function quicUdpRow(id: number, fromClient: boolean, over: Record<string, number
   v.setUint32(8, body.length, true); v.setUint32(12, fnv1a(body), true);
   old.set(body, 16);
   mustBeNull('a format 3 snapshot is refused', old);
+
+  // Format 4, as the last build wrote it: its DNS tally had no evicted or
+  // settled list and its TLS summary no tls13, so it must be folded again.
+  const four = bytes.slice();
+  new DataView(four.buffer).setUint16(4, 4, true);
+  mustBeNull('a format 4 snapshot is refused', four);
 }
 
 // Stage 3: a DHCP exchange rides beside the others, its xid above 2^31 intact.

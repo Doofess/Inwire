@@ -42,9 +42,20 @@ interface FlowBase {
 export interface DnsTally {
   answered: number;
   errors: number;
-  /** Queries pushed out of `open` by `MAX_OPEN_QUERIES`; each counts as unanswered. */
+  /**
+   * Queries pushed out of `open` by `MAX_OPEN_QUERIES` and not answered since;
+   * each counts as unanswered. A late answer to one takes it back out.
+   */
   evictedUnanswered: number;
-  /** Queries with no answer yet, oldest first. */
+  /** The ids behind `evictedUnanswered`, oldest first, at most `MAX_OPEN_QUERIES` of them. */
+  evicted: number[];
+  /**
+   * Queries an answer closed, with the answer's time, oldest first, at most
+   * `MAX_OPEN_QUERIES`. A second answer inside `DNS_WAIT_SECONDS` is the other
+   * copy of a retry and is not counted again.
+   */
+  settled: { id: number; time: number }[];
+  /** Queries with no answer yet, oldest first, each at its last copy (frame and time). */
   open: { id: number; frameId: number; time: number }[];
 }
 
@@ -183,26 +194,58 @@ export function foldUdp(s: UdpSummary, row: Packet): void {
 
 /**
  * Counts a DNS row in a classic DNS flow (a port is 53). A query opens by its
- * `dns.id` and a response with that id closes it; a response with none open
- * counts by its rcode. Matching by id, not the tracker's `dns.response_to`,
- * keeps the tally independent of tracker eviction (S3-4).
+ * `dns.id` and a response with that id closes it. A repeated query is a retry:
+ * it moves to its last copy, which is how the ladder's marks time it too. A
+ * response with no open query is, in order: the late answer to a query that was
+ * evicted (it stops being unanswered), the second answer to a retry the first
+ * answer already closed (not counted again), or an answer to a query the capture
+ * never saw (counted by its rcode). Matching by id, not the tracker's
+ * `dns.response_to`, keeps the tally independent of tracker eviction (S3-4).
  */
 function foldDns(s: UdpSummary, row: Packet): void {
   if (s.client.port !== 53 && s.server.port !== 53) return;
   const id = num(row, 'dns.id');
   const response = num(row, 'dns.flags.response');
   if (id === undefined || response === undefined) return;
-  const t = s.dns ??= { answered: 0, errors: 0, evictedUnanswered: 0, open: [] };
+  const t = s.dns ??= { answered: 0, errors: 0, evictedUnanswered: 0, evicted: [], settled: [], open: [] };
   if (response === 0) {
-    if (t.open.some((q) => q.id === id)) return;
+    const copy = t.open.findIndex((q) => q.id === id);
+    if (copy >= 0) t.open.splice(copy, 1);
+    // A new query with a settled id is a new query: its answer must count.
+    dropId(t.settled, id);
+    // A retry of an evicted query is that query again, open at its last copy.
+    const evicted = t.evicted.indexOf(id);
+    if (evicted >= 0) { t.evicted.splice(evicted, 1); t.evictedUnanswered--; }
     t.open.push({ id, frameId: row.id, time: row.relativeTime });
-    if (t.open.length > MAX_OPEN_QUERIES) { t.open.shift(); t.evictedUnanswered++; }
+    if (t.open.length > MAX_OPEN_QUERIES) {
+      t.evicted.push(t.open.shift()!.id);
+      t.evictedUnanswered++;
+      if (t.evicted.length > MAX_OPEN_QUERIES) t.evicted.shift();
+    }
     return;
   }
+  // Whether a query this tally saw is closed by this answer, so that the other
+  // copy of a retry, answered too, finds it in `settled`.
+  let closes = false;
   const at = t.open.findIndex((q) => q.id === id);
-  if (at >= 0) t.open.splice(at, 1);
+  if (at >= 0) { t.open.splice(at, 1); closes = true; }
+  else {
+    const late = t.evicted.indexOf(id);
+    if (late >= 0) { t.evicted.splice(late, 1); t.evictedUnanswered--; closes = true; }
+    else if (t.settled.some((q) => q.id === id && row.relativeTime - q.time <= DNS_WAIT_SECONDS)) return;
+  }
+  if (closes) {
+    dropId(t.settled, id);
+    t.settled.push({ id, time: row.relativeTime });
+    if (t.settled.length > MAX_OPEN_QUERIES) t.settled.shift();
+  }
   if ((num(row, 'dns.flags.rcode') ?? 0) === 0) t.answered++;
   else t.errors++;
+}
+
+/** Removes every record for `id` from a list. */
+function dropId(list: { id: number }[], id: number): void {
+  for (let i = list.length - 1; i >= 0; i--) if (list[i].id === id) list.splice(i, 1);
 }
 
 /**

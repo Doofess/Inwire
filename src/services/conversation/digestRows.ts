@@ -17,6 +17,7 @@ import { DNS_WAIT_SECONDS, type DnsTally, type QuicOutcome, type QuicSummary, ty
 import type { TcpOutcome } from './tcpStates';
 import { tlsNote, type TlsSummary } from './tlsSummary';
 import type { DhcpOutcome, DhcpSummary } from './dhcpSummary';
+import type { StreamTarget } from '../followStream';
 
 /** A flow with no frame this long before the capture's last frame has gone quiet. */
 export const QUIET_SECONDS = 30;
@@ -45,9 +46,11 @@ export function digestConversation(s: StreamSummary | UdpSummary | QuicSummary |
   return {
     key: `${kind}:${id}`,
     kind,
-    // A DHCP client is a MAC before it is anything else, and a name when it gave one.
-    addressA: dhcp ? s.hostname ?? s.client.address : s.client.address, portA: s.client.port,
-    addressB: s.server.address, portB: s.server.port,
+    // A DHCP client is a MAC before it is anything else; a name it gave is added,
+    // never put in the MAC's place. A server nobody heard has no address, and an
+    // empty cell reads as a bug rather than as a finding.
+    addressA: dhcp && s.hostname !== null ? `${s.hostname} (${s.client.address})` : s.client.address, portA: s.client.port,
+    addressB: dhcp && s.server.address === '' ? 'not seen' : s.server.address, portB: s.server.port,
     packetsAtoB: s.toServer.packets, bytesAtoB: s.toServer.bytes,
     packetsBtoA: s.toClient.packets, bytesBtoA: s.toClient.bytes,
     firstAtoB: s.toServer.first, lastAtoB: s.toServer.last,
@@ -118,6 +121,15 @@ export function digestScopeNote(
     : 'Whole capture';
 }
 
+/**
+ * What Follow Stream calls a target of this kind: a QUIC target is a
+ * connection, a DHCP one an exchange, the others streams. The pane's title and
+ * the packet list's menu both read it, so the two cannot name one thing twice.
+ */
+export function followNoun(kind: StreamTarget['kind']): 'Connection' | 'Exchange' | 'Stream' {
+  return kind === 'quic' ? 'Connection' : kind === 'dhcp' ? 'Exchange' : 'Stream';
+}
+
 function dnsTallyOf(summary: unknown): DnsTally | undefined {
   return typeof summary === 'object' && summary !== null && 'dns' in summary
     ? (summary as { dns?: DnsTally }).dns : undefined;
@@ -126,10 +138,12 @@ function dnsTallyOf(summary: unknown): DnsTally | undefined {
 /**
  * A DNS flow's answers in words: answered, errors, unanswered, waiting, zeros
  * left out. A query open for `DNS_WAIT_SECONDS` of the capture's end is
- * unanswered, decided here against the moving end. Empty when all are zero.
+ * unanswered, decided here against the moving end. In a `finished` capture (a
+ * file, or a capture that stopped or paused) no answer can still arrive, so
+ * every open query is unanswered and nothing is waiting. Empty when all are zero.
  */
-export function dnsOutcomeText(t: DnsTally, captureEnd: number): string {
-  const stale = t.open.filter((q) => captureEnd - q.time >= DNS_WAIT_SECONDS).length;
+export function dnsOutcomeText(t: DnsTally, captureEnd: number, finished = false): string {
+  const stale = finished ? t.open.length : t.open.filter((q) => captureEnd - q.time >= DNS_WAIT_SECONDS).length;
   const unanswered = t.evictedUnanswered + stale;
   const waiting = t.open.length - stale;
   return [
@@ -143,7 +157,9 @@ export function dnsOutcomeText(t: DnsTally, captureEnd: number): string {
 /**
  * The outcome in the ADR's words, with its modifiers. A UDP or QUIC row also
  * says when it went quiet: its last frame is `QUIET_SECONDS` or more before the
- * capture's last one. TCP has its own endings and never says it.
+ * capture's last one. TCP has its own endings and never says it. `finished`
+ * says the capture gains no more frames, which settles a DNS query still
+ * inside its wait as unanswered.
  */
 export function outcomeText(
   r: {
@@ -152,11 +168,12 @@ export function outcomeText(
     summary?: unknown;
   },
   captureEnd = 0,
+  finished = false,
 ): string {
   // A DNS flow's text is its tally alone (S3-5): no modifier, no went quiet.
   const tally = r.kind === 'udp' ? dnsTallyOf(r.summary) : undefined;
   if (tally !== undefined) {
-    const dns = dnsOutcomeText(tally, captureEnd);
+    const dns = dnsOutcomeText(tally, captureEnd, finished);
     if (dns !== '') return dns;
   }
   let text: string = r.outcome;

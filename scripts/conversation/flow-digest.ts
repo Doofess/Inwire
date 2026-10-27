@@ -368,7 +368,11 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
     } as Packet;
   };
   const hello = (): Record<string, number | string> => ({ 'tls.record.content_type': 22, 'tls.handshake.type': 1, 'tls.handshake.ja4': 't13d1516h2_x_y' });
-  const serverHello = (): Record<string, number | string> => ({ 'tls.record.content_type': 22, 'tls.handshake.type': 2, 'tls.handshake.ja3s': 'abc' });
+  /** A ServerHello row's fields; `version` is the extension a TLS 1.3 hello carries (0x0304). */
+  const serverHello = (version?: number): Record<string, number | string> => ({
+    'tls.record.content_type': 22, 'tls.handshake.type': 2, 'tls.handshake.ja3s': 'abc',
+    ...(version === undefined ? {} : { 'tls.handshake.extensions.supported_version': version }),
+  });
   const alert = (desc: number, level: number): Record<string, number | string> =>
     ({ 'tls.record.content_type': 21, 'tls.alert_message.level': level, 'tls.alert_message.desc': desc });
   const app = (): Record<string, number | string> => ({ 'tls.record.content_type': 23 });
@@ -477,6 +481,49 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
       [steps(tlsOf(d)!), tlsNote(tlsOf(d), 'reset by server')], [['client:ClientHello', 'server:application data'], '']);
   }
   {
+    // TLS 1.3 hides the server's EncryptedExtensions..Finished and the client's
+    // Finished behind outer type 23, so the server's first opaque records are its
+    // handshake, not application data. Without keys the only sign it has moved
+    // on is the client's first opaque record, its Finished.
+    const d = fresh();
+    d.feed(tlsRow(true, hello(), 1));
+    d.feed(tlsRow(false, serverHello(0x0304), 2));
+    d.feed(tlsRow(false, app(), 3));
+    check('tls 1.3: the server\'s encrypted handshake is not application data',
+      [tlsOf(d)!.tls13, steps(tlsOf(d))], [true, ['client:ClientHello', 'server:ServerHello']]);
+    d.feed(tlsRow(true, app(), 4));
+    check('...the client\'s first opaque record (its Finished) is its application data, and the server\'s still waits',
+      steps(tlsOf(d)), ['client:ClientHello', 'server:ServerHello', 'client:application data']);
+    d.feed(tlsRow(false, app(), 5));
+    const server = tlsOf(d)!.phases.find((p) => p.side === 'server' && p.phase === 'application data');
+    check('...and the server\'s next opaque record is its application data', [server?.frameId, server?.time], [5, 5]);
+  }
+  {
+    // TLS 1.2 is server-first for some protocols (IMAPS): the server's data is
+    // data from its first record, and a ServerHello without the extension, or
+    // one naming 1.2, never sets the flag.
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, serverHello()));
+    d.feed(tlsRow(false, app()));
+    check('tls 1.2: the server\'s application data is marked without the client\'s',
+      [tlsOf(d)!.tls13, steps(tlsOf(d))], [undefined, ['client:ClientHello', 'server:ServerHello', 'server:application data']]);
+    const named = fresh();
+    named.feed(tlsRow(false, serverHello(0x0303)));
+    named.feed(tlsRow(false, app()));
+    check('...and a ServerHello naming 1.2 in the extension is not 1.3', [tlsOf(named)!.tls13, steps(tlsOf(named))], [undefined, ['server:ServerHello', 'server:application data']]);
+  }
+  {
+    // A decrypted row exposes only `inwire.tls.decrypted`, never its inner
+    // content type (the row's content type is the outer 23), so a decrypted
+    // 1.3 handshake row still reads as application data. Unchanged on purpose.
+    const d = fresh();
+    d.feed(tlsRow(true, hello()));
+    d.feed(tlsRow(false, serverHello(0x0304)));
+    d.feed(tlsRow(false, { 'tls.record.content_type': 23, 'inwire.tls.decrypted': 1 }));
+    check('tls 1.3: a decrypted row is application data as before', steps(tlsOf(d)), ['client:ClientHello', 'server:ServerHello', 'server:application data']);
+  }
+  {
     const d = fresh();
     d.feed(tlsRow(true, hello()));
     const first = d.version;
@@ -508,14 +555,16 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
     const d = fresh();
     d.feed(dnsRow(true, 7, undefined, 1));
     d.feed(dnsRow(false, 7, 0, 1.1));
-    check('dns: a query and its answer is one answered', tally(d), { answered: 1, errors: 0, evictedUnanswered: 0, open: [] });
+    check('dns: a query and its answer is one answered', tally(d),
+      { answered: 1, errors: 0, evictedUnanswered: 0, evicted: [], settled: [{ id: 7, time: 1.1 }], open: [] });
   }
   {
     const d = fresh();
     d.feed(dnsRow(true, 7, undefined, 1));
     d.feed(dnsRow(true, 7, undefined, 2));
     d.feed(dnsRow(false, 7, 0, 2.1));
-    check('dns: a retried query answered once is one answered', tally(d), { answered: 1, errors: 0, evictedUnanswered: 0, open: [] });
+    check('dns: a retried query answered once is one answered', tally(d),
+      { answered: 1, errors: 0, evictedUnanswered: 0, evicted: [], settled: [{ id: 7, time: 2.1 }], open: [] });
   }
   {
     const d = fresh();
@@ -541,6 +590,83 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
     d.feed(dnsRow(true, 7, undefined, 1, 5353));
     d.feed(dnsRow(false, 7, 0, 1.1, 5353));
     check('dns: mDNS keeps the UDP outcome', [udpOf(d).dns, udpOf(d).outcome], [undefined, 'request/response']);
+  }
+  {
+    // 2a: an evicted query that is answered later was counted unanswered and
+    // answered both.
+    const d = fresh();
+    for (let i = 0; i < 65; i++) d.feed(dnsRow(true, 100 + i, undefined, i));
+    d.feed(dnsRow(false, 100, 0, 70));
+    const t = tally(d)!;
+    check('dns: an evicted query answered later is one answered, not also unanswered',
+      [t.answered, t.errors, t.evictedUnanswered, t.evicted, t.open.length], [1, 0, 0, [], 64]);
+    d.feed(dnsRow(false, 100, 0, 71));
+    check('...and a retry copy answered too is not counted again', [tally(d)!.answered, tally(d)!.evictedUnanswered], [1, 0]);
+  }
+  {
+    // A retry of an evicted query is that query again, at its last copy: it is
+    // open, no longer evicted, and its answer counts it once.
+    const d = fresh();
+    for (let i = 0; i < 65; i++) d.feed(dnsRow(true, 100 + i, undefined, i));
+    d.feed(dnsRow(true, 100, undefined, 66));
+    const t = tally(d)!;
+    check('dns: a retry of an evicted query takes it back out of evicted',
+      [t.evictedUnanswered, t.evicted, t.open.some((q) => q.id === 100)], [1, [101], true]);
+    d.feed(dnsRow(false, 100, 0, 66.1));
+    check('...and its answer is one answered', [tally(d)!.answered, tally(d)!.evictedUnanswered], [1, 1]);
+  }
+  {
+    const d = fresh();
+    for (let i = 0; i < 70; i++) d.feed(dnsRow(true, 100 + i, undefined, i));
+    const t = tally(d)!;
+    check('dns: evicted ids are kept oldest first, at most MAX_OPEN_QUERIES',
+      [t.evictedUnanswered, t.evicted, t.open.length], [6, [100, 101, 102, 103, 104, 105], 64]);
+    for (let i = 70; i < 200; i++) d.feed(dnsRow(true, 100 + i, undefined, i));
+    const e = tally(d)!;
+    check('...and the oldest is dropped past the bound, the count is not', [e.evicted.length, e.evicted[0], e.evictedUnanswered], [64, 100 + 136 - 64, 136]);
+  }
+  {
+    // 2b: a retry whose two copies are both answered.
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1));
+    d.feed(dnsRow(true, 7, undefined, 2));
+    d.feed(dnsRow(false, 7, 0, 2.1));
+    d.feed(dnsRow(false, 7, 0, 2.2));
+    check('dns: a retry whose two copies are both answered is one answered', [tally(d)!.answered, tally(d)!.errors], [1, 0]);
+    d.feed(dnsRow(false, 7, 0, 20));
+    check('...but an answer after the wait window is a query the capture never saw', tally(d)!.answered, 2);
+  }
+  {
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1));
+    d.feed(dnsRow(false, 7, 0, 1.1));
+    d.feed(dnsRow(true, 7, undefined, 3));
+    d.feed(dnsRow(false, 7, 0, 3.1));
+    check('dns: a new query with a settled id is a new query', [tally(d)!.answered, tally(d)!.settled], [2, [{ id: 7, time: 3.1 }]]);
+    d.feed(dnsRow(true, 8, undefined, 4));
+    d.feed(dnsRow(false, 8, 0, 4.1));
+    d.feed(dnsRow(true, 8, undefined, 5));
+    check('...and clears the settled id while it waits, so a stray answer would count', tally(d)!.settled.map((s) => s.id), [7]);
+  }
+  {
+    const d = fresh();
+    for (let i = 0; i < 70; i++) {
+      d.feed(dnsRow(true, 100 + i, undefined, i));
+      d.feed(dnsRow(false, 100 + i, 0, i + 0.1));
+    }
+    const t = tally(d)!;
+    check('dns: settled ids are bounded, oldest dropped', [t.settled.length, t.settled[0].id, t.answered], [64, 106, 70]);
+  }
+  {
+    // 2c: the tally times a retry from its last copy, as the marks do.
+    const d = fresh();
+    d.feed(dnsRow(true, 7, undefined, 1));
+    d.feed(dnsRow(true, 8, undefined, 2));
+    d.feed(dnsRow(true, 7, undefined, 3));
+    const t = tally(d)!;
+    check('dns: a repeated query moves to the last copy and the back of open',
+      t.open.map((q) => [q.id, q.frameId, q.time]), [[8, 2, 2], [7, 3, 3]]);
+    check('...and counts as one query, so it can be evicted only once', [t.evictedUnanswered, t.answered], [0, 0]);
   }
 }
 

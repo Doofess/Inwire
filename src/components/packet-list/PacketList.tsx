@@ -52,6 +52,7 @@ import {
 import { fieldDef } from '../../services/dissect/fieldRegistry';
 import type { NameLookup } from '../../services/nameResolution';
 import { targetForPacket, type StreamTarget } from '../../services/followStream';
+import { followNoun } from '../../services/conversation/digestRows';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -1856,8 +1857,8 @@ export const PacketList: React.FC<PacketListProps> = ({
                   <MessageSquare className="w-3.5 h-3.5" />
                   <span>
                     {streamTarget.kind === 'dhcp'
-                      ? 'Follow DHCP Exchange'
-                      : `Follow ${streamTarget.kind.toUpperCase()} Stream${
+                      ? `Follow DHCP ${followNoun('dhcp')}`
+                      : `Follow ${streamTarget.kind.toUpperCase()} ${followNoun(streamTarget.kind)}${
                         streamTarget.streamId !== undefined ? ` (#${streamTarget.streamId})` : ''}`}
                   </span>
                 </ContextMenuItem>

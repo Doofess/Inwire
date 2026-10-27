@@ -3741,7 +3741,8 @@ export default function App() {
                 // The TCP, UDP and QUIC levels read the store's digest, the
                 // whole capture with each flow's outcome - the tables here
                 // that do not count the buffer (ADR 0055).
-                digest={streamDigest}
+                // `finished`: nothing is capturing, so no answer is still coming.
+                digest={{ ...streamDigest, finished: !isCapturing }}
                 onSelectFrame={goToFrame}
                 droppedBuffer={droppedBuffer}
                 // Every row here is a filter, so applying one means going to look
@@ -3803,6 +3804,7 @@ export default function App() {
                 tls={streamSummary !== null && !('kind' in streamSummary) ? streamDigest.tls.get(streamSummary.streamId) ?? null : null}
                 captureId={streamDigest.captureId}
                 captureEnd={streamDigest.captureEnd}
+                captureFinished={!isCapturing}
                 colorEngine={colorEngine}
                 packetTheme={packetTheme}
                 initialTab={streamView}

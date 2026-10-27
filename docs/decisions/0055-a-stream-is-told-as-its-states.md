@@ -233,7 +233,11 @@ same `feed`, from fields a row already carries, and the snapshot is format 4.
   description is `encrypted alert`, never `close_notify` and never a failure.
   The hello and certificate facts are read only on a handshake record or a
   decrypted one. A row shows only its first record's type, so application data
-  behind a handshake record is first seen a row later. The TLS map sits beside
+  behind a handshake record is first seen a row later. On a TLS 1.3 stream
+  (`tls13`, a ServerHello with `supported_version` 0x0304) the server's
+  encrypted handshake is type 23 too, so without keys the server's application
+  data waits for the client's, whose first opaque record is its Finished; a
+  decrypted row exposes no inner type and is unchanged. The TLS map sits beside
   the TCP map, never inside it, so TCP's summaries stay byte for byte.
 - **S3-2: the TLS notes.** ` · TLS alert` after the TCP outcome for a readable
   fatal alert from either side; ` · TLS unanswered` for a ClientHello the server
@@ -246,11 +250,16 @@ same `feed`, from fields a row already carries, and the snapshot is format 4.
   other flows; DNS over TCP is a TCP stream.
 - **S3-4: queries are matched by `dns.id` within the flow**, not by the
   tracker's `dns.response_to`, so the tally does not depend on tracker eviction
-  or shards. A repeated open id counts once; a response with no open query
-  counts by its rcode; at most 64 stay open (`MAX_OPEN_QUERIES`) and an evicted
-  one counts as unanswered. An open query is `unanswered` once 5 s
+  or shards. A repeated open id counts once, timed from its last copy, as the
+  ladder's marks time it; at most 64 stay open (`MAX_OPEN_QUERIES`) and an
+  evicted one counts as unanswered until a late answer takes it back. A
+  response with no open query counts by its rcode, unless it is the second
+  answer, within 5 s, to a query an answer already closed (a retry whose two
+  copies were both answered). An open query is `unanswered` once 5 s
   (`DNS_WAIT_SECONDS`) separate it from the capture's last frame, otherwise
-  `waiting`, decided at render time as "went quiet" is.
+  `waiting`, decided at render time as "went quiet" is - and in a finished
+  capture (a file, or one that stopped or paused) always `unanswered`, because
+  no answer can still arrive.
 - **S3-5: a DNS flow's text is its tally alone**, e.g. `40 answered · 1 error`,
   with no "went quiet": a finished query is not a flow that stopped. The ladder
   marks an error answer with its rcode name and an unanswered query with
@@ -281,11 +290,13 @@ And these, which the stage's work settled:
   TLS (`TLS phases`) and DHCP (`DHCP phases`) reuse with the same classes and
   no new colours.
 - **A DHCP exchange is its own level and its own target.** Conversations →
-  DHCP is the whole capture, client as A (the hostname when a row carried one,
-  else the MAC); Follow Stream opens `Follow DHCP Exchange 0x<xid>`, filtered by
+  DHCP is the whole capture, client as A (`hostname (MAC)` when a row carried
+  a hostname, else the MAC), B `not seen` when no server message was read; Follow Stream opens `Follow DHCP Exchange 0x<xid>`, filtered by
   `dhcp.id`, and a DHCP row still counts in its UDP flow.
-- **The snapshot is format 4.** A format 3 snapshot is refused and the digest
-  rebuilt from the rows.
+- **The snapshot is format 5.** Format 4 was stage 3 as first landed; the DNS
+  tally and the TLS summary gained fields afterwards (the evicted and settled
+  ids, `tls13`), so a format 4 snapshot is refused like a format 3 one and the
+  digest rebuilt from the rows.
 
 ## Considered and rejected
 
