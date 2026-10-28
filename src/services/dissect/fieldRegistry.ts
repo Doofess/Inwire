@@ -1635,6 +1635,7 @@ const BASE_FIELDS: readonly FieldDef[] = [
   treeOnly(str('pkix1implicit.accessMethod', 'accessMethod', 'pkix1implicit')),
   bool('tls.reassembled', 'Reassembled record', 'tls'),
   bool('inwire.tls.decrypted', 'Decrypted with a key log secret', 'tls'),
+  bool('inwire.tls.app_data', 'Carries application data', 'tls'),
 
   // --- HTTP ------------------------------------------------------------------
   // Cleartext, and the plaintext of a TLS conversation a key log opened - the

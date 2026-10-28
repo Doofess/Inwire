@@ -345,7 +345,11 @@ request. The dock is a container query on the pane, `@min-[1180px]`, because
 with the side bar open a 1600px window can hand the pane less than a 1024px
 one: at and above it the map is always there; below it the map can be put
 away for a slim strip, and is open by default because hiding it at the minimum
-window hides the feature. Where the lanes are narrow the row's line under the
+window hides the feature. Put away, it is unmounted, not hidden: the pane
+measures the same 1180px with a ResizeObserver, since a container query can
+hide the map but not stop it rendering, and the Client | Server choice lives
+in the pane so it survives. Reset labels that share a spot (port reuse resets
+from several states) print once, with the count (`resetLabels`). Where the lanes are narrow the row's line under the
 arrow drops "ordered, not to scale" before it overruns them (`rowMeta`). A
 state node takes focus from the keyboard and draws its own `--ring` rect, and
 carries `outline-none`, because the browser's outline on an SVG `<g>` painted
@@ -354,7 +358,9 @@ holds the geometry: no label covers most of its own edge, which is why
 UNKNOWN to LISTEN is drawn bare.
 
 **Statistics → Conversations → TCP is the whole capture**, from the same
-digest, with an Outcome column; the other levels still count the buffer and
+digest, with an Outcome column pinned to the table's right edge beside the
+filter button (`pinRight` in `StatTable`), because at 1024 with a side panel
+open the address columns alone fill the pane; the other levels still count the buffer and
 keep their "frames X-Y only" note, and the TCP level says "Whole capture", that
 the digest is rebuilding, or that a rebuild missed frames and is not the whole
 capture. **A TCP or UDP row click opens the stream on the

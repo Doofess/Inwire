@@ -466,6 +466,47 @@ console.log('\n--- 13. a missed row does not cost every open a rebuild ---\n');
   check('no handle leaked', missVolume.outstanding, 0);
 }
 
+console.log('\n--- 13b. appendBytes that throws partway folds the rows it stored, and no other ---\n');
+
+{
+  // Rows that overtook their bytes wait in the host. The writer is made to take
+  // the first two frames of a slab of four and then throw, as one that fails on
+  // a frame partway does: the two rows it stored are folded, the other two
+  // stay waiting, and the throw is still reported and acked.
+  const THROW = 'cap-20261028-120000-dig13';
+  const framesOf = (s: StreamSummary | undefined) => s === undefined ? undefined : s.toServer.packets + s.toClient.packets;
+  const h = host({ scanSliceMs: 0 }, new MemoryVolume());
+  nextId = 1;
+  const rows = connection().slice(0, 4);
+  const frames = rows.map((r) => ({ id: r.id, tsUs: r.tsUs, bytes: r.rawBytes }));
+  h.send({ type: 'open', captureId: THROW });
+  h.send({ type: 'append', packets: crossed(rows), bytesSent: true });
+  await h.store.drain();
+  check('the rows wait for their bytes: nothing folded yet', (await ask(h, 0, 1300))?.summaries.length, 0);
+
+  const writer = (h.store as unknown as { open: { writer: { appendBytes(f: readonly RawFrame[]): void } } }).open.writer;
+  const real = writer.appendBytes.bind(writer);
+  writer.appendBytes = (taken) => {
+    real(taken.slice(0, 2));
+    throw new Error('disk full');
+  };
+  const logged = console.error;
+  console.error = () => {};      // the host logs the throw it reports; it is expected here
+  h.send({ type: 'appendBytes', slab: packFrames(frames), ack: 1 });
+  await h.store.drain();
+  console.error = logged;
+  check('the throw is reported', h.of('failure').map((m) => /disk full/.test(m.message)), [true]);
+  check('...and the append is still acked', h.of('bytesTaken').map((m) => m.ack), [1]);
+  check('the digest folded exactly the two rows the writer stored', framesOf((await ask(h, 0, 1301))?.summaries[0]), 2);
+
+  // The writer works again: the two it never reached are still waiting.
+  writer.appendBytes = real;
+  h.send({ type: 'appendBytes', slab: packFrames(frames.slice(2)), ack: 2 });
+  await h.store.drain();
+  check('the rows it had not reached fold when their bytes come, once each', framesOf((await ask(h, 0, 1302))?.summaries[0]), 4);
+  h.store.close();
+}
+
 console.log('\n--- 14. UDP and QUIC reach the answer, and survive a reopen ---\n');
 
 {

@@ -704,6 +704,17 @@ export class CaptureWriter {
   }
 
   /**
+   * Whether the row that was held for frame `id`'s bytes has been taken into a
+   * slot: the frame is staged or sealed and no row of it still waits. False for
+   * a frame the writer has not reached, and for one a gap left behind (its
+   * row is still in `orphanRows`). Asked after `appendBytes` threw, to learn
+   * which of the frames before the throw the writer stored.
+   */
+  rowTaken(id: number): boolean {
+    return !this.orphanRows.has(id) && this.hasSlot(id);
+  }
+
+  /**
    * Writes the bytes and opens a slot for each, without sealing anything.
    *
    * One write a run of frames, not one a frame: a `writeSync` per frame was a

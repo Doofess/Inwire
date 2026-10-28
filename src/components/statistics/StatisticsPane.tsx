@@ -251,11 +251,16 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     ...(digestRows !== null
       ? [{
         key: 'outcome', label: 'Outcome',
+        // Pinned beside the filter button: at 1024 with a side panel open the
+        // address columns alone fill the pane, and the outcome is the answer.
+        pinRight: transport ? 'right-9' : 'right-0', className: 'max-w-[14rem]',
         render: (r: Conversation) => {
           const d = r as DigestConversation;
+          const text = outcomeText(d, held.captureEnd, held.finished);
+          // Titled, because the pinned column is capped and a long outcome truncates.
           return (
-            <span className={d.kind === 'tcp' && d.outcome === 'open' ? 'text-muted-foreground' : undefined}>
-              {outcomeText(d, held.captureEnd, held.finished)}
+            <span title={text} className={d.kind === 'tcp' && d.outcome === 'open' ? 'text-muted-foreground' : undefined}>
+              {text}
             </span>
           );
         },
@@ -288,7 +293,9 @@ export const StatisticsPane: React.FC<StatisticsPaneProps> = ({
     // its own on the row rather than living only in the context menu.
     ...(transport
       ? [{
-        key: 'filter', label: '',
+        // w-9 is the cell's own width (px-2 around a p-1 button and a 12px
+        // icon), and Outcome's right-9 rests on it: narrower, and the two overlap.
+        key: 'filter', label: '', pinRight: 'right-0', className: 'w-9 min-w-9',
         render: (r: Conversation) => (
           <button
             type="button"

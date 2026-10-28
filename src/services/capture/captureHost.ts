@@ -822,14 +822,24 @@ export class CaptureHost {
       const open = this.open;
       if (open !== null) {
         const frames = unpackFrames(message.slab);
-        open.writer.appendBytes(frames);
-        // A row that overtook its bytes was taken just now (`appendRows`).
-        if (open.digestWaiting.size > 0) {
-          for (const frame of frames) {
-            const row = open.digestWaiting.get(frame.id);
-            if (row === undefined) continue;
-            open.digestWaiting.delete(frame.id);
-            this.feedDigest(open, row);
+        let threw = true;
+        try {
+          open.writer.appendBytes(frames);
+          threw = false;
+        } finally {
+          // A row that overtook its bytes was taken just now (`appendRows`). Also
+          // when the writer threw partway: the frames it staged before the throw
+          // took their rows with them, and those are stored. The writer says
+          // which (`rowTaken`); a row whose frame it never reached, or whose
+          // frame left a gap, stays waiting and is not folded (ADR 0055).
+          if (open.digestWaiting.size > 0) {
+            for (const frame of frames) {
+              const row = open.digestWaiting.get(frame.id);
+              if (row === undefined) continue;
+              if (threw && !open.writer.rowTaken(frame.id)) continue;
+              open.digestWaiting.delete(frame.id);
+              this.feedDigest(open, row);
+            }
           }
         }
       }

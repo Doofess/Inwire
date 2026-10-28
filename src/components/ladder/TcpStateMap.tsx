@@ -5,7 +5,7 @@ import type { StreamSummary } from '../../services/conversation/streamDigest';
 import { Segmented } from '../ui/segmented';
 import { STATE_EDGES, STATE_NODES, type MapEdge } from './tcpStateGraph';
 import {
-  drawnEdges, edgeGeometry, edgeLabel, hoverTarget, isImplied, labelLines, nodeBox, sidePath,
+  drawnEdges, edgeGeometry, edgeLabel, hoverTarget, resetLabels, isImplied, labelLines, nodeBox, sidePath,
   MAP_WIDTH, VIEW, type EdgeGeometry,
 } from './tcpStateMapModel';
 
@@ -56,16 +56,22 @@ interface TcpStateMapProps {
   onPickState: (frameId: number) => void;
   /** Collapses the map, where the pane lets it be collapsed; the button is hidden where it does not. */
   onCollapse?: () => void;
+  /** Whose path is shown, where the parent keeps it across the map being unmounted; otherwise the map keeps its own. */
+  side?: Side;
+  onSideChange?: (side: Side) => void;
 }
 
-export const TcpStateMap: React.FC<TcpStateMapProps> = ({ summary, hoverFrameId, onPickState, onCollapse }) => {
-  const [side, setSide] = useState<Side>('client');
+export const TcpStateMap: React.FC<TcpStateMapProps> = ({ summary, hoverFrameId, onPickState, onCollapse, side: sideProp, onSideChange }) => {
+  const [ownSide, setOwnSide] = useState<Side>('client');
+  const side = sideProp ?? ownSide;
+  const setSide = onSideChange ?? setOwnSide;
   /** The state node holding keyboard focus, which draws its own ring. */
   const [ringed, setRinged] = useState<string | null>(null);
   const { steps } = summary;
   const path = useMemo(() => sidePath(steps, side), [steps, side]);
   const hover = useMemo(() => hoverTarget(steps, side, hoverFrameId), [steps, side, hoverFrameId]);
   const edges = useMemo(() => drawnEdges(path), [path]);
+  const labels = useMemo(() => resetLabels(edges, path, hover.edgeId), [edges, path, hover]);
   const other: Side = side === 'client' ? 'server' : 'client';
 
   // Taken edges over untaken, and the lit one over everything, so the path is
@@ -212,7 +218,9 @@ export const TcpStateMap: React.FC<TcpStateMapProps> = ({ summary, hoverFrameId,
           const lit = hover.edgeId === edge.id;
           const label = GEOMETRY.get(edge.id)!.label;
           if (label === null) return null;
-          const lines = labelLines(edgeLabel(edge, walked), label.split);
+          const text = edge.rst ? labels.get(edge.id) ?? null : edgeLabel(edge, walked);
+          if (text === null) return null;
+          const lines = labelLines(text, label.split);
           return (
             <text
               key={edge.id}
@@ -236,6 +244,11 @@ export const TcpStateMap: React.FC<TcpStateMapProps> = ({ summary, hoverFrameId,
       <p className="text-[10px] leading-snug text-muted-foreground">
         States are inferred from one vantage point. Dashed: implied, not seen.
       </p>
+      {summary.stepsDropped > 0 && (
+        <p className="text-[10px] leading-snug text-muted-foreground" data-steps-dropped={summary.stepsDropped}>
+          {`+${summary.stepsDropped.toLocaleString()} later ${summary.stepsDropped === 1 ? 'step' : 'steps'} not shown. The map stops at the last one kept.`}
+        </p>
+      )}
     </div>
   );
 };

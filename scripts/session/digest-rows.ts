@@ -318,7 +318,8 @@ console.log('\n--- DNS answers on a UDP row ---\n');
   check('the Outcome column sorts by the text it shows',
     /sortValue: \(r: Conversation\) => outcomeText\(r as DigestConversation, held\.captureEnd, held\.finished\)/.test(outcomeColumn), true);
   check('...and the pane hands the same finished flag to the cell',
-    /\{outcomeText\(d, held\.captureEnd, held\.finished\)\}/.test(outcomeColumn), true);
+    /const text = outcomeText\(d, held\.captureEnd, held\.finished\);/.test(outcomeColumn)
+      && /\{text\}/.test(outcomeColumn), true);
 }
 
 console.log('\n--- what Follow Stream calls each kind ---\n');

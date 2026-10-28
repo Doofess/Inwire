@@ -401,8 +401,8 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
   }
   {
     const d = fresh();
-    d.feed(tlsRow(true, { 'tls.record.content_type': 22, 'inwire.tls.decrypted': 1 }));
-    check('tls: a decrypted record is application data', steps(tlsOf(d)), ['client:application data']);
+    d.feed(tlsRow(true, { 'tls.record.content_type': 23, 'inwire.tls.decrypted': 1 }));
+    check('tls: a decrypted application record is application data', steps(tlsOf(d)), ['client:application data']);
   }
   {
     const d = fresh();
@@ -514,14 +514,18 @@ const udpOf =(d: StreamDigest, n = 3): UdpSummary => d.getFlow('udp', n) as UdpS
     check('...and a ServerHello naming 1.2 in the extension is not 1.3', [tlsOf(named)!.tls13, steps(tlsOf(named))], [undefined, ['server:ServerHello', 'server:application data']]);
   }
   {
-    // A decrypted row exposes only `inwire.tls.decrypted`, never its inner
-    // content type (the row's content type is the outer 23), so a decrypted
-    // 1.3 handshake row still reads as application data. Unchanged on purpose.
+    // A decrypted row's `tls.record.content_type` is its INNER type (the
+    // reference's reading), so the server's decrypted handshake (22) is not
+    // application data and its first decrypted 23 is.
     const d = fresh();
     d.feed(tlsRow(true, hello()));
     d.feed(tlsRow(false, serverHello(0x0304)));
-    d.feed(tlsRow(false, { 'tls.record.content_type': 23, 'inwire.tls.decrypted': 1 }));
-    check('tls 1.3: a decrypted row is application data as before', steps(tlsOf(d)), ['client:ClientHello', 'server:ServerHello', 'server:application data']);
+    d.feed(tlsRow(false, { 'tls.record.content_type': 22, 'inwire.tls.decrypted': 1 }, 3));
+    d.feed(tlsRow(false, { 'tls.record.content_type': 22, 'inwire.tls.decrypted': 1, 'tls.handshake.type': 20 }, 4));
+    check('tls 1.3 with keys: the server\'s decrypted handshake is not application data', steps(tlsOf(d)), ['client:ClientHello', 'server:ServerHello']);
+    d.feed(tlsRow(false, { 'tls.record.content_type': 23, 'inwire.tls.decrypted': 1 }, 5));
+    const server = tlsOf(d)!.phases.find((p) => p.side === 'server' && p.phase === 'application data');
+    check('...and its first decrypted application record is', [server?.frameId, steps(tlsOf(d))], [5, ['client:ClientHello', 'server:ServerHello', 'server:application data']]);
   }
   {
     const d = fresh();

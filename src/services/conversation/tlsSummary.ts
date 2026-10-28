@@ -86,7 +86,12 @@ export function foldTls(s: TlsSummary, row: Packet, side: Side): boolean {
   }
 
   const contentType = num(row, 'tls.record.content_type');
-  if (!has(s, 'application data', side) && (contentType === CONTENT_APPLICATION || decrypted)
+  // A decrypted record counts by its inner type, so a decrypted handshake (22)
+  // is not data; `inwire.tls.app_data` says any record of the frame was 23,
+  // where the content type is the first record's alone. A row stored before
+  // the flag existed has only the content type.
+  if (!has(s, 'application data', side)
+    && (fieldValue(row, 'inwire.tls.app_data') === 1 || contentType === CONTENT_APPLICATION)
     && !(s.tls13 === true && !decrypted && side === 'server' && !has(s, 'application data', 'client'))) {
     // TLS 1.3 sends the server's EncryptedExtensions..Finished and the client's
     // Finished as opaque type-23 records too. Without keys the client's first one

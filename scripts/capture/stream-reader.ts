@@ -15,6 +15,7 @@ import { CHUNK_FRAMES } from '../../src/services/capture/chunkCodec';
 import { plainForStore } from '../../src/services/capture/storePacket';
 import { loadStreamFrames, type StreamFrameSource } from '../../src/services/conversation/streamFrames';
 import type { StreamSummary } from '../../src/services/conversation/streamDigest';
+import type { UdpSummary } from '../../src/services/conversation/flowSummary';
 import { inflateSync } from 'fflate';
 import { serialize, deserialize } from 'node:v8';
 import type { FromCapture, ToCapture } from '../../src/services/capture/captureProtocol';
@@ -44,11 +45,11 @@ function row(streamId: number): Packet {
 }
 
 /** A host over `rows`, its source adapter, and the inflate count. */
-async function open(rows: Packet[], streamOrdinalChunks: number) {
+async function open(rows: Packet[], streamOrdinalChunks: number, flowOrdinalChunks = 4) {
   const counter = { inflates: 0 };
   const said: FromCapture[] = [];
   const store = new CaptureHost(new MemoryVolume(), (m) => said.push(m), {
-    streamOrdinalChunks, scanSliceMs: 0,
+    streamOrdinalChunks, flowOrdinalChunks, scanSliceMs: 0,
     inflate: (bytes) => { counter.inflates++; return inflateSync(bytes); },
   });
   const send = (m: ToCapture) => store.receive(m);
@@ -110,6 +111,35 @@ console.log('\n--- a 20k-frame stream decodes each chunk once ---\n');
   console.log(`MEASURE  20,000 frames, ${chunks} chunks, ${rowPages} row pages: ${rowInflates} inflates (${rowInflates / 2} chunk decodes)`);
   // Two inflates (summary, prefix) per chunk decoded.
   check('rows cost two inflates per chunk, not per page of 256', rowInflates, 2 * chunks);
+  store.close();
+}
+
+console.log('\n--- a 20k-frame UDP flow decodes each chunk once, ordinals and rows together ---\n');
+{
+  nextId = 1;
+  const udpRow = (): Packet => {
+    const p = row(7);
+    p.protocol = 'UDP'; p.frameProtocols = ['eth', 'ethertype', 'ip', 'udp'];
+    p.fields = { 'udp.stream': 5 }; delete p.streamId;
+    return p;
+  };
+  // Every third row is TCP, so the flow owns some of each chunk and not all.
+  const rows = Array.from({ length: 20_000 }, (_, i) => (i % 3 === 0 ? row(7) : udpRow()));
+  const wanted = rows.filter((r) => r.fields?.['udp.stream'] === 5);
+  // Four chunks a flowOrdinals answer, the host's default: the answer spans
+  // chunks that the one-chunk cache cannot hold until the row reads come.
+  const { store, source, counter } = await open(rows, 32, 4);
+  const summary = {
+    kind: 'udp', key: 5, firstId: rows[0].id, lastId: rows[rows.length - 1].id,
+  } as unknown as UdpSummary;
+  const before = counter.inflates;
+  const frames = await loadStreamFrames(summary, [], source);
+  const spent = counter.inflates - before;
+  const chunks = Math.ceil(20_000 / CHUNK_FRAMES);
+  check('every frame of the flow comes back, in order', frames.map((f) => f.id), wanted.map((f) => f.id));
+  console.log(`MEASURE  ${wanted.length} flow frames, ${chunks} chunks: ${spent} inflates (${spent / 2} chunk decodes)`);
+  // Two inflates (summary, prefix) per chunk decoded, for the ordinals and the rows together.
+  check('Follow Stream on a flow costs two inflates per chunk, not two walks of them', spent, 2 * chunks);
   store.close();
 }
 

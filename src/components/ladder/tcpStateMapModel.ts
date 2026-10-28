@@ -142,8 +142,51 @@ export function drawnEdges(path: SidePath): MapEdge[] {
  */
 export function edgeLabel(edge: MapEdge, walked: readonly StreamStep[] | undefined): string {
   if (!edge.rst || walked === undefined || walked.length === 0) return edge.label;
-  const last = walked[walked.length - 1];
-  return last.evidence === 'sent' ? 'RST sent' : 'RST received';
+  const sent = walked.filter((s) => s.evidence === 'sent').length;
+  const who = sent === walked.length ? 'RST sent' : sent === 0 ? 'RST received' : 'RST';
+  // One line is drawn however many times port reuse walked the edge; the count says so.
+  return walked.length > 1 ? `${who} ×${walked.length}` : who;
+}
+
+/** Where a label sits, rounded: two labels with the same key overprint. */
+function labelSlot(edge: MapEdge): string | null {
+  const label = edgeGeometry(edge).label;
+  return label === null ? null : `${label.x.toFixed(1)},${label.y.toFixed(1)},${label.anchor}`;
+}
+
+/**
+ * The text each drawn reset edge's label gets; null where it falls silent.
+ *
+ * The reset routes run down two shared channels and along one floor, and the
+ * hand-laid labels of several edges sit on the same spot: a stream whose port
+ * is reused and reset from two different states used to print two labels on
+ * top of each other. The lines may share a trunk (they leave different nodes,
+ * so the branches say which is which), but a label cannot, so edges that
+ * share a slot share ONE label, the total across them (`RST x3`), until one
+ * of them is lit: then that edge speaks for itself and the rest fall silent.
+ */
+export function resetLabels(edges: readonly MapEdge[], path: SidePath, litId: string | null): Map<string, string | null> {
+  const bySlot = new Map<string, MapEdge[]>();
+  for (const edge of edges) {
+    if (!edge.rst) continue;
+    const slot = labelSlot(edge);
+    if (slot === null) continue;
+    const group = bySlot.get(slot);
+    if (group === undefined) bySlot.set(slot, [edge]); else group.push(edge);
+  }
+  const out = new Map<string, string | null>();
+  for (const group of bySlot.values()) {
+    const leader = group.find((e) => e.id === litId) ?? group[0];
+    // Every walk across the group, so the shared label still says who sent
+    // the resets when they agree (`RST sent ×3`), and plain `RST` when not.
+    const walks = group.flatMap((e) => path.taken.get(e.id) ?? []);
+    for (const edge of group) {
+      if (group.length === 1 || (edge === leader && litId === edge.id)) out.set(edge.id, edgeLabel(edge, path.taken.get(edge.id)));
+      else if (edge === leader) out.set(edge.id, edgeLabel(edge, walks));
+      else out.set(edge.id, null);
+    }
+  }
+  return out;
 }
 
 /** Whether a taken edge is drawn dashed: one the capture implied rather than saw. */

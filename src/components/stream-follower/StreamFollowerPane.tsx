@@ -14,6 +14,7 @@ import {
   type ClientEnd, type StreamTarget,
 } from '../../services/followStream';
 import type { Endpoint } from '../../services/conversation/clientSide';
+import type { Side } from '../../services/conversation/tcpStates';
 import type { StreamSummary } from '../../services/conversation/streamDigest';
 import type { QuicPhaseStep, QuicSummary, UdpSummary } from '../../services/conversation/flowSummary';
 import { keepFrames, loadStreamFrames, progressGate, recallFrames } from '../../services/conversation/streamFrames';
@@ -310,6 +311,24 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
   // narrower than 1180px. Above that it is always docked and this is not
   // consulted; the classes below carry the width rule, not this state.
   const [mapOpen, setMapOpen] = useState(true);
+  // Whose path the map shows lives here, so putting the map away (which
+  // unmounts it) does not reset the Client | Server switch.
+  const [mapSide, setMapSide] = useState<Side>('client');
+  // The same 1180px the classes below test, measured: a container query can
+  // hide the map but cannot stop it computing and rendering, and a map put
+  // away should cost nothing. Unknown until measured, which reads as narrow.
+  const [docked, setDocked] = useState(false);
+  const dockObserver = useRef<ResizeObserver | null>(null);
+  // A callback ref, because the element comes and goes with the tab and the load.
+  const dockRef = useCallback((element: HTMLDivElement | null) => {
+    dockObserver.current?.disconnect();
+    dockObserver.current = null;
+    if (element === null) return;
+    const update = () => setDocked(element.getBoundingClientRect().width >= 1180);
+    update();
+    dockObserver.current = new ResizeObserver(update);
+    dockObserver.current.observe(element);
+  }, []);
 
   // A new capture drops everything kept per stream - the frames, the cache,
   // the opened bands, the hovered frame - because all of it is keyed by ids
@@ -729,7 +748,7 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
               onPick={pickState}
             />
           )}
-          <div className="flex-1 min-h-0 flex @container">
+          <div ref={dockRef} className="flex-1 min-h-0 flex @container">
             <LadderView
               frames={frames}
               loading={loading}
@@ -754,18 +773,22 @@ export const StreamFollowerPane: React.FC<StreamFollowerPaneProps> = ({
             />
             {loaded !== null && tcpSummary !== null && (
               <>
-                <aside
-                  className={`${mapOpen ? 'flex' : 'hidden @min-[1180px]:flex'} w-[19.5rem] shrink-0 min-h-0 flex-col
-                    overflow-y-auto custom-scrollbar border-l border-border bg-card`}
-                  aria-label="TCP state map"
-                >
-                  <TcpStateMap
-                    summary={tcpSummary}
-                    hoverFrameId={hoverFrameId}
-                    onPickState={pickState}
-                    onCollapse={() => setMapOpen(false)}
-                  />
-                </aside>
+                {(docked || mapOpen) && (
+                  <aside
+                    className={`${mapOpen ? 'flex' : 'hidden @min-[1180px]:flex'} w-[19.5rem] shrink-0 min-h-0 flex-col
+                      overflow-y-auto custom-scrollbar border-l border-border bg-card`}
+                    aria-label="TCP state map"
+                  >
+                    <TcpStateMap
+                      summary={tcpSummary}
+                      hoverFrameId={hoverFrameId}
+                      onPickState={pickState}
+                      onCollapse={() => setMapOpen(false)}
+                      side={mapSide}
+                      onSideChange={setMapSide}
+                    />
+                  </aside>
+                )}
                 {!mapOpen && (
                   <button
                     type="button"

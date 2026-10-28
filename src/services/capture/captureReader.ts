@@ -89,6 +89,8 @@ export class CaptureReader {
   private readonly directories = new Map<number, ChunkDirectory>();
   private readonly recordBlocks = new Map<number, (Uint8Array | null)[]>();
   private lastRows: { chunk: number; packets: Packet[] } | null = null;
+  /** The rows the last `flowOrdinals` answer named, by ordinal, for the row reads that follow it. */
+  private flowPage: Map<number, Packet> | null = null;
 
   constructor(
     private readonly files: CaptureFiles,
@@ -101,6 +103,7 @@ export class CaptureReader {
     this.directories.clear();
     this.recordBlocks.clear();
     this.lastRows = null;
+    this.flowPage = null;
   }
 
   /**
@@ -264,7 +267,20 @@ export class CaptureReader {
       else list.push(ordinal);
     }
 
-    for (const [chunk, wanted] of byChunk) {
+    for (const [chunk, asked] of byChunk) {
+      // Rows the last `flowOrdinals` answer already decoded (its pages span
+      // several chunks, which the one-chunk cache below cannot hold).
+      let wanted = asked;
+      const page = this.flowPage;
+      if (page !== null) {
+        wanted = asked.filter((ordinal) => {
+          const packet = page.get(ordinal);
+          if (packet === undefined) return true;
+          out.set(ordinal, packet);
+          return false;
+        });
+        if (wanted.length === 0) continue;
+      }
       const packets = this.rowsOfChunk(chunk);
       if (packets.length === 0) continue;      // a torn tail
       const first = this.index.record(chunk).firstOrdinal;
@@ -337,11 +353,25 @@ export class CaptureReader {
    * `searched` is how far through the chunks that range spans the walk has got
    * (0..1), because a sparse flow finds nothing for many pages and the caller
    * would otherwise have no progress to show. Exactly 1 when `nextChunk` is null.
+   *
+   * Follow Stream then reads the rows at these ordinals, so the matching rows
+   * are kept (`flowPage`, replaced by the next answer) and `readRowsFor` serves
+   * them from there: each chunk is inflated and decoded once. The one-chunk
+   * cache would not do, since an answer spans up to `maxChunks` chunks and the
+   * reads walk them again from the first, while keeping all the chunks' rows
+   * would hold `maxChunks` x 4,096 rows to serve the few the flow owns.
    */
   flowOrdinals(
     kind: 'udp' | 'quic' | 'dhcp', key: number, fromId: number, toId: number, startChunk: number, maxChunks: number,
   ): { ordinals: number[]; nextChunk: number | null; searched: number } {
     const ordinals: number[] = [];
+    const matched = new Map<number, Packet>();
+    // Published only once the walk is whole, so a throw partway leaves no page.
+    this.flowPage = null;
+    const done = (nextChunk: number | null, searched: number) => {
+      this.flowPage = matched;
+      return { ordinals, nextChunk, searched };
+    };
     const first = Math.max(this.index.floorChunk, this.index.chunkForId(fromId));
     const toChunk = this.index.chunkForId(toId);
     const last = toChunk < 0 ? this.index.chunkCount - 1 : toChunk;
@@ -350,15 +380,17 @@ export class CaptureReader {
     const stop = Math.min(this.index.chunkCount, chunk + maxChunks);
     for (; chunk < stop; chunk++) {
       const record = this.index.record(chunk);
-      if (record.firstId > toId) return { ordinals, nextChunk: null, searched: 1 };
+      if (record.firstId > toId) return done(null, 1);
       if (record.lastId < fromId) continue;
       const packets = this.readRows(chunk);
       for (let i = 0; i < packets.length; i++) {
-        if (inFlow(packets[i], kind, key)) ordinals.push(record.firstOrdinal + i);
+        if (!inFlow(packets[i], kind, key)) continue;
+        ordinals.push(record.firstOrdinal + i);
+        matched.set(record.firstOrdinal + i, packets[i]);
       }
     }
-    if (chunk >= this.index.chunkCount) return { ordinals, nextChunk: null, searched: 1 };
-    return { ordinals, nextChunk: chunk, searched: Math.min(1, Math.max(0, (chunk - first) / span)) };
+    if (chunk >= this.index.chunkCount) return done(null, 1);
+    return done(chunk, Math.min(1, Math.max(0, (chunk - first) / span)));
   }
 
   /**

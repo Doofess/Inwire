@@ -227,17 +227,19 @@ same `feed`, from fields a row already carries, and the snapshot is format 4.
 - **S3-1: TLS facts from a row.** Only rows with both `tcp` and `tls` fold;
   QUIC's TLS is QUIC's phases. ClientHello is `tls.handshake.ja4` present,
   ServerHello `tls.handshake.ja3s`, Certificate `tls.x509.subject_cn` (plaintext
-  TLS 1.2 or a decrypted record), application data content type 23 or a
-  decrypted record. A readable alert of description 0 is `close_notify`, any
+  TLS 1.2 or a decrypted record), application data any record of the row whose
+  type is 23 (`inwire.tls.app_data`), a decrypted record by its inner type,
+  which the row's `tls.record.content_type` also carries, as the reference's
+  does. A readable alert of description 0 is `close_notify`, any
   other `alert: <name>`, and level 2 is fatal; content type 21 with no
   description is `encrypted alert`, never `close_notify` and never a failure.
   The hello and certificate facts are read only on a handshake record or a
-  decrypted one. A row shows only its first record's type, so application data
-  behind a handshake record is first seen a row later. On a TLS 1.3 stream
-  (`tls13`, a ServerHello with `supported_version` 0x0304) the server's
-  encrypted handshake is type 23 too, so without keys the server's application
-  data waits for the client's, whose first opaque record is its Finished; a
-  decrypted row exposes no inner type and is unchanged. The TLS map sits beside
+  decrypted one. On a TLS 1.3 stream (`tls13`, a ServerHello with
+  `supported_version` 0x0304) the server's encrypted handshake is type 23 too,
+  so without keys the server's application data waits for the client's, whose
+  first opaque record is its Finished. With keys a decrypted handshake is 22
+  and marks nothing; a row stored before the inner type was recorded carries
+  the outer 23 and still marks it at the handshake. The TLS map sits beside
   the TCP map, never inside it, so TCP's summaries stay byte for byte.
 - **S3-2: the TLS notes.** ` · TLS alert` after the TCP outcome for a readable
   fatal alert from either side; ` · TLS unanswered` for a ClientHello the server
@@ -293,10 +295,13 @@ And these, which the stage's work settled:
   DHCP is the whole capture, client as A (`hostname (MAC)` when a row carried
   a hostname, else the MAC), B `not seen` when no server message was read; Follow Stream opens `Follow DHCP Exchange 0x<xid>`, filtered by
   `dhcp.id`, and a DHCP row still counts in its UDP flow.
-- **The snapshot is format 5.** Format 4 was stage 3 as first landed; the DNS
+- **The snapshot is format 6.** Format 4 was stage 3 as first landed; the DNS
   tally and the TLS summary gained fields afterwards (the evicted and settled
   ids, `tls13`), so a format 4 snapshot is refused like a format 3 one and the
-  digest rebuilt from the rows.
+  digest rebuilt from the rows. Format 5 marked a decrypted TLS row as
+  application data whatever it carried; a decrypted row now has
+  `tls.record.content_type` of its inner type (the reference's own reading) and
+  only a decrypted 23 marks it, so a format 5 snapshot is refused too.
 
 ## Considered and rejected
 

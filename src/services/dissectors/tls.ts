@@ -1194,7 +1194,11 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
 
   const fields: Record<string, string | number> = {};
   const first = completed[0];
-  fields['tls.record.content_type'] = first.contentType;
+  // A record the key log opened carries its real (inner) type: in TLS 1.3 the
+  // outer byte is always 23, and the reference's `tls.record.content_type` is
+  // the decrypted type there (the outer one is `tls.record.opaque_type`). The
+  // stream digest reads this to tell a decrypted handshake from application data.
+  fields['tls.record.content_type'] = first.decrypted?.contentType ?? first.contentType;
   fields['tls.record.version'] = first.version;
   fields['tls.record.length'] = first.length;
   const reassembledFrom: number[] = [];
@@ -1274,6 +1278,11 @@ export function dissectTlsSegment(bytes: Uint8Array, start: number, end: number,
     for (const [key, value] of Object.entries(app.fields)) fields[key] = value;
   }
   if (completed.some((r) => r.decrypted !== undefined)) fields['inwire.tls.decrypted'] = 1;
+  // Any record of the frame, not only the first that `tls.record.content_type`
+  // names: a client's Finished and its first request often share a segment.
+  if (completed.some((r) => (r.decrypted?.contentType ?? r.contentType) === CT_APPLICATION_DATA)) {
+    fields['inwire.tls.app_data'] = 1;
+  }
   for (const r of completed) {
     const certificates = r.decrypted?.certificates;
     if (certificates && certificates.length > 0) {
@@ -2146,7 +2155,8 @@ function buildTlsLayer(records: TlsRecord[], conv: TlsConversationState, frame: 
  */
 function decryptedFields(view: DecryptedRecordView, conv: TlsConversationState, now: Date): ProtocolField[] {
   const children: ProtocolField[] = [
-    { name: 'Content Type', value: `${CONTENT_TYPE_NAMES[view.contentType] ?? 'Unknown'} (${view.contentType})` },
+    // The reference's field for the inner type, which the row carries too.
+    { name: 'Content Type', value: `${CONTENT_TYPE_NAMES[view.contentType] ?? 'Unknown'} (${view.contentType})`, abbrev: 'tls.record.content_type' },
     { name: 'Length', value: view.plaintextLength },
     { name: 'Keys', value: `${view.epoch} traffic secret, from the key log`, generated: true },
   ];

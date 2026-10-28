@@ -805,7 +805,7 @@ const kinds = (marked: { marks: { kind: string }[] }) => marked.marks.map((m) =>
   checkTrue('the summary reaches the ladder only with frames read through it, and only a TCP one',
     pane.includes('summary={loaded !== null ? tcpSummary : null}'));
   checkTrue('...the state map is docked for a TCP summary alone, never for UDP or QUIC',
-    /\{loaded !== null && tcpSummary !== null && \(\s*<>\s*<aside/.test(pane) && !/<TcpStateMap\s+summary=\{summary\}/.test(pane));
+    /\{loaded !== null && tcpSummary !== null && \(\s*<>\s*\{\(docked \|\| mapOpen\) && \(\s*<aside/.test(pane) && !/<TcpStateMap\s+summary=\{summary\}/.test(pane));
   checkTrue('DNS marks wait for the last page: a query whose answer is on a later page is not marked no answer',
     pane.includes('hasDnsTally && !stillReading ? dnsMarks(frames, captureEnd, captureFinished)') && pane.includes('const stillReading = loaded?.loading != null;'));
   checkTrue('...the ladder is told what it is folding', pane.includes('kind={target.kind}') && view.includes("foldRuns(frames, client, ruleKeyOf, expanded, kind, notes)"));

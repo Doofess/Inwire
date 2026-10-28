@@ -27,7 +27,20 @@ export interface StatColumn<T> {
   sortValue?: (row: T) => number | string;
   /** Rendered width hint, as a Tailwind class. */
   className?: string;
+  /**
+   * Pin the column to the table's right edge while the rest scrolls under it,
+   * as a Tailwind `right-*` class naming the offset. For the one column that
+   * answers the question the row exists for, so it cannot be scrolled out of
+   * view at the 1024 minimum with a side panel open.
+   */
+  pinRight?: string;
 }
+
+/** The classes a pinned cell needs: opaque, so what scrolls under it is hidden. */
+const pinned = (c: { pinRight?: string }, header: boolean) =>
+  c.pinRight === undefined
+    ? ''
+    : `sticky ${c.pinRight} bg-card ${header ? 'z-10' : 'group-hover:bg-[color-mix(in_srgb,var(--accent)_60%,var(--card))]'} border-l border-border/40`;
 
 interface StatTableProps<T> {
   rows: readonly T[];
@@ -97,7 +110,7 @@ export function StatTable<T>({
                 aria-sort={
                   sortKey === c.key ? (descending ? 'descending' : 'ascending') : 'none'
                 }
-                className={`px-2 py-1.5 font-bold ${c.align === 'right' ? 'text-right' : 'text-left'} ${c.className ?? ''}`}
+                className={`px-2 py-1.5 font-bold ${c.align === 'right' ? 'text-right' : 'text-left'} ${c.className ?? ''} ${pinned(c, true)}`}
               >
                 {c.sortValue ? (
                   <button
@@ -124,14 +137,14 @@ export function StatTable<T>({
               key={rowKey(row)}
               onClick={() => onRowClick?.(row)}
               onContextMenu={() => onRowContextMenu?.(row)}
-              className={`border-b border-border/40 hover:bg-accent/60 ${onRowClick ? 'cursor-pointer' : ''}`}
+              className={`group border-b border-border/40 hover:bg-accent/60 ${onRowClick ? 'cursor-pointer' : ''}`}
             >
               {columns.map((c) => (
                 <td
                   key={c.key}
                   className={`px-2 py-1 whitespace-nowrap truncate ${
                     c.align === 'right' ? 'text-right tabular-nums' : 'text-left'
-                  } ${c.className ?? ''}`}
+                  } ${c.className ?? ''} ${pinned(c, false)}`}
                 >
                   {c.render(row)}
                 </td>

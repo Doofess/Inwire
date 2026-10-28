@@ -5,9 +5,13 @@
  * older format, a checksum that does not match - reads as `null`, and the
  * store folds the digest again from the capture's rows.
  *
- * Format 5 is a header, four numbers, and a run of independently deflated
+ * Format 6 is a header, four numbers, and a run of independently deflated
  * chunks of at most `CHUNK_ENTRIES` entries each; each entry is tagged with its
- * kind (TCP stream, UDP flow, QUIC connection, TLS summary, DHCP exchange). Format 4 had
+ * kind (TCP stream, UDP flow, QUIC connection, TLS summary, DHCP exchange). Format 5 folded
+ * a decrypted TLS row as application data whatever it carried; now a decrypted row has
+ * `tls.record.content_type` of its inner type and only a decrypted 23 counts, so a
+ * format 5 TLS phase line (a server's handshake marked as data) reads as null and is
+ * folded again. Format 4 had
  * a DNS tally without its evicted and settled ids and a TLS summary without `tls13`; read
  * as it is, a reopened capture would count a late answer twice and mark a TLS 1.3 server
  * early, so it reads as null. Format 3 had no TLS
@@ -28,7 +32,7 @@
 import { fnv1a } from '../dissect/frameRecord';
 import type { DigestSnapshot, DigestSnapshotData, TaggedEntry } from './streamDigest';
 
-export const DIGEST_FORMAT = 5;
+export const DIGEST_FORMAT = 6;
 const MAGIC = 0x47445749;
 const HEADER = 16;
 const META = 28;
