@@ -1306,6 +1306,51 @@ if os.name != "nt":
     check("failure policy is false off Windows", agent._ensure_failure_policy(), False)
 
 
+# Exiting ends a capture, so restart_agent is the capture owner's to give, like
+# stop_capture: another window gets capture_busy and nothing is scheduled. The
+# owner, and anyone while idle, may still restart.
+class _RestartWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, data):
+        self.sent.append(json.loads(data))
+
+
+async def _restart_as(server, ws):
+    server.authenticated.add(ws)
+    await server._handle_message(ws, json.dumps({"type": "restart_agent"}))
+    await asyncio.sleep(0.7)  # the exit is deferred by 0.5s, so wait it out
+
+
+class _CapturingSniffer:
+    def is_sniffing(self):
+        return True
+
+
+_rs_prev = (getattr(agent, "sniffer", None), agent.RESTART_SUPPORTED, agent.exit_for_restart)
+_rs_calls = []
+try:
+    agent.RESTART_SUPPORTED = True
+    agent.exit_for_restart = lambda: _rs_calls.append(1)
+    agent.sniffer = _CapturingSniffer()
+    _rs = agent.AgentServer()
+    _rs_owner, _rs_other = _RestartWS(), _RestartWS()
+    _rs.connections.update({_rs_owner, _rs_other})
+    _rs.capture_owner = _rs_owner
+
+    asyncio.run(_restart_as(_rs, _rs_other))
+    check("restart_agent from a non-owner is told capture_busy",
+          [m.get("code") for m in _rs_other.sent], ["capture_busy"])
+    check("...and no restart is scheduled", _rs_calls, [])
+    asyncio.run(_restart_as(_rs, _rs_owner))
+    check("the owner's own restart_agent is still honoured", _rs_calls, [1])
+finally:
+    agent.sniffer, agent.RESTART_SUPPORTED, agent.exit_for_restart = _rs_prev
+    if agent.sniffer is None:
+        del agent.sniffer
+
+
 
 import adapters
 

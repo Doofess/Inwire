@@ -1391,7 +1391,9 @@ class AgentServer:
                 }))
                 return
 
-        if msg_type in ("start_capture", "stop_capture", "set_interfaces") and self.owned_by_other(ws):
+        # restart_agent is on the list because it ends the capture by exiting:
+        # it is the owner's to give, like stop_capture.
+        if msg_type in ("start_capture", "stop_capture", "set_interfaces", "restart_agent") and self.owned_by_other(ws):
             await ws.send(json.dumps({
                 "type": "error",
                 "code": "capture_busy",

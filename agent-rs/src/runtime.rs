@@ -1609,7 +1609,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
             Command::RestartAgent => {
                 // Refused unless this process is the SCM's and a restart policy
                 // will bring it back - see `restart.rs`.
-                control::restart_agent(&*shared, &shared.restart, &client);
+                shared.control.restart_agent(&*shared, &shared.restart, &client);
             }
             _ => {
                 // Nothing reaches here today: the three capture commands were

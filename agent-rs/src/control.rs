@@ -658,6 +658,39 @@ impl<R> Control<R> {
         env.broadcast(&idle(env));
     }
 
+    /// agent.py:1353-1370, with the capture owner's gate in front.
+    ///
+    /// **Refusing is the whole safety property**: this command is implemented by
+    /// exiting, and where nothing would start the agent again that is a stop the
+    /// user cannot undo from the app. Answers only the asker and broadcasts no
+    /// `state` - restarting changes nothing about what the agent is doing until
+    /// the process is gone.
+    ///
+    /// **It is also the capture owner's to give.** Exiting ends a capture, so a
+    /// client that does not own the running one is refused as `stop_capture` and
+    /// `set_interfaces` refuse it, with `capture_busy`. Idle, or from the owner,
+    /// it is honoured as before.
+    pub fn restart_agent(&self, env: &(impl Env + ?Sized), support: &RestartSupport, client: &str) {
+        {
+            let st = self.state.lock().unwrap();
+            if Self::busy(env, &st, client) {
+                env.log(
+                    Level::Warning,
+                    "restart_agent refused - another client owns the running capture",
+                );
+                env.send_to(client, &capture_busy());
+                return;
+            }
+        }
+        if !support.allowed {
+            env.log(Level::Warning, &format!("restart_agent refused - {}", support.reason));
+            env.send_to(client, &restart_unavailable(&support.reason));
+            return;
+        }
+        env.log(Level::Info, "restart_agent requested by a client");
+        env.schedule_restart();
+    }
+
     /// Everything that can go wrong before a `Command` exists.
     ///
     /// agent.py:1186-1191 ignores what is not a JSON object; 1371-1379 names an
@@ -862,23 +895,6 @@ pub struct RestartSupport {
     pub allowed: bool,
     /// The sentence sent back when it cannot be. Empty when it can.
     pub reason: String,
-}
-
-/// agent.py:1353-1370.
-///
-/// **Refusing is the whole safety property**: this command is implemented by
-/// exiting, and where nothing would start the agent again that is a stop the
-/// user cannot undo from the app. Answers only the asker and broadcasts no
-/// `state` - restarting changes nothing about what the agent is doing until
-/// the process is gone.
-pub fn restart_agent(env: &(impl Env + ?Sized), support: &RestartSupport, client: &str) {
-    if !support.allowed {
-        env.log(Level::Warning, &format!("restart_agent refused - {}", support.reason));
-        env.send_to(client, &restart_unavailable(&support.reason));
-        return;
-    }
-    env.log(Level::Info, "restart_agent requested by a client");
-    env.schedule_restart();
 }
 
 /// The interface list after a re-read, and the log lines that say what moved.
@@ -1719,7 +1735,8 @@ mod tests {
             allowed: false,
             reason: "Restart is unavailable: this agent is not running as the Inwire service.".into(),
         };
-        restart_agent(&env, &refused, "a");
+        let control = Control::<u32>::new();
+        control.restart_agent(&env, &refused, "a");
         assert_eq!(env.take(), vec![(To::One("a".into()), json!({
             "type": "error", "code": "restart_unavailable",
             "message": "Restart is unavailable: this agent is not running as the Inwire service.",
@@ -1730,10 +1747,35 @@ mod tests {
         )]);
         assert_eq!(env.restarts.load(Ordering::SeqCst), 0);
 
-        restart_agent(&env, &RestartSupport { allowed: true, reason: String::new() }, "a");
+        control.restart_agent(&env, &RestartSupport { allowed: true, reason: String::new() }, "a");
         assert!(env.take().is_empty());
         assert_eq!(env.take_logs(), vec![(Level::Info, "restart_agent requested by a client".into())]);
         assert_eq!(env.restarts.load(Ordering::SeqCst), 1);
+    }
+
+    /// The command exits the process, so it is the capture owner's to give, as
+    /// `set_interfaces` and `stop_capture` are: another window was able to end a
+    /// capture it did not start. Idle, anyone may; the owner may always.
+    #[test]
+    fn restart_is_refused_to_a_client_that_does_not_own_the_running_capture() {
+        let env = FakeEnv::with(&["a", "b"], three());
+        let driver = FakeDriver::default();
+        let control = Control::new();
+        let allowed = RestartSupport { allowed: true, reason: String::new() };
+        control.command(&env, &driver, "a", &start());
+        env.take();
+        env.take_logs();
+
+        control.restart_agent(&env, &allowed, "b");
+        assert_eq!(env.take(), vec![(To::One("b".into()), capture_busy())]);
+        assert_eq!(
+            env.take_logs(),
+            vec![(Level::Warning, "restart_agent refused - another client owns the running capture".into())]
+        );
+        assert_eq!(env.restarts.load(Ordering::SeqCst), 0);
+
+        control.restart_agent(&env, &allowed, "a");
+        assert_eq!(env.restarts.load(Ordering::SeqCst), 1, "the owner may still restart");
     }
 
     // --- the interface list, and Npcap arriving late ---------------------------
