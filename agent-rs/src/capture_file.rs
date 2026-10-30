@@ -259,7 +259,8 @@ pub enum FileEvent {
     Opened(FileReport),
     Closed(FileReport),
     Deleted(FileReport),
-    /// A file could not be created, written or deleted. The capture stops -
+    /// A file could not be created or written (a ring file that cannot be
+    /// deleted is logged and left, not this). The capture stops -
     /// a capture writing nowhere is not one its owner asked for.
     Failed(String),
 }
@@ -404,8 +405,18 @@ fn run(setup: WriterSetup, queue: &WriterQueue, dropped: &[AtomicU64]) {
                 if let Some(keep) = setup.ring.keep {
                     while on_disk.len() + 1 > keep as usize {
                         let Some((oldest, path)) = on_disk.pop_front() else { break };
+                        // **A file that cannot be deleted does not end the
+                        // capture** (open in Wireshark without delete sharing,
+                        // say): dumpcap logs it and carries on. It was popped
+                        // from `on_disk`, so it is not tried again, and no
+                        // `Deleted` is sent for it - the app files a segment by
+                        // that event, so the file keeps its segment.
                         if let Err(error) = as_client(&setup, || fs::remove_file(&path)) {
-                            return fail(format!("could not delete {}: {error}", oldest.name));
+                            crate::log_warn!(
+                                "could not delete {}: {error} - it stays on disk and the ring carries on",
+                                oldest.name
+                            );
+                            continue;
                         }
                         (setup.events)(FileEvent::Deleted(oldest));
                     }
@@ -739,6 +750,95 @@ mod tests {
         assert_eq!(taken.iter().map(|j| j.seq).collect::<Vec<_>>(), [0, 2], "what was accepted is kept, in order");
         q.close();
         assert!(q.take(Duration::from_millis(1)).is_none());
+    }
+
+    /// dumpcap logs a ring file it cannot delete (open in Wireshark without
+    /// delete sharing, say) and carries on; ending a capture over it lost the
+    /// rest of the capture to a file somebody was reading. The stuck file stays
+    /// on disk, is never reported `Deleted` (the app files a segment by that
+    /// event, so it keeps its segment), and the ring goes on rotating.
+    #[test]
+    fn a_ring_file_that_cannot_be_deleted_is_left_and_the_capture_carries_on() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::Mutex;
+
+        let dir = std::env::temp_dir().join(format!("inwire-ring-stuck-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let interfaces = vec![FileInterface {
+            name: "test".into(),
+            connection: None,
+            hardware: None,
+            link_type: 1,
+            ts_resolution: 9,
+        }];
+        let events: Arc<Mutex<Vec<FileEvent>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let header = file_header(&interfaces, 65_535, None);
+        let writer = Writer::start(WriterSetup {
+            dir: dir.clone(),
+            ring: ring(None, None, Some(1), Some(2)),
+            token: None,
+            interfaces,
+            header,
+            started_ns: 0,
+            counters: Arc::new(|_| (0, Some(0))),
+            events: Box::new(move |event| sink.lock().unwrap().push(event)),
+        });
+        let job = |seq: u64, file: u32| FrameJob {
+            seq, file, interface: 0, ts_ns: seq, wire_len: 60, data: vec![0; 60],
+        };
+        let opened = |index: u32| {
+            events.lock().unwrap().iter().find_map(|event| match event {
+                FileEvent::Opened(report) if report.index == index => Some(report.name.clone()),
+                _ => None,
+            })
+        };
+        let wait_for = |index: u32| {
+            for _ in 0..200 {
+                if let Some(name) = opened(index) {
+                    return name;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            panic!("file {index} was never opened: {:?}", events.lock().unwrap());
+        };
+
+        writer.push(job(0, 1));
+        writer.push(job(1, 2));
+        // File 1 is closed once file 2 is open, and only then can it be held
+        // the way Wireshark holds one: readable, with no delete sharing.
+        let stuck_name = wait_for(1);
+        let _ = wait_for(2);
+        let held = loop {
+            match File::options().read(true).share_mode(0).open(dir.join(&stuck_name)) {
+                Ok(file) => break file,
+                Err(_) => std::thread::sleep(Duration::from_millis(25)),
+            }
+        };
+        // Two more rotations: the first tries to delete file 1 and cannot, the
+        // second deletes file 2 as usual.
+        writer.push(job(2, 3));
+        writer.push(job(3, 4));
+        writer.finish();
+
+        let seen = events.lock().unwrap().clone();
+        let deleted: Vec<u32> = seen.iter().filter_map(|e| match e {
+            FileEvent::Deleted(report) => Some(report.index),
+            _ => None,
+        }).collect();
+        let opened_indexes: Vec<u32> = seen.iter().filter_map(|e| match e {
+            FileEvent::Opened(report) => Some(report.index),
+            _ => None,
+        }).collect();
+        let failed: Vec<&FileEvent> = seen.iter().filter(|e| matches!(e, FileEvent::Failed(_))).collect();
+        let stuck_exists = dir.join(&stuck_name).exists();
+        drop(held);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(failed.is_empty(), "the writer did not fail: {failed:?}");
+        assert_eq!(opened_indexes, [1, 2, 3, 4], "the capture carried on through both rotations");
+        assert_eq!(deleted, [2], "only the file that could be deleted was reported deleted");
+        assert!(stuck_exists, "the file that could not be deleted is still on disk");
     }
 
     #[test]
