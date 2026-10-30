@@ -2407,6 +2407,62 @@ check_true("...and is protected, so nothing is inherited", "D:P" in _sddl_source
 check_true("...and admits nobody else",
            all(sid not in _sddl_source for sid in (";;;WD)", ";;;AN)", ";;;NU)")))
 
+# The log folder is the other thing a LocalSystem service rotates with
+# remove/rename, so the same rule as agent-rs/src/agent_log.rs: admin-owned,
+# protected, and a junction is refused. The real ACL needs pywin32 on Windows,
+# so like the pipe's descriptor above this pins the source where it cannot run.
+import logging_setup
+_log_source = inspect.getsource(logging_setup)
+check_true("the log folder descriptor is admin-owned and protected",
+           "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)" in _log_source)
+check_true("...a reparse point is refused", "0x400" in _log_source)
+check_true("...and the DACL is protected, so nothing is inherited",
+           "PROTECTED_DACL_SECURITY_INFORMATION" in _log_source)
+check_true("...and links planted under a log name are cleared", "_clear_planted_links" in _log_source)
+check_true("...and the service, which is SYSTEM, is what asks for it",
+           "harden=True" in (pathlib.Path(__file__).parent / "service_windows.py").read_text(encoding="utf-8"))
+
+# Behaviour that runs without pywin32: a link planted under a log name is
+# removed and what it pointed at is not, and a folder that cannot be secured
+# is not written to. (On Windows the second would really harden a temp folder.)
+_planted_dir = tempfile.mkdtemp()
+_planted_target = tempfile.mkdtemp()
+with open(os.path.join(_planted_target, "keep"), "w") as _f:
+    _f.write("x")
+try:
+    os.symlink(_planted_target, os.path.join(_planted_dir, "agent.log.3"), target_is_directory=True)
+    os.symlink(os.path.join(_planted_target, "keep"), os.path.join(_planted_dir, "agent.log.1"))
+    _can_link = True
+except (OSError, NotImplementedError):
+    _can_link = False  # an unprivileged Windows account cannot make symlinks
+if _can_link:
+    logging_setup._clear_planted_links(_planted_dir)
+    check_true("a planted directory link is removed",
+               not os.path.lexists(os.path.join(_planted_dir, "agent.log.3")))
+    check_true("a planted file link is removed",
+               not os.path.lexists(os.path.join(_planted_dir, "agent.log.1")))
+    check_true("what the links pointed at is kept",
+               os.path.exists(os.path.join(_planted_target, "keep")))
+if os.name != "nt":
+    _hl = logging.getLogger("inwire")
+    _hl_saved = (list(_hl.handlers), _hl.level, _hl.propagate)
+    _hl_dir = tempfile.mkdtemp()
+    try:
+        logging_setup._configured_with = None
+        logging_setup.setup_logging(_hl_dir, to_stderr=False, harden=True)
+        check_true("a folder that cannot be secured gets no file handler",
+                   not any(isinstance(h, logging.FileHandler) for h in _hl.handlers))
+        check("...and no log file is created in it", os.listdir(_hl_dir), [])
+    finally:
+        for _h in list(_hl.handlers):
+            _hl.removeHandler(_h)
+            _h.close()
+        for _h in _hl_saved[0]:
+            _hl.addHandler(_h)
+        _hl.setLevel(_hl_saved[1])
+        _hl.propagate = _hl_saved[2]
+        logging_setup._configured_with = None
+
 
 # The one claim a pipe connection makes that a socket cannot: the descriptor
 # was checked before the handle existed, so `register` skips the pairing token

@@ -1594,8 +1594,20 @@ is a panel that stays empty with nothing erroring.
 - **Run the agent unelevated beside the installed service** (`inwire-agent
   debug` with `INWIRE_AGENT_PIPE` set) and expect one warning at startup that it
   cannot write a log. That is correct: `%ProgramData%\Inwire` grants Users
-  write, while `agent.log` itself belongs to SYSTEM and Administrators. Lines
+  only read once the service has secured it, and `agent.log` itself belongs to
+  SYSTEM and Administrators. Lines
   still reach subscribers and stderr; nothing is kept.
+  (A hand run does not secure the folder: only the service does.)
+- **The log folder is admin-only**, set by the agent and not by the installer.
+  After the service has started once, `icacls C:\ProgramData\Inwire` shows the
+  owner `BUILTIN\Administrators`, no `(I)` entries, and `BUILTIN\Users:(OI)(CI)(RX)`
+  only. The failure looks like `Users` still holding `(WD,AD)` or an `(I)` line:
+  the folder is still ProgramData's, and a user can plant a junction in it for
+  SYSTEM's log rotation to follow. The owner cannot be checked by the unit test
+  (it runs unelevated), so this is where it is held. Also try it with a
+  pre-existing folder: create `C:\ProgramData\Inwire` as a standard user, start
+  the service, and expect the owner to change; replace it with a junction
+  (`mklink /J`) first and expect no file log and one warning in Diagnostics.
 
 ### NetFlow monitoring: the firewall, the lifetime, a real exporter
 

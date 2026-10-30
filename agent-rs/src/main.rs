@@ -442,7 +442,7 @@ fn debug() -> windows_service::Result<()> {
     // `to_stderr` is true here and false under the SCM, which is the whole of
     // `logging_setup.py`'s argument of the same name: run by hand there is a
     // console worth writing to, and under the SCM there is not.
-    agent_log::init(&agent_log::directory(), true);
+    agent_log::init(&agent_log::directory(), true, false);
     inwire_agent::log_info!(
         "[inwire-agent] {} - foreground on {}; Ctrl+C to stop",
         inwire_agent::VERSION,

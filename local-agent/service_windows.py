@@ -109,7 +109,7 @@ class InwireAgentService(win32serviceutil.ServiceFramework):
         import config
         import logging_setup
 
-        logging_setup.setup_logging(config.config_dir(), to_stderr=DEBUG_MODE)
+        logging_setup.setup_logging(config.config_dir(), to_stderr=DEBUG_MODE, harden=True)
 
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)

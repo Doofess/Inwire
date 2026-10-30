@@ -9,6 +9,7 @@ not optional polish - it is the entire observability story (see spec).
 
 import logging
 import os
+import stat
 import sys
 from logging.handlers import RotatingFileHandler
 
@@ -17,21 +18,91 @@ LOG_FILENAME = "agent.log"
 MAX_BYTES = 1_000_000
 BACKUP_COUNT = 3
 
+# The service's descriptor for its log folder, the same literal as
+# agent-rs/src/agent_log.rs: owned by Administrators, protected (nothing
+# inherited from ProgramData), SYSTEM and Administrators full control, Users
+# read-and-execute only. The service rotates this folder as SYSTEM with
+# remove/rename, so a user who owned it or could plant entries in it could aim
+# SYSTEM's delete or rename anywhere.
+LOG_DIR_SDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)"
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
 _configured_with = None
 
 
-def setup_logging(directory, to_stderr=True, level=logging.INFO):
+def _harden_directory(directory):
+    """Gives `directory` LOG_DIR_SDDL, protected, and propagates it to children.
+
+    A reparse point is refused, not followed: SetNamedSecurityInfo would
+    re-ACL whatever a junction points at, as SYSTEM.
+    """
+    import win32file  # noqa: PLC0415 - Windows only, imported where used
+    import win32security  # noqa: PLC0415
+
+    if win32file.GetFileAttributes(directory) & 0x400:
+        raise OSError(f"{directory} is a reparse point and is not followed")
+    descriptor = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+        LOG_DIR_SDDL, win32security.SDDL_REVISION_1,
+    )
+    owner = descriptor.GetSecurityDescriptorOwner()
+    dacl = descriptor.GetSecurityDescriptorDacl()
+    information = (
+        win32security.OWNER_SECURITY_INFORMATION
+        | win32security.DACL_SECURITY_INFORMATION
+        | win32security.PROTECTED_DACL_SECURITY_INFORMATION
+    )
+    win32security.SetNamedSecurityInfo(
+        directory, win32security.SE_FILE_OBJECT, information, owner, None, dacl, None,
+    )
+
+
+def _clear_planted_links(directory):
+    """Removes a symlink, junction or directory sitting where a log file belongs.
+
+    Only the entry goes, never what it points at: rmdir on a junction removes
+    the junction. Errors are ignored - an entry that cannot be removed also
+    cannot be rotated into.
+    """
+    names = [LOG_FILENAME] + [f"{LOG_FILENAME}.{n}" for n in range(1, BACKUP_COUNT + 1)]
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        planted = (
+            stat.S_ISLNK(info.st_mode)
+            or stat.S_ISDIR(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+        )
+        if not planted:
+            continue
+        try:
+            os.rmdir(path)
+        except OSError:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def setup_logging(directory, to_stderr=True, level=logging.INFO, harden=False):
     """Configures and returns the shared `inwire` logger.
 
-    Idempotent: calling it twice with the same (directory, to_stderr) returns
-    the same logger without stacking duplicate handlers (which would print
-    every line twice). A second call with *different* settings must actually
-    take effect - a stale StreamHandler from an earlier to_stderr=True call
-    would otherwise keep writing to a stderr the service has no console for.
+    Idempotent: calling it twice with the same (directory, to_stderr, harden)
+    returns the same logger without stacking duplicate handlers (which would
+    print every line twice). A second call with *different* settings must
+    actually take effect - a stale StreamHandler from an earlier
+    to_stderr=True call would otherwise keep writing to a stderr the service
+    has no console for.
+
+    `harden` is for the Windows service only (a hand run is not SYSTEM and
+    cannot set the owner). It secures the folder with LOG_DIR_SDDL first and
+    clears planted links; if that fails there is no file handler at all.
     """
     global _configured_with
     logger = logging.getLogger("inwire")
-    if _configured_with == (directory, to_stderr):
+    if _configured_with == (directory, to_stderr, harden):
         return logger
 
     for handler in list(logger.handlers):
@@ -44,8 +115,16 @@ def setup_logging(directory, to_stderr=True, level=logging.INFO):
     logger.propagate = False
     formatter = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s")
 
+    unsecured = None
     try:
         os.makedirs(directory, exist_ok=True)
+        if harden:
+            try:
+                _harden_directory(directory)
+            except Exception as exc:  # noqa: BLE001 - any failure means no file log
+                unsecured = exc
+                raise OSError(str(exc)) from exc
+            _clear_planted_links(directory)
         file_handler = RotatingFileHandler(
             os.path.join(directory, LOG_FILENAME),
             maxBytes=MAX_BYTES,
@@ -74,5 +153,10 @@ def setup_logging(directory, to_stderr=True, level=logging.INFO):
         # asked us not to do.
         logger.addHandler(logging.NullHandler())
 
-    _configured_with = (directory, to_stderr)
+    _configured_with = (directory, to_stderr, harden)
+    if unsecured is not None:
+        logger.warning(
+            "agent log folder %r could not be secured (%s) - logging to subscribers only",
+            directory, unsecured,
+        )
     return logger

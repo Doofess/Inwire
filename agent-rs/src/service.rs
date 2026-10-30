@@ -90,7 +90,7 @@ fn service_main(_arguments: Vec<OsString>) {
     // read - which is the shape this whole module exists to avoid, and which
     // the agent had until the log was ported: every `eprintln!` in the crate
     // went nowhere on exactly the machines they were written for.
-    agent_log::init(&agent_log::directory(), false);
+    agent_log::init(&agent_log::directory(), false, true);
     if let Err(error) = serve() {
         crate::log_error!("service failed: {error}");
     }

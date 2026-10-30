@@ -257,7 +257,8 @@ Source: "{#AgentSource}\{#AgentExeName}"; DestDir: "{app}\agent"; \
 
 [Dirs]
 ; Config and log live here, present before anyone logs in - which a LocalSystem
-; service needs. Inherits ProgramData's default ACLs.
+; service needs. The installer only creates it: the agent sets the folder's
+; owner and ACL itself each time the service starts (admin-only, not inherited).
 Name: "{commonappdata}\Inwire"
 
 [Icons]

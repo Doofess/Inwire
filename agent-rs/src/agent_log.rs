@@ -41,8 +41,10 @@
 #![cfg(windows)]
 
 use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -106,7 +108,23 @@ static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 ///
 /// `to_stderr` is false under the SCM, where stderr reaches nobody, and true
 /// for `inwire-agent debug`.
-pub fn init(directory: &Path, to_stderr: bool) {
+///
+/// `harden` is true under the SCM only. The service rotates this folder as
+/// SYSTEM with `remove_file` and `rename`, so a user who owned it, or could
+/// plant entries in it, could aim SYSTEM's delete or rename anywhere. With
+/// `harden` the folder is created, then given `LOG_DIR_SDDL` (owner
+/// Administrators, protected DACL), then any link planted under a log name is
+/// removed. A folder that is already a junction is refused rather than
+/// followed, and a folder that cannot be secured is not written to at all. A
+/// hand run is not the service and cannot set the owner, so it passes false.
+pub fn init(directory: &Path, to_stderr: bool, harden: bool) {
+    let mut unsecured: Option<io::Error> = None;
+    if harden {
+        match fs::create_dir_all(directory).and_then(|()| harden_directory(directory, LOG_DIR_SDDL)) {
+            Ok(()) => clear_planted_links(directory),
+            Err(error) => unsecured = Some(error),
+        }
+    }
     // **Probed here, not on the first line**, which is what `logging_setup.py`
     // does by constructing its handler inside the same `try`. The realistic
     // failure is not an unwritable directory: `%ProgramData%\Inwire` grants
@@ -115,19 +133,23 @@ pub fn init(directory: &Path, to_stderr: bool) {
     // unelevated, beside an installed service can create nothing and append to
     // nothing. Finding that out once and saying so beats discovering it per
     // line and saying nothing.
-    let path = fs::create_dir_all(directory)
-        .and_then(|()| {
-            let path = directory.join("agent.log");
-            OpenOptions::new().create(true).append(true).open(&path)?;
-            Ok(path)
-        })
-        .map_err(|error| {
-            if to_stderr {
-                eprintln!("[agent] WARNING: cannot write a log in {directory:?}: {error}");
-                eprintln!("[agent] lines go to stderr and to subscribers, and nothing is kept");
-            }
-        })
-        .ok();
+    let path = if unsecured.is_some() {
+        None
+    } else {
+        fs::create_dir_all(directory)
+            .and_then(|()| {
+                let path = directory.join("agent.log");
+                OpenOptions::new().create(true).append(true).open(&path)?;
+                Ok(path)
+            })
+            .map_err(|error| {
+                if to_stderr {
+                    eprintln!("[agent] WARNING: cannot write a log in {directory:?}: {error}");
+                    eprintln!("[agent] lines go to stderr and to subscribers, and nothing is kept");
+                }
+            })
+            .ok()
+    };
     *SINK.lock().unwrap() = Some(Sink {
         path,
         to_stderr,
@@ -135,12 +157,155 @@ pub fn init(directory: &Path, to_stderr: bool) {
         first_pending: 0,
         next: 0,
     });
+    if let Some(error) = unsecured {
+        write(
+            "WARNING",
+            &format!(
+                "agent log folder {directory:?} could not be secured ({error}) - logging to subscribers only"
+            ),
+        );
+    }
+}
+
+/// The service's descriptor for its log folder: owned by Administrators,
+/// protected (nothing inherited from ProgramData), SYSTEM and Administrators
+/// full control, and `Users` read-and-execute only. Inheritable, so the log
+/// files take it too.
+pub const LOG_DIR_SDDL: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
+
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
+const SDDL_REVISION_1: u32 = 1;
+const SE_FILE_OBJECT: u32 = 1;
+const OWNER_SECURITY_INFORMATION: u32 = 0x1;
+const DACL_SECURITY_INFORMATION: u32 = 0x4;
+const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetFileAttributesW(name: *const u16) -> u32;
+    fn LocalFree(memory: *mut c_void) -> *mut c_void;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl: *const u16,
+        revision: u32,
+        descriptor: *mut *mut c_void,
+        size: *mut u32,
+    ) -> i32;
+    fn GetSecurityDescriptorOwner(descriptor: *mut c_void, owner: *mut *mut c_void, defaulted: *mut i32) -> i32;
+    fn GetSecurityDescriptorDacl(
+        descriptor: *mut c_void,
+        present: *mut i32,
+        dacl: *mut *mut c_void,
+        defaulted: *mut i32,
+    ) -> i32;
+    fn SetNamedSecurityInfoW(
+        name: *const u16,
+        object_type: u32,
+        information: u32,
+        owner: *mut c_void,
+        group: *mut c_void,
+        dacl: *mut c_void,
+        sacl: *mut c_void,
+    ) -> u32;
+}
+
+fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
+    text.encode_wide().chain(Some(0)).collect()
+}
+
+/// Gives `dir` the owner and DACL of `sddl`, protected, and propagates them to
+/// what is already inside.
+///
+/// **A reparse point is refused**, not followed: `SetNamedSecurityInfoW` would
+/// re-ACL whatever a junction points at, as SYSTEM. The owner is applied only
+/// when `sddl` names one.
+pub fn harden_directory(dir: &Path, sddl: &str) -> io::Result<()> {
+    let name = wide(dir.as_os_str());
+    let attributes = unsafe { GetFileAttributesW(name.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(io::Error::last_os_error());
+    }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{dir:?} is a reparse point and is not followed"),
+        ));
+    }
+
+    let sddl_wide = wide(std::ffi::OsStr::new(sddl));
+    let mut descriptor: *mut c_void = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let result = (|| {
+        let mut owner: *mut c_void = std::ptr::null_mut();
+        let mut dacl: *mut c_void = std::ptr::null_mut();
+        let (mut defaulted, mut present) = (0i32, 0i32);
+        if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+        if !owner.is_null() {
+            information |= OWNER_SECURITY_INFORMATION;
+        }
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                information,
+                owner,
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        Ok(())
+    })();
+    unsafe { LocalFree(descriptor) };
+    result
+}
+
+/// Removes a symlink, junction or directory sitting where a log file belongs.
+///
+/// Rotation renames and deletes these names as SYSTEM; a junction under one is
+/// how that is aimed elsewhere. Only the entry goes, never what it points at:
+/// `remove_dir` on a junction removes the junction. Errors are ignored - an
+/// entry that cannot be removed also cannot be rotated into.
+fn clear_planted_links(dir: &Path) {
+    let live = dir.join("agent.log");
+    let mut names = vec![live.clone()];
+    names.extend((1..=BACKUP_COUNT).map(|n| live.with_extension(format!("log.{n}"))));
+    for name in names {
+        let Ok(meta) = fs::symlink_metadata(&name) else { continue };
+        if meta.file_type().is_symlink() || meta.is_dir() {
+            let _ = fs::remove_dir(&name).or_else(|_| fs::remove_file(&name));
+        }
+    }
 }
 
 /// `%ProgramData%\Inwire`, which is where the Python agent keeps its own.
 ///
 /// Populated before anybody logs in, which a LocalSystem service starting at
-/// boot needs, and it inherits ProgramData's ACLs.
+/// boot needs. Under the SCM `init` gives it `LOG_DIR_SDDL`; the installer
+/// only creates it.
 pub fn directory() -> PathBuf {
     let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
     PathBuf::from(base).join("Inwire")
@@ -407,5 +572,142 @@ mod tests {
         assert_eq!(entry["message"], "a message");
         let short = format!("{} {:LEVEL_FIELD_WIDTH$} {}", stamp(), "INFO", "a message");
         assert_eq!(parse_line(&short)["message"], "a message");
+    }
+
+    // --- the log folder's ACL, and links planted in it ---
+
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn GetNamedSecurityInfoW(
+            name: *const u16,
+            object_type: u32,
+            information: u32,
+            owner: *mut *mut std::ffi::c_void,
+            group: *mut *mut std::ffi::c_void,
+            dacl: *mut *mut std::ffi::c_void,
+            sacl: *mut *mut std::ffi::c_void,
+            descriptor: *mut *mut std::ffi::c_void,
+        ) -> u32;
+        fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor: *const std::ffi::c_void,
+            revision: u32,
+            information: u32,
+            string: *mut *mut u16,
+            length: *mut u32,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A path under the temp folder that nothing has created yet.
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "inwire-agent-log-{label}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn temp(label: &str) -> PathBuf {
+        let path = temp_path(label);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// `cmd /c mklink /J`, which needs no privilege.
+    fn mklink_junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "mklink /J failed: {output:?}");
+    }
+
+    /// The directory's DACL as SDDL text, read back from the filesystem.
+    fn read_dacl_sddl(dir: &Path) -> String {
+        let name: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                name.as_ptr(),
+                1, // SE_FILE_OBJECT
+                4, // DACL_SECURITY_INFORMATION
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(status, 0, "GetNamedSecurityInfoW");
+        let mut text: *mut u16 = std::ptr::null_mut();
+        let mut length = 0u32;
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4, &mut text, &mut length)
+        };
+        assert_ne!(ok, 0, "ConvertSecurityDescriptorToStringSecurityDescriptorW");
+        let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length as usize) });
+        unsafe {
+            LocalFree(text.cast());
+            LocalFree(descriptor);
+        }
+        sddl.trim_end_matches('\0').to_string()
+    }
+
+    #[test]
+    fn the_service_descriptor_is_admin_only() {
+        assert_eq!(LOG_DIR_SDDL, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)");
+    }
+
+    #[test]
+    fn hardening_protects_the_dacl() {
+        // No `O:` - an unelevated test cannot set the owner to Administrators.
+        let dir = temp("harden");
+        harden_directory(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)").unwrap();
+        let sddl = read_dacl_sddl(&dir);
+        let _ = fs::remove_dir(&dir);
+        assert!(sddl.starts_with("D:P"), "{sddl}");
+        assert!(!sddl.contains(";ID;"), "nothing inherited survives: {sddl}");
+    }
+
+    #[test]
+    fn a_reparse_point_is_refused() {
+        let target = temp("target");
+        let link = temp_path("junction");
+        mklink_junction(&link, &target);
+        let before = read_dacl_sddl(&target);
+        let refused = harden_directory(&link, "D:P(A;OICI;FA;;;SY)");
+        let after = read_dacl_sddl(&target);
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir(&target);
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(after, before, "the junction's target was not re-ACLed");
+    }
+
+    #[test]
+    fn planted_links_are_cleared() {
+        let dir = temp("planted");
+        let target = temp("planted-target");
+        fs::write(target.join("keep"), b"x").unwrap();
+        mklink_junction(&dir.join("agent.log.3"), &target);
+        clear_planted_links(&dir);
+        let gone = !dir.join("agent.log.3").exists();
+        let kept = target.join("keep").exists();
+        let _ = fs::remove_file(target.join("keep"));
+        let _ = fs::remove_dir(&target);
+        let _ = fs::remove_dir(&dir);
+        assert!(gone);
+        assert!(kept, "the link went, not what it pointed at");
     }
 }
