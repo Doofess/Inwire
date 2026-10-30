@@ -710,4 +710,22 @@ mod tests {
         assert!(gone);
         assert!(kept, "the link went, not what it pointed at");
     }
+
+    /// Hardening runs before `clear_planted_links`, and `SetNamedSecurityInfoW`
+    /// propagates to children - so a junction planted under any other name is
+    /// already inside when it does. Measured: the propagation does not follow
+    /// it. This pins that, rather than a property of `harden_directory` itself.
+    #[test]
+    fn propagation_does_not_follow_a_junction_inside() {
+        let dir = temp("inside-parent");
+        let target = temp("inside-target");
+        mklink_junction(&dir.join("elsewhere"), &target);
+        let before = read_dacl_sddl(&target);
+        harden_directory(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)").unwrap();
+        let after = read_dacl_sddl(&target);
+        let _ = fs::remove_dir(dir.join("elsewhere"));
+        let _ = fs::remove_dir(&target);
+        let _ = fs::remove_dir(&dir);
+        assert_eq!(after, before, "propagation re-ACLed a child junction's target");
+    }
 }
