@@ -45,6 +45,7 @@ use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -173,17 +174,58 @@ pub fn init(directory: &Path, to_stderr: bool, harden: bool) {
 /// files take it too.
 pub const LOG_DIR_SDDL: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
 
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
 const SDDL_REVISION_1: u32 = 1;
 const SE_FILE_OBJECT: u32 = 1;
 const OWNER_SECURITY_INFORMATION: u32 = 0x1;
 const DACL_SECURITY_INFORMATION: u32 = 0x4;
 const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 
+const READ_CONTROL: u32 = 0x0002_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
+const WRITE_OWNER: u32 = 0x0008_0000;
+const FILE_SHARE_READ: u32 = 0x1;
+const FILE_SHARE_WRITE: u32 = 0x2;
+const FILE_SHARE_DELETE: u32 = 0x4;
+const OPEN_EXISTING: u32 = 3;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
+
+#[repr(C)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+
+/// `BY_HANDLE_FILE_INFORMATION`.
+#[repr(C)]
+struct ByHandleFileInformation {
+    file_attributes: u32,
+    creation_time: FileTime,
+    last_access_time: FileTime,
+    last_write_time: FileTime,
+    volume_serial_number: u32,
+    file_size_high: u32,
+    file_size_low: u32,
+    number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
 #[link(name = "kernel32")]
 extern "system" {
-    fn GetFileAttributesW(name: *const u16) -> u32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: *mut c_void,
+        disposition: u32,
+        flags: u32,
+        template: *mut c_void,
+    ) -> *mut c_void;
+    fn GetFileInformationByHandle(file: *mut c_void, information: *mut ByHandleFileInformation) -> i32;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
 
@@ -202,8 +244,8 @@ extern "system" {
         dacl: *mut *mut c_void,
         defaulted: *mut i32,
     ) -> i32;
-    fn SetNamedSecurityInfoW(
-        name: *const u16,
+    fn SetSecurityInfo(
+        handle: *mut c_void,
         object_type: u32,
         information: u32,
         owner: *mut c_void,
@@ -220,22 +262,23 @@ fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
 /// Gives `dir` the owner and DACL of `sddl`, protected, and propagates them to
 /// what is already inside.
 ///
-/// **A reparse point is refused**, not followed: `SetNamedSecurityInfoW` would
-/// re-ACL whatever a junction points at, as SYSTEM. The owner is applied only
-/// when `sddl` names one.
+/// **A reparse point is refused**, not followed: re-ACLing a junction's target
+/// would be done as SYSTEM. The owner is applied only when `sddl` names one.
+///
+/// **The folder is opened once and the check and the change both use that
+/// handle.** A user who owns a pre-existing folder can replace it between a
+/// check made on its path and a change made on its path (an oplock says when),
+/// so neither names the path twice. The handle is opened with every share flag
+/// and explicit rights: `SetSecurityInfo` propagates inheritable entries to what
+/// is already inside, but not through a handle opened exclusively or with
+/// `MAXIMUM_ALLOWED`.
 pub fn harden_directory(dir: &Path, sddl: &str) -> io::Result<()> {
-    let name = wide(dir.as_os_str());
-    let attributes = unsafe { GetFileAttributesW(name.as_ptr()) };
-    if attributes == INVALID_FILE_ATTRIBUTES {
-        return Err(io::Error::last_os_error());
-    }
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{dir:?} is a reparse point and is not followed"),
-        ));
-    }
+    harden_directory_with(dir, sddl, || {})
+}
 
+/// `harden_directory`, with a hook that runs between the check and the change -
+/// the only gap a swap could use. Tests put the swap there.
+fn harden_directory_with(dir: &Path, sddl: &str, between_check_and_apply: impl FnOnce()) -> io::Result<()> {
     let sddl_wide = wide(std::ffi::OsStr::new(sddl));
     let mut descriptor: *mut c_void = std::ptr::null_mut();
     if unsafe {
@@ -260,12 +303,53 @@ pub fn harden_directory(dir: &Path, sddl: &str) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         let mut information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+        let mut access = READ_CONTROL | WRITE_DAC;
         if !owner.is_null() {
             information |= OWNER_SECURITY_INFORMATION;
+            access |= WRITE_OWNER;
         }
-        let status = unsafe {
-            SetNamedSecurityInfoW(
+
+        let name = wide(dir.as_os_str());
+        let raw = unsafe {
+            CreateFileW(
                 name.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // Closed when this goes out of scope, on every path below.
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let raw = handle.as_raw_handle();
+
+        let mut info: ByHandleFileInformation = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(raw, &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{dir:?} is a reparse point and is not followed"),
+            ));
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{dir:?} is not a directory"),
+            ));
+        }
+
+        between_check_and_apply();
+
+        let status = unsafe {
+            SetSecurityInfo(
+                raw,
                 SE_FILE_OBJECT,
                 information,
                 owner,
@@ -693,6 +777,68 @@ mod tests {
         let _ = fs::remove_dir(&target);
         assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert_eq!(after, before, "the junction's target was not re-ACLed");
+    }
+
+    /// **The check and the change are one object.** A user who owns the
+    /// pre-existing folder can swap it for a junction between a path-based
+    /// reparse check and the `SetNamedSecurityInfoW` that follows it, and SYSTEM
+    /// would then re-ACL the junction's target. The swap is made in the hook,
+    /// where it would be made by hand: the folder is renamed away and a junction
+    /// takes its name.
+    #[test]
+    fn a_folder_swapped_for_a_junction_after_the_check_is_not_followed() {
+        let dir = temp("race");
+        let moved = temp_path("race-moved");
+        let target = temp("race-target");
+        let before = read_dacl_sddl(&target);
+        let result = harden_directory_with(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", || {
+            fs::rename(&dir, &moved).unwrap();
+            mklink_junction(&dir, &target);
+        });
+        let after = read_dacl_sddl(&target);
+        let swapped_in = read_dacl_sddl(&dir);
+        let checked = read_dacl_sddl(&moved);
+        let _ = fs::remove_dir(&dir);
+        let _ = fs::remove_dir(&moved);
+        let _ = fs::remove_dir(&target);
+        result.unwrap();
+        assert_eq!(after, before, "the junction's target was re-ACLed");
+        // Measured: on this Windows `SetNamedSecurityInfoW` does not follow a
+        // junction at the final component, it re-ACLs the junction itself - so
+        // the target above survives even the path-based code. What fails there
+        // is the object: the change must land on the folder that passed the
+        // check, not on whatever the name has come to mean.
+        assert!(checked.starts_with("D:P"), "the checked folder was hardened: {checked}");
+        assert!(!swapped_in.starts_with("D:P"), "the swapped-in junction was changed: {swapped_in}");
+    }
+
+    /// Opening a handle instead of naming a path must not lose the propagation
+    /// to what is already inside, which is how an old log file gets the new
+    /// descriptor.
+    #[test]
+    fn an_existing_child_inherits_the_hardened_descriptor() {
+        let dir = temp("children");
+        let child = dir.join("agent.log");
+        fs::write(&child, b"x").unwrap();
+        let before = read_dacl_sddl(&child);
+        harden_directory(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)").unwrap();
+        let after = read_dacl_sddl(&child);
+        let _ = fs::remove_file(&child);
+        let _ = fs::remove_dir(&dir);
+        assert_ne!(after, before);
+        assert!(after.contains("(A;ID;FA;;;SY)"), "{after}");
+        assert_eq!(after.matches("(A;").count(), 2, "only the hardened entries: {after}");
+    }
+
+    #[test]
+    fn a_file_is_refused_as_a_log_folder() {
+        let dir = temp("not-a-folder");
+        let file = dir.join("file");
+        fs::write(&file, b"x").unwrap();
+        let refused = harden_directory(&file, "D:P(A;OICI;FA;;;SY)");
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir(&dir);
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

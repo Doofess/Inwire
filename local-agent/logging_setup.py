@@ -26,6 +26,10 @@ BACKUP_COUNT = 3
 # SYSTEM's delete or rename anywhere.
 LOG_DIR_SDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)"
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_FILE_ATTRIBUTE_DIRECTORY = 0x10
+_READ_CONTROL = 0x00020000
+_WRITE_DAC = 0x00040000
+_WRITE_OWNER = 0x00080000
 
 _configured_with = None
 # Folders that have been set up hardened in this process. Hardening is sticky:
@@ -43,27 +47,52 @@ def _directory_key(directory):
 def _harden_directory(directory):
     """Gives `directory` LOG_DIR_SDDL, protected, and propagates it to children.
 
-    A reparse point is refused, not followed: SetNamedSecurityInfo would
-    re-ACL whatever a junction points at, as SYSTEM.
+    A reparse point is refused, not followed: re-ACLing a junction's target
+    would be done as SYSTEM.
+
+    The folder is opened once and the check and the change both use that
+    handle. A user who owns a pre-existing folder can replace it between a
+    check made on its path and a change made on its path, so neither names the
+    path twice. The handle is opened with every share flag and explicit rights:
+    SetSecurityInfo propagates inheritable entries to what is already inside,
+    but not through a handle opened exclusively or with MAXIMUM_ALLOWED.
     """
     import win32file  # noqa: PLC0415 - Windows only, imported where used
     import win32security  # noqa: PLC0415
 
-    if win32file.GetFileAttributes(directory) & 0x400:
-        raise OSError(f"{directory} is a reparse point and is not followed")
     descriptor = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
         LOG_DIR_SDDL, win32security.SDDL_REVISION_1,
     )
     owner = descriptor.GetSecurityDescriptorOwner()
     dacl = descriptor.GetSecurityDescriptorDacl()
     information = (
-        win32security.OWNER_SECURITY_INFORMATION
-        | win32security.DACL_SECURITY_INFORMATION
+        win32security.DACL_SECURITY_INFORMATION
         | win32security.PROTECTED_DACL_SECURITY_INFORMATION
     )
-    win32security.SetNamedSecurityInfo(
-        directory, win32security.SE_FILE_OBJECT, information, owner, None, dacl, None,
+    access = _READ_CONTROL | _WRITE_DAC
+    if owner is not None:
+        information |= win32security.OWNER_SECURITY_INFORMATION
+        access |= _WRITE_OWNER
+    handle = win32file.CreateFile(
+        directory,
+        access,
+        win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE | win32file.FILE_SHARE_DELETE,
+        None,
+        win32file.OPEN_EXISTING,
+        win32file.FILE_FLAG_BACKUP_SEMANTICS | win32file.FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
     )
+    try:
+        attributes = win32file.GetFileInformationByHandle(handle)[0]
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise OSError(f"{directory} is a reparse point and is not followed")
+        if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+            raise OSError(f"{directory} is not a directory")
+        win32security.SetSecurityInfo(
+            handle, win32security.SE_FILE_OBJECT, information, owner, None, dacl, None,
+        )
+    finally:
+        handle.Close()
 
 
 def _clear_planted_links(directory):

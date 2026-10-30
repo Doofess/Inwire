@@ -2496,6 +2496,15 @@ check_true("...a reparse point is refused", "0x400" in _log_source)
 check_true("...and the DACL is protected, so nothing is inherited",
            "PROTECTED_DACL_SECURITY_INFORMATION" in _log_source)
 check_true("...and links planted under a log name are cleared", "_clear_planted_links" in _log_source)
+# The folder is opened once and the reparse check and the change both use that
+# handle; a check on the path followed by a change on the path can be raced by a
+# user who owns the folder (agent-rs/src/agent_log.rs has the long version).
+_harden_source = inspect.getsource(logging_setup._harden_directory)
+check_true("...and the folder is opened once without following a reparse point",
+           "FILE_FLAG_OPEN_REPARSE_POINT" in _harden_source and "GetFileInformationByHandle" in _harden_source)
+check_true("...and the change is made on that handle, not on the path",
+           "SetSecurityInfo(" in _harden_source and "SetNamedSecurityInfo" not in _harden_source
+           and "GetFileAttributes(" not in _harden_source)
 check_true("...and the service, which is SYSTEM, is what asks for it",
            "harden=True" in (pathlib.Path(__file__).parent / "service_windows.py").read_text(encoding="utf-8"))
 
