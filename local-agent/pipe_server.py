@@ -103,6 +103,13 @@ PIPE_NAME = os.environ.get("INWIRE_AGENT_PIPE") or r"\\.\pipe\inwire-agent"
 #: against the one machine-wide service, and `capture_busy` is what arbitrates.
 MAX_PIPE_INSTANCES = 8
 
+#: Fails ``CreateNamedPipe`` when the name already exists (ADR 0068). Set on the
+#: first instance only, so the agent never serves a pipe someone else made.
+FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000
+
+#: Seconds before an instance the system refused is asked for again (ADR 0068).
+INSTANCE_RETRY_SECONDS = 1.0
+
 #: Read buffer. A batch is capped at 256 kB and a control message is smaller.
 READ_CHUNK = 64 * 1024
 
@@ -329,6 +336,15 @@ class PipeServer:
         self._accept_thread: Optional[threading.Thread] = None
         #: Whether this is the agent's transport. See `start`.
         self.serving = False
+        #: Why the server would not start, or None. Set when the pipe name
+        #: already existed (ADR 0068); `agent.main` reads it and ends, rather
+        #: than falling through to the WebSocket this platform must not open.
+        self.refused: Optional[str] = None
+        #: The instance made before the accept thread, with
+        #: ``FILE_FLAG_FIRST_PIPE_INSTANCE``. See `_begin`.
+        self._first_handle = None
+        #: Seconds before an instance the system refused is asked for again.
+        self._retry = INSTANCE_RETRY_SECONDS
 
     def start(self) -> None:
         if sys.platform != "win32":
@@ -342,6 +358,26 @@ class PipeServer:
             # honest thing is to leave those platforms exactly as they were.
             log.info("named pipe not started: this platform uses the socket")
             return
+        self._begin()
+
+    def _begin(self) -> None:
+        """Makes the first instance, then starts accepting on it.
+
+        **The first instance is created here, before the thread, with
+        ``FILE_FLAG_FIRST_PIPE_INSTANCE``** (ADR 0068): if another process
+        created the name first, creation fails and the agent refuses to serve a
+        pipe whose descriptor someone else chose. Same sentence as the Rust
+        agent.
+        """
+        try:
+            self._first_handle = self._create_instance(first=True)
+        except Exception as error:  # noqa: BLE001 - pywintypes.error on Windows
+            log.error(
+                "%s already exists - another process created it first, "
+                "so the agent will not serve it: %s", self._name, error,
+            )
+            self.refused = "the pipe name is already in use"
+            return
         self._accept_thread = threading.Thread(
             target=self._accept_loop, name="inwire-pipe-accept", daemon=True,
         )
@@ -354,32 +390,63 @@ class PipeServer:
 
     # -- the threads ---------------------------------------------------------
 
-    def _accept_loop(self) -> None:
-        import pywintypes  # noqa: PLC0415
-        import win32event  # noqa: PLC0415
+    def _create_instance(self, first: bool):
+        """Creates one pipe instance carrying the descriptor (Windows only).
+
+        ``first`` adds ``FILE_FLAG_FIRST_PIPE_INSTANCE``, which fails the call
+        when any process has already created the name (ADR 0068).
+        """
         import win32file  # noqa: PLC0415
         import win32pipe  # noqa: PLC0415
-        import winerror  # noqa: PLC0415
+
+        return win32pipe.CreateNamedPipe(
+            self._name,
+            # OVERLAPPED because the reader and the writer are two
+            # threads on one handle; see the header. Without it a write
+            # queues behind whatever read is outstanding.
+            win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_OVERLAPPED
+            | (FILE_FLAG_FIRST_PIPE_INSTANCE if first else 0),
+            # BYTE mode both ways: the framing is ours, and message
+            # mode would add a second, redundant idea of a boundary
+            # that the two ends would then have to agree about twice.
+            win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE
+            | win32pipe.PIPE_WAIT | win32pipe.PIPE_REJECT_REMOTE_CLIENTS,
+            MAX_PIPE_INSTANCES,
+            READ_CHUNK, READ_CHUNK,
+            0,
+            _security_attributes(),
+        )
+
+    def _next_instance(self):
+        """The instance to wait for a client on, or None once stopping.
+
+        The first call hands over the instance made before the thread started.
+        After that, a refusal is **not** a reason to stop - any user can take a
+        slot - so it is logged once per failing streak and retried (ADR 0068).
+        """
+        if self._first_handle is not None:
+            handle, self._first_handle = self._first_handle, None
+            return handle
+        failing = False
+        while not self._stopping.is_set():
+            try:
+                return self._create_instance(first=False)
+            except Exception as error:  # noqa: BLE001 - pywintypes.error on Windows
+                if not failing:
+                    failing = True
+                    log.warning("could not create a pipe instance, retrying: %s", error)
+                self._stopping.wait(self._retry)
+        return None
+
+    def _accept_loop(self) -> None:
+        import pywintypes  # noqa: PLC0415
+        import win32file  # noqa: PLC0415
 
         while not self._stopping.is_set():
-            handle = None
+            handle = self._next_instance()
+            if handle is None:
+                return
             try:
-                handle = win32pipe.CreateNamedPipe(
-                    self._name,
-                    # OVERLAPPED because the reader and the writer are two
-                    # threads on one handle; see the header. Without it a write
-                    # queues behind whatever read is outstanding.
-                    win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_OVERLAPPED,
-                    # BYTE mode both ways: the framing is ours, and message
-                    # mode would add a second, redundant idea of a boundary
-                    # that the two ends would then have to agree about twice.
-                    win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE
-                    | win32pipe.PIPE_WAIT | win32pipe.PIPE_REJECT_REMOTE_CLIENTS,
-                    MAX_PIPE_INSTANCES,
-                    READ_CHUNK, READ_CHUNK,
-                    0,
-                    _security_attributes(),
-                )
                 if not self._await_client(handle):
                     win32file.CloseHandle(handle)
                     return
@@ -387,8 +454,7 @@ class PipeServer:
                 if self._stopping.is_set():
                     return
                 log.warning("pipe accept failed: %s", error)
-                if handle is not None:
-                    win32file.CloseHandle(handle)
+                win32file.CloseHandle(handle)
                 # A tight retry loop on a persistent failure would fill the log
                 # faster than anyone could read it.
                 self._stopping.wait(1.0)

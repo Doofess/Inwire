@@ -2508,6 +2508,78 @@ if os.name != "nt":
         _hl.propagate = _hl_saved[2]
         logging_setup._configured_with = None
 
+# --- a pipe name someone else created, and a lost instance (ADR 0068) --------------
+#
+# The first instance carries FILE_FLAG_FIRST_PIPE_INSTANCE, so a name a user
+# made before the service started is refused instead of joined; and an instance
+# the system will not give is retried instead of ending the server. The real
+# CreateNamedPipe needs Windows and pywin32, and CI runs this file on ubuntu and
+# macOS - so the flag is held by a source check, and the decisions by a server
+# whose `_create_instance` is a stand-in.
+check_true("the first pipe instance asks for FILE_FLAG_FIRST_PIPE_INSTANCE",
+           pipe_server.FILE_FLAG_FIRST_PIPE_INSTANCE == 0x00080000
+           and "FILE_FLAG_FIRST_PIPE_INSTANCE if first" in inspect.getsource(pipe_server.PipeServer._create_instance))
+
+import logging as _logging
+
+
+class _Lines(_logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append((record.levelname, record.getMessage()))
+
+
+class _FakePipes(pipe_server.PipeServer):
+    """A PipeServer whose instances are strings, and whose creation can fail."""
+
+    def __init__(self, outcomes):
+        super().__init__(asyncio.new_event_loop(), lambda connection: None, name=r"\\.\pipe\inwire-test")
+        self._outcomes = list(outcomes)
+        self.asked = []
+        self._retry = 0.01
+
+    def _create_instance(self, first):
+        self.asked.append(first)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+_lines = _Lines()
+pipe_server.log.addHandler(_lines)
+try:
+    _squatted = _FakePipes([OSError(5, "Access is denied.")])
+    _squatted._begin()
+    check("a name that already exists is refused", _squatted.refused, "the pipe name is already in use")
+    check("...the refusal asked for the FIRST instance", _squatted.asked, [True])
+    check_true("...and nothing is serving or accepting", not _squatted.serving and _squatted._accept_thread is None)
+    check_true("...the log says another process created it first",
+               any(level == "ERROR" and "already exists - another process created it first" in text
+                   for level, text in _lines.lines))
+
+    # A lost instance is retried, and said once per failing streak.
+    _lines.lines.clear()
+    _lost = _FakePipes(["first-instance", OSError(231, "busy"), OSError(231, "busy"), "second-instance"])
+    _lost._first_handle = _lost._create_instance(first=True)
+    check("the first call hands over the instance made before the thread",
+          _lost._next_instance(), "first-instance")
+    check("a refused instance is retried until the system gives one",
+          _lost._next_instance(), "second-instance")
+    check("...asking for a non-first instance every time", _lost.asked, [True, False, False, False])
+    check("...logging the streak once, not once per attempt",
+          sum(1 for level, text in _lines.lines if "could not create a pipe instance, retrying" in text), 1)
+    check_true("...and not refusing: a lost slot does not stop the server", _lost.refused is None)
+
+    _stopping = _FakePipes([OSError(231, "busy")] * 3)
+    _stopping._stopping.set()
+    check("a stop ends the retrying", _stopping._next_instance(), None)
+finally:
+    pipe_server.log.removeHandler(_lines)
+
 
 # The one claim a pipe connection makes that a socket cannot: the descriptor
 # was checked before the handle existed, so `register` skips the pairing token

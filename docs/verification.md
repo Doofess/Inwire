@@ -1094,6 +1094,14 @@ account, and it is the reason this file exists.
       is why `WD`, `AN` and `NU` are absent.
 - [ ] Kill the app while capturing. The capture stops when the last client
       disconnects — and so, now, does the **service** (see below).
+- [ ] As a **second standard user**, while the agent runs,
+      `CreateNamedPipe("\\.\pipe\inwire-agent")` **succeeds**. This is the
+      accepted residual, not a regression: the access the app needs to connect
+      includes `FILE_CREATE_PIPE_INSTANCE` (ADR 0068).
+- [ ] With the service **stopped**, as that second user create the name first,
+      then start Inwire so it starts the service. The agent logs
+      `already exists - another process created it first` and exits rather than
+      joining. Release the name, and the next start serves normally.
 
 ### The agent writes a capture's file as its client, never as itself
 

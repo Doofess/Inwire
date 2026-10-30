@@ -16,6 +16,12 @@ to follow them. It does not replace them with anything. It deletes them.
 > - **The Python agent** still sends the field, for the macOS and Linux
 >   WebSocket, where this ADR kept the token.
 
+> **Also amended by
+> [0068](0068-another-user-can-serve-the-agents-pipe.md).** The descriptor
+> decides who may *connect*, not who may *serve*: the agent now refuses a pipe
+> name it did not create, and another interactive user can still add an
+> instance while it runs.
+
 ## Context
 
 The agent listened on `ws://localhost:8999`. Everything defensive that grew

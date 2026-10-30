@@ -65,7 +65,7 @@ fn main() -> std::io::Result<()> {
         hardware: None,
     }];
 
-    let instance = Arc::new(pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES)?);
+    let instance = Arc::new(pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, true)?);
     eprintln!("listening on {name}");
     pipe::accept(&instance)?;
     eprintln!("client connected");

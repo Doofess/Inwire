@@ -2597,6 +2597,11 @@ async def main(to_stderr=True):
     # with a different name.
     pipes = pipe_server.PipeServer(agent.loop, agent.register)
     pipes.start()
+    if pipes.refused:
+        # The pipe name existed before this process made it (ADR 0068). Already
+        # logged by `PipeServer`; ending here also keeps a refusal from falling
+        # through to the WebSocket, which Windows must never open.
+        return False
 
     if pipes.serving:
         try:

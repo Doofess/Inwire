@@ -152,6 +152,8 @@ const TOKEN_IMPERSONATION: u32 = 2;
 
 const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+/// Fails `CreateNamedPipe` when the name already exists (ADR 0068).
+const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
 const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
 const PIPE_READMODE_BYTE: u32 = 0x0000_0000;
 const PIPE_WAIT: u32 = 0x0000_0000;
@@ -177,6 +179,11 @@ pub const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 /// Windows user logged into the same machine runs their own copy of the app
 /// against the one machine-wide service, and `capture_busy` arbitrates.
 pub const MAX_INSTANCES: u32 = 8;
+
+/// How long an acceptor waits before asking for an instance again after the
+/// system refused one (ADR 0068). A user who takes a slot costs the agent a
+/// second of that slot, not its life.
+pub const INSTANCE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Read buffer. A batch is capped at 256 kB and a control message is smaller.
 pub const READ_CHUNK: usize = 64 * 1024;
@@ -283,7 +290,17 @@ impl Drop for PipeInstance {
 /// which for a LocalSystem service is exactly the descriptor that locks the app
 /// out. Passing our own means creating the instances ourselves, and once we are
 /// doing that the threads are the simpler half.
-pub fn create_instance(name: &str, sddl: &str, max_instances: u32) -> io::Result<PipeInstance> {
+///
+/// **`first` is for the very first instance of the name** (ADR 0068). It adds
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, which makes the call fail when any process
+/// has already created the name - so the agent never serves a pipe that
+/// someone else made, and whose descriptor they chose.
+pub fn create_instance(
+    name: &str,
+    sddl: &str,
+    max_instances: u32,
+    first: bool,
+) -> io::Result<PipeInstance> {
     let descriptor = Descriptor::from_sddl(sddl)?;
     let mut attrs = SecurityAttributes {
         n_length: std::mem::size_of::<SecurityAttributes>() as u32,
@@ -294,7 +311,9 @@ pub fn create_instance(name: &str, sddl: &str, max_instances: u32) -> io::Result
     let handle = unsafe {
         CreateNamedPipeW(
             wide_name.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_ACCESS_DUPLEX
+                | FILE_FLAG_OVERLAPPED
+                | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 },
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             max_instances,
             READ_CHUNK as u32,
@@ -658,3 +677,30 @@ impl core::fmt::Display for SendError {
 }
 
 impl std::error::Error for SendError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A pipe name nothing else uses - never the production one.
+    fn unique_pipe_name(tag: &str) -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        format!(
+            r"\\.\pipe\inwire-pipe-test-{}-{tag}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// ADR 0068: the first instance of the name is created with
+    /// `FILE_FLAG_FIRST_PIPE_INSTANCE`, which fails when anyone else made the
+    /// name first. Later instances of our own name must still be created.
+    #[test]
+    fn a_second_first_instance_is_refused() {
+        let name = unique_pipe_name("first");
+        let _a = create_instance(&name, PIPE_SDDL, 2, true).unwrap();
+        assert!(create_instance(&name, PIPE_SDDL, 2, true).is_err());
+        assert!(create_instance(&name, PIPE_SDDL, 2, false).is_ok());
+    }
+}

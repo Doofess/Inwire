@@ -38,7 +38,7 @@ fn main() -> std::io::Result<()> {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(4);
 
-    let instance = pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES)?;
+    let instance = pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, true)?;
     println!("listening on {name}");
     println!("descriptor  {}", pipe::PIPE_SDDL);
 

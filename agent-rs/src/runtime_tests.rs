@@ -199,6 +199,85 @@ fn stop(shutdown: Arc<Shutdown>, server: thread::JoinHandle<io::Result<()>>) -> 
     asked.elapsed()
 }
 
+// --- ADR 0068: the pipe name, and a lost instance ---------------------------
+
+/// **A name someone else created first is not served.** Without
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE` the agent joined a pipe a user had made
+/// before the service started, and served the app from it.
+#[test]
+fn a_pipe_name_someone_else_created_is_refused() {
+    let name = private_pipe("squatted");
+    let _squatter = pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, false)
+        .expect("the squatter creates the name first");
+
+    let (shutdown, server) = serve_in_background(&name, Hardware::NPCAP);
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(server.join());
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("the runtime returns by itself rather than serving the squatter's pipe")
+        .expect("the runtime did not panic")
+        .expect("a refusal is a clean stop");
+    assert!(shutdown.requested());
+    assert_eq!(shutdown.wait(), "the pipe name is already in use");
+
+    let line = name_taken_message(&name, &io::Error::from_raw_os_error(5));
+    assert!(line.contains("already exists - another process created it first"), "{line}");
+    assert!(line.contains(&name), "{line}");
+}
+
+/// A pipe instance for the retry tests, on a name of its own.
+fn spare_instance(tag: &str) -> pipe::PipeInstance {
+    pipe::create_instance(&private_pipe(tag), pipe::PIPE_SDDL, 2, false).unwrap()
+}
+
+/// **A lost instance slot is retried, not fatal.** Any user who took a slot used
+/// to stop the agent, because the acceptor answered every failure with a shutdown.
+#[test]
+fn a_lost_instance_is_retried_and_does_not_stop_the_agent() {
+    let shutdown = Shutdown::new();
+    let mut first = None;
+    let mut failing = false;
+    let mut calls = 0u32;
+    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+        calls += 1;
+        if calls < 3 {
+            Err(io::Error::from_raw_os_error(231)) // ERROR_PIPE_BUSY
+        } else {
+            Ok(spare_instance("retry"))
+        }
+    });
+    assert!(got.is_some(), "the third attempt created an instance");
+    assert_eq!(calls, 3);
+    assert!(!shutdown.requested(), "a lost slot is not a reason to stop");
+    assert!(!failing, "the streak ended with the success");
+}
+
+#[test]
+fn the_first_instance_is_used_before_a_new_one_is_created() {
+    let shutdown = Shutdown::new();
+    let mut first = Some(spare_instance("held"));
+    let mut failing = false;
+    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+        panic!("slot 0's first loop uses the instance made before the threads started")
+    });
+    assert!(got.is_some());
+    assert!(first.is_none());
+}
+
+#[test]
+fn a_stop_ends_the_retrying() {
+    let shutdown = Shutdown::new();
+    shutdown.request("the service control manager asked");
+    let mut first = None;
+    let mut failing = false;
+    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+        Err(io::Error::from_raw_os_error(231))
+    });
+    assert!(got.is_none(), "no instance is created, and no endless loop, once a stop is asked for");
+}
+
 static NPCAP_ARRIVED: AtomicBool = AtomicBool::new(false);
 
 /// Npcap as a machine sees it before the Update Center has installed it - until
