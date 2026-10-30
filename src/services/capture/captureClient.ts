@@ -39,6 +39,7 @@ import type { StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import type { TlsSummary } from '../conversation/tlsSummary';
 import type { DhcpSummary } from '../conversation/dhcpSummary';
+import { PortQueue } from './portQueue';
 
 /** What a `streamDigest` poll gets back (ADR 0055). */
 export interface StreamDigestAnswer {
@@ -250,6 +251,7 @@ class CaptureClient {
   private die(reason: string): void {
     this.disabled = true;
     this.connection = Promise.resolve(null);
+    this.outbox.drop();
     this.update({ error: reason || 'the capture store stopped' });
     // Whoever was waiting gets an empty answer rather than a promise that
     // never settles: a frame whose bytes cannot be fetched is a thing to
@@ -257,8 +259,15 @@ class CaptureClient {
     this.settleAll();
   }
 
+  /**
+   * Every message goes out through here, in call order - and in the same turn
+   * once the port is up, because an import's synchronous pass would otherwise
+   * hold the whole file in queued callbacks until it ended (#19).
+   */
+  private readonly outbox = new PortQueue<MessagePort>(() => this.ensurePort());
+
   private send(message: ToCapture): void {
-    void this.ensurePort().then((port) => port?.postMessage(message));
+    this.outbox.run((port) => port?.postMessage(message));
   }
 
   private update(patch: Partial<CaptureStorageState>): void {
@@ -500,18 +509,17 @@ class CaptureClient {
    * caller gets when there is no store at all - never when there is one that
    * has not connected yet, because every path here awaits the port first.
    */
-  private async request<T>(
+  private request<T>(
     pendingMap: Map<number, (value: never) => void>,
     build: (requestId: number) => ToCapture,
     fallback: T,
   ): Promise<T> {
-    const port = await this.ensurePort();
-    if (port === null) return fallback;
-    const requestId = this.nextRequest++;
-    return new Promise<T>((resolve) => {
+    return new Promise<T>((resolve) => this.outbox.run((port) => {
+      if (port === null) { resolve(fallback); return; }
+      const requestId = this.nextRequest++;
       (pendingMap as Map<number, (value: T) => void>).set(requestId, resolve);
       port.postMessage(build(requestId));
-    });
+    }));
   }
 
   /**
@@ -737,22 +745,20 @@ class CaptureClient {
     let cancelled = false;
     let requestId: number | null = null;
 
-    const result = (async (): Promise<ScanOutcome> => {
-      const port = await this.ensurePort();
+    const result = new Promise<ScanOutcome>((settle) => this.outbox.run((port) => {
       if (port === null) {
-        return { status: 'failed', message: 'there is no capture store to scan' };
+        settle({ status: 'failed', message: 'there is no capture store to scan' });
+        return;
       }
-      // Checked after the await as well as before sending: a cancel that
-      // arrived while the port was still coming has nothing to cancel, and
-      // starting the scan anyway would leave it running with no reader.
-      if (cancelled) return { status: 'cancelled' };
+      // Checked when the port is in hand as well as before sending: a cancel
+      // that arrived while the port was still coming has nothing to cancel,
+      // and starting the scan anyway would leave it running with no reader.
+      if (cancelled) { settle({ status: 'cancelled' }); return; }
       const id = this.nextRequest++;
       requestId = id;
-      return new Promise<ScanOutcome>((settle) => {
-        this.pendingScan.set(id, { onProgress, settle });
-        port.postMessage({ type: 'scan', requestId: id, filter });
-      });
-    })();
+      this.pendingScan.set(id, { onProgress, settle });
+      port.postMessage({ type: 'scan', requestId: id, filter });
+    }));
 
     return {
       result,
