@@ -30,6 +30,8 @@ _FILE_ATTRIBUTE_DIRECTORY = 0x10
 _READ_CONTROL = 0x00020000
 _WRITE_DAC = 0x00040000
 _WRITE_OWNER = 0x00080000
+_SID_SYSTEM = "S-1-5-18"
+_SID_ADMINISTRATORS = "S-1-5-32-544"
 
 _configured_with = None
 # Folders that have been set up hardened in this process. Hardening is sticky:
@@ -65,6 +67,11 @@ def _harden_directory(directory):
     )
     owner = descriptor.GetSecurityDescriptorOwner()
     dacl = descriptor.GetSecurityDescriptorDacl()
+    if dacl is None:
+        # SetSecurityInfo with no DACL applies a NULL DACL, which grants
+        # everyone full control. The descriptor is a constant today; this keeps
+        # a future edit to it from silently opening the folder.
+        raise OSError("the log folder's descriptor has no DACL")
     information = (
         win32security.DACL_SECURITY_INFORMATION
         | win32security.PROTECTED_DACL_SECURITY_INFORMATION
@@ -110,14 +117,50 @@ def _is_link_or_directory(info):
     )
 
 
+def _trusted_owner(owner_sid, own_sid):
+    """Whether a log file owned by `owner_sid` may be written by this process:
+    SYSTEM, BUILTIN\\Administrators, or the account the process runs as."""
+    return owner_sid in (_SID_SYSTEM, _SID_ADMINISTRATORS) or owner_sid == own_sid
+
+
+def _owner_is_trusted(path):
+    """Whether `path` is owned by an account that may own a log file.
+
+    Before the service first hardened the folder a user could create
+    `agent.log` there. Hardening propagates the folder's DACL to it, but that
+    user stays its owner, and an owner can always rewrite a file's DACL: they
+    could grant themselves write and forge log lines. So a file owned by anyone
+    else is treated as planted. Off Windows nothing is hardened, so every owner
+    is trusted. An owner that cannot be read counts as untrusted.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import win32api  # noqa: PLC0415 - Windows only, imported where used
+        import win32security  # noqa: PLC0415
+
+        descriptor = win32security.GetFileSecurity(path, win32security.OWNER_SECURITY_INFORMATION)
+        owner = win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())
+        token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32security.TOKEN_QUERY)
+        own = win32security.ConvertSidToStringSid(
+            win32security.GetTokenInformation(token, win32security.TokenUser)[0],
+        )
+    except Exception:  # noqa: BLE001 - any failure to read means untrusted
+        return False
+    return _trusted_owner(owner, own)
+
+
 def _clear_planted_links(directory):
     """Removes what a user planted under a log name: a symlink, junction or
-    directory, or a regular file with more than one name.
+    directory, a regular file with more than one name, or a regular file owned
+    by an account other than SYSTEM, Administrators or this process's own.
 
     Only the entry goes, never what it points at: rmdir on a junction removes
     the junction, and removing one name of a hard link leaves the file and its
-    other names alone. Errors are ignored here because _log_names_are_safe is
-    what decides what to do about an entry that stayed.
+    other names alone. A file under someone else's ownership is removed whatever
+    its DACL says, because the folder's delete-child right is what allows it.
+    Errors are ignored here because _log_names_are_safe is what decides what to
+    do about an entry that stayed.
     """
     for path in _log_paths(directory):
         try:
@@ -132,7 +175,7 @@ def _clear_planted_links(directory):
                     os.remove(path)
                 except OSError:
                     pass
-        elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+        elif stat.S_ISREG(info.st_mode) and (info.st_nlink > 1 or not _owner_is_trusted(path)):
             try:
                 os.remove(path)
             except OSError:
@@ -140,12 +183,14 @@ def _clear_planted_links(directory):
 
 
 def _log_names_are_safe(directory):
-    """True when every log name is absent or a plain regular file with one name.
+    """True when every log name is absent or a plain regular file with one name
+    and a trusted owner.
 
     Checked after _clear_planted_links: an entry that is still a link, a
-    directory or a multi-link file is one the agent must not rotate into or
-    append to, so setup_logging then installs no file handler at all. A name
-    whose state cannot be read counts as unsafe.
+    directory, a multi-link file or a file owned by an untrusted account is one
+    the agent must not rotate into or append to (its owner can rewrite its
+    DACL), so setup_logging then installs no file handler at all. A name whose
+    state cannot be read counts as unsafe.
     """
     for path in _log_paths(directory):
         try:
@@ -155,6 +200,8 @@ def _log_names_are_safe(directory):
         except OSError:
             return False
         if _is_link_or_directory(info) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return False
+        if not _owner_is_trusted(path):
             return False
     return True
 

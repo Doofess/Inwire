@@ -1345,6 +1345,26 @@ try:
     check("...and no restart is scheduled", _rs_calls, [])
     asyncio.run(_restart_as(_rs, _rs_owner))
     check("the owner's own restart_agent is still honoured", _rs_calls, [1])
+
+    # The gate is asked again when the exit is due: in the half second between
+    # the answer and the exit another window can start a capture, and exiting
+    # would end it.
+    async def _restart_then_lose_the_race(server, asker, newcomer):
+        server.authenticated.add(asker)
+        await server._handle_message(asker, json.dumps({"type": "restart_agent"}))
+        await asyncio.sleep(0.1)
+        server.connections.add(newcomer)
+        server.capture_owner = newcomer
+        await asyncio.sleep(0.6)
+
+    _rs_calls.clear()
+    _rs_idle = agent.AgentServer()
+    _rs_asker, _rs_newcomer = _RestartWS(), _RestartWS()
+    _rs_idle.connections.add(_rs_asker)
+    asyncio.run(_restart_then_lose_the_race(_rs_idle, _rs_asker, _rs_newcomer))
+    check("a restart whose capture was started by another window meanwhile is told capture_busy",
+          [m.get("code") for m in _rs_asker.sent], ["capture_busy"])
+    check("...and the agent does not exit", _rs_calls, [])
 finally:
     agent.sniffer, agent.RESTART_SUPPORTED, agent.exit_for_restart = _rs_prev
     if agent.sniffer is None:
@@ -2505,6 +2525,12 @@ check_true("...and the folder is opened once without following a reparse point",
 check_true("...and the change is made on that handle, not on the path",
            "SetSecurityInfo(" in _harden_source and "SetNamedSecurityInfo" not in _harden_source
            and "GetFileAttributes(" not in _harden_source)
+# A descriptor with no DACL would be applied as a NULL DACL - full control for
+# everyone - so the guard comes before the folder is opened and before the set.
+check_true("...and a descriptor with no DACL is refused before anything is changed",
+           "has no DACL" in _harden_source
+           and _harden_source.index("has no DACL") < _harden_source.index("CreateFile(")
+           and _harden_source.index("has no DACL") < _harden_source.index("SetSecurityInfo("))
 check_true("...and the service, which is SYSTEM, is what asks for it",
            "harden=True" in (pathlib.Path(__file__).parent / "service_windows.py").read_text(encoding="utf-8"))
 
@@ -2562,6 +2588,37 @@ check_true("an empty folder is safe", logging_setup._log_names_are_safe(_plain_d
 with open(os.path.join(_plain_dir, "agent.log"), "w") as _f:
     _f.write("x")
 check_true("...and so is one holding a plain log file", logging_setup._log_names_are_safe(_plain_dir))
+
+# A log file a user created before the folder was first hardened keeps that user
+# as its owner, and an owner can rewrite the file's DACL whatever the folder
+# says. Only SYSTEM, Administrators and the process's own account are trusted
+# owners. (Reading the real owner needs pywin32, so the decision is tested
+# apart from it and the reading is stood in for.)
+check_true("SYSTEM is a trusted log owner", logging_setup._trusted_owner("S-1-5-18", "S-1-5-21-1-2-3-1001"))
+check_true("...so are Administrators", logging_setup._trusted_owner("S-1-5-32-544", "S-1-5-21-1-2-3-1001"))
+check_true("...and the process's own account",
+           logging_setup._trusted_owner("S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001"))
+check_true("...but not another user",
+           not logging_setup._trusted_owner("S-1-5-21-1-2-3-1001", "S-1-5-18"))
+_owner_dir = tempfile.mkdtemp()
+for _name in ("agent.log", "agent.log.1"):
+    with open(os.path.join(_owner_dir, _name), "w") as _f:
+        _f.write("x")
+_owner_original = logging_setup._owner_is_trusted
+try:
+    logging_setup._owner_is_trusted = lambda path: os.path.basename(path) != "agent.log"
+    check_true("a log file owned by an untrusted account is not a safe folder",
+               not logging_setup._log_names_are_safe(_owner_dir))
+    logging_setup._clear_planted_links(_owner_dir)
+    check_true("...it is removed", not os.path.lexists(os.path.join(_owner_dir, "agent.log")))
+    check_true("...and a trusted-owner log file beside it is left alone",
+               os.path.exists(os.path.join(_owner_dir, "agent.log.1")))
+    check_true("...after which the folder is safe", logging_setup._log_names_are_safe(_owner_dir))
+finally:
+    logging_setup._owner_is_trusted = _owner_original
+if os.name != "nt":
+    check_true("off Windows every owner is trusted: there is no hardening to defeat",
+               logging_setup._owner_is_trusted(os.path.join(_owner_dir, "agent.log.1")))
 check_true("...and setup_logging asks, so an unsafe folder gets no file handler",
            "_log_names_are_safe" in inspect.getsource(logging_setup.setup_logging))
 if os.name != "nt":
@@ -2649,6 +2706,32 @@ try:
     check_true("...the log says another process created it first",
                any(level == "ERROR" and "already exists - another process created it first" in text
                    for level, text in _lines.lines))
+
+    # Only "the name exists" (access denied from the first-instance flag, or pipe
+    # busy) is said as such. Any other CreateNamedPipe failure is a different
+    # problem, and naming it "already exists" sends a reader after a squatter.
+    _lines.lines.clear()
+    _busy = _FakePipes([OSError(231, "All pipe instances are busy.")])
+    _busy._begin()
+    check("a busy pipe name is refused as already in use", _busy.refused, "the pipe name is already in use")
+    check_true("...and the log says it already exists",
+               any(level == "ERROR" and "already exists - another process created it first" in text
+                   for level, text in _lines.lines))
+    _lines.lines.clear()
+    _syntax = _FakePipes([OSError(123, "The filename, directory name, or volume label syntax is incorrect.")])
+    _syntax._begin()
+    check("any other creation failure is refused as a creation failure",
+          _syntax.refused, "the pipe could not be created")
+    check_true("...and nothing is serving or accepting", not _syntax.serving and _syntax._accept_thread is None)
+    check_true("...the log says it could not create the pipe",
+               any(level == "ERROR" and "could not create" in text and "the agent will not serve it" in text
+                   for level, text in _lines.lines))
+    check_true("...and does not claim the name already exists",
+               not any("already exists" in text for level, text in _lines.lines))
+    check_true("a pywintypes-shaped error is read from its args",
+               pipe_server._name_is_taken(type("E", (Exception,), {})(5, "CreateNamedPipe", "Access is denied."))
+               and not pipe_server._name_is_taken(Exception(123, "CreateNamedPipe", "bad"))
+               and not pipe_server._name_is_taken(Exception("no code at all")))
 
     # A lost instance is retried, and said once per failing streak.
     _lines.lines.clear()

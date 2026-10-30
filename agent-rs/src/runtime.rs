@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -283,6 +283,9 @@ struct Shared {
     /// uses it. Whatever the start did not take is discarded after it.
     pending_output: Mutex<HashMap<String, PendingOutput>>,
     shutdown: Arc<Shutdown>,
+    /// This `Shared`, for a thread that outlives the call that started it: a
+    /// deferred restart asks `control` again when its exit is due.
+    this: Weak<Shared>,
 }
 
 /// Where a capture's files go, and who they are written as.
@@ -594,10 +597,19 @@ impl Env for Shared {
     }
 
     /// agent.py:1369 - a moment's delay, so the handler returns and the log
-    /// line reaches a subscriber before the pipe drops.
-    fn schedule_restart(&self) {
-        thread::spawn(|| {
+    /// line reaches a subscriber before the pipe drops. The capture gate is
+    /// asked again when the delay is up: a capture another client started in
+    /// the meantime calls the restart off (`Control::restart_may_proceed`).
+    fn schedule_restart(&self, client: &str) {
+        let this = self.this.clone();
+        let client = client.to_string();
+        thread::spawn(move || {
             thread::sleep(restart::RESTART_DELAY);
+            if let Some(shared) = this.upgrade() {
+                if !shared.control.restart_may_proceed(&*shared, &client) {
+                    return;
+                }
+            }
             restart::exit_for_restart();
         });
     }
@@ -1710,25 +1722,44 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
     run_with(shutdown, name, Hardware::NPCAP)
 }
 
-/// The line logged when the very first `CreateNamedPipe` is refused (ADR 0068).
-fn name_taken_message(name: &str, error: &io::Error) -> String {
-    format!(
-        "{name} already exists - another process created it first, so the agent will not serve it: {error}"
-    )
+/// The line logged when the very first `CreateNamedPipe` is refused, and the
+/// reason the runtime stops with (ADR 0068).
+///
+/// Only `ERROR_ACCESS_DENIED` - what `FILE_FLAG_FIRST_PIPE_INSTANCE` answers
+/// when the name exists - and `ERROR_PIPE_BUSY` mean someone else holds the
+/// name. Any other failure is reported as itself. Same sentences as Python's
+/// `PipeServer._begin`.
+fn pipe_refusal(name: &str, error: &io::Error) -> (String, &'static str) {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    match error.raw_os_error() {
+        Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY) => (
+            format!(
+                "{name} already exists - another process created it first, so the agent will not serve it: {error}"
+            ),
+            "the pipe name is already in use",
+        ),
+        _ => (
+            format!("could not create {name}, so the agent will not serve it: {error}"),
+            "the pipe could not be created",
+        ),
+    }
 }
 
 /// The instance an acceptor serves next (ADR 0068).
 ///
 /// `first` is the one made before the threads started, used once by slot 0.
 /// Every other instance comes from `create`. A refusal is **not** a reason to
-/// stop the agent - any user can take a slot - so it is logged once per failing
-/// streak and retried every `retry` until it works or a stop is asked for.
-/// `None` means a stop was asked for.
+/// stop the agent - any user can take a slot - so it is retried every `retry`
+/// until it works or a stop is asked for, and `warn` is called once per failing
+/// streak. `failing` is the streak, shared by every acceptor: one cause is one
+/// warning, not one per acceptor. `None` means a stop was asked for.
 fn next_instance(
     first: &mut Option<pipe::PipeInstance>,
-    failing: &mut bool,
+    failing: &AtomicBool,
     shutdown: &Shutdown,
     retry: Duration,
+    warn: impl Fn(&io::Error),
     mut create: impl FnMut() -> io::Result<pipe::PipeInstance>,
 ) -> Option<pipe::PipeInstance> {
     if let Some(instance) = first.take() {
@@ -1740,13 +1771,13 @@ fn next_instance(
         }
         match create() {
             Ok(instance) => {
-                *failing = false;
+                failing.store(false, Ordering::SeqCst);
                 return Some(instance);
             }
             Err(error) => {
-                if !*failing {
-                    *failing = true;
-                    crate::log_warn!("could not create a pipe instance, retrying: {error}");
+                // Whoever starts the streak says so; the rest are the same cause.
+                if !failing.swap(true, Ordering::SeqCst) {
+                    warn(&error);
                 }
                 // In short slices, so a stop is not held up by the retry wait.
                 let until = Instant::now() + retry;
@@ -1802,28 +1833,37 @@ fn run_with(shutdown: Arc<Shutdown>, name: &str, hardware: Hardware) -> io::Resu
         match held.create(name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES) {
             Ok(instance) => instance,
             Err(error) => {
-                crate::log_error!("{}", name_taken_message(name, &error));
-                shutdown.request("the pipe name is already in use");
+                let (line, reason) = pipe_refusal(name, &error);
+                crate::log_error!("{line}");
+                shutdown.request(reason);
                 crate::log_info!("shutting down: {}", shutdown.wait());
-                return Ok(());
+                // A failure, so the SCM shows a service-specific exit code
+                // rather than a clean stop - as Python's service reports
+                // "agent failed to start" for the same refusal.
+                return Err(io::Error::new(error.kind(), line));
             }
         };
     let mut first_instance = Some(first_instance);
     let mut acceptors = Vec::new();
+    // One failing streak for all the acceptors, so one cause is one warning.
+    let failing = Arc::new(AtomicBool::new(false));
     for slot in 0..pipe::MAX_INSTANCES {
         let shared = Arc::clone(&shared);
         let shutdown = Arc::clone(&shutdown);
         let name = name.to_string();
         let live = Arc::clone(&live);
         let held = held.clone();
+        let failing = Arc::clone(&failing);
         let mut first = if slot == 0 { first_instance.take() } else { None };
         acceptors.push(thread::spawn(move || {
             let mut serial = 0u64;
-            let mut failing = false;
             while !shutdown.requested() {
                 let create = || held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES);
+                let warn = |error: &io::Error| {
+                    crate::log_warn!("could not create a pipe instance, retrying: {error}");
+                };
                 let Some(instance) =
-                    next_instance(&mut first, &mut failing, &shutdown, pipe::INSTANCE_RETRY, create)
+                    next_instance(&mut first, &failing, &shutdown, pipe::INSTANCE_RETRY, warn, create)
                 else {
                     return;
                 };
@@ -2001,7 +2041,7 @@ fn run_with(shutdown: Arc<Shutdown>, name: &str, hardware: Hardware) -> io::Resu
 /// Everything shared between connections, as a run begins - one constructor,
 /// so a test builds exactly what `run_with` builds.
 fn new_shared(shutdown: &Arc<Shutdown>, hardware: Hardware, restart: RestartSupport) -> Arc<Shared> {
-    Arc::new(Shared {
+    Arc::new_cyclic(|this| Shared {
         npcap: Lazy::new(),
         hardware,
         interfaces: Mutex::new(Vec::new()),
@@ -2015,6 +2055,7 @@ fn new_shared(shutdown: &Arc<Shutdown>, hardware: Hardware, restart: RestartSupp
         capture_roots: Mutex::new(HashMap::new()),
         pending_output: Mutex::new(HashMap::new()),
         shutdown: Arc::clone(shutdown),
+        this: this.clone(),
     })
 }
 

@@ -1394,11 +1394,7 @@ class AgentServer:
         # restart_agent is on the list because it ends the capture by exiting:
         # it is the owner's to give, like stop_capture.
         if msg_type in ("start_capture", "stop_capture", "set_interfaces", "restart_agent") and self.owned_by_other(ws):
-            await ws.send(json.dumps({
-                "type": "error",
-                "code": "capture_busy",
-                "message": "Another Inwire window started this capture. Stop it there, or close that window.",
-            }))
+            await ws.send(self._capture_busy_message())
             return
 
         if msg_type == "start_capture":
@@ -1553,7 +1549,26 @@ class AgentServer:
             # Deferred by a moment rather than exiting inline so this handler
             # can return, the log line reaches any subscriber, and the socket
             # closes as a normal drop instead of mid-message.
-            asyncio.get_running_loop().call_later(0.5, exit_for_restart)
+            #
+            # The ownership gate above was answered half a second before the
+            # exit, and another window can start a capture in that time, so the
+            # gate is asked again when the exit is due (same rule as the Rust
+            # agent).
+            def restart_if_still_allowed():
+                if self.owned_by_other(ws):
+                    log.warning("restart_agent cancelled - another client started a capture")
+                    # call_later callbacks are synchronous; a send to a socket
+                    # that has since closed must not raise out of this one.
+                    async def tell_asker():
+                        try:
+                            await ws.send(self._capture_busy_message())
+                        except Exception:  # noqa: BLE001 - the asker may be gone
+                            pass
+                    asyncio.ensure_future(tell_asker())
+                    return
+                exit_for_restart()
+
+            asyncio.get_running_loop().call_later(0.5, restart_if_still_allowed)
             return
         else:
             # Named rather than dropped: a newer app talking to an older agent
@@ -1570,6 +1585,15 @@ class AgentServer:
         # it went missing in a refactor once and nothing noticed for weeks,
         # which is why test_protocol.py now asserts it per command.
         self.broadcast_state()
+
+    @staticmethod
+    def _capture_busy_message() -> str:
+        """The refusal sent to a client that does not own the running capture."""
+        return json.dumps({
+            "type": "error",
+            "code": "capture_busy",
+            "message": "Another Inwire window started this capture. Stop it there, or close that window.",
+        })
 
     def owner_id(self):
         """The owning connection's id, or None when nothing is being captured."""

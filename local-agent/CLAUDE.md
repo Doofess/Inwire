@@ -312,7 +312,9 @@ there is no console, so this is the only place to look.
 
 The service hardens that folder the way the Rust agent does (`agent-rs/CLAUDE.md`):
 `setup_logging(..., harden=True)`, and the hardening sticks to the folder, so
-`agent.main()`'s second `setup_logging` call cannot undo it. One gap remains:
+`agent.main()`'s second `setup_logging` call cannot undo it. A log file owned by
+an account other than SYSTEM, Administrators or the agent's own is removed as
+planted, as in Rust. One gap remains:
 `RotatingFileHandler` cannot open with `FILE_FLAG_OPEN_REPARSE_POINT`. This
 agent clears and checks the log names before opening them, but does not refuse
 a reparse point at open time. It does not ship on Windows. The app surfaces it in

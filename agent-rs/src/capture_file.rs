@@ -409,8 +409,12 @@ fn run(setup: WriterSetup, queue: &WriterQueue, dropped: &[AtomicU64]) {
                         // capture** (open in Wireshark without delete sharing,
                         // say): dumpcap logs it and carries on. It was popped
                         // from `on_disk`, so it is not tried again, and no
-                        // `Deleted` is sent for it - the app files a segment by
-                        // that event, so the file keeps its segment.
+                        // `Deleted` is sent for it. That keeps its frames in
+                        // the app only until the next file is deleted: the
+                        // store reads `Deleted` as a watermark (`ringDeleted`,
+                        // everything up to its last sequence may go), so the
+                        // next one takes this file's segments with it. The
+                        // frames stay in this file on disk.
                         if let Err(error) = as_client(&setup, || fs::remove_file(&path)) {
                             crate::log_warn!(
                                 "could not delete {}: {error} - it stays on disk and the ring carries on",
@@ -755,8 +759,9 @@ mod tests {
     /// dumpcap logs a ring file it cannot delete (open in Wireshark without
     /// delete sharing, say) and carries on; ending a capture over it lost the
     /// rest of the capture to a file somebody was reading. The stuck file stays
-    /// on disk, is never reported `Deleted` (the app files a segment by that
-    /// event, so it keeps its segment), and the ring goes on rotating.
+    /// on disk, is never reported `Deleted`, and the ring goes on rotating. (The
+    /// app's store treats `Deleted` as a watermark, so the next file's deletion
+    /// drops the stuck file's segments as well; only the disk keeps it.)
     #[test]
     fn a_ring_file_that_cannot_be_deleted_is_left_and_the_capture_carries_on() {
         use std::os::windows::fs::OpenOptionsExt;
