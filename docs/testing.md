@@ -119,8 +119,11 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | Buffer trim is reachable before auto-pause | `scripts/session/buffer-budget.ts` |
 | A window trim does not refold the window: the expert log subtracts the trimmed frames and equals a rebuild (groups, frames, counts, categories), and names stay learned (ADR 0053 phase 6) | `scripts/expert/trim.ts` |
 | An import matches the whole-array result with the patch window forced small | `scripts/capture/import-stream.ts` |
-| An import cuts frames from the file one at a time; every pass sees every frame and the pcapng facts that trail them | `scripts/capture/frame-walk.ts` |
-| An import's RAM tail is held to the buffer budget in estimated row bytes, keeping at least the newest frame | `scripts/capture/import-tail.ts` |
+| An import cuts frames from the file one at a time; every pass sees every frame and the pcapng facts that trail them, whatever window size splits the records, and a file over 4 GiB walks with exact offsets | `scripts/capture/frame-walk.ts` |
+| A file is read one window at a time: a load replaces the window, grows to fit a record longer than it, and clamps at the file's end | `scripts/capture/byte-window.ts` |
+| One import at a time, and its progress line reads in the units Explorer shows | `scripts/capture/import-job.ts` |
+| While an import runs, Start, a scheduled capture, Reopen, Clear View, Discard and export wait with a reason, and a remounted import panel still refuses a second import | `scripts/session/import-gate.ts` |
+| An import's RAM tail is held to the buffer budget in estimated row bytes, keeping at least the newest frame, and only its newest `BYTES_RESIDENT_FRAMES` keep raw bytes, after the store has been handed them | `scripts/capture/import-tail.ts` |
 | The store client posts in call order, and in the same turn once connected, so an import's synchronous pass does not queue the file in the renderer | `scripts/capture/port-queue.ts` |
 | Trackers keep nothing a transfer detaches | `scripts/pipeline/moved-bytes.ts`, `scripts/pipeline/arrival.ts` |
 | A frame dissects the same as a view at an odd offset inside a bigger buffer as from a buffer of its own, tree and row (#17) | `scripts/pipeline/frame-views.ts` |

@@ -17,7 +17,8 @@
  * V8's 4 GB limit applies only to the heap proper, so the drive prints that
  * split too.
  *
- * Fails (exit 1) if main logs `[renderer] gone`, or if the live heap after the
+ * Fails (exit 1) if main logs `[renderer] gone`, if the app answers the import
+ * with its error dialog (printed: a file over 2 GB did, until #20), or if the live heap after the
  * import is past the buffer budget plus 512 MiB. The 512 MiB stands for the
  * app's own baseline and its trackers: an assumption, printed as one, not a
  * measurement. Without `--buffer-mb` the profile keeps the app's default,
@@ -120,19 +121,48 @@ try {
         metrics.filter((m) => m.privateKb > 100 * 1024)
           .map((m) => `${m.type} ${mb(m.privateKb * 1024)}`).join(', ')), () => {});
   }, 5000);
+  // An import the app refuses ends in its error dialog, not the line above:
+  // before #20 a file over 2 GB did, and the drive waited out its 15 minutes.
+  // The longest the progress line held one value is printed as a hint at how
+  // long the renderer went without painting; it is not asserted.
   let done = '';
+  let refused: { heading: string; message: string } | null = null;
+  let progress = '';
+  let progressSince = Date.now();
+  let longestHold = 0;
   try {
-    while (Date.now() - started < 900_000 && !gone() && !done) {
-      done = await page.evaluate(() =>
-        (document.body.innerText.match(/Imported [\d,]+ packets from [^\n]+/) ?? [''])[0]).catch(() => '');
-      if (!done) await sleep(500);
+    while (Date.now() - started < 900_000 && !gone() && !done && !refused) {
+      const seen = await page.evaluate(() => {
+        // Visible only: the quit confirm is a closed <dialog role="alertdialog">
+        // that stays mounted for the app's whole life.
+        const dialog = [...document.querySelectorAll<HTMLElement>('[role="alertdialog"]')]
+          .find((el) => el.getClientRects().length > 0) ?? null;
+        return {
+          done: (document.body.innerText.match(/Imported [\d,]+ packets from [^\n]+/) ?? [''])[0],
+          progress: (document.body.innerText.match(/Importing [^\n]+ of [^\n]+\(\d+%\)/) ?? [''])[0],
+          dialog: dialog === null ? null : {
+            heading: dialog.querySelector('h1, h2, h3, [role="heading"]')?.textContent?.trim() ?? '',
+            message: dialog.innerText.trim(),
+          },
+        };
+      }).catch(() => ({ done: '', progress: '', dialog: null }));
+      done = seen.done;
+      refused = seen.dialog;
+      if (seen.progress !== progress) {
+        if (progress) longestHold = Math.max(longestHold, Date.now() - progressSince);
+        progress = seen.progress;
+        progressSince = Date.now();
+      }
+      if (!done && !refused) await sleep(500);
     }
   } finally {
     clearInterval(sampler);
   }
   if (gone()) throw new Error('renderer gone during the import');
+  if (refused) throw new Error(`the app refused the import: ${refused.heading} - ${refused.message.replace(/\s+/g, ' ')}`);
   if (!done) throw new Error('the import did not finish in 15 minutes');
   const seconds = Math.round((Date.now() - started) / 1000);
+  console.log(`progress line: longest unchanged ${(longestHold / 1000).toFixed(1)} s (a hint, not asserted)`);
   const note = await page.evaluate(() =>
     (document.body.innerText.match(/All [\d,]+ frames were imported[^\n]*/) ?? [''])[0]).catch(() => '');
   if (note) console.log(`note: ${note}`);
