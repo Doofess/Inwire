@@ -74,12 +74,15 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
     setNotes([]);
 
     try {
-      // The budget is turned into a frame count at the measured average. With
-      // a sink that is what stays RESIDENT - the file is imported whole and
-      // the rest is on disk. Without one it is still a cap on the import, and
-      // `importAnyFile` says so in a note.
+      // With a sink the file is imported whole and the rest is on disk, so the
+      // budget's BYTES bound what stays resident (`residentBytes`, measured per
+      // row); the frame count is only a ceiling beside it. Without a sink
+      // (other formats) the count, from the measured average, is still a cap on
+      // the import, and `importAnyFile` says so in a note.
+      const budget = currentBufferBudget(perf.packetBufferBytes);
       const outcome = await importAnyFile(file, {
-        maxFrames: framesForBudget(currentBufferBudget(perf.packetBufferBytes), AVERAGE_FRAME_BYTES),
+        maxFrames: framesForBudget(budget, AVERAGE_FRAME_BYTES),
+        residentBytes: budget,
         onBatch: onImportBatch,
       });
       if (outcome.ok === false) {

@@ -1,4 +1,5 @@
 import { Packet } from '../types/packet';
+import { estimateSummaryBytes } from './bufferBudget';
 import { DnsTracker } from './dnsTracker';
 import { ImportFailure, rowsToFrames } from './exportSchema';
 import { PcapService, type FrameRecordEntry } from './pcapParser';
@@ -249,13 +250,13 @@ async function importZip(file: File, maxFrames: number): Promise<ImportOutcome> 
 }
 
 async function importCapture(
-  file: File, maxFrames: number, onBatch?: ImportBatchSink,
+  file: File, maxFrames: number, residentBytes: number, onBatch?: ImportBatchSink,
 ): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
     const { packets, totalFrames, stored, facts } = onBatch === undefined
       ? await readWholeCapture(file, maxFrames)
-      : await readStreamedCapture(file, maxFrames, onBatch);
+      : await readStreamedCapture(file, maxFrames, residentBytes, onBatch);
 
     if (stored === null && totalFrames > packets.length) {
       // Only when there is nowhere to put the rest. With a sink the frames are
@@ -321,17 +322,38 @@ async function readWholeCapture(file: File, maxFrames: number): Promise<CaptureR
  * the same one a live capture leaves them at.
  */
 async function readStreamedCapture(
-  file: File, maxFrames: number, onBatch: ImportBatchSink,
+  file: File, maxFrames: number, residentBytes: number, onBatch: ImportBatchSink,
 ): Promise<CaptureRead> {
   const tail: Packet[] = [];
+  // Each tail row's estimate, parallel to `tail`, so dropping a row subtracts
+  // what it added without estimating it again.
+  const sizes: number[] = [];
+  let tailBytes = 0;
   // Recorded, because every frame of a streamed import goes to the store, and
   // a frame's record there is what rebuilds its tree later (ADR 0049).
   const outcome = await PcapService.streamCaptureFile(file, (batch, records) => {
     onBatch(batch, records ?? []);
-    tail.push(...batch);
+    for (const packet of batch) {
+      const size = estimateSummaryBytes(packet);
+      tail.push(packet);
+      sizes.push(size);
+      tailBytes += size;
+    }
     // Trimmed as it goes, not at the end: holding the whole capture to slice
-    // the last slab off it is the memory this route exists to avoid.
-    if (tail.length > maxFrames) tail.splice(0, tail.length - maxFrames);
+    // the last slab off it is the memory this route exists to avoid. Both
+    // bounds hold, one frame always stays, and the head goes in one splice.
+    let drop = 0;
+    while (
+      tail.length - drop > 1
+      && (tailBytes > residentBytes || tail.length - drop > maxFrames)
+    ) {
+      tailBytes -= sizes[drop];
+      drop++;
+    }
+    if (drop > 0) {
+      tail.splice(0, drop);
+      sizes.splice(0, drop);
+    }
   }, { record: true });
   return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
 }
@@ -359,6 +381,13 @@ export interface ImportOptions {
    * changes.
    */
   onBatch?: ImportBatchSink;
+  /**
+   * With `onBatch`: what the RAM tail may hold, in `estimateSummaryBytes` terms
+   * - the measure `adoptAccounting` and `planBufferTrim` use, so the buffer
+   * does not start over budget. It binds beside `maxFrames`; the tighter of the
+   * two wins and one frame always stays. Ignored without `onBatch`.
+   */
+  residentBytes?: number;
 }
 
 export async function importAnyFile(file: File, options: ImportOptions = {}): Promise<ImportOutcome> {
@@ -367,7 +396,9 @@ export async function importAnyFile(file: File, options: ImportOptions = {}): Pr
 
   if (extension === '.zip') return importZip(file, maxFrames);
   if (CAPTURE_EXTENSIONS.includes(extension)) {
-    return importCapture(file, maxFrames, options.onBatch);
+    return importCapture(
+      file, maxFrames, options.residentBytes ?? Number.POSITIVE_INFINITY, options.onBatch,
+    );
   }
   if (extension === '.json') return importJson(file);
 
