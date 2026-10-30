@@ -21,7 +21,11 @@ The Rust capture agent that ships on Windows (ADRs 0037, 0047); loaded when you 
 
 - The only Windows transport is the named pipe, `agent-rs/src/pipe.rs`. Every instance is `FILE_FLAG_OVERLAPPED` and every operation has its own `OVERLAPPED` and event. A synchronous handle queues `WriteFile` behind a blocked `ReadFile`: the handshake works and traffic stops.
 - `PIPE_SDDL` (`pipe.rs`) is `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`. `IU` is the point: the service is LocalSystem, the app is not. `WD`, `AN` and `NU` stay absent because a pipe answers over SMB otherwise. Nothing asserts the Rust literal (`local-agent/test_protocol.py` reads only Python's); change it only with a second-account check from `docs/verification.md`.
+- Every instance created while the agent holds none asks for `FILE_FLAG_FIRST_PIPE_INSTANCE` (`pipe::Held`), so a name another user created or recreated is refused, never joined. A lost instance is retried, not fatal. Another interactive user can still add an instance while the agent holds the name; ADR 0068 accepts that.
+- Only a packet batch is ever shed (`outbound.rs`). Control messages have their own 4 MB cap, and passing it ends the session through `pipe::disconnect`, because the writer is blocked in a `WriteFile` the client is not draining.
 - The service is demand start and stops itself two watchdog ticks after its last client leaves (ADR 0035). Do not grant the app `SERVICE_STOP`: it would be granted to every interactive logon.
+- `restart_agent` is refused with `capture_busy` to a client that does not own the running capture.
+- The log folder (`agent_log.rs`) is SYSTEM's to rotate in, so the service makes it `LOG_DIR_SDDL`: owned by Administrators, protected DACL, users read only. It is opened once with `FILE_FLAG_OPEN_REPARSE_POINT` and secured through that handle, because checking a path and then securing the same path lets a junction be swapped in between. A log name that is a link, a directory or a hard link is removed; if one cannot be removed, the agent runs with no file log. Every log open passes `FILE_FLAG_OPEN_REPARSE_POINT`.
 - It writes capture files as its connected client, never as SYSTEM. `scripts/agent/second-account-check.ps1` and `scripts/electron/capture-file-drive.ts` hold it.
 
 ## Npcap
