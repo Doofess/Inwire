@@ -12,7 +12,7 @@
  */
 import { pcapOf } from '../parity/synthetic';
 import { importAnyFile } from '../../src/services/tabularImport';
-import { estimateSummaryBytes } from '../../src/services/bufferBudget';
+import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from '../../src/services/bufferBudget';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -94,6 +94,25 @@ async function main() {
 
   const noSink = await run({ residentBytes: 1, sink: false });
   check('without onBatch residentBytes is ignored', noSink.packets.length, FRAMES);
+
+  // Raw bytes stay resident for the newest BYTES_RESIDENT_FRAMES only, as in
+  // the live buffer: the budget does not count them, and a tail of full-size
+  // frames held a 2.7 GB file's bytes past it (#20). Every frame reaches the
+  // sink - the store - with its bytes; only the tail's own copy lets them go.
+  const many = BYTES_RESIDENT_FRAMES + 1000;
+  const manyBytes = pcapOf(Array.from({ length: many }, (_, i) => dnsQuery((i % 60000) + 1)));
+  let sunkWithout = 0;
+  const released = await importAnyFile(new File([manyBytes as unknown as BlobPart], 'many.pcap'), {
+    onBatch: (batch) => { for (const p of batch) if (p.rawBytes.byteLength === 0) sunkWithout++; },
+  });
+  if (released.ok !== true) throw new Error('import failed');
+  const kept = released.packets;
+  check('a long import keeps every frame in the tail', kept.length, many);
+  check('... the sink saw every frame with its bytes', sunkWithout, 0);
+  check('... the oldest 1,000 hold no bytes',
+    kept.slice(0, 1000).every((p) => p.rawBytes.byteLength === 0), true);
+  check('... the newest BYTES_RESIDENT_FRAMES keep theirs',
+    kept.slice(1000).every((p) => p.rawBytes.byteLength > 0), true);
 
   if (failures > 0) {
     console.log(`\n${failures} failed`);

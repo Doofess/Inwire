@@ -31,6 +31,13 @@ import type { Packet } from '../types/packet';
  */
 
 /**
+ * How many of the newest frames keep their raw bytes resident: the live
+ * buffer's (`usePacketBuffer`, through `evictOldBytes`) and an import's tail
+ * (`tabularImport.ts`). Older frames answer from the store (`packetBytes.ts`).
+ */
+export const BYTES_RESIDENT_FRAMES = 25000;
+
+/**
  * The fallback when the machine cannot be measured. Not the usual answer.
  *
  * `'auto'` is what the app ships with (`PERFORMANCE_DEFAULTS`), and this is

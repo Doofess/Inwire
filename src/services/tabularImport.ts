@@ -1,5 +1,5 @@
 import { Packet } from '../types/packet';
-import { estimateSummaryBytes } from './bufferBudget';
+import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from './bufferBudget';
 import { DnsTracker } from './dnsTracker';
 import { ImportFailure, rowsToFrames } from './exportSchema';
 import { PcapService, type FrameRecordEntry } from './pcapParser';
@@ -331,6 +331,11 @@ async function readStreamedCapture(
   // what it added without estimating it again.
   const sizes: number[] = [];
   let tailBytes = 0;
+  // How many of the tail's oldest rows have let their bytes go. The budget does
+  // not count raw bytes; they stay for the newest BYTES_RESIDENT_FRAMES only, as
+  // in the live buffer, and older frames read theirs from the store. Kept on
+  // every row, a tail of full-size frames held a 2.7 GB file's bytes (#20).
+  let released = 0;
   // Recorded, because every frame of a streamed import goes to the store, and
   // a frame's record there is what rebuilds its tree later (ADR 0049).
   const outcome = await PcapService.streamCaptureFile(file, (batch, records) => {
@@ -355,6 +360,12 @@ async function readStreamedCapture(
     if (drop > 0) {
       tail.splice(0, drop);
       sizes.splice(0, drop);
+      released = Math.max(0, released - drop);
+    }
+    // After `onBatch`, which has handed each frame to the store: its append
+    // copies the packet object there and then, so this reaches only the tail's.
+    for (; released < tail.length - BYTES_RESIDENT_FRAMES; released++) {
+      tail[released].rawBytes = RELEASED_BYTES;
     }
   }, { record: true, onProgress });
   return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
@@ -368,6 +379,13 @@ export type ImportBatchSink = (packets: Packet[], records: FrameRecordEntry[]) =
 
 /** How much of the file has been read, of its size; called as each window loads. */
 type ImportProgress = (readBytes: number, totalBytes: number) => void;
+
+/**
+ * What a tail row holds once its bytes have gone: empty, which is all
+ * `hasBytes` in `packetBytes.ts` asks. Not imported from there, so this module
+ * does not pull the store client in.
+ */
+const RELEASED_BYTES = new Uint8Array(0);
 
 export interface ImportOptions {
   /**
