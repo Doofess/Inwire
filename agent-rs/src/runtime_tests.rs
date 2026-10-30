@@ -227,6 +227,42 @@ fn a_pipe_name_someone_else_created_is_refused() {
     assert!(line.contains(&name), "{line}");
 }
 
+/// **The guarantee holds for every instance the agent makes while it holds
+/// none, not only for the first one ever.** A user who drains the agent's
+/// slots, closes their own, and creates the name again must not be joined by the
+/// agent's next retry.
+#[test]
+fn a_pipe_name_recreated_by_someone_else_is_not_joined() {
+    let name = private_pipe("drained");
+    let held = pipe::Held::new();
+    let ours = held
+        .create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES)
+        .expect("the agent makes the name");
+    // While the agent holds an instance, adding another is the ordinary case.
+    let second = held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).expect("a later slot");
+    // The user takes a slot, and the agent's instances go (their clients left).
+    let takeover = pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, false)
+        .expect("the user takes the freed slot");
+    drop((ours, second));
+    assert_eq!(held.count(), 0);
+    // The name still exists, made by the user: the agent refuses it.
+    assert!(
+        held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).is_err(),
+        "the agent joined a pipe it does not hold an instance of"
+    );
+    // They close theirs and recreate the name with a descriptor of their own.
+    drop(takeover);
+    let recreated = pipe::create_instance(&name, "D:(A;;GA;;;WD)", pipe::MAX_INSTANCES, true)
+        .expect("the user recreates the name");
+    assert!(
+        held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).is_err(),
+        "the agent joined a recreated pipe"
+    );
+    // With the name free again the agent makes it, as it did at the start.
+    drop(recreated);
+    assert!(held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).is_ok());
+}
+
 /// A pipe instance for the retry tests, on a name of its own.
 fn spare_instance(tag: &str) -> pipe::PipeInstance {
     pipe::create_instance(&private_pipe(tag), pipe::PIPE_SDDL, 2, false).unwrap()

@@ -46,6 +46,17 @@ instance. There is no descriptor that admits the app and refuses that, and
   first, so the agent will not serve it: {error}` and stops with the reason
   "the pipe name is already in use". Slot 0 serves that instance. Both agents
   do this (`pipe.rs`, `runtime.rs`; `pipe_server.py`).
+- **The agent asks for a first instance whenever it holds none, not only at
+  start.** It counts the instances it holds - created and not yet dropped,
+  connected or listening - and a creation made at zero carries the flag again
+  (`Held` in `pipe.rs`; `_acquire_instance` in `pipe_server.py`). Without that,
+  the flag protected one call: a user could take each slot the agent freed, let
+  the agent's count reach zero, close their own instances so the name vanished,
+  and recreate it with a descriptor they chose; the agent's next retry, asking
+  for a non-first instance, would have joined it. Now it is refused and retried
+  like any other failure. The decision and the creation share a lock with a
+  drop's close, so the count is never ahead of or behind the name; two
+  acceptors at zero may both ask for a first instance, and the loser retries.
 - **A later instance the system refuses is retried, not fatal.** The acceptor
   logs one warning per failing streak, sleeps `INSTANCE_RETRY` (one second) and
   asks again until a stop is requested. Both agents do this.

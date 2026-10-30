@@ -408,6 +408,10 @@ class PipeServer:
         self._first_handle = None
         #: Seconds before an instance the system refused is asked for again.
         self._retry = INSTANCE_RETRY_SECONDS
+        #: How many instances of the pipe this server holds right now - made
+        #: and not yet closed, connected or listening. See `_acquire_instance`.
+        self._held = 0
+        self._held_lock = threading.Lock()
 
     def start(self) -> None:
         if sys.platform != "win32":
@@ -433,7 +437,7 @@ class PipeServer:
         agent.
         """
         try:
-            self._first_handle = self._create_instance(first=True)
+            self._first_handle = self._acquire_instance()
         except Exception as error:  # noqa: BLE001 - pywintypes.error on Windows
             log.error(
                 "%s already exists - another process created it first, "
@@ -480,6 +484,45 @@ class PipeServer:
             _security_attributes(),
         )
 
+    def _acquire_instance(self):
+        """Creates the next instance, as the first one when none is held.
+
+        **Why the server counts** (ADR 0068). ``FILE_FLAG_FIRST_PIPE_INSTANCE``
+        protects only the instance that creates the name. A user can take every
+        slot the server frees, let its count of instances reach zero, close
+        their own, and create the name again with a descriptor they chose; a
+        server that then asked for a non-first instance would join it. So it
+        asks for a first instance whenever it holds none: a name that still
+        exists, or that someone else made again, is refused and retried like
+        any other failure. Same rule as the Rust agent's ``Held``.
+
+        The decision and the creation share one lock with `_release_instance`'s
+        close and decrement. Two acceptors at zero may both ask for a first
+        instance; one fails and retries, which costs a second and nothing else.
+        """
+        with self._held_lock:
+            first = self._held == 0
+            handle = self._create_instance(first)
+            self._held += 1
+            return handle
+
+    def _release_instance(self, handle) -> None:
+        """Closes an instance made by `_acquire_instance` and stops counting it.
+
+        Closed under the lock, so a creation deciding ``first`` never sees a
+        count that still includes a handle already gone, or the reverse.
+        """
+        with self._held_lock:
+            try:
+                self._close_handle(handle)
+            finally:
+                self._held -= 1
+
+    def _close_handle(self, handle) -> None:
+        import win32file  # noqa: PLC0415
+
+        win32file.CloseHandle(handle)
+
     def _next_instance(self):
         """The instance to wait for a client on, or None once stopping.
 
@@ -493,7 +536,7 @@ class PipeServer:
         failing = False
         while not self._stopping.is_set():
             try:
-                return self._create_instance(first=False)
+                return self._acquire_instance()
             except Exception as error:  # noqa: BLE001 - pywintypes.error on Windows
                 if not failing:
                     failing = True
@@ -503,7 +546,6 @@ class PipeServer:
 
     def _accept_loop(self) -> None:
         import pywintypes  # noqa: PLC0415
-        import win32file  # noqa: PLC0415
 
         while not self._stopping.is_set():
             handle = self._next_instance()
@@ -511,13 +553,16 @@ class PipeServer:
                 return
             try:
                 if not self._await_client(handle):
-                    win32file.CloseHandle(handle)
+                    self._release_instance(handle)
                     return
             except pywintypes.error as error:
                 if self._stopping.is_set():
+                    # Released too: an instance left uncounted-for would keep
+                    # the held count above zero for good.
+                    self._release_instance(handle)
                     return
                 log.warning("pipe accept failed: %s", error)
-                win32file.CloseHandle(handle)
+                self._release_instance(handle)
                 # A tight retry loop on a persistent failure would fill the log
                 # faster than anyone could read it.
                 self._stopping.wait(1.0)
@@ -563,7 +608,6 @@ class PipeServer:
 
     def _serve(self, handle) -> None:
         import pywintypes  # noqa: PLC0415
-        import win32file  # noqa: PLC0415
         import win32pipe  # noqa: PLC0415
 
         outbound = _Outbound(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES)
@@ -625,7 +669,7 @@ class PipeServer:
             except Exception:  # noqa: BLE001 - the handle may already be gone
                 pass
             try:
-                win32file.CloseHandle(handle)
+                self._release_instance(handle)
             except Exception:  # noqa: BLE001
                 pass
 

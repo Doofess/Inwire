@@ -2572,6 +2572,7 @@ class _FakePipes(pipe_server.PipeServer):
         self._outcomes = list(outcomes)
         self.asked = []
         self._retry = 0.01
+        self.closed = []
 
     def _create_instance(self, first):
         self.asked.append(first)
@@ -2579,6 +2580,9 @@ class _FakePipes(pipe_server.PipeServer):
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+    def _close_handle(self, handle):
+        self.closed.append(handle)
 
 
 _lines = _Lines()
@@ -2596,7 +2600,7 @@ try:
     # A lost instance is retried, and said once per failing streak.
     _lines.lines.clear()
     _lost = _FakePipes(["first-instance", OSError(231, "busy"), OSError(231, "busy"), "second-instance"])
-    _lost._first_handle = _lost._create_instance(first=True)
+    _lost._first_handle = _lost._acquire_instance()
     check("the first call hands over the instance made before the thread",
           _lost._next_instance(), "first-instance")
     check("a refused instance is retried until the system gives one",
@@ -2609,6 +2613,31 @@ try:
     _stopping = _FakePipes([OSError(231, "busy")] * 3)
     _stopping._stopping.set()
     check("a stop ends the retrying", _stopping._next_instance(), None)
+
+    # The first-instance guarantee holds whenever the server holds no instance,
+    # not only for the very first one: a user who drains the slots and
+    # recreates the name must not be joined by the next retry.
+    _drained = _FakePipes(["a", "b", "c", OSError(5, "Access is denied."), "d"])
+    _a = _drained._acquire_instance()
+    _b = _drained._acquire_instance()
+    check("a second instance is not asked for as a first", _drained.asked, [True, False])
+    check("...and both are counted", _drained._held, 2)
+    _drained._release_instance(_a)
+    check("an instance the server still holds another of is not a reason to ask for a first",
+          (_drained._held, _drained._acquire_instance()), (1, "c"))
+    check("...asked for non-first again", _drained.asked, [True, False, False])
+    _drained._release_instance(_b)
+    _drained._release_instance("c")
+    check("closing an instance counts it out", (_drained._held, _drained.closed), (0, ["a", "b", "c"]))
+    try:
+        _drained._acquire_instance()
+    except OSError:
+        pass
+    check("with none held, the next creation asks for a FIRST instance", _drained.asked[-1], True)
+    check("...a refusal is not counted as held", _drained._held, 0)
+    check("...and the retry after it asks for a first instance again",
+          (_drained._next_instance(), _drained.asked[-1]), ("d", True))
+    check("...which is then held", _drained._held, 1)
 finally:
     pipe_server.log.removeHandler(_lines)
 

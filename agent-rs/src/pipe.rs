@@ -255,6 +255,8 @@ impl Drop for Event {
 /// One pipe instance, closed on drop.
 pub struct PipeInstance {
     handle: Handle,
+    /// The count this instance is part of, when it was made through `Held`.
+    held: Option<Arc<Mutex<usize>>>,
 }
 
 // The handle is moved to a serving thread and used from there.
@@ -278,6 +280,13 @@ unsafe impl Sync for PipeInstance {}
 
 impl Drop for PipeInstance {
     fn drop(&mut self) {
+        // Locked across the close, so a creation deciding `first` never sees a
+        // count that still includes a handle already gone (or the reverse):
+        // see `Held`.
+        let mut count = self
+            .held
+            .as_ref()
+            .map(|held| held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         if !self.handle.is_null() {
             unsafe {
                 DisconnectNamedPipe(self.handle);
@@ -285,6 +294,56 @@ impl Drop for PipeInstance {
             }
             self.handle = ptr::null_mut();
         }
+        if let Some(count) = count.as_mut() {
+            **count -= 1;
+        }
+    }
+}
+
+/// How many instances of its pipe the agent holds right now - created and not
+/// yet dropped, connected or listening (ADR 0068).
+///
+/// **Why the agent counts.** `FILE_FLAG_FIRST_PIPE_INSTANCE` protects only the
+/// instance that creates the name. A user can take every slot the agent frees,
+/// let the agent's count of instances reach zero, close their own, and create
+/// the name again with a descriptor they chose; an agent that then asked for a
+/// non-first instance would join it. So the agent asks for a first instance
+/// whenever it holds none: a name that still exists, or that someone else made
+/// again, is refused and retried like any other failure.
+///
+/// The decision and the creation happen under one lock, and so does a drop's
+/// close and decrement. Two acceptors at zero may both ask for a first
+/// instance; one fails and retries, which costs a second and nothing else.
+#[derive(Clone, Default)]
+pub struct Held(Arc<Mutex<usize>>);
+
+impl Held {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Instances held now.
+    pub fn count(&self) -> usize {
+        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Creates the next instance of `name`, as the first one when none is held.
+    pub fn create(&self, name: &str, sddl: &str, max_instances: u32) -> io::Result<PipeInstance> {
+        self.create_with(|first| create_instance(name, sddl, max_instances, first))
+    }
+
+    /// `create`, with the creation given - so a test sees what `first` was
+    /// asked for.
+    pub fn create_with(
+        &self,
+        make: impl FnOnce(bool) -> io::Result<PipeInstance>,
+    ) -> io::Result<PipeInstance> {
+        let mut count = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let first = *count == 0;
+        let mut instance = make(first)?;
+        instance.held = Some(Arc::clone(&self.0));
+        *count += 1;
+        Ok(instance)
     }
 }
 
@@ -330,7 +389,7 @@ pub fn create_instance(
     if handle as isize == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(PipeInstance { handle })
+    Ok(PipeInstance { handle, held: None })
 }
 
 /// Waits for a client. Returns when one has connected.
@@ -763,6 +822,45 @@ mod tests {
     /// ADR 0068: the first instance of the name is created with
     /// `FILE_FLAG_FIRST_PIPE_INSTANCE`, which fails when anyone else made the
     /// name first. Later instances of our own name must still be created.
+    /// ADR 0068: the agent asks for a first instance whenever it holds none,
+    /// not only for the very first one it ever made - and the count goes down
+    /// when an instance is dropped, wherever it was kept.
+    #[test]
+    fn a_first_instance_is_asked_for_whenever_none_is_held() {
+        let name = unique_pipe_name("held");
+        let held = Held::new();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let make = |first: bool| {
+            asked.borrow_mut().push(first);
+            create_instance(&name, PIPE_SDDL, 4, first)
+        };
+
+        let a = held.create_with(make).unwrap();
+        let b = held.create_with(make).unwrap();
+        assert_eq!(held.count(), 2);
+        // Held in an Arc, as a session holds one: the count follows the last
+        // owner, not the first.
+        let shared = Arc::new(a);
+        let also = Arc::clone(&shared);
+        drop(shared);
+        assert_eq!(held.count(), 2, "an instance another owner still has is still held");
+        drop(also);
+        drop(b);
+        assert_eq!(held.count(), 0);
+        let _c = held.create_with(make).unwrap();
+        assert_eq!(*asked.borrow(), vec![true, false, true]);
+    }
+
+    /// A failed creation is not counted: nothing is held.
+    #[test]
+    fn a_refused_creation_holds_nothing() {
+        let name = unique_pipe_name("refused");
+        let _squatter = create_instance(&name, PIPE_SDDL, 4, true).unwrap();
+        let held = Held::new();
+        assert!(held.create(&name, PIPE_SDDL, 4).is_err());
+        assert_eq!(held.count(), 0);
+    }
+
     #[test]
     fn a_second_first_instance_is_refused() {
         let name = unique_pipe_name("first");

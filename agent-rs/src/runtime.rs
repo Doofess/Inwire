@@ -1793,8 +1793,13 @@ fn run_with(shutdown: Arc<Shutdown>, name: &str, hardware: Hardware) -> io::Resu
     // `FILE_FLAG_FIRST_PIPE_INSTANCE` (ADR 0068): if another process created the
     // name first, the agent refuses it rather than serving a pipe whose
     // descriptor someone else chose. Slot 0 then serves that instance.
+    //
+    // Every instance is made through `held`, which counts them: whenever the
+    // agent holds none, the next one is asked for as a first instance again, so
+    // a name a user drained and recreated is refused rather than joined.
+    let held = pipe::Held::new();
     let first_instance =
-        match pipe::create_instance(name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, true) {
+        match held.create(name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES) {
             Ok(instance) => instance,
             Err(error) => {
                 crate::log_error!("{}", name_taken_message(name, &error));
@@ -1810,14 +1815,13 @@ fn run_with(shutdown: Arc<Shutdown>, name: &str, hardware: Hardware) -> io::Resu
         let shutdown = Arc::clone(&shutdown);
         let name = name.to_string();
         let live = Arc::clone(&live);
+        let held = held.clone();
         let mut first = if slot == 0 { first_instance.take() } else { None };
         acceptors.push(thread::spawn(move || {
             let mut serial = 0u64;
             let mut failing = false;
             while !shutdown.requested() {
-                let create = || {
-                    pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, false)
-                };
+                let create = || held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES);
                 let Some(instance) =
                     next_instance(&mut first, &mut failing, &shutdown, pipe::INSTANCE_RETRY, create)
                 else {
