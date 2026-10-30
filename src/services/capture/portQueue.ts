@@ -19,6 +19,12 @@ export class PortQueue<P> {
   constructor(private readonly connect: () => Promise<P | null>) {}
 
   run(use: (port: P | null) => void): void {
+    // After a drop no use posts anything, so order no longer matters, and a
+    // queued use would hold its message as the connecting ones do.
+    if (this.dropped) {
+      use(null);
+      return;
+    }
     if (this.port !== null && this.waiting === 0) {
       use(this.port);
       return;

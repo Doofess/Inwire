@@ -20,7 +20,7 @@
  *   property the import needs, checked inside one synchronous block.
  * - A call made while earlier ones still wait goes behind them, never ahead:
  *   an `open` must not overtake a read issued before it.
- * - Once dropped, nothing runs against the old port; calls get `null`.
+ * - Once dropped, nothing runs against the old port; calls get `null` at once.
  */
 import { PortQueue } from '../../src/services/capture/portQueue';
 
@@ -68,11 +68,12 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
   await flush();
   alive = false;
   queue.drop();
+  // A call after the drop answers null in its own turn. Queued, each would
+  // hold its message until the caller yields, and an import's pass never
+  // does: a big import after a store death would fill the renderer as #19 did.
   queue.run((port) => seen.push(port));
   queue.run((port) => seen.push(port));
-  check('dropped: nothing runs in the same turn', seen, [PORT]);
-  await flush();
-  check('dropped: later calls get null, in order', seen, [PORT, null, null]);
+  check('dropped: later calls get null in the same turn, in order', seen, [PORT, null, null]);
 }
 
 console.log(failures === 0 ? '\nAll port queue checks passed.' : `\n${failures} port queue check(s) failed.`);

@@ -14,12 +14,13 @@
  *
  * ## What is pinned
  *
- * - A walk yields exactly what `extractFrames` returns, field for field, for
- *   both formats - and facts that arrive *after* the frames (a pcapng's ISB
- *   comes last) are the walk's, not a prefix's.
+ * - A walk yields what the file holds, field for field, for both formats,
+ *   checked against values written from the synthetic inputs (never against
+ *   `extractFrames`, which is this walk collected) - and facts that arrive
+ *   *after* the frames (a pcapng's ISB comes last) are the walk's, not a prefix's.
  * - Passes are independent: a second `frames()` call yields everything again,
  *   and a pass abandoned early does not spoil the next one.
- * - A truncated final record ends the walk where `extractFrames` ends today.
+ * - A truncated final record or block ends the walk after the last whole frame.
  * - Lazy: a frame is cut when it is pulled. Proved by changing the file's own
  *   bytes between two pulls, which a walk that cut ahead cannot survive.
  * - Each frame is its own copy, never a view into the file's buffer.
@@ -116,6 +117,19 @@ function pcapngOf(count: number, secrets?: string): Uint8Array {
   return out;
 }
 
+/**
+ * What the synthetic files hold, written from their inputs rather than read
+ * back through extractFrames, which is now this same walk collected.
+ */
+const expectedFrames = (count: number, tsNanos: (i: number) => bigint): ExtractedFrame[] =>
+  Array.from({ length: count }, (_, i) => ({
+    rawBytes: frameBytes(i), tsNanos: tsNanos(i), origLen: frameBytes(i).length, tsPrecision: 6, linktype: 1,
+  }) as ExtractedFrame);
+/** pcapOf stamps frame i at 1,700,000,000 + i seconds. */
+const classicTs = (i: number) => BigInt(1_700_000_000 + i) * 1_000_000_000n;
+/** pcapngOf stamps frame i at 1,000,000 + i microseconds (if_tsresol absent: 6). */
+const ngTs = (i: number) => BigInt(1_000_000 + i) * 1_000n;
+
 /** Every frame of one pass, with the pass left to run to its end. */
 const collect = (pass: Iterable<ExtractedFrame>): ExtractedFrame[] => [...pass];
 
@@ -142,9 +156,9 @@ const classicExtracted = await PcapService.extractFrames(asFile(classicBytes, 'f
   const walk = PcapService.frameWalk(classic);
   check('classic: before a pass, nothing is claimed', [walk.totalFrames, walk.facts.interfaces.length], [0, 0]);
   const frames = collect(walk.frames());
-  sameFrames('classic', frames, classicExtracted.frames);
+  sameFrames('classic', frames, expectedFrames(5, classicTs));
   check('classic: totalFrames', walk.totalFrames, 5);
-  check('classic: facts match extractFrames', walk.facts, classicExtracted.facts);
+  check('classic: extractFrames collects the same facts', walk.facts, classicExtracted.facts);
   checkTrue('classic: no rawBytes pins the file',
     frames.every((f) => f.rawBytes.buffer !== classic));
 }
@@ -157,9 +171,9 @@ const ngExtracted = await PcapService.extractFrames(asFile(ngBytes, 'five.pcapng
 {
   const walk = PcapService.frameWalk(ng);
   const frames = collect(walk.frames());
-  sameFrames('pcapng', frames, ngExtracted.frames);
+  sameFrames('pcapng', frames, expectedFrames(5, ngTs));
   check('pcapng: totalFrames', walk.totalFrames, 5);
-  check('pcapng: facts match extractFrames', walk.facts, ngExtracted.facts);
+  check('pcapng: extractFrames collects the same facts', walk.facts, ngExtracted.facts);
   // Review Focus 1: the ISB is after the last frame, so only a pass that ran to
   // the end can have read it.
   check('pcapng: the trailing ISB contributed',
@@ -202,8 +216,21 @@ const ngExtracted = await PcapService.extractFrames(asFile(ngBytes, 'five.pcapng
   const expected = await PcapService.extractFrames(asFile(torn, 'torn.pcap'), Number.POSITIVE_INFINITY);
   const walk = PcapService.frameWalk(bufferOf(torn));
   const frames = collect(walk.frames());
-  sameFrames('truncated record', frames, expected.frames);
+  sameFrames('truncated record', frames, expectedFrames(3, classicTs));
   check('truncated record: totalFrames', [walk.totalFrames, expected.totalFrames], [3, 3]);
+}
+{
+  // The same for pcapng: a trailing EPB whose length claims 1000 bytes and 20 follow.
+  const good = pcapngOf(3);
+  const torn = new Uint8Array(good.length + 20);
+  torn.set(good);
+  const view = new DataView(torn.buffer);
+  view.setUint32(good.length, 0x00000006, true);
+  view.setUint32(good.length + 4, 1000, true);
+  const walk = PcapService.frameWalk(bufferOf(torn));
+  const frames = collect(walk.frames());
+  sameFrames('truncated pcapng block', frames, expectedFrames(3, ngTs));
+  check('truncated pcapng block: totalFrames', walk.totalFrames, 3);
 }
 
 // --- laziness --------------------------------------------------------------------
