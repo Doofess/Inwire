@@ -45,6 +45,7 @@ use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -116,13 +117,26 @@ static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 /// `harden` the folder is created, then given `LOG_DIR_SDDL` (owner
 /// Administrators, protected DACL), then any link planted under a log name is
 /// removed. A folder that is already a junction is refused rather than
-/// followed, and a folder that cannot be secured is not written to at all. A
+/// followed, and a folder that cannot be secured is not written to at all - nor
+/// is one where a log name is still held by a link, a directory or a file with
+/// other names after clearing. Every open of a log file declines to follow a
+/// reparse point. A
 /// hand run is not the service and cannot set the owner, so it passes false.
 pub fn init(directory: &Path, to_stderr: bool, harden: bool) {
     let mut unsecured: Option<io::Error> = None;
     if harden {
         match fs::create_dir_all(directory).and_then(|()| harden_directory(directory, LOG_DIR_SDDL)) {
-            Ok(()) => clear_planted_links(directory),
+            Ok(()) => {
+                clear_planted_links(directory);
+                // An entry that could not be removed is run past, not trusted:
+                // no file log, exactly as for a folder that is a junction.
+                if !log_names_are_safe(directory) {
+                    unsecured = Some(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "a log file name is held by a link, a directory or a file with other names",
+                    ));
+                }
+            }
             Err(error) => unsecured = Some(error),
         }
     }
@@ -140,7 +154,7 @@ pub fn init(directory: &Path, to_stderr: bool, harden: bool) {
         fs::create_dir_all(directory)
             .and_then(|()| {
                 let path = directory.join("agent.log");
-                OpenOptions::new().create(true).append(true).open(&path)?;
+                open_append(&path)?;
                 Ok(path)
             })
             .map_err(|error| {
@@ -367,22 +381,82 @@ fn harden_directory_with(dir: &Path, sddl: &str, between_check_and_apply: impl F
     result
 }
 
-/// Removes a symlink, junction or directory sitting where a log file belongs.
-///
-/// Rotation renames and deletes these names as SYSTEM; a junction under one is
-/// how that is aimed elsewhere. Only the entry goes, never what it points at:
-/// `remove_dir` on a junction removes the junction. Errors are ignored - an
-/// entry that cannot be removed also cannot be rotated into.
-fn clear_planted_links(dir: &Path) {
+/// `agent.log` and its rotated names, which are the only entries the agent
+/// opens, renames or deletes in its folder.
+fn log_names(dir: &Path) -> Vec<PathBuf> {
     let live = dir.join("agent.log");
     let mut names = vec![live.clone()];
     names.extend((1..=BACKUP_COUNT).map(|n| live.with_extension(format!("log.{n}"))));
-    for name in names {
+    names
+}
+
+/// How many names the file at `path` has, read without following a reparse
+/// point. A log file has one; a hard link planted by a user has two or more.
+fn link_count(path: &Path) -> io::Result<u32> {
+    // Only `FILE_READ_ATTRIBUTES`, so this succeeds on a file the account may
+    // not read, and every share flag so it cannot make a user's own open fail.
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    let file = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut info: ByHandleFileInformation = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.number_of_links)
+}
+
+/// Whether `meta` describes something other than a plain file: a symlink, a
+/// junction or any other reparse point, or a directory.
+fn is_link_or_directory(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink() || meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Removes what a user planted under a log name: a symlink, junction or
+/// directory, or a regular file with more than one name.
+///
+/// Rotation renames and deletes these names as SYSTEM, and every append opens
+/// one; a link under one is how that is aimed elsewhere. Only the entry goes,
+/// never what it points at: `remove_dir` on a junction removes the junction, and
+/// removing one name of a hard link leaves the file and its other names alone.
+/// Errors are ignored here because `log_names_are_safe` is what decides what to
+/// do about an entry that stayed.
+fn clear_planted_links(dir: &Path) {
+    for name in log_names(dir) {
         let Ok(meta) = fs::symlink_metadata(&name) else { continue };
-        if meta.file_type().is_symlink() || meta.is_dir() {
+        if is_link_or_directory(&meta) {
             let _ = fs::remove_dir(&name).or_else(|_| fs::remove_file(&name));
+        } else if link_count(&name).map_or(false, |links| links > 1) {
+            let _ = fs::remove_file(&name);
         }
     }
+}
+
+/// True when every log name is absent or a plain regular file with one name.
+///
+/// Checked after `clear_planted_links`: an entry that is still a reparse point,
+/// a directory or a multi-link file is one a user could remove-proof (a symlink
+/// held open without `FILE_SHARE_DELETE`, a directory with something inside),
+/// and the agent then writes no file log at all rather than rotate into it. A
+/// name whose state cannot be read counts as unsafe.
+fn log_names_are_safe(dir: &Path) -> bool {
+    log_names(dir).iter().all(|name| match fs::symlink_metadata(name) {
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+        Ok(meta) => !is_link_or_directory(&meta) && meta.is_file() && link_count(name).map_or(false, |links| links == 1),
+    })
+}
+
+/// Opens a log file for appending without following a reparse point, so a
+/// symlink that clearing could not remove, or that appeared afterwards, is
+/// opened itself and never what it points at.
+fn open_append(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 /// `%ProgramData%\Inwire`, which is where the Python agent keeps its own.
@@ -441,10 +515,10 @@ pub fn write(level: &str, message: &str) {
 
 /// Appends a line, rotating first when the file has reached its cap.
 fn append(path: &Path, line: &str) -> std::io::Result<()> {
-    if fs::metadata(path).map(|m| m.len()).unwrap_or(0) >= MAX_BYTES {
+    if fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0) >= MAX_BYTES {
         rotate(path);
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = open_append(path)?;
     writeln!(file, "{line}")
 }
 
@@ -518,7 +592,10 @@ pub fn backlog() -> Vec<Value> {
             None => return Vec::new(),
         }
     };
-    let Ok(mut file) = File::open(&path) else { return Vec::new() };
+    // Not `File::open`, which would follow a link on the log's name.
+    let Ok(mut file) = OpenOptions::new().read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&path) else {
+        return Vec::new();
+    };
     let Ok(size) = file.metadata().map(|m| m.len()) else { return Vec::new() };
     let from = size.saturating_sub(BACKLOG_BYTES);
     if file.seek(SeekFrom::Start(from)).is_err() {
@@ -855,6 +932,93 @@ mod tests {
         let _ = fs::remove_dir(&dir);
         assert!(gone);
         assert!(kept, "the link went, not what it pointed at");
+    }
+
+    /// Before the folder was first hardened any user could create entries in
+    /// it. A hard link under a log name makes rotation's `rename` and the next
+    /// append act on a file the user chose, and unlike a symlink it has no
+    /// reparse tag to find. Removing a hard link's name deletes only that name.
+    #[test]
+    fn a_planted_hard_link_is_removed_and_its_target_is_intact() {
+        let dir = temp("hardlink");
+        let outside = temp("hardlink-outside");
+        let target = outside.join("victim");
+        fs::write(&target, b"precious").unwrap();
+        fs::hard_link(&target, dir.join("agent.log.2")).unwrap();
+        let unsafe_before = !log_names_are_safe(&dir);
+        clear_planted_links(&dir);
+        let gone = !dir.join("agent.log.2").exists();
+        let intact = fs::read(&target).ok();
+        let safe_after = log_names_are_safe(&dir);
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(&outside);
+        let _ = fs::remove_dir(&dir);
+        assert!(unsafe_before, "a multi-link file is not a plain log file");
+        assert!(gone);
+        assert_eq!(intact.as_deref(), Some(&b"precious"[..]));
+        assert!(safe_after);
+    }
+
+    /// A non-empty directory cannot be removed by `remove_dir`, and an entry
+    /// that stays is one SYSTEM would still rotate into. The caller must see
+    /// that and run with no file log, as it does for a junction folder.
+    #[test]
+    fn a_name_that_cannot_be_cleared_makes_the_folder_unsafe() {
+        let dir = temp("stuck");
+        let stuck = dir.join("agent.log.2");
+        fs::create_dir_all(&stuck).unwrap();
+        fs::write(stuck.join("inside"), b"x").unwrap();
+        let before = log_names_are_safe(&dir);
+        clear_planted_links(&dir);
+        let after = log_names_are_safe(&dir);
+        let _ = fs::remove_file(stuck.join("inside"));
+        let _ = fs::remove_dir(&stuck);
+        let _ = fs::remove_dir(&dir);
+        assert!(!before);
+        assert!(!after, "the directory is still there");
+    }
+
+    #[test]
+    fn plain_log_files_and_absent_names_are_safe() {
+        let dir = temp("plain");
+        assert!(log_names_are_safe(&dir), "an empty folder");
+        fs::write(dir.join("agent.log"), b"x").unwrap();
+        fs::write(dir.join("agent.log.1"), b"x").unwrap();
+        let safe = log_names_are_safe(&dir);
+        let _ = fs::remove_file(dir.join("agent.log"));
+        let _ = fs::remove_file(dir.join("agent.log.1"));
+        let _ = fs::remove_dir(&dir);
+        assert!(safe);
+    }
+
+    /// The case clearing cannot win: a user-owned file converted to a symlink
+    /// after the folder was checked. Appending opens the link itself, never
+    /// what it points at. Creating a symlink needs Developer Mode or the
+    /// privilege, so this skips on an account that has neither.
+    #[test]
+    fn appending_never_follows_a_symlink_on_a_log_name() {
+        let dir = temp("symlink");
+        let outside = temp("symlink-outside");
+        let target = outside.join("victim");
+        fs::write(&target, b"precious").unwrap();
+        let log = dir.join("agent.log");
+        let cleanup = || {
+            let _ = fs::remove_file(&log);
+            let _ = fs::remove_file(&target);
+            let _ = fs::remove_dir(&outside);
+            let _ = fs::remove_dir(&dir);
+        };
+        if std::os::windows::fs::symlink_file(&target, &log).is_err() {
+            eprintln!("skipped: this account cannot create a symlink");
+            cleanup();
+            return;
+        }
+        let unsafe_before = !log_names_are_safe(&dir);
+        let _ = append(&log, "2026-09-20 22:14:02,123 INFO    appended through a link");
+        let intact = fs::read(&target).ok();
+        cleanup();
+        assert!(unsafe_before, "a symlink is not a plain log file");
+        assert_eq!(intact.as_deref(), Some(&b"precious"[..]), "the link's target was written");
     }
 
     /// Hardening runs before `clear_planted_links`, and `SetNamedSecurityInfoW`

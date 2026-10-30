@@ -95,34 +95,68 @@ def _harden_directory(directory):
         handle.Close()
 
 
+def _log_paths(directory):
+    """`agent.log` and its rotated names: the only entries the agent opens,
+    renames or deletes in its folder."""
+    names = [LOG_FILENAME] + [f"{LOG_FILENAME}.{n}" for n in range(1, BACKUP_COUNT + 1)]
+    return [os.path.join(directory, name) for name in names]
+
+
+def _is_link_or_directory(info):
+    return bool(
+        stat.S_ISLNK(info.st_mode)
+        or stat.S_ISDIR(info.st_mode)
+        or getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
 def _clear_planted_links(directory):
-    """Removes a symlink, junction or directory sitting where a log file belongs.
+    """Removes what a user planted under a log name: a symlink, junction or
+    directory, or a regular file with more than one name.
 
     Only the entry goes, never what it points at: rmdir on a junction removes
-    the junction. Errors are ignored - an entry that cannot be removed also
-    cannot be rotated into.
+    the junction, and removing one name of a hard link leaves the file and its
+    other names alone. Errors are ignored here because _log_names_are_safe is
+    what decides what to do about an entry that stayed.
     """
-    names = [LOG_FILENAME] + [f"{LOG_FILENAME}.{n}" for n in range(1, BACKUP_COUNT + 1)]
-    for name in names:
-        path = os.path.join(directory, name)
+    for path in _log_paths(directory):
         try:
             info = os.lstat(path)
         except OSError:
             continue
-        planted = (
-            stat.S_ISLNK(info.st_mode)
-            or stat.S_ISDIR(info.st_mode)
-            or getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
-        )
-        if not planted:
-            continue
-        try:
-            os.rmdir(path)
-        except OSError:
+        if _is_link_or_directory(info):
+            try:
+                os.rmdir(path)
+            except OSError:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
             try:
                 os.remove(path)
             except OSError:
                 pass
+
+
+def _log_names_are_safe(directory):
+    """True when every log name is absent or a plain regular file with one name.
+
+    Checked after _clear_planted_links: an entry that is still a link, a
+    directory or a multi-link file is one the agent must not rotate into or
+    append to, so setup_logging then installs no file handler at all. A name
+    whose state cannot be read counts as unsafe.
+    """
+    for path in _log_paths(directory):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        if _is_link_or_directory(info) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return False
+    return True
 
 
 def setup_logging(directory, to_stderr=True, level=logging.INFO, harden=False):
@@ -171,6 +205,11 @@ def setup_logging(directory, to_stderr=True, level=logging.INFO, harden=False):
                 unsecured = exc
                 raise OSError(str(exc)) from exc
             _clear_planted_links(directory)
+            if not _log_names_are_safe(directory):
+                # An entry that could not be removed is run past, not trusted:
+                # no file log, exactly as for a folder that is a junction.
+                unsecured = OSError("a log file name is held by a link, a directory or a file with other names")
+                raise unsecured
         file_handler = RotatingFileHandler(
             os.path.join(directory, LOG_FILENAME),
             maxBytes=MAX_BYTES,

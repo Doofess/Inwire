@@ -2529,6 +2529,41 @@ if _can_link:
                not os.path.lexists(os.path.join(_planted_dir, "agent.log.1")))
     check_true("what the links pointed at is kept",
                os.path.exists(os.path.join(_planted_target, "keep")))
+# Before the folder was first hardened any user could create entries in it, and
+# clearing can fail (a non-empty directory) or be raced. A hard link has no
+# reparse tag to find, so it is found by its link count; removing one name of a
+# hard link deletes only that name. What cannot be cleared must make the setup
+# run with no file log, which is what _log_names_are_safe decides.
+_hardlink_dir = tempfile.mkdtemp()
+_hardlink_outside = tempfile.mkdtemp()
+_hardlink_target = os.path.join(_hardlink_outside, "victim")
+with open(_hardlink_target, "w") as _f:
+    _f.write("precious")
+os.link(_hardlink_target, os.path.join(_hardlink_dir, "agent.log.2"))
+logging_setup._clear_planted_links(_hardlink_dir)
+check_true("a planted hard link under a log name is removed",
+           not os.path.lexists(os.path.join(_hardlink_dir, "agent.log.2")))
+with open(_hardlink_target) as _f:
+    check("...and the file it linked to is intact", _f.read(), "precious")
+
+_stuck_dir = tempfile.mkdtemp()
+os.makedirs(os.path.join(_stuck_dir, "agent.log.2"))
+with open(os.path.join(_stuck_dir, "agent.log.2", "inside"), "w") as _f:
+    _f.write("x")
+check_true("a non-empty directory under a log name is not a safe folder",
+           not logging_setup._log_names_are_safe(_stuck_dir))
+logging_setup._clear_planted_links(_stuck_dir)
+check_true("...and clearing cannot make it one", not logging_setup._log_names_are_safe(_stuck_dir))
+os.link(_hardlink_target, os.path.join(_hardlink_dir, "agent.log.1"))
+check_true("a hard link left in place is not a safe folder",
+           not logging_setup._log_names_are_safe(_hardlink_dir))
+_plain_dir = tempfile.mkdtemp()
+check_true("an empty folder is safe", logging_setup._log_names_are_safe(_plain_dir))
+with open(os.path.join(_plain_dir, "agent.log"), "w") as _f:
+    _f.write("x")
+check_true("...and so is one holding a plain log file", logging_setup._log_names_are_safe(_plain_dir))
+check_true("...and setup_logging asks, so an unsafe folder gets no file handler",
+           "_log_names_are_safe" in inspect.getsource(logging_setup.setup_logging))
 if os.name != "nt":
     _hl = logging.getLogger("inwire")
     _hl_saved = (list(_hl.handlers), _hl.level, _hl.propagate)
