@@ -68,7 +68,7 @@ Read each driver's prerequisites before starting it.
 | Scheme handler, preload, IPC, Worker, renderer startup | Built-app smoke through `npm run check`; manual `npm run start:app` |
 | Window chrome, drag/resize, GPU, packaging | `npm run pack`, then relevant items in [verification.md](verification.md) |
 | Dissection, display fields or colour rules | Column parity, tree coverage and relevant synthetic protocol scripts; snaplen for truncation changes |
-| Capture store, row space or import | `scripts/electron/disk-drive.ts` and `scripts/electron/import-drive.ts` |
+| Capture store, row space or import | `scripts/electron/disk-drive.ts` and `scripts/electron/import-drive.ts`; for import memory, `scripts/electron/import-heap-drive.ts --pcap <file>` with a file of millions of frames |
 | Live frame path or record reconstruction | `scripts/electron/live-revisit-drive.ts`; `scripts/electron/revisit-drive.ts` for imported/decrypted detail |
 | Capture-start options or agent open | `scripts/electron/capture-options-drive.ts` |
 | Agent capture-file writer or autostop | `scripts/electron/capture-file-drive.ts` |
@@ -119,6 +119,9 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | Buffer trim is reachable before auto-pause | `scripts/session/buffer-budget.ts` |
 | A window trim does not refold the window: the expert log subtracts the trimmed frames and equals a rebuild (groups, frames, counts, categories), and names stay learned (ADR 0053 phase 6) | `scripts/expert/trim.ts` |
 | An import matches the whole-array result with the patch window forced small | `scripts/capture/import-stream.ts` |
+| An import cuts frames from the file one at a time; every pass sees every frame and the pcapng facts that trail them | `scripts/capture/frame-walk.ts` |
+| An import's RAM tail is held to the buffer budget in estimated row bytes, keeping at least the newest frame | `scripts/capture/import-tail.ts` |
+| The store client posts in call order, and in the same turn once connected, so an import's synchronous pass does not queue the file in the renderer | `scripts/capture/port-queue.ts` |
 | Trackers keep nothing a transfer detaches | `scripts/pipeline/moved-bytes.ts`, `scripts/pipeline/arrival.ts` |
 | A frame dissects the same as a view at an odd offset inside a bigger buffer as from a buffer of its own, tree and row (#17) | `scripts/pipeline/frame-views.ts` |
 | A replay bundle built from window rows sends each frame as exactly its own buffer, never the flush slab its row is a view into (#17) | `scripts/pipeline/replay-bytes.ts` |
