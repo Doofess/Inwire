@@ -2530,6 +2530,14 @@ if os.name != "nt":
         check_true("a folder that cannot be secured gets no file handler",
                    not any(isinstance(h, logging.FileHandler) for h in _hl.handlers))
         check("...and no log file is created in it", os.listdir(_hl_dir), [])
+        # agent.main() calls setup_logging again for the same folder without
+        # `harden`, because it cannot know it runs as the service. That second
+        # call must not undo the first: a plain handler would have SYSTEM
+        # writing through whatever a user planted in the folder.
+        logging_setup.setup_logging(_hl_dir, to_stderr=False)
+        check_true("a later call without harden keeps the hardened setup",
+                   not any(isinstance(h, logging.FileHandler) for h in _hl.handlers))
+        check("...and still creates no log file", os.listdir(_hl_dir), [])
     finally:
         for _h in list(_hl.handlers):
             _hl.removeHandler(_h)
@@ -2539,6 +2547,7 @@ if os.name != "nt":
         _hl.setLevel(_hl_saved[1])
         _hl.propagate = _hl_saved[2]
         logging_setup._configured_with = None
+        logging_setup._hardened_directories.clear()
 
 # --- a pipe name someone else created, and a lost instance (ADR 0068) --------------
 #

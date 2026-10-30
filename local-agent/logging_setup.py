@@ -28,6 +28,16 @@ LOG_DIR_SDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)"
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 _configured_with = None
+# Folders that have been set up hardened in this process. Hardening is sticky:
+# the service calls setup_logging with harden=True, then agent.main() calls it
+# again without, because main() cannot know whether it runs as the service. If
+# that second call rebuilt the handler plainly, SYSTEM would be appending
+# through whatever a user had planted in the folder.
+_hardened_directories = set()
+
+
+def _directory_key(directory):
+    return os.path.normcase(os.path.abspath(directory))
 
 
 def _harden_directory(directory):
@@ -98,10 +108,17 @@ def setup_logging(directory, to_stderr=True, level=logging.INFO, harden=False):
 
     `harden` is for the Windows service only (a hand run is not SYSTEM and
     cannot set the owner). It secures the folder with LOG_DIR_SDDL first and
-    clears planted links; if that fails there is no file handler at all.
+    clears planted links; if that fails there is no file handler at all. It is
+    sticky: once a folder has been set up hardened, a later call for it without
+    `harden` keeps the hardened setup.
     """
     global _configured_with
     logger = logging.getLogger("inwire")
+    key = _directory_key(directory)
+    if harden:
+        _hardened_directories.add(key)
+    elif key in _hardened_directories:
+        harden = True
     if _configured_with == (directory, to_stderr, harden):
         return logger
 

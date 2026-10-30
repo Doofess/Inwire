@@ -129,9 +129,10 @@ class InwireAgentService(win32serviceutil.ServiceFramework):
             # failure, rather than escaping SvcDoRun unlogged.
             import agent
 
-            # agent.main() calls setup_logging again with this same
-            # (directory, to_stderr) pair; that is safe since setup_logging is
-            # idempotent when the pair is unchanged from the call above.
+            # agent.main() calls setup_logging again for this same folder but
+            # without harden, since it cannot know it runs as the service.
+            # That is safe because hardening is sticky per folder: the second
+            # call finds the first one's setup unchanged and returns it.
             started_ok = self.loop.run_until_complete(agent.main(to_stderr=DEBUG_MODE))
             if started_ok is False:
                 # agent.main() logs its own reason and returns False rather than
