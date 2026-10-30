@@ -2927,6 +2927,14 @@ export default function App() {
     }
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
+    // Except that a stored import got frames, and `lastPacketMs` is how the
+    // session says so (`offeredCapture`). Left null, nothing ever offered it
+    // again: not Clear View, not a relaunch, and not a failed import after it,
+    // which emptied the view and left no Reopen. The Worker's clock only seeds
+    // live frames, and a Start clears before any arrive.
+    if (storedImport !== null && imported.length > 0) {
+      lastPacketTimeRef.current = imported[imported.length - 1].tsUs;
+    }
     // Always assigned, never left alone: a selection held over from the
     // previous buffer would keep the tree and hex views showing a frame that
     // is not in the list any more.

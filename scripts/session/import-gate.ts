@@ -124,6 +124,14 @@ check('the first batch opens the store through the lifecycle, and no longer stop
   batch.includes('importLifecycle.onBatch()') && !batch.includes('stopCaptureForImportRef'));
 check('the success path takes the capture id from the lifecycle',
   between(app, 'const handleImportPackets', 'adoptMarks(EMPTY_MARKS)').includes('importLifecycle.succeed()'));
+// The offer's "it got a frame" mark is `lastPacketMs`. An import that left it
+// null was offered by nothing - a failed import after it, Clear View, a
+// relaunch - so a failed second import left an empty view and no Reopen.
+const imported = between(app, 'const handleImportPackets', 'deriveForBuffer(imported)');
+check('a stored import records its last frame\'s time, so it can be offered again',
+  /if \(storedImport !== null && imported\.length > 0\)\s*\{?\s*lastPacketTimeRef\.current = imported\[imported\.length - 1\]\.tsUs/
+    .test(imported)
+  && imported.lastIndexOf('lastPacketTimeRef.current = imported') > imported.lastIndexOf('lastPacketTimeRef.current = null'));
 check('App hands the panel the lifecycle and the store\'s reach',
   app.includes('onImportBegin={handleImportBegin}') && app.includes('onImportFailed={handleImportFailed}')
   && app.includes('bytesStoredThrough={bytesStoredThrough}')
