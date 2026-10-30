@@ -154,6 +154,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | The filter engine holds its 50,000-frame budget | `scripts/filter/engine.ts` |
 | No handler or preload method for the key log takes a path | `scripts/electron/keylog-follow.ts` |
 | Main never sends to a crashed page; a crash loads the crash screen (Reload / Quit), the OS box only if that dies | `scripts/electron/renderer-life.ts`, `scripts/electron/smoke.ts` |
+| The crash line names only the measured out-of-memory code (-36861, Windows); `start:app` alone logs the heap every 10 s, and its log file keeps the crash lines | `scripts/electron/heap-log.ts` (the code itself is re-measured by hand after an Electron upgrade) |
 | Reverse DNS has at most four lookups in flight | `scripts/geoip/reverse-dns-queue.ts` |
 | One icon set; `Map` and `Image` aliased | `scripts/themes/icon-set.ts` |
 | Scripts launch the app in the background | `scripts/electron/background-launch.ts` |

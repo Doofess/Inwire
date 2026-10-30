@@ -45,6 +45,9 @@ import {
 import { QuitConfirm } from './quitConfirm';
 import { canSend, crashResponse, readCrashAnswer } from './rendererLife';
 import {
+  crashLine, HEAP_LOG_ENV, HEAP_LOG_INTERVAL_MS, heapLine, heapLogEnabled, type HeapSample,
+} from './heapLog';
+import {
   CRASH_SCREEN_PATH, CRASH_SCREEN_TEXT, crashNativeDetail, crashScreenSearch,
 } from '../src/lib/crashScreen';
 import { QUIT_CONFIRM_TEXT, readQuitConfirmReply } from '../src/lib/quitConfirm';
@@ -649,6 +652,42 @@ function openExternally(raw: string): void {
   void shell.openExternal(parsed.toString());
 }
 
+/**
+ * `npm run start:app`'s heap timeline (`heapLog.ts` says why). The page's own
+ * `performance.memory` is asked for, and skipped while an answer is still
+ * owed: a page busy enough to run out of heap answers late, and the process's
+ * private bytes, read here without asking the page, still print.
+ */
+function logHeap(window: BrowserWindow): void {
+  let asking = false;
+  const timer = setInterval(() => {
+    if (window.isDestroyed()) {
+      clearInterval(timer);
+      return;
+    }
+    const contents = window.webContents;
+    const pid = contents.getOSProcessId();
+    const metric = app.getAppMetrics().find((m) => m.pid === pid);
+    const privateKb = metric?.memory.privateBytes;
+    const sample: HeapSample = {
+      at: new Date(), jsUsed: null, jsLimit: null, privateBytes: privateKb === undefined ? null : privateKb * 1024,
+    };
+    if (asking || !canSend(contents)) {
+      console.log(heapLine(sample));
+      return;
+    }
+    asking = true;
+    contents.executeJavaScript('[performance.memory.usedJSHeapSize, performance.memory.jsHeapSizeLimit]')
+      .then((reply: unknown) => {
+        if (Array.isArray(reply)) [sample.jsUsed, sample.jsLimit] = reply as [number, number];
+      }, () => { /* the page went away mid-question; print what main has */ })
+      .finally(() => {
+        asking = false;
+        console.log(heapLine(sample));
+      });
+  }, HEAP_LOG_INTERVAL_MS);
+}
+
 /** Tells the renderer what only main is told: maximized, and focused. */
 function sendWindowState(window: BrowserWindow): void {
   // A crashed page still has its webContents, and a send to it only logs.
@@ -723,8 +762,9 @@ async function createWindow(): Promise<BrowserWindow> {
   // Said out loud: nothing reloads a crashed page, and without this line the
   // only trace of one was Electron's complaints about sends to it.
   window.webContents.on('render-process-gone', (_event, details) => {
-    console.error(`[renderer] gone: ${details.reason} (exit code ${details.exitCode})`);
+    console.error(crashLine(details.reason, details.exitCode, process.platform));
   });
+  if (heapLogEnabled(process.env[HEAP_LOG_ENV])) logHeap(window);
 
   if (BACKGROUND_WINDOW) {
     // A test launch: shown without activation and parked outside every
