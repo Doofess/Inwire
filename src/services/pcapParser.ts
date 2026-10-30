@@ -80,6 +80,38 @@ export const IMPORT_PATCH_WINDOW = 100_000;
  */
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 
+/** What `PcapService.frameWalk` hands back; see there. */
+export interface FrameWalk {
+  /**
+   * A fresh pass over the file's frames each call; independent passes. Past
+   * `limit` frames a pass still walks to the end, counting, but cuts nothing.
+   */
+  frames(limit?: number): Generator<ExtractedFrame, void, undefined>;
+  /** Valid once a frames() pass has run to its end; before that, 0 and the empty facts. */
+  readonly totalFrames: number;
+  readonly facts: CaptureFileFacts;
+}
+
+/**
+ * A walk over `pass`, which tells `finish` the totals when it reaches its end.
+ * The latest pass to finish is the one the walk reports; they all agree.
+ */
+function walkOf(
+  pass: (
+    limit: number,
+    finish: (totalFrames: number, facts: CaptureFileFacts) => void,
+  ) => Generator<ExtractedFrame, void, undefined>,
+): FrameWalk {
+  let totalFrames = 0;
+  let facts: CaptureFileFacts = { application: null, interfaces: [] };
+  return {
+    frames: (limit = Number.POSITIVE_INFINITY) =>
+      pass(limit, (total, found) => { totalFrames = total; facts = found; }),
+    get totalFrames() { return totalFrames; },
+    get facts() { return facts; },
+  };
+}
+
 export interface ExtractedFrame {
   rawBytes: Uint8Array;
   /**
@@ -246,12 +278,19 @@ export class PcapService {
     // No cap: the point is the frames the cap used to throw away. What bounds
     // this is the patch window above, and whatever the caller does with each
     // batch.
-    const extracted = await PcapService.extractFrames(file, Number.POSITIVE_INFINITY);
-    const host = PcapService.inferHostFromFrames(extracted.frames);
+    const walk = PcapService.frameWalk(await file.arrayBuffer());
+    // Host inference reads a prefix, so only that many frames are cut ahead of
+    // the pass; the rest are cut as dissection pulls them.
+    const prefix: ExtractedFrame[] = [];
+    for (const frame of walk.frames()) {
+      prefix.push(frame);
+      if (prefix.length >= SCORING_FRAMES) break;
+    }
+    const host = PcapService.inferHostFromFrames(prefix);
 
     let built = 0;
     const { missedPatches } = PcapService.buildPacketsInBatches(
-      extracted.frames,
+      walk.frames(),
       (batch, records) => { built += batch.length; onBatch(batch, records); },
       options.keepTrees ?? false,
       host,
@@ -262,7 +301,7 @@ export class PcapService {
       // records, and it is already waiting on a file read.
       options.record === true ? (await import('./dissect/frameRecord')).FrameRecorder : null,
     );
-    return { totalFrames: extracted.totalFrames, built, missedPatches, facts: extracted.facts };
+    return { totalFrames: walk.totalFrames, built, missedPatches, facts: walk.facts };
   }
 
   /** Every frame in the file, as a plain array. */
@@ -275,12 +314,37 @@ export class PcapService {
     return (await PcapService.parseCaptureFile(file, Number.POSITIVE_INFINITY, true)).packets;
   }
 
+  /**
+   * The first `maxFrames` frames of a file, and how many it holds in all.
+   *
+   * The walk below, collected: past the cap it keeps going over the records
+   * so the total is exact, without keeping the frames that won't load.
+   */
   public static async extractFrames(
     file: File,
     maxFrames: number,
   ): Promise<{ frames: ExtractedFrame[]; totalFrames: number; facts: CaptureFileFacts }> {
-    const arrayBuffer = await file.arrayBuffer();
+    const walk = PcapService.frameWalk(await file.arrayBuffer());
+    const frames = [...walk.frames(maxFrames)];
+    return { frames, totalFrames: walk.totalFrames, facts: walk.facts };
+  }
 
+  /**
+   * A file's frames, cut one at a time as they are asked for.
+   *
+   * `extractFrames` cut every frame into one array before dissection saw the
+   * first, which held the file twice over: the buffer, and a copy of every
+   * frame in it (#19). Here a frame is cut when the loop pulls it, so the
+   * caller can dissect it and let it go. Each frame is still its own copy
+   * rather than a view into the buffer - a view would pin the whole file for
+   * as long as one row lived.
+   *
+   * Every `frames()` call is a fresh pass from the start, so a caller can take
+   * a prefix to infer the host and then walk the lot. `totalFrames` and
+   * `facts` are the walk's and are only claimed when a pass reaches the end: a
+   * pcapng's Interface Statistics Blocks come after the frames they describe.
+   */
+  public static frameWalk(arrayBuffer: ArrayBuffer): FrameWalk {
     if (arrayBuffer.byteLength < 8) {
       throw new Error('File is too small to be a valid PCAP file.');
     }
@@ -291,7 +355,10 @@ export class PcapService {
     // so it reads identically regardless of the file's actual byte order -
     // no endianness detection needed before recognizing it.
     if (magic === 0x0a0d0d0a) {
-      return PcapService.extractPcapNgFrames(arrayBuffer, maxFrames);
+      // One walk hands each Decryption Secrets Block to the key log once,
+      // however many passes it makes: a repeated malformed line would count twice.
+      const secretsHanded = new Set<number>();
+      return walkOf((limit, finish) => PcapService.walkPcapNgFrames(arrayBuffer, limit, secretsHanded, finish));
     }
 
     if (arrayBuffer.byteLength < 24) {
@@ -329,19 +396,17 @@ export class PcapService {
     // The snaplen is the header's field before it: all a classic file says
     // about how it was taken.
     const snaplen = new DataView(arrayBuffer).getUint32(16, isLittleEndian);
-    const extracted = PcapService.extractClassicPcapFrames(
-      arrayBuffer, isLittleEndian, subSecondIsNanos, maxFrames, linktype,
-    );
-    return {
-      ...extracted,
-      facts: {
-        application: null,
-        interfaces: [{
-          linkType: linktype, name: null, description: null, filter: null,
-          snaplen: snaplenOrWhole(snaplen), received: null, dropped: null,
-        }],
-      },
+    const facts: CaptureFileFacts = {
+      application: null,
+      interfaces: [{
+        linkType: linktype, name: null, description: null, filter: null,
+        snaplen: snaplenOrWhole(snaplen), received: null, dropped: null,
+      }],
     };
+    return walkOf((limit, finish) => PcapService.walkClassicPcapFrames(
+      arrayBuffer, isLittleEndian, subSecondIsNanos, linktype, limit,
+      (totalFrames) => finish(totalFrames, facts),
+    ));
   }
 
   /**
@@ -352,15 +417,15 @@ export class PcapService {
    * variant (magic 0x4d3cb2a1 / 0xa1b23c4d) puts nanoseconds in the exact
    * same field. Reading one as the other is off by a factor of 1000.
    */
-  private static extractClassicPcapFrames(
+  private static *walkClassicPcapFrames(
     buffer: ArrayBuffer,
     isLittleEndian: boolean,
     subSecondIsNanos: boolean,
-    maxFrames: number,
     linktype: number,
-  ): { frames: ExtractedFrame[]; totalFrames: number } {
+    limit: number,
+    finish: (totalFrames: number) => void,
+  ): Generator<ExtractedFrame, void, undefined> {
     const view = new DataView(buffer);
-    const frames: ExtractedFrame[] = [];
     let totalFrames = 0;
     const nanosPerSubSecondUnit = subSecondIsNanos ? 1n : 1000n;
     const tsPrecision = subSecondIsNanos ? 9 : 6;
@@ -376,21 +441,21 @@ export class PcapService {
       if (offset + capLen > buffer.byteLength) break; // Truncated final packet
 
       totalFrames++;
-      // Past the cap the walk continues over the record headers alone, so the
-      // total is exact without holding the bytes of frames that won't load.
-      if (frames.length < maxFrames) {
-        frames.push({
+      // Past the limit the walk continues over the record headers alone, so the
+      // total is exact without cutting the bytes of frames that won't load.
+      if (totalFrames <= limit) {
+        yield {
           rawBytes: new Uint8Array(buffer.slice(offset, offset + capLen)),
           tsNanos: BigInt(tsSec) * 1_000_000_000n + BigInt(tsSubSecond) * nanosPerSubSecondUnit,
           origLen,
           tsPrecision,
           linktype,
-        });
+        };
       }
       offset += capLen;
     }
 
-    return { frames, totalFrames };
+    finish(totalFrames);
   }
 
   /**
@@ -403,13 +468,18 @@ export class PcapService {
    * name resolution, vendor-specific blocks, ...) is safely skipped using its
    * own declared length - a reader doesn't need to understand every block kind
    * to walk past it, which is the whole point of the block-based format.
+   *
+   * A generator, like the classic walk: each Enhanced Packet Block's frame is
+   * cut when it is pulled. `finish` is called when the last block is read and
+   * never if the consumer stops early.
    */
-  private static extractPcapNgFrames(
+  private static *walkPcapNgFrames(
     buffer: ArrayBuffer,
-    maxFrames: number,
-  ): { frames: ExtractedFrame[]; totalFrames: number; facts: CaptureFileFacts } {
+    limit: number,
+    secretsHanded: Set<number>,
+    finish: (totalFrames: number, facts: CaptureFileFacts) => void,
+  ): Generator<ExtractedFrame, void, undefined> {
     const view = new DataView(buffer);
-    const frames: ExtractedFrame[] = [];
     let totalFrames = 0;
     let offset = 0;
     let isLittleEndian = true;
@@ -518,7 +588,11 @@ export class PcapService {
         // the user at all.
         const secretsType = view.getUint32(offset + 8, isLittleEndian);
         const secretsLength = view.getUint32(offset + 12, isLittleEndian);
-        if (secretsType === DSB_SECRETS_TYPE_TLS_KEY_LOG && offset + 16 + secretsLength <= offset + blockLen) {
+        if (
+          secretsType === DSB_SECRETS_TYPE_TLS_KEY_LOG && offset + 16 + secretsLength <= offset + blockLen
+          && !secretsHanded.has(offset)
+        ) {
+          secretsHanded.add(offset);
           const text = utf8Decoder
             .decode(new Uint8Array(buffer, offset + 16, secretsLength));
           keyLog.add(text);
@@ -534,7 +608,7 @@ export class PcapService {
 
         if (dataStart + capLen <= buffer.byteLength) {
           totalFrames++;
-          if (frames.length >= maxFrames) {
+          if (totalFrames > limit) {
             offset += blockLen;
             continue;
           }
@@ -543,13 +617,13 @@ export class PcapService {
           // capture's tick count exceeds float64's exact-integer range, so
           // doing this as (tsHigh * 2**32 + tsLow) quantizes the timestamp.
           const ticks = (BigInt(tsHigh) << 32n) | BigInt(tsLow);
-          frames.push({
+          yield {
             rawBytes: new Uint8Array(buffer.slice(dataStart, dataStart + capLen)),
             tsNanos: ticksToNanos(ticks, resolution),
             origLen,
             tsPrecision: precisionFor(resolution),
             linktype: interfaceLinkTypes[interfaceId] ?? LINKTYPE.ETHERNET,
-          });
+          };
         }
       }
       // Every other block type carries no frame data we need.
@@ -557,7 +631,9 @@ export class PcapService {
       offset += blockLen;
     }
 
-    return { frames, totalFrames, facts };
+    // Only here: an ISB comes after the frames it describes, so the facts are
+    // not whole until the walk is.
+    finish(totalFrames, facts);
   }
 
   /**
@@ -609,7 +685,7 @@ export class PcapService {
    * same reason: a frame is only finished once it is out of patch range.
    */
   private static buildPacketsInBatches(
-    frames: ExtractedFrame[],
+    frames: Iterable<ExtractedFrame>,
     onBatch: (packets: Packet[], records?: FrameRecordEntry[]) => void,
     keepTrees = false,
     host?: HostIdentity,
