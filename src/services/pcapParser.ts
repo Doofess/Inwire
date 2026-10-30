@@ -20,6 +20,7 @@ import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { decodeNetworkLayer, nestQuotedLayers } from './dissectors/networkLayer';
 import { nestLayers } from './dissect/nestedLayers';
 import { keyLog } from './tls/keyLog';
+import { ByteWindow, READ_WINDOW_BYTES, type BlobLike } from './byteWindow';
 import { snaplenOrWhole, type CaptureFileFacts, type FileInterfaceFacts } from './captureFileFacts';
 import { DSB_SECRETS_TYPE_TLS_KEY_LOG, LINKTYPE, type InfoPatch } from './dissect/types';
 // Re-exported because it was declared here for a long time and four modules
@@ -83,10 +84,15 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 /** What `PcapService.frameWalk` hands back; see there. */
 export interface FrameWalk {
   /**
-   * A fresh pass over the file's frames each call; independent passes. Past
-   * `limit` frames a pass still walks to the end, counting, but cuts nothing.
+   * A fresh pass over the file's frames each call; independent passes, each with
+   * a window of its own. Past `limit` frames a pass still walks to the end,
+   * counting, but cuts nothing. `onLoad` hears each window load of this pass:
+   * the file offset it reached, and the file's size.
    */
-  frames(limit?: number): Generator<ExtractedFrame, void, undefined>;
+  frames(
+    limit?: number,
+    onLoad?: (end: number, size: number) => void,
+  ): AsyncGenerator<ExtractedFrame, void, undefined>;
   /** Valid once a frames() pass has run to its end; before that, 0 and the empty facts. */
   readonly totalFrames: number;
   readonly facts: CaptureFileFacts;
@@ -97,16 +103,18 @@ export interface FrameWalk {
  * The latest pass to finish is the one the walk reports; they all agree.
  */
 function walkOf(
+  windowFor: (onLoad?: (end: number, size: number) => void) => ByteWindow,
   pass: (
+    window: ByteWindow,
     limit: number,
     finish: (totalFrames: number, facts: CaptureFileFacts) => void,
-  ) => Generator<ExtractedFrame, void, undefined>,
+  ) => AsyncGenerator<ExtractedFrame, void, undefined>,
 ): FrameWalk {
   let totalFrames = 0;
   let facts: CaptureFileFacts = { application: null, interfaces: [] };
   return {
-    frames: (limit = Number.POSITIVE_INFINITY) =>
-      pass(limit, (total, found) => { totalFrames = total; facts = found; }),
+    frames: (limit = Number.POSITIVE_INFINITY, onLoad) =>
+      pass(windowFor(onLoad), limit, (total, found) => { totalFrames = total; facts = found; }),
     get totalFrames() { return totalFrames; },
     get facts() { return facts; },
   };
@@ -237,17 +245,20 @@ export class PcapService {
    * keeps only the tail, so the import is bounded by the store rather than by
    * memory.
    *
-   * `onBatch` is **synchronous**, and that is deliberate rather than
-   * unfinished. The dissection pass owns five trackers whose state is the
-   * whole reason a frame's row is not a function of its own bytes; an `await`
-   * in the middle of it would let a second import interleave with them. So the
-   * batches arrive during the pass, and the caller drops each one as it goes -
-   * which is what bounds the memory.
+   * `onBatch` is **synchronous**, and so is each frame's dissection: the pass
+   * owns five trackers whose state is the whole reason a frame's row is not a
+   * function of its own bytes, and nothing awaits in the middle of one frame.
+   * The batches arrive during the pass, and the caller drops each one as it
+   * goes - which is what bounds the memory.
    *
-   * What that does **not** do is yield to the UI. An import of a million
-   * frames blocks the main thread for the whole dissection, exactly as it did
-   * before this existed; streaming changed where the frames end up, not who is
-   * doing the work. Moving the pass off the main thread is its own step.
+   * The pass does await **between** frames, and only for a file read: the file
+   * is read in windows (`byteWindow.ts`), never as one buffer, so one over 2 GB
+   * imports (#20). That means the renderer runs between windows. What stops a
+   * second import, or a capture change, from interleaving with the trackers is
+   * `importJob.ts` and App's gates, not synchronicity. Between windows is also
+   * the only place the UI can breathe: within a window an import of a million
+   * frames still blocks the main thread, as it did before. Moving the pass off
+   * the main thread is its own step.
    *
    * Frames are numbered 1..N over the file, exactly as `parseCaptureFile`
    * numbers them, so nothing downstream can tell which route a frame took.
@@ -273,24 +284,31 @@ export class PcapService {
        * conversation. They come with their batch.
        */
       record?: boolean;
+      /**
+       * How far the main pass has read, at each window load: the file offset it
+       * reached and the file's size. Not called for the host-inference prefix.
+       */
+      onProgress?: (readBytes: number, totalBytes: number) => void;
     } = {},
   ): Promise<{ totalFrames: number; built: number; missedPatches: number; facts: CaptureFileFacts }> {
     // No cap: the point is the frames the cap used to throw away. What bounds
     // this is the patch window above, and whatever the caller does with each
     // batch.
-    const walk = PcapService.frameWalk(await file.arrayBuffer());
+    const walk = await PcapService.frameWalk(file);
     // Host inference reads a prefix, so only that many frames are cut ahead of
     // the pass; the rest are cut as dissection pulls them.
     const prefix: ExtractedFrame[] = [];
-    for (const frame of walk.frames()) {
+    for await (const frame of walk.frames()) {
       prefix.push(frame);
       if (prefix.length >= SCORING_FRAMES) break;
     }
     const host = PcapService.inferHostFromFrames(prefix);
+    // Released before the main pass: its frames are copies, and a prefix kept
+    // through a multi-gigabyte pass is memory the pass has no use for.
+    prefix.length = 0;
 
     let built = 0;
-    const { missedPatches } = PcapService.buildPacketsInBatches(
-      walk.frames(),
+    const batcher = new PacketBatcher(
       (batch, records) => { built += batch.length; onBatch(batch, records); },
       options.keepTrees ?? false,
       host,
@@ -301,6 +319,8 @@ export class PcapService {
       // records, and it is already waiting on a file read.
       options.record === true ? (await import('./dissect/frameRecord')).FrameRecorder : null,
     );
+    for await (const frame of walk.frames(undefined, options.onProgress)) batcher.push(frame);
+    const { missedPatches } = batcher.finish();
     return { totalFrames: walk.totalFrames, built, missedPatches, facts: walk.facts };
   }
 
@@ -324,8 +344,9 @@ export class PcapService {
     file: File,
     maxFrames: number,
   ): Promise<{ frames: ExtractedFrame[]; totalFrames: number; facts: CaptureFileFacts }> {
-    const walk = PcapService.frameWalk(await file.arrayBuffer());
-    const frames = [...walk.frames(maxFrames)];
+    const walk = await PcapService.frameWalk(file);
+    const frames: ExtractedFrame[] = [];
+    for await (const frame of walk.frames(maxFrames)) frames.push(frame);
     return { frames, totalFrames: walk.totalFrames, facts: walk.facts };
   }
 
@@ -339,17 +360,37 @@ export class PcapService {
    * rather than a view into the buffer - a view would pin the whole file for
    * as long as one row lived.
    *
-   * Every `frames()` call is a fresh pass from the start, so a caller can take
-   * a prefix to infer the host and then walk the lot. `totalFrames` and
-   * `facts` are the walk's and are only claimed when a pass reaches the end: a
-   * pcapng's Interface Statistics Blocks come after the frames they describe.
+   * `source` is an `ArrayBuffer` already in memory, or anything shaped like a
+   * `File`, which is then read in windows of `windowBytes` (#20): a pass awaits
+   * a read only between frames, when the next record is not resident. A record
+   * longer than a window is loaded whole. `windowBytes` is settable for the
+   * same reason `patchWindow` is - the behaviour to assert is at a window's
+   * edge, and reaching it honestly would mean a file of hundreds of megabytes.
+   *
+   * Every `frames()` call is a fresh pass from the start, with a window of its
+   * own, so a caller can take a prefix to infer the host and then walk the lot.
+   * `totalFrames` and `facts` are the walk's and are only claimed when a pass
+   * reaches the end: a pcapng's Interface Statistics Blocks come after the
+   * frames they describe.
    */
-  public static frameWalk(arrayBuffer: ArrayBuffer): FrameWalk {
-    if (arrayBuffer.byteLength < 8) {
+  public static async frameWalk(
+    source: ArrayBuffer | BlobLike,
+    windowBytes: number = READ_WINDOW_BYTES,
+  ): Promise<FrameWalk> {
+    const size = 'size' in source ? source.size : source.byteLength;
+    if (size < 8) {
       throw new Error('File is too small to be a valid PCAP file.');
     }
 
-    const magic = new DataView(arrayBuffer).getUint32(0, false);
+    // The header is read here, once: it picks the format and, for a classic
+    // file, holds everything the walk needs to know before its first record.
+    const header = 'size' in source
+      ? await source.slice(0, Math.min(size, 24)).arrayBuffer()
+      : source;
+    const windowFor = (onLoad?: (end: number, size: number) => void): ByteWindow =>
+      'size' in source ? ByteWindow.over(source, windowBytes, onLoad) : ByteWindow.whole(source);
+
+    const magic = new DataView(header).getUint32(0, false);
 
     // pcapng's Section Header Block type (0x0A0D0D0A) is a byte-palindrome,
     // so it reads identically regardless of the file's actual byte order -
@@ -358,10 +399,11 @@ export class PcapService {
       // One walk hands each Decryption Secrets Block to the key log once,
       // however many passes it makes: a repeated malformed line would count twice.
       const secretsHanded = new Set<number>();
-      return walkOf((limit, finish) => PcapService.walkPcapNgFrames(arrayBuffer, limit, secretsHanded, finish));
+      return walkOf(windowFor, (window, limit, finish) =>
+        PcapService.walkPcapNgFrames(window, limit, secretsHanded, finish));
     }
 
-    if (arrayBuffer.byteLength < 24) {
+    if (size < 24) {
       throw new Error('File is too small to be a valid PCAP file.');
     }
 
@@ -392,10 +434,10 @@ export class PcapService {
     // The global header's last field is the link type every frame in the file
     // shares. It has always been parsed by the comment at the top of this file
     // and by nothing else.
-    const linktype = new DataView(arrayBuffer).getUint32(20, isLittleEndian);
+    const linktype = new DataView(header).getUint32(20, isLittleEndian);
     // The snaplen is the header's field before it: all a classic file says
     // about how it was taken.
-    const snaplen = new DataView(arrayBuffer).getUint32(16, isLittleEndian);
+    const snaplen = new DataView(header).getUint32(16, isLittleEndian);
     const facts: CaptureFileFacts = {
       application: null,
       interfaces: [{
@@ -403,8 +445,8 @@ export class PcapService {
         snaplen: snaplenOrWhole(snaplen), received: null, dropped: null,
       }],
     };
-    return walkOf((limit, finish) => PcapService.walkClassicPcapFrames(
-      arrayBuffer, isLittleEndian, subSecondIsNanos, linktype, limit,
+    return walkOf(windowFor, (window, limit, finish) => PcapService.walkClassicPcapFrames(
+      window, isLittleEndian, subSecondIsNanos, linktype, limit,
       (totalFrames) => finish(totalFrames, facts),
     ));
   }
@@ -417,42 +459,45 @@ export class PcapService {
    * variant (magic 0x4d3cb2a1 / 0xa1b23c4d) puts nanoseconds in the exact
    * same field. Reading one as the other is off by a factor of 1000.
    */
-  private static *walkClassicPcapFrames(
-    buffer: ArrayBuffer,
+  private static async *walkClassicPcapFrames(
+    w: ByteWindow,
     isLittleEndian: boolean,
     subSecondIsNanos: boolean,
     linktype: number,
     limit: number,
     finish: (totalFrames: number) => void,
-  ): Generator<ExtractedFrame, void, undefined> {
-    const view = new DataView(buffer);
+  ): AsyncGenerator<ExtractedFrame, void, undefined> {
     let totalFrames = 0;
     const nanosPerSubSecondUnit = subSecondIsNanos ? 1n : 1000n;
     const tsPrecision = subSecondIsNanos ? 9 : 6;
     let offset = 24;
 
-    while (offset + 16 <= buffer.byteLength) {
-      const tsSec = view.getUint32(offset, isLittleEndian);
-      const tsSubSecond = view.getUint32(offset + 4, isLittleEndian);
-      const capLen = view.getUint32(offset + 8, isLittleEndian);
-      const origLen = view.getUint32(offset + 12, isLittleEndian);
-      offset += 16;
+    while (offset + 16 <= w.size) {
+      // The only awaits in the walk are file reads, here and before a body.
+      if (!w.has(offset, 16)) await w.load(offset, 16);
+      const tsSec = w.u32(offset, isLittleEndian);
+      const tsSubSecond = w.u32(offset + 4, isLittleEndian);
+      const capLen = w.u32(offset + 8, isLittleEndian);
+      const origLen = w.u32(offset + 12, isLittleEndian);
+      const dataAt = offset + 16;
 
-      if (offset + capLen > buffer.byteLength) break; // Truncated final packet
+      if (dataAt + capLen > w.size) break; // Truncated final packet
 
       totalFrames++;
       // Past the limit the walk continues over the record headers alone, so the
-      // total is exact without cutting the bytes of frames that won't load.
+      // total is exact without cutting - or reading - the bytes of frames that
+      // won't load.
       if (totalFrames <= limit) {
+        if (!w.has(dataAt, capLen)) await w.load(offset, 16 + capLen);
         yield {
-          rawBytes: new Uint8Array(buffer.slice(offset, offset + capLen)),
+          rawBytes: new Uint8Array(w.copy(dataAt, capLen)),
           tsNanos: BigInt(tsSec) * 1_000_000_000n + BigInt(tsSubSecond) * nanosPerSubSecondUnit,
           origLen,
           tsPrecision,
           linktype,
         };
       }
-      offset += capLen;
+      offset = dataAt + capLen;
     }
 
     finish(totalFrames);
@@ -472,14 +517,19 @@ export class PcapService {
    * A generator, like the classic walk: each Enhanced Packet Block's frame is
    * cut when it is pulled. `finish` is called when the last block is read and
    * never if the consumer stops early.
+   *
+   * It reads through a `ByteWindow`, awaiting a load only when the block it
+   * needs is not resident. A block type this walk acts on is loaded whole; an
+   * Enhanced Packet Block past the limit is read for its length alone, and any
+   * other type is skipped from its 8-byte header, so a vendor block of any size
+   * costs no read.
    */
-  private static *walkPcapNgFrames(
-    buffer: ArrayBuffer,
+  private static async *walkPcapNgFrames(
+    w: ByteWindow,
     limit: number,
     secretsHanded: Set<number>,
     finish: (totalFrames: number, facts: CaptureFileFacts) => void,
-  ): Generator<ExtractedFrame, void, undefined> {
-    const view = new DataView(buffer);
+  ): AsyncGenerator<ExtractedFrame, void, undefined> {
     let totalFrames = 0;
     let offset = 0;
     let isLittleEndian = true;
@@ -490,17 +540,17 @@ export class PcapService {
     const facts: CaptureFileFacts = { application: null, interfaces: [] };
     let sectionBase = 0;
     const text = (at: number, length: number): string =>
-      utf8Decoder.decode(new Uint8Array(buffer, at, length)).replace(/\0+$/, '');
+      utf8Decoder.decode(w.bytes(at, length)).replace(/\0+$/, '');
     const u64 = (at: number): number => {
-      const high = view.getUint32(at + (isLittleEndian ? 4 : 0), isLittleEndian);
-      const low = view.getUint32(at + (isLittleEndian ? 0 : 4), isLittleEndian);
+      const high = w.u32(at + (isLittleEndian ? 4 : 0), isLittleEndian);
+      const low = w.u32(at + (isLittleEndian ? 0 : 4), isLittleEndian);
       return high * 2 ** 32 + low;
     };
     /** Each option of a block's options area, as code, value offset and length. */
     const eachOption = (from: number, to: number, visit: (code: number, at: number, length: number) => void) => {
       for (let at = from; at + 4 <= to;) {
-        const code = view.getUint16(at, isLittleEndian);
-        const length = view.getUint16(at + 2, isLittleEndian);
+        const code = w.u16(at, isLittleEndian);
+        const length = w.u16(at + 2, isLittleEndian);
         if (code === 0 || at + 4 + length > to) break;
         visit(code, at + 4, length);
         at += 4 + length + ((4 - (length % 4)) % 4);
@@ -515,18 +565,28 @@ export class PcapService {
     // what `tcpdump -i any` produces - so this cannot be a per-file constant.
     let interfaceLinkTypes: number[] = [];
 
-    while (offset + 8 <= buffer.byteLength) {
-      const blockType = view.getUint32(offset, isLittleEndian);
-      const blockLen = view.getUint32(offset + 4, isLittleEndian);
+    while (offset + 8 <= w.size) {
+      // The only awaits in the walk are file reads, and only for a block that
+      // is not resident.
+      if (!w.has(offset, 8)) await w.load(offset, 8);
+      const blockType = w.u32(offset, isLittleEndian);
+      const blockLen = w.u32(offset + 4, isLittleEndian);
 
-      if (blockLen < 12 || offset + blockLen > buffer.byteLength) break; // truncated/corrupt
+      if (blockLen < 12 || offset + blockLen > w.size) break; // truncated/corrupt
+
+      if (
+        blockType === 0x0a0d0d0a || blockType === 0x00000001
+        || blockType === 0x00000005 || blockType === 0x0000000a
+      ) {
+        if (!w.has(offset, blockLen)) await w.load(offset, blockLen);
+      }
 
       if (blockType === 0x0a0d0d0a) {
         // Section Header Block - the byte-order magic right after the
         // length field re-establishes endianness for the rest of this
         // section (multiple sections, each with their own byte order, are
         // technically legal - reset per new SHB encountered).
-        const boMagicAsLE = view.getUint32(offset + 8, true);
+        const boMagicAsLE = w.u32(offset + 8, true);
         isLittleEndian = boMagicAsLE === 0x1a2b3c4d;
         interfaceResolutions = [];
         interfaceLinkTypes = [];
@@ -536,17 +596,17 @@ export class PcapService {
         });
       } else if (blockType === 0x00000001) {
         // Interface Description Block: LinkType(2) Reserved(2) SnapLen(4), then options.
-        const ifLinkType = view.getUint16(offset + 8, isLittleEndian);
+        const ifLinkType = w.u16(offset + 8, isLittleEndian);
         let tsresol = 1e-6; // default per spec: microseconds
         const optionsEnd = offset + blockLen - 4;
         let optOffset = offset + 16;
         while (optOffset + 4 <= optionsEnd) {
-          const optCode = view.getUint16(optOffset, isLittleEndian);
-          const optLen = view.getUint16(optOffset + 2, isLittleEndian);
+          const optCode = w.u16(optOffset, isLittleEndian);
+          const optLen = w.u16(optOffset + 2, isLittleEndian);
           if (optCode === 0) break; // opt_endofopt
           if (optCode === 9 && optLen >= 1 && optOffset + 4 < optionsEnd) {
             // if_tsresol: high bit set means a power of 2, otherwise a power of 10.
-            const raw = view.getUint8(optOffset + 4);
+            const raw = w.u8(optOffset + 4);
             const exponent = raw & 0x7f;
             tsresol = (raw & 0x80) !== 0 ? 2 ** -exponent : 10 ** -exponent;
           }
@@ -556,13 +616,13 @@ export class PcapService {
         interfaceLinkTypes.push(ifLinkType);
         const described: FileInterfaceFacts = {
           linkType: ifLinkType, name: null, description: null, filter: null,
-          snaplen: snaplenOrWhole(view.getUint32(offset + 12, isLittleEndian)), received: null, dropped: null,
+          snaplen: snaplenOrWhole(w.u32(offset + 12, isLittleEndian)), received: null, dropped: null,
         };
         eachOption(offset + 16, offset + blockLen - 4, (code, at, length) => {
           if (code === 2) described.name = text(at, length);                  // if_name
           if (code === 3) described.description = text(at, length);           // if_description
           // if_filter: a type byte, then the filter; 0 is a libpcap string.
-          if (code === 11 && length >= 1 && view.getUint8(at) === 0) {
+          if (code === 11 && length >= 1 && w.u8(at) === 0) {
             const expression = text(at + 1, length - 1);
             described.filter = expression.length > 0 ? expression : null;
           }
@@ -572,7 +632,7 @@ export class PcapService {
         // Interface Statistics Block: InterfaceID(4) TsHigh(4) TsLow(4), then
         // options. The newest for an interface is its answer: dumpcap writes
         // one at the end, and the agent one per file.
-        const described = facts.interfaces[sectionBase + view.getUint32(offset + 8, isLittleEndian)];
+        const described = facts.interfaces[sectionBase + w.u32(offset + 8, isLittleEndian)];
         if (described !== undefined) {
           eachOption(offset + 20, offset + blockLen - 4, (code, at, length) => {
             if (code === 4 && length === 8) described.received = u64(at);   // isb_ifrecv
@@ -586,39 +646,42 @@ export class PcapService {
         // is what makes the secrets available by the time those frames are
         // dissected. A file that carries its own secrets needs nothing from
         // the user at all.
-        const secretsType = view.getUint32(offset + 8, isLittleEndian);
-        const secretsLength = view.getUint32(offset + 12, isLittleEndian);
+        const secretsType = w.u32(offset + 8, isLittleEndian);
+        const secretsLength = w.u32(offset + 12, isLittleEndian);
         if (
           secretsType === DSB_SECRETS_TYPE_TLS_KEY_LOG && offset + 16 + secretsLength <= offset + blockLen
           && !secretsHanded.has(offset)
         ) {
           secretsHanded.add(offset);
-          const text = utf8Decoder
-            .decode(new Uint8Array(buffer, offset + 16, secretsLength));
+          const text = utf8Decoder.decode(w.bytes(offset + 16, secretsLength));
           keyLog.add(text);
         }
       } else if (blockType === 0x00000006) {
         // Enhanced Packet Block: InterfaceID(4) TsHigh(4) TsLow(4) CapLen(4) OrigLen(4), then data.
-        const interfaceId = view.getUint32(offset + 8, isLittleEndian);
-        const tsHigh = view.getUint32(offset + 12, isLittleEndian);
-        const tsLow = view.getUint32(offset + 16, isLittleEndian);
-        const capLen = view.getUint32(offset + 20, isLittleEndian);
-        const origLen = view.getUint32(offset + 24, isLittleEndian);
+        // Only its 28-byte head is loaded to start with, which is all a frame
+        // past the limit needs: its body is never read.
+        if (!w.has(offset, 28)) await w.load(offset, 28);
+        const interfaceId = w.u32(offset + 8, isLittleEndian);
+        const tsHigh = w.u32(offset + 12, isLittleEndian);
+        const tsLow = w.u32(offset + 16, isLittleEndian);
+        const capLen = w.u32(offset + 20, isLittleEndian);
+        const origLen = w.u32(offset + 24, isLittleEndian);
         const dataStart = offset + 28;
 
-        if (dataStart + capLen <= buffer.byteLength) {
+        if (dataStart + capLen <= w.size) {
           totalFrames++;
           if (totalFrames > limit) {
             offset += blockLen;
             continue;
           }
+          if (!w.has(dataStart, capLen)) await w.load(offset, Math.max(blockLen, 28 + capLen));
           const resolution = interfaceResolutions[interfaceId] ?? 1e-6;
           // Reassemble the 64-bit tick count in bigint: a nanosecond-resolution
           // capture's tick count exceeds float64's exact-integer range, so
           // doing this as (tsHigh * 2**32 + tsLow) quantizes the timestamp.
           const ticks = (BigInt(tsHigh) << 32n) | BigInt(tsLow);
           yield {
-            rawBytes: new Uint8Array(buffer.slice(dataStart, dataStart + capLen)),
+            rawBytes: new Uint8Array(w.copy(dataStart, capLen)),
             tsNanos: ticksToNanos(ticks, resolution),
             origLen,
             tsPrecision: precisionFor(resolution),
@@ -656,33 +719,8 @@ export class PcapService {
   }
 
   /**
-   * The same pass, handing frames over as it goes instead of at the end.
-   *
-   * ## Why the array cannot simply be returned
-   *
-   * A capture file bigger than the RAM buffer used to be **truncated**: the
-   * importer built `maxFrames` frames and said so in a note. The store can hold
-   * the rest, but only if the frames reach it, and they cannot all be in one
-   * array on the way - that array is the thing the cap existed to bound.
-   *
-   * ## The patch window is why this is not just a loop with a callback
-   *
-   * Dissection amends frames it has already emitted: `[TCP PDU reassembled in
-   * N]` on every segment of a multi-segment PDU, `[Reassembled in N]` for IP
-   * fragments, `dns.response_in` written onto the query by its answer, and
-   * ICMP `(reply in N)` where the round trip can be seconds. This pass applies
-   * all of those by **indexing straight into the array it is building** -
-   * `parsedPackets[patch.frameId - 1]` - which stops working the moment a
-   * frame has been handed over and dropped.
-   *
-   * So frames are held until no open patch can still reach them, exactly the
-   * way `captureWriter.ts` holds rows behind its horizon, and only then handed
-   * over. A patch that reaches back further than the window is counted rather
-   * than applied to the wrong frame - which is what an unchecked index would
-   * do, silently, to whichever frame happened to be there.
-   *
-   * The dense-field split runs on the way out rather than at the end, for the
-   * same reason: a frame is only finished once it is out of patch range.
+   * The same pass over frames already in hand; see `PacketBatcher`. The async
+   * walk (`streamCaptureFile`) feeds a batcher frame by frame instead.
    */
   private static buildPacketsInBatches(
     frames: Iterable<ExtractedFrame>,
@@ -693,129 +731,182 @@ export class PcapService {
     patchWindow = IMPORT_PATCH_WINDOW,
     Recorder: typeof FrameRecorder | null = null,
   ): { missedPatches: number } {
-    /** The window: frames built and not yet handed over, oldest first. */
-    const parsedPackets: Packet[] = [];
-    /** How many have left it, so an id still maps to a position. */
-    let shipped = 0;
-    let missedPatches = 0;
-    const fieldWriter = new FieldBlockWriter();
+    const batcher = new PacketBatcher(onBatch, keepTrees, host, batchFrames, patchWindow, Recorder);
+    for (const frame of frames) batcher.push(frame);
+    return batcher.finish();
+  }
+}
 
-    /**
-     * The frame with this id, or undefined if it is out of the window.
-     *
-     * `- shipped` is the load-bearing part: without it every patch after the
-     * first hand-over lands on the wrong offset, and `scripts/capture/
-     * import-stream.ts` fails three ways. The `id` check after it is
-     * belt-and-braces - nothing reachable makes the array and the counter
-     * disagree, and removing it fails nothing - kept because the cost of being
-     * wrong here is a cross-reference written onto an unrelated frame.
-     */
-    const held = (frameId: number): Packet | undefined => {
-      const at = frameId - 1 - shipped;
-      if (at < 0 || at >= parsedPackets.length) return undefined;
-      const packet = parsedPackets[at];
-      return packet !== undefined && packet.id === frameId ? packet : undefined;
-    };
+/**
+ * The dissection pass, handing frames over as it goes instead of at the end.
+ * `push` takes one frame and `finish` hands over what is left, so the sync path
+ * (`parseCaptureFile`) and the async one (`streamCaptureFile`, which awaits file
+ * reads between frames) run the same code.
+ *
+ * ## Why the array cannot simply be returned
+ *
+ * A capture file bigger than the RAM buffer used to be **truncated**: the
+ * importer built `maxFrames` frames and said so in a note. The store can hold
+ * the rest, but only if the frames reach it, and they cannot all be in one
+ * array on the way - that array is the thing the cap existed to bound.
+ *
+ * ## The patch window is why this is not just a loop with a callback
+ *
+ * Dissection amends frames it has already emitted: `[TCP PDU reassembled in
+ * N]` on every segment of a multi-segment PDU, `[Reassembled in N]` for IP
+ * fragments, `dns.response_in` written onto the query by its answer, and
+ * ICMP `(reply in N)` where the round trip can be seconds. This pass applies
+ * all of those by **indexing straight into the array it is building** -
+ * `parsedPackets[patch.frameId - 1]` - which stops working the moment a
+ * frame has been handed over and dropped.
+ *
+ * So frames are held until no open patch can still reach them, exactly the
+ * way `captureWriter.ts` holds rows behind its horizon, and only then handed
+ * over. A patch that reaches back further than the window is counted rather
+ * than applied to the wrong frame - which is what an unchecked index would
+ * do, silently, to whichever frame happened to be there.
+ *
+ * The dense-field split runs on the way out rather than at the end, for the
+ * same reason: a frame is only finished once it is out of patch range.
+ */
+class PacketBatcher {
+  /** The window: frames built and not yet handed over, oldest first. */
+  private readonly parsedPackets: Packet[] = [];
+  /** How many have left it, so an id still maps to a position. */
+  private shipped = 0;
+  private missedPatches = 0;
+  private readonly fieldWriter = new FieldBlockWriter();
+  private packetIndex = 1;
+  // One stage numbers across conversations, and both trackers ask it
+  // (`dissect/sequencer.ts`).
+  private readonly sequencer = new Sequencer();
+  private readonly tcpTracker = new TcpStreamTracker(this.sequencer);
+  private readonly icmpTracker = new IcmpEchoTracker();
+  private readonly quicTracker = new QuicFlowTracker();
+  private readonly dnsTracker = new DnsTracker();
+  private readonly l3Tracker = new L3Tracker(this.sequencer);
+  // Recording, every frame is dissected through a recorder in front of the
+  // trackers - the same one the live Worker uses. A frame's record waits here
+  // with the frame, and leaves with it.
+  private readonly recorder: FrameRecorder | null;
+  private readonly records = new Map<number, { record: Uint8Array; derived: Uint8Array | null }>();
 
-    /** Hands over everything past `keep`, splitting its dense fields first. */
-    const drain = (keep: number): void => {
-      while (parsedPackets.length > keep) {
-        const batch = parsedPackets.splice(0, Math.min(batchFrames, parsedPackets.length - keep));
-        // After the patches, never before: a frame leaves the window only once
-        // nothing can still amend it, and this is that moment.
-        fieldWriter.absorb(batch);
-        shipped += batch.length;
-        if (recorder === null) {
-          onBatch(batch);
-        } else {
-          const batchRecords: FrameRecordEntry[] = [];
-          for (const packet of batch) {
-            const r = records.get(packet.id);
-            if (r === undefined) continue;
-            batchRecords.push({ id: packet.id, ...r });
-            records.delete(packet.id);
-          }
-          onBatch(batch, batchRecords);
-        }
-      }
-    };
-
-    let packetIndex = 1;
-    // One stage numbers across conversations, and both trackers ask it
-    // (`dissect/sequencer.ts`).
-    const sequencer = new Sequencer();
-    const tcpTracker = new TcpStreamTracker(sequencer);
-    const icmpTracker = new IcmpEchoTracker();
-    const quicTracker = new QuicFlowTracker();
-    const dnsTracker = new DnsTracker();
-    const l3Tracker = new L3Tracker(sequencer);
-    // Recording, every frame is dissected through a recorder in front of the
-    // trackers - the same one the live Worker uses. A frame's record waits here
-    // with the frame, and leaves with it.
-    const recorder = Recorder === null ? null : new Recorder({
-      tcp: tcpTracker, quic: quicTracker, dns: dnsTracker, icmp: icmpTracker, l3: l3Tracker,
+  constructor(
+    private readonly onBatch: (packets: Packet[], records?: FrameRecordEntry[]) => void,
+    private readonly keepTrees: boolean,
+    private readonly host: HostIdentity | undefined,
+    private readonly batchFrames: number,
+    private readonly patchWindow: number,
+    Recorder: typeof FrameRecorder | null,
+  ) {
+    this.recorder = Recorder === null ? null : new Recorder({
+      tcp: this.tcpTracker, quic: this.quicTracker, dns: this.dnsTracker,
+      icmp: this.icmpTracker, l3: this.l3Tracker,
     });
-    const records = new Map<number, { record: Uint8Array; derived: Uint8Array | null }>();
+  }
 
-    for (const frame of frames) {
-      // In bigint before a float, which keeps nanosecond precision (`FrameClock`).
-      const { relativeTime, timeDelta } = sequencer.clock.fromNanos(frame.tsNanos);
-      const tsUs = Number(frame.tsNanos / 1000n);
+  /**
+   * The frame with this id, or undefined if it is out of the window.
+   *
+   * `- shipped` is the load-bearing part: without it every patch after the
+   * first hand-over lands on the wrong offset, and `scripts/capture/
+   * import-stream.ts` fails three ways. The `id` check after it is
+   * belt-and-braces - nothing reachable makes the array and the counter
+   * disagree, and removing it fails nothing - kept because the cost of being
+   * wrong here is a cross-reference written onto an unrelated frame.
+   */
+  private held(frameId: number): Packet | undefined {
+    const at = frameId - 1 - this.shipped;
+    if (at < 0 || at >= this.parsedPackets.length) return undefined;
+    const packet = this.parsedPackets[at];
+    return packet !== undefined && packet.id === frameId ? packet : undefined;
+  }
 
-      const id = packetIndex++;
-      const frameFacts = { nanosRemainder: frame.tsPrecision > 6 ? Number(frame.tsNanos % 1000n) : undefined };
-      let decoded: ReturnType<typeof decodeRawEthernetPacket>;
-      if (recorder === null) {
-        decoded = decodeRawEthernetPacket(
-          frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
-          tcpTracker, icmpTracker, quicTracker, dnsTracker, undefined, frame.linktype, l3Tracker,
-          host, frameFacts,
-        );
+  /** Hands over everything past `keep`, splitting its dense fields first. */
+  private drain(keep: number): void {
+    while (this.parsedPackets.length > keep) {
+      const batch = this.parsedPackets.splice(0, Math.min(this.batchFrames, this.parsedPackets.length - keep));
+      // After the patches, never before: a frame leaves the window only once
+      // nothing can still amend it, and this is that moment.
+      this.fieldWriter.absorb(batch);
+      this.shipped += batch.length;
+      if (this.recorder === null) {
+        this.onBatch(batch);
       } else {
-        recorder.begin();
-        const src = recorder.sources;
-        decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
-          frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
-          src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host, frameFacts,
-        ));
-        records.set(id, { record: recorder.end(), derived: recorder.endDerived() });
-      }
-      const { packet, icmpMatchedRequestFrameId, infoPatches } = decoded;
-      packet.tsPrecision = frame.tsPrecision;
-      if (frame.tsPrecision > 6) packet.tsNanos = frame.tsNanos;
-      // Dissected, then dropped: the tree has already done its work by here -
-      // it is what the fields, the Info line and the expert findings were read
-      // out of - and keeping one per frame is 89% of a buffer's memory.
-      if (!keepTrees) packet.layers = [];
-      parsedPackets.push(packet);
-
-      if (icmpMatchedRequestFrameId !== undefined) {
-        // Indexed, not searched - on the same invariant the block below states
-        // and has always relied on. As a `.find` this scanned the whole
-        // growing array once per ICMP reply, so importing a ping-heavy capture
-        // of N frames with k replies cost O(N*k); the guard on `id` is what
-        // makes the index safe if that invariant ever stops holding.
-        const requestPacket = held(icmpMatchedRequestFrameId);
-        if (requestPacket) requestPacket.info += ` (reply in ${packet.id})`;
-        else missedPatches += 1;
-      }
-      if (infoPatches) {
-        // Frame ids are 1-based positions in the window, so no search is needed.
-        for (const patch of infoPatches) {
-          const target = held(patch.frameId);
-          // The window's own packets: this pass built them and owns them.
-          if (target) applyInfoPatch(target, patch, true);
-          else missedPatches += 1;
+        const batchRecords: FrameRecordEntry[] = [];
+        for (const packet of batch) {
+          const r = this.records.get(packet.id);
+          if (r === undefined) continue;
+          batchRecords.push({ id: packet.id, ...r });
+          this.records.delete(packet.id);
         }
+        this.onBatch(batch, batchRecords);
       }
+    }
+  }
 
-      // Everything past the window is finished, and goes.
-      if (parsedPackets.length > patchWindow + batchFrames) drain(patchWindow);
+  /** Dissects one frame; hands a batch over when the window has outgrown itself. */
+  push(frame: ExtractedFrame): void {
+    const { sequencer, recorder, host } = this;
+    // In bigint before a float, which keeps nanosecond precision (`FrameClock`).
+    const { relativeTime, timeDelta } = sequencer.clock.fromNanos(frame.tsNanos);
+    const tsUs = Number(frame.tsNanos / 1000n);
+
+    const id = this.packetIndex++;
+    const frameFacts = { nanosRemainder: frame.tsPrecision > 6 ? Number(frame.tsNanos % 1000n) : undefined };
+    let decoded: ReturnType<typeof decodeRawEthernetPacket>;
+    if (recorder === null) {
+      decoded = decodeRawEthernetPacket(
+        frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
+        this.tcpTracker, this.icmpTracker, this.quicTracker, this.dnsTracker, undefined, frame.linktype, this.l3Tracker,
+        host, frameFacts,
+      );
+    } else {
+      recorder.begin();
+      const src = recorder.sources;
+      decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
+        frame.rawBytes, id, tsUs, relativeTime, timeDelta, frame.origLen,
+        src.tcp, src.icmp, src.quic, src.dns, undefined, frame.linktype, src.l3, host, frameFacts,
+      ));
+      this.records.set(id, { record: recorder.end(), derived: recorder.endDerived() });
+    }
+    const { packet, icmpMatchedRequestFrameId, infoPatches } = decoded;
+    packet.tsPrecision = frame.tsPrecision;
+    if (frame.tsPrecision > 6) packet.tsNanos = frame.tsNanos;
+    // Dissected, then dropped: the tree has already done its work by here -
+    // it is what the fields, the Info line and the expert findings were read
+    // out of - and keeping one per frame is 89% of a buffer's memory.
+    if (!this.keepTrees) packet.layers = [];
+    this.parsedPackets.push(packet);
+
+    if (icmpMatchedRequestFrameId !== undefined) {
+      // Indexed, not searched - on the same invariant the block below states
+      // and has always relied on. As a `.find` this scanned the whole
+      // growing array once per ICMP reply, so importing a ping-heavy capture
+      // of N frames with k replies cost O(N*k); the guard on `id` is what
+      // makes the index safe if that invariant ever stops holding.
+      const requestPacket = this.held(icmpMatchedRequestFrameId);
+      if (requestPacket) requestPacket.info += ` (reply in ${packet.id})`;
+      else this.missedPatches += 1;
+    }
+    if (infoPatches) {
+      // Frame ids are 1-based positions in the window, so no search is needed.
+      for (const patch of infoPatches) {
+        const target = this.held(patch.frameId);
+        // The window's own packets: this pass built them and owns them.
+        if (target) applyInfoPatch(target, patch, true);
+        else this.missedPatches += 1;
+      }
     }
 
-    // Whatever is left has nothing else coming for it.
-    drain(0);
-    return { missedPatches };
+    // Everything past the window is finished, and goes.
+    if (this.parsedPackets.length > this.patchWindow + this.batchFrames) this.drain(this.patchWindow);
+  }
+
+  /** Whatever is left has nothing else coming for it. */
+  finish(): { missedPatches: number } {
+    this.drain(0);
+    return { missedPatches: this.missedPatches };
   }
 }
 
