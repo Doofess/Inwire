@@ -363,7 +363,9 @@ export class PcapService {
    * `source` is an `ArrayBuffer` already in memory, or anything shaped like a
    * `File`, which is then read in windows of `windowBytes` (#20): a pass awaits
    * a read only between frames, when the next record is not resident. A record
-   * longer than a window is loaded whole. `windowBytes` is settable for the
+   * longer than a window is loaded whole - up to `READ_WINDOW_BYTES`: a record
+   * or block this walk loads that claims more is corrupt and ends the walk as a
+   * torn one does, whatever `windowBytes` is. `windowBytes` is settable for the
    * same reason `patchWindow` is - the behaviour to assert is at a window's
    * edge, and reaching it honestly would mean a file of hundreds of megabytes.
    *
@@ -482,6 +484,11 @@ export class PcapService {
       const dataAt = offset + 16;
 
       if (dataAt + capLen > w.size) break; // Truncated final packet
+      // Longer than a window is corrupt, and ends the walk as a torn record
+      // does: a real frame is at most a few hundred KB, and loading a claimed
+      // gigabyte would be the renderer's heap. Applied to every pass alike, so
+      // a limited pass and an unlimited one count the same frames.
+      if (capLen > READ_WINDOW_BYTES) break;
 
       totalFrames++;
       // Past the limit the walk continues over the record headers alone, so the
@@ -574,10 +581,16 @@ export class PcapService {
 
       if (blockLen < 12 || offset + blockLen > w.size) break; // truncated/corrupt
 
-      if (
-        blockType === 0x0a0d0d0a || blockType === 0x00000001
-        || blockType === 0x00000005 || blockType === 0x0000000a
-      ) {
+      const loadedWhole = blockType === 0x0a0d0d0a || blockType === 0x00000001
+        || blockType === 0x00000005 || blockType === 0x0000000a;
+      // A block this walk reads or counts, longer than a window, is corrupt and
+      // ends the walk as a torn one does: real ones are kilobytes, and loading
+      // a claimed gigabyte would be the renderer's heap. An Enhanced Packet
+      // Block counts here too, though one past the limit is never loaded, so a
+      // limited pass and an unlimited one count the same frames. Any other
+      // type is skipped from its header, at whatever length it claims.
+      if ((loadedWhole || blockType === 0x00000006) && blockLen > READ_WINDOW_BYTES) break;
+      if (loadedWhole) {
         if (!w.has(offset, blockLen)) await w.load(offset, blockLen);
       }
 
@@ -669,6 +682,9 @@ export class PcapService {
         const dataStart = offset + 28;
 
         if (dataStart + capLen <= w.size) {
+          // A body that claims more than a window, inside a block that does
+          // not, is the same corruption.
+          if (28 + capLen > READ_WINDOW_BYTES) break;
           totalFrames++;
           if (totalFrames > limit) {
             offset += blockLen;

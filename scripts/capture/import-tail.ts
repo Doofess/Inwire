@@ -13,6 +13,7 @@
 import { pcapOf } from '../parity/synthetic';
 import { importAnyFile } from '../../src/services/tabularImport';
 import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from '../../src/services/bufferBudget';
+import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -102,8 +103,10 @@ async function main() {
   const many = BYTES_RESIDENT_FRAMES + 1000;
   const manyBytes = pcapOf(Array.from({ length: many }, (_, i) => dnsQuery((i % 60000) + 1)));
   let sunkWithout = 0;
-  const released = await importAnyFile(new File([manyBytes as unknown as BlobPart], 'many.pcap'), {
+  const manyFile = () => new File([manyBytes as unknown as BlobPart], 'many.pcap');
+  const released = await importAnyFile(manyFile(), {
     onBatch: (batch) => { for (const p of batch) if (p.rawBytes.byteLength === 0) sunkWithout++; },
+    bytesStoredThrough: () => Number.POSITIVE_INFINITY,
   });
   if (released.ok !== true) throw new Error('import failed');
   const kept = released.packets;
@@ -113,6 +116,30 @@ async function main() {
     kept.slice(0, 1000).every((p) => p.rawBytes.byteLength === 0), true);
   check('... the newest BYTES_RESIDENT_FRAMES keep theirs',
     kept.slice(1000).every((p) => p.rawBytes.byteLength > 0), true);
+
+  // A row's bytes go only when the store holds them: the live path's rule
+  // (`evictOldBytes`). Without it, a store whose port is gone would leave the
+  // bytes nowhere.
+  const releasedIds = async (bytesStoredThrough?: () => number, onBatch: (batch: Packet[]) => void = sink) => {
+    const outcome = await importAnyFile(manyFile(), { onBatch, bytesStoredThrough });
+    if (outcome.ok !== true) throw new Error('import failed');
+    return outcome.packets.filter((p) => p.rawBytes.byteLength === 0).map((p) => p.id);
+  };
+  const idsUpTo = (last: number) => Array.from({ length: last }, (_, i) => i + 1);
+
+  check('a store holding frames 1-500 lets only those go',
+    await releasedIds(() => 500), idsUpTo(500));
+  check('no bytesStoredThrough releases nothing', await releasedIds(), []);
+  check('a store holding nothing releases nothing', await releasedIds(() => 0), []);
+  // The store's mark trails the sink by more than the resident window, so it
+  // starts below every row and rises batch by batch; at the end it stands at 500.
+  let lastSeen = 0;
+  check('a store whose mark rises releases up to it and no further',
+    await releasedIds(
+      () => lastSeen - (BYTES_RESIDENT_FRAMES + 500),
+      (batch) => { lastSeen = batch[batch.length - 1].id; },
+    ),
+    idsUpTo(500));
 
   if (failures > 0) {
     console.log(`\n${failures} failed`);

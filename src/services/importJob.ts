@@ -16,8 +16,15 @@ import { useSyncExternalStore } from 'react';
  * object, because that hook compares snapshots by identity.
  */
 
+/** What the last import that succeeded has to say; the panel shows it. */
+export interface ImportResult {
+  message: string;
+  notes: string[];
+}
+
 export type ImportJobState =
-  | { status: 'idle' }
+  /** `result` is the last import's, kept until the next one begins. */
+  | { status: 'idle'; result?: ImportResult }
   | { status: 'running'; fileName: string; readBytes: number; totalBytes: number };
 
 /** Why a control is shut while a file is being imported. */
@@ -57,8 +64,13 @@ export function importJobProgress(readBytes: number): void {
   publish({ ...state, readBytes });
 }
 
-export function endImportJob(): void {
-  if (state.status === 'running') publish(IDLE);
+/**
+ * Ends the job. A `result` stays in the idle state until the next import
+ * begins: the panel that would have shown it may have been unmounted while the
+ * import ran, and its own state went with it.
+ */
+export function endImportJob(result?: ImportResult): void {
+  if (state.status === 'running') publish(result === undefined ? IDLE : { status: 'idle', result });
 }
 
 export function useImportJob(): ImportJobState {

@@ -104,6 +104,10 @@ export interface TransferPanelProps {
   captureSource: CaptureSource;
   onImportPackets: (packets: Packet[], info: { filename: string; facts?: CaptureFileFacts }) => void;
   onImportBatch?: ImportBatchSink;
+  /** The import lifecycle's ends, handed to the Import panel (`importLifecycle.ts`). */
+  onImportBegin?: () => Promise<void>;
+  onImportFailed?: () => void;
+  bytesStoredThrough?: () => number;
   /** The capture on disk, whose own files "As captured" copies. */
   captureId: string | null;
   /** How many pcapng files the agent wrote for it and still keeps. 0 hides the row. */
@@ -175,6 +179,7 @@ const PHASE_LABEL: Record<ExportPhase, string> = {
 export const TransferPanel: React.FC<TransferPanelProps> = ({
   packets, appliedFilter, permissions, captureStats, belowWindow, captureFloor, captureRowCount, filteredRowCount,
   filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
+  onImportBegin, onImportFailed, bytesStoredThrough,
   captureId, capturedFileCount, capturing, importBlockedBy = null, pickRequest = 0, marks,
 }) => {
   const [scope, setScope] = useState<Scope>('capture');
@@ -598,6 +603,9 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
           <ImportPanel
             onImportPackets={onImportPackets}
             onImportBatch={onImportBatch}
+            onImportBegin={onImportBegin}
+            onImportFailed={onImportFailed}
+            bytesStoredThrough={bytesStoredThrough}
             onFailure={(filename, failure) => setRejected({ filename, failure })}
             retryToken={retryToken}
             blockedBy={busy ? 'Not while an export is running - an import would replace the frames it is reading.' : importBlockedBy}

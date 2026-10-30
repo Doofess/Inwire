@@ -54,7 +54,15 @@ const beforeAwait = handleFile.slice(0, handleFile.indexOf('await'));
 check('handleFile refuses while the job runs', beforeAwait.includes(RUNNING));
 check('handleFile no longer keys its refusal on a local busy flag', !handleFile.includes('busy'));
 check('handleFile begins the job before its first await', beforeAwait.includes('beginImportJob(file.name, file.size)'));
-check('handleFile ends the job in finally', handleFile.slice(handleFile.indexOf('finally')).includes('endImportJob()'));
+check('handleFile ends the job in finally, with the result', handleFile.slice(handleFile.indexOf('finally')).includes('endImportJob(result)'));
+check('handleFile awaits the lifecycle\'s begin before it reads the file',
+  handleFile.indexOf('await onImportBegin?.()') !== -1
+  && handleFile.indexOf('await onImportBegin?.()') < handleFile.indexOf('importAnyFile('));
+check('a refusal and a throw both undo a begun import, before the dialog',
+  (handleFile.match(/if \(begun\) onImportFailed\?\.\(\);\s+onFailure\(/g) ?? []).length === 2);
+check('the import is handed the store\'s reach for its tail', handleFile.includes('bytesStoredThrough,'));
+check('the last result is the job\'s, so a remounted panel still shows it',
+  panel.includes('job.result?.message') && panel.includes('job.result?.notes') && !panel.includes('setStatus'));
 check('handleFile hands the progress callback to the import', handleFile.includes('onProgress: importJobProgress'));
 check('the panel renders from useImportJob, so a remount shows the running import',
   panel.includes('useImportJob()') && panel.includes('importProgressText('));
@@ -82,6 +90,44 @@ const discard = between(app, 'const handleDiscardCapture = useCallback', '}, [ad
 check('Discard refuses while the job runs', discard.includes(RUNNING));
 check('...before it cancels an export or clears the session',
   discard.indexOf(RUNNING) < discard.indexOf('cancelExportForChange'));
+
+const startCapture = between(app, 'const handleStartCapture = async () => {', 'await cancelExportForChange');
+check('handleStartCapture refuses while the job runs, before anything else',
+  startCapture.includes(RUNNING));
+check('...a palette command and Ctrl+E reach it with only a render-time ref to stop them',
+  app.includes("case 'capture.start': void handleStartCapture(); return;"));
+
+const rail = readFileSync('src/components/common/ActivityRail.tsx', 'utf8');
+const confirmEffect = between(rail, 'React.useEffect(() => {\n    if (isCapturing || !restartDiscards', '}, [isCapturing');
+check('the rail\'s "Discard and start" confirm closes when Start becomes blocked',
+  confirmEffect.includes('gate.blocked !== null') && rail.includes('[isCapturing, restartDiscards, gate.blocked]'));
+
+// --- the import's order, bound in App ---------------------------------------------
+
+check('stopCaptureAndSeal hands back the drain it started',
+  app.includes('const stopCaptureAndSeal = (tellAgent: boolean): Promise<void> => {'));
+check('...resolved at once when the capture is already sealed',
+  between(app, 'const stopCaptureAndSeal =', 'stopCaptureRef.current = stopCaptureAndSeal').includes('?? Promise.resolve()'));
+const lifecycleBegin = between(app, 'const importLifecycleEffects', 'const handleImportBatch');
+check('the lifecycle seals through stopCaptureAndSeal(true) and not the bare stop',
+  /stopAndSeal: \(\) => \(isCapturingRef\.current\s+\? stopCaptureAndSeal\(true\)/.test(lifecycleBegin));
+check('...and empties the view with handleClearPackets, bypassing the Clear View gate',
+  lifecycleBegin.includes('handleClearPackets()') && !lifecycleBegin.includes('handleClearView'));
+check('...keeping the offer, so the view\'s offer stays null for the import',
+  lifecycleBegin.includes('offeredCapture(sessionMetaNow())') && lifecycleBegin.includes('setLastCapture(null)'));
+check('a failure re-offers the kept capture as Clear View does',
+  lifecycleBegin.includes('setLastCapture(kept)') && lifecycleBegin.includes('void saveSessionMeta(kept)'));
+check('a failure discards the import\'s directory and drops its derived answers',
+  lifecycleBegin.includes('captureStore.discard(captureId)') && lifecycleBegin.includes('importDerivedRef.current = null'));
+const batch = between(app, 'const handleImportBatch', 'const handleImportPackets');
+check('the first batch opens the store through the lifecycle, and no longer stops the capture itself',
+  batch.includes('importLifecycle.onBatch()') && !batch.includes('stopCaptureForImportRef'));
+check('the success path takes the capture id from the lifecycle',
+  between(app, 'const handleImportPackets', 'adoptMarks(EMPTY_MARKS)').includes('importLifecycle.succeed()'));
+check('App hands the panel the lifecycle and the store\'s reach',
+  app.includes('onImportBegin={handleImportBegin}') && app.includes('onImportFailed={handleImportFailed}')
+  && app.includes('bytesStoredThrough={bytesStoredThrough}')
+  && app.includes('captureStore.storedRange?.last ?? 0'));
 
 check('App reads the job for render-time reasons', app.includes('useImportJob()'));
 check('Settings is told why Clear View and Discard are shut',

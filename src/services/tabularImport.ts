@@ -251,13 +251,13 @@ async function importZip(file: File, maxFrames: number): Promise<ImportOutcome> 
 
 async function importCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch?: ImportBatchSink,
-  onProgress?: ImportProgress,
+  onProgress?: ImportProgress, bytesStoredThrough?: () => number,
 ): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
     const { packets, totalFrames, stored, facts } = onBatch === undefined
       ? await readWholeCapture(file, maxFrames)
-      : await readStreamedCapture(file, maxFrames, residentBytes, onBatch, onProgress);
+      : await readStreamedCapture(file, maxFrames, residentBytes, onBatch, onProgress, bytesStoredThrough);
 
     if (stored === null && totalFrames > packets.length) {
       // Only when there is nowhere to put the rest. With a sink the frames are
@@ -324,7 +324,7 @@ async function readWholeCapture(file: File, maxFrames: number): Promise<CaptureR
  */
 async function readStreamedCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch: ImportBatchSink,
-  onProgress?: ImportProgress,
+  onProgress?: ImportProgress, bytesStoredThrough?: () => number,
 ): Promise<CaptureRead> {
   const tail: Packet[] = [];
   // Each tail row's estimate, parallel to `tail`, so dropping a row subtracts
@@ -364,7 +364,17 @@ async function readStreamedCapture(
     }
     // After `onBatch`, which has handed each frame to the store: its append
     // copies the packet object there and then, so this reaches only the tail's.
-    for (; released < tail.length - BYTES_RESIDENT_FRAMES; released++) {
+    // Only a frame the store can supply is let go, as the live path's
+    // `evictOldBytes` does: rows are in id order, so the first one not yet
+    // stored ends the pass and the next batch tries again. With no way to ask,
+    // nothing is released - a tail that keeps every byte is safe, one that
+    // lets go of bytes held nowhere is not.
+    const storedThrough = bytesStoredThrough?.() ?? 0;
+    for (
+      ;
+      released < tail.length - BYTES_RESIDENT_FRAMES && tail[released].id <= storedThrough;
+      released++
+    ) {
       tail[released].rawBytes = RELEASED_BYTES;
     }
   }, { record: true, onProgress });
@@ -416,6 +426,13 @@ export interface ImportOptions {
    * the windows the capture is read in. Ignored without `onBatch`.
    */
   onProgress?: ImportProgress;
+  /**
+   * With `onBatch`: the highest frame id whose bytes the store can supply
+   * (0 = none). A tail row lets its bytes go only when it is older than the
+   * newest `BYTES_RESIDENT_FRAMES` and at or below this. Absent, no row does -
+   * the sink is not known to hold what it was handed. Ignored without `onBatch`.
+   */
+  bytesStoredThrough?: () => number;
 }
 
 export async function importAnyFile(file: File, options: ImportOptions = {}): Promise<ImportOutcome> {
@@ -426,7 +443,7 @@ export async function importAnyFile(file: File, options: ImportOptions = {}): Pr
   if (CAPTURE_EXTENSIONS.includes(extension)) {
     return importCapture(
       file, maxFrames, options.residentBytes ?? Number.POSITIVE_INFINITY, options.onBatch,
-      options.onProgress,
+      options.onProgress, options.bytesStoredThrough,
     );
   }
   if (extension === '.json') return importJson(file);

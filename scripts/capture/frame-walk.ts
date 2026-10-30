@@ -357,6 +357,102 @@ for (const [format, bytes, ts, whole] of [
   checkTrue('over 4 GiB: the file was read in more than one piece', reads.length > 1);
 }
 
+// --- a record or block claiming more than a window is corrupt -----------------------
+
+{
+  // A block this walk loads whole used to be loaded at whatever length it
+  // claimed: a corrupt SHB of 1.9 GB in a 2.7 GB file was 1.9 GB in the
+  // renderer, and past 2 GB `arrayBuffer()` rejected and the import failed.
+  // Now the walk stops there as it does at a torn record, with the totals so far.
+  const W = READ_WINDOW_BYTES;
+  type Part = { at: number; bytes: Uint8Array };
+  /** A file that is mostly zeros: only `parts` hold bytes, and `reads` records each slice. */
+  const virtualFile = (parts: Part[], size: number) => {
+    const reads: Array<[number, number]> = [];
+    const fill = (start: number, end: number): ArrayBuffer => {
+      const out = new Uint8Array(end - start);
+      for (const part of parts) {
+        const from = Math.max(start, part.at);
+        const to = Math.min(end, part.at + part.bytes.length);
+        if (from < to) out.set(part.bytes.subarray(from - part.at, to - part.at), from - start);
+      }
+      return out.buffer;
+    };
+    const blob: BlobLike = {
+      size,
+      slice: (start = 0, end = size) => {
+        reads.push([start, end]);
+        return { arrayBuffer: async () => fill(start, end) };
+      },
+    };
+    return { blob, reads, buffer: () => fill(0, size) };
+  };
+  /** A block header claiming `length`, and for an EPB a head whose own capLen is sane. */
+  const claim = (type: number, length: number, capLen = 20): Uint8Array => {
+    const out = new Uint8Array(type === 0x00000006 ? 28 : 8);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, type, true);
+    view.setUint32(4, length, true);
+    if (type === 0x00000006) { view.setUint32(20, capLen, true); view.setUint32(24, capLen, true); }
+    return out;
+  };
+
+  const ngPrefix = joined([shb(), idb(), epb(0)]);
+  const ngCases: Array<[string, Part[], number]> = [];
+  for (const [name, type] of [
+    ['ISB', 0x00000005], ['IDB', 0x00000001], ['DSB', 0x0000000a], ['EPB', 0x00000006],
+  ] as const) {
+    const length = W + 4;
+    ngCases.push([
+      `pcapng ${name} of window + 4`,
+      [{ at: 0, bytes: ngPrefix }, { at: ngPrefix.length, bytes: claim(type, length) }],
+      ngPrefix.length + length,
+    ]);
+  }
+  {
+    // The block is small; the frame it holds claims more than a window.
+    const head = claim(0x00000006, 28, W + 1);
+    ngCases.push([
+      'pcapng EPB whose capLen is window + 1',
+      [{ at: 0, bytes: ngPrefix }, { at: ngPrefix.length, bytes: head }],
+      ngPrefix.length + 28 + W + 1,
+    ]);
+  }
+  {
+    // The first block: an SHB that claims more than a window, before any frame.
+    ngCases.push(['pcapng SHB of window + 4', [{ at: 0, bytes: claim(0x0a0d0d0a, W + 4) }], W + 4]);
+  }
+
+  const classicPrefix = pcapOf([0, 1].map(frameBytes));
+  const record = new Uint8Array(16);
+  new DataView(record.buffer).setUint32(8, W + 1, true);
+  new DataView(record.buffer).setUint32(12, W + 1, true);
+  const classicCase: [string, Part[], number] = [
+    'classic record of capLen window + 1',
+    [{ at: 0, bytes: classicPrefix }, { at: classicPrefix.length, bytes: record }],
+    classicPrefix.length + 16 + W + 1,
+  ];
+
+  for (const [name, parts, size] of [...ngCases, classicCase]) {
+    const classicFile = name.startsWith('classic');
+    const before = name.includes('SHB') ? 0 : classicFile ? 2 : 1;
+    const expected = expectedFrames(before, classicFile ? classicTs : ngTs);
+    const virtual = virtualFile(parts, size);
+    for (const [via, source] of [['a blob', virtual.blob], ['a buffer', virtual.buffer()]] as const) {
+      const walk = await PcapService.frameWalk(source);
+      const frames = await collect(walk.frames());
+      sameFrames(`${name}, ${via}`, frames, expected);
+      check(`${name}, ${via}: the walk stops there, counting what it yielded`, walk.totalFrames, before);
+      // A limited pass counts by the same rule: its total is the unlimited one's.
+      const limited = await PcapService.frameWalk(source);
+      await collect(limited.frames(0));
+      check(`${name}, ${via}: frames(0) counts the same`, limited.totalFrames, before);
+    }
+    check(`${name}: no read is longer than a window`,
+      virtual.reads.filter(([start, end]) => end - start > W), []);
+  }
+}
+
 // --- progress ---------------------------------------------------------------------
 
 {

@@ -58,6 +58,26 @@ check('listeners heard begin, progress and end', heard, 3);
 check('a new begin succeeds after the end', beginImportJob('b.pcap', 10), true);
 endImportJob();
 
+// --- the last result outlives the panel ----------------------------------------
+
+const RESULT = { message: 'Imported 12 packets from a.pcap', notes: ['One row was skipped.'] };
+beginImportJob('a.pcap', 10);
+endImportJob(RESULT);
+check('a finished import leaves its result in the idle state', getImportJob(), { status: 'idle', result: RESULT });
+endImportJob();
+check('a second end changes nothing', getImportJob(), { status: 'idle', result: RESULT });
+const beforeSecond = heard;
+importJobProgress(3);
+check('progress while idle keeps the result and publishes nothing', [getImportJob(), heard], [
+  { status: 'idle', result: RESULT }, beforeSecond,
+]);
+beginImportJob('b.pcap', 10);
+check('the next import clears the result as it begins', getImportJob(), {
+  status: 'running', fileName: 'b.pcap', readBytes: 0, totalBytes: 10,
+});
+endImportJob();
+check('an import that ends with no result leaves none', getImportJob(), { status: 'idle' });
+
 stop();
 const quiet = heard;
 beginImportJob('c.pcap', 1);
