@@ -115,25 +115,28 @@ static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 /// SYSTEM with `remove_file` and `rename`, so a user who owned it, or could
 /// plant entries in it, could aim SYSTEM's delete or rename anywhere. With
 /// `harden` the folder is created, then given `LOG_DIR_SDDL` (owner
-/// Administrators, protected DACL), then any link planted under a log name is
-/// removed. A folder that is already a junction is refused rather than
-/// followed, and a folder that cannot be secured is not written to at all - nor
-/// is one where a log name is still held by a link, a directory or a file with
-/// other names after clearing. Every open of a log file declines to follow a
-/// reparse point. A
-/// hand run is not the service and cannot set the owner, so it passes false.
+/// Administrators, protected DACL), then anything planted under a log name is
+/// removed: a link, or a file another account owns. A folder that is already a
+/// junction is refused rather than followed, and a folder that cannot be
+/// secured is not written to at all - nor is one where a log name is still held
+/// by a link, a directory, a file with other names or another account's file
+/// after clearing. Every open of a log file declines to follow a reparse point.
+/// A hand run is not the service and cannot set the owner, so it passes false.
 pub fn init(directory: &Path, to_stderr: bool, harden: bool) {
     let mut unsecured: Option<io::Error> = None;
     if harden {
         match fs::create_dir_all(directory).and_then(|()| harden_directory(directory, LOG_DIR_SDDL)) {
             Ok(()) => {
-                clear_planted_links(directory);
+                // Unreadable, only SYSTEM and Administrators are trusted.
+                let own = process_user_sid().unwrap_or_default();
+                clear_planted_links(directory, &own);
                 // An entry that could not be removed is run past, not trusted:
                 // no file log, exactly as for a folder that is a junction.
-                if !log_names_are_safe(directory) {
+                if !log_names_are_safe(directory, &own) {
                     unsecured = Some(io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        "a log file name is held by a link, a directory or a file with other names",
+                        "a log file name is held by a link, a directory, a file with other names \
+                         or another account's file",
                     ));
                 }
             }
@@ -241,6 +244,7 @@ extern "system" {
     ) -> *mut c_void;
     fn GetFileInformationByHandle(file: *mut c_void, information: *mut ByHandleFileInformation) -> i32;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    fn GetCurrentProcess() -> *mut c_void;
 }
 
 #[link(name = "advapi32")]
@@ -267,6 +271,25 @@ extern "system" {
         dacl: *mut c_void,
         sacl: *mut c_void,
     ) -> u32;
+    fn GetSecurityInfo(
+        handle: *mut c_void,
+        object_type: u32,
+        information: u32,
+        owner: *mut *mut c_void,
+        group: *mut *mut c_void,
+        dacl: *mut *mut c_void,
+        sacl: *mut *mut c_void,
+        descriptor: *mut *mut c_void,
+    ) -> u32;
+    fn ConvertSidToStringSidW(sid: *mut c_void, text: *mut *mut u16) -> i32;
+    fn OpenProcessToken(process: *mut c_void, access: u32, token: *mut *mut c_void) -> i32;
+    fn GetTokenInformation(
+        token: *mut c_void,
+        class: u32,
+        information: *mut c_void,
+        length: u32,
+        returned: *mut u32,
+    ) -> i32;
 }
 
 fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
@@ -315,6 +338,14 @@ fn harden_directory_with(dir: &Path, sddl: &str, between_check_and_apply: impl F
         }
         if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) } == 0 {
             return Err(io::Error::last_os_error());
+        }
+        // A NULL DACL, set, grants everyone full control: no DACL is refused
+        // rather than applied.
+        if present == 0 || dacl.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{sddl:?} has no DACL, and applying none would grant everyone full control"),
+            ));
         }
         let mut information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
         let mut access = READ_CONTROL | WRITE_DAC;
@@ -408,6 +439,85 @@ fn link_count(path: &Path) -> io::Result<u32> {
     Ok(info.number_of_links)
 }
 
+/// A SID as `S-1-...` text.
+fn sid_text(sid: *mut c_void) -> io::Result<String> {
+    let mut text: *mut u16 = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut length = 0;
+    while unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    let sid = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
+    unsafe { LocalFree(text.cast()) };
+    Ok(sid)
+}
+
+/// The account this process runs as: SYSTEM under the SCM.
+fn process_user_sid() -> io::Result<String> {
+    const TOKEN_QUERY: u32 = 0x8;
+    const TOKEN_USER: u32 = 1;
+    let mut raw = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut needed = 0u32;
+    unsafe { GetTokenInformation(token.as_raw_handle(), TOKEN_USER, std::ptr::null_mut(), 0, &mut needed) };
+    // `u64`s so the buffer is aligned for the `SID_AND_ATTRIBUTES` at its head.
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(2)];
+    let size = (buffer.len() * 8) as u32;
+    if unsafe { GetTokenInformation(token.as_raw_handle(), TOKEN_USER, buffer.as_mut_ptr().cast(), size, &mut needed) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // `TOKEN_USER` is one `SID_AND_ATTRIBUTES`, whose first field is the SID.
+    sid_text(unsafe { *buffer.as_ptr().cast::<*mut c_void>() })
+}
+
+/// The owner of the file at `path`, read without following a reparse point.
+fn owner_sid(path: &Path) -> io::Result<String> {
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    let file = OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut owner = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let sid = sid_text(owner);
+    unsafe { LocalFree(descriptor) };
+    sid
+}
+
+/// Whether a log file owned by `owner` is the agent's: SYSTEM's,
+/// Administrators' (what a file SYSTEM creates is owned by), or the account
+/// this process runs as.
+fn trusted_owner(owner: &str, own: &str) -> bool {
+    owner == "S-1-5-18" || owner == "S-1-5-32-544" || owner == own
+}
+
+/// `trusted_owner` for the file at `path`. An owner that cannot be read is not
+/// trusted.
+fn owned_by_the_agent(path: &Path, own: &str) -> bool {
+    owner_sid(path).map_or(false, |owner| trusted_owner(&owner, own))
+}
+
 /// Whether `meta` describes something other than a plain file: a symlink, a
 /// junction or any other reparse point, or a directory.
 fn is_link_or_directory(meta: &fs::Metadata) -> bool {
@@ -415,36 +525,52 @@ fn is_link_or_directory(meta: &fs::Metadata) -> bool {
 }
 
 /// Removes what a user planted under a log name: a symlink, junction or
-/// directory, or a regular file with more than one name.
+/// directory, a regular file with more than one name, or a file another
+/// account owns.
 ///
 /// Rotation renames and deletes these names as SYSTEM, and every append opens
 /// one; a link under one is how that is aimed elsewhere. Only the entry goes,
 /// never what it points at: `remove_dir` on a junction removes the junction, and
 /// removing one name of a hard link leaves the file and its other names alone.
+///
+/// **A file a user created before the folder was first hardened** takes the
+/// hardened DACL, but the user stays its owner, and an owner can always
+/// rewrite a DACL: grant themselves write and forge the agent's lines. So a
+/// log name `own` (the agent's account) or SYSTEM or Administrators does not
+/// own goes too. The folder's `FILE_DELETE_CHILD` lets SYSTEM delete it
+/// whatever its own DACL says.
+///
 /// Errors are ignored here because `log_names_are_safe` is what decides what to
 /// do about an entry that stayed.
-fn clear_planted_links(dir: &Path) {
+fn clear_planted_links(dir: &Path, own: &str) {
     for name in log_names(dir) {
         let Ok(meta) = fs::symlink_metadata(&name) else { continue };
         if is_link_or_directory(&meta) {
             let _ = fs::remove_dir(&name).or_else(|_| fs::remove_file(&name));
-        } else if link_count(&name).map_or(false, |links| links > 1) {
+        } else if link_count(&name).map_or(false, |links| links > 1) || !owned_by_the_agent(&name, own) {
             let _ = fs::remove_file(&name);
         }
     }
 }
 
-/// True when every log name is absent or a plain regular file with one name.
+/// True when every log name is absent or a plain regular file with one name,
+/// owned by the agent's account, SYSTEM or Administrators.
 ///
 /// Checked after `clear_planted_links`: an entry that is still a reparse point,
-/// a directory or a multi-link file is one a user could remove-proof (a symlink
-/// held open without `FILE_SHARE_DELETE`, a directory with something inside),
-/// and the agent then writes no file log at all rather than rotate into it. A
-/// name whose state cannot be read counts as unsafe.
-fn log_names_are_safe(dir: &Path) -> bool {
+/// a directory, a multi-link file or another account's file is one a user
+/// could remove-proof (a symlink held open without `FILE_SHARE_DELETE`, a
+/// directory with something inside), and the agent then writes no file log at
+/// all rather than rotate into it. A name whose state cannot be read counts as
+/// unsafe.
+fn log_names_are_safe(dir: &Path, own: &str) -> bool {
     log_names(dir).iter().all(|name| match fs::symlink_metadata(name) {
         Err(error) => error.kind() == io::ErrorKind::NotFound,
-        Ok(meta) => !is_link_or_directory(&meta) && meta.is_file() && link_count(name).map_or(false, |links| links == 1),
+        Ok(meta) => {
+            !is_link_or_directory(&meta)
+                && meta.is_file()
+                && link_count(name).map_or(false, |links| links == 1)
+                && owned_by_the_agent(name, own)
+        }
     })
 }
 
@@ -907,6 +1033,23 @@ mod tests {
         assert_eq!(after.matches("(A;").count(), 2, "only the hardened entries: {after}");
     }
 
+    /// **A descriptor with no DACL is refused, not applied.** `SetSecurityInfo`
+    /// given a NULL DACL sets one, which grants everyone full control - the
+    /// opposite of hardening. `LOG_DIR_SDDL` always has one; this holds the
+    /// function to that for any descriptor it is given.
+    #[test]
+    fn a_descriptor_without_a_dacl_is_refused() {
+        for sddl in ["D:NO_ACCESS_CONTROL", "G:SY"] {
+            let dir = temp("null-dacl");
+            let before = read_dacl_sddl(&dir);
+            let refused = harden_directory(&dir, sddl);
+            let after = read_dacl_sddl(&dir);
+            let _ = fs::remove_dir(&dir);
+            assert_eq!(refused.map_err(|e| e.kind()), Err(io::ErrorKind::InvalidInput), "{sddl}");
+            assert_eq!(after, before, "{sddl} changed the folder");
+        }
+    }
+
     #[test]
     fn a_file_is_refused_as_a_log_folder() {
         let dir = temp("not-a-folder");
@@ -924,7 +1067,7 @@ mod tests {
         let target = temp("planted-target");
         fs::write(target.join("keep"), b"x").unwrap();
         mklink_junction(&dir.join("agent.log.3"), &target);
-        clear_planted_links(&dir);
+        clear_planted_links(&dir, &me());
         let gone = !dir.join("agent.log.3").exists();
         let kept = target.join("keep").exists();
         let _ = fs::remove_file(target.join("keep"));
@@ -945,11 +1088,11 @@ mod tests {
         let target = outside.join("victim");
         fs::write(&target, b"precious").unwrap();
         fs::hard_link(&target, dir.join("agent.log.2")).unwrap();
-        let unsafe_before = !log_names_are_safe(&dir);
-        clear_planted_links(&dir);
+        let unsafe_before = !log_names_are_safe(&dir, &me());
+        clear_planted_links(&dir, &me());
         let gone = !dir.join("agent.log.2").exists();
         let intact = fs::read(&target).ok();
-        let safe_after = log_names_are_safe(&dir);
+        let safe_after = log_names_are_safe(&dir, &me());
         let _ = fs::remove_file(&target);
         let _ = fs::remove_dir(&outside);
         let _ = fs::remove_dir(&dir);
@@ -968,9 +1111,9 @@ mod tests {
         let stuck = dir.join("agent.log.2");
         fs::create_dir_all(&stuck).unwrap();
         fs::write(stuck.join("inside"), b"x").unwrap();
-        let before = log_names_are_safe(&dir);
-        clear_planted_links(&dir);
-        let after = log_names_are_safe(&dir);
+        let before = log_names_are_safe(&dir, &me());
+        clear_planted_links(&dir, &me());
+        let after = log_names_are_safe(&dir, &me());
         let _ = fs::remove_file(stuck.join("inside"));
         let _ = fs::remove_dir(&stuck);
         let _ = fs::remove_dir(&dir);
@@ -981,14 +1124,54 @@ mod tests {
     #[test]
     fn plain_log_files_and_absent_names_are_safe() {
         let dir = temp("plain");
-        assert!(log_names_are_safe(&dir), "an empty folder");
+        assert!(log_names_are_safe(&dir, &me()), "an empty folder");
         fs::write(dir.join("agent.log"), b"x").unwrap();
         fs::write(dir.join("agent.log.1"), b"x").unwrap();
-        let safe = log_names_are_safe(&dir);
+        let safe = log_names_are_safe(&dir, &me());
         let _ = fs::remove_file(dir.join("agent.log"));
         let _ = fs::remove_file(dir.join("agent.log.1"));
         let _ = fs::remove_dir(&dir);
         assert!(safe);
+    }
+
+    /// The account the tests run as, which owns every file they create.
+    fn me() -> String {
+        process_user_sid().expect("the test's own SID")
+    }
+
+    #[test]
+    fn the_agents_own_files_are_trusted_and_anyone_elses_are_not() {
+        let own = "S-1-5-21-1-2-3-1001";
+        assert!(trusted_owner("S-1-5-18", own), "SYSTEM");
+        assert!(trusted_owner("S-1-5-32-544", own), "Administrators, which own what SYSTEM creates");
+        assert!(trusted_owner(own, own), "the agent's own account");
+        assert!(!trusted_owner("S-1-5-21-1-2-3-1002", own), "another user");
+        assert!(!trusted_owner(own, "S-1-5-18"), "a user's file, to an agent running as SYSTEM");
+        assert!(me().starts_with("S-1-5-"), "{}", me());
+    }
+
+    /// **A log file another account owns is planted, and goes.** Before the
+    /// folder was first hardened any user could create `agent.log`; hardening
+    /// gives it the folder's DACL but leaves the user its owner, and an owner
+    /// can rewrite the DACL and forge lines. Played here by running as if the
+    /// agent were SYSTEM: the files this test makes are then another account's.
+    #[test]
+    fn a_log_file_another_account_owns_is_removed() {
+        let dir = temp("owned");
+        fs::write(dir.join("agent.log"), b"forged").unwrap();
+        fs::write(dir.join("agent.log.1"), b"forged").unwrap();
+        let read_back = owner_sid(&dir.join("agent.log")).ok();
+        let unsafe_before = !log_names_are_safe(&dir, "S-1-5-18");
+        clear_planted_links(&dir, "S-1-5-18");
+        let gone = !dir.join("agent.log").exists() && !dir.join("agent.log.1").exists();
+        let safe_after = log_names_are_safe(&dir, "S-1-5-18");
+        let _ = fs::remove_file(dir.join("agent.log"));
+        let _ = fs::remove_file(dir.join("agent.log.1"));
+        let _ = fs::remove_dir(&dir);
+        assert_eq!(read_back, Some(me()), "the owner is read back as the account that made the file");
+        assert!(unsafe_before, "another account's file is not the agent's log");
+        assert!(gone, "both planted names were removed");
+        assert!(safe_after);
     }
 
     /// The case clearing cannot win: a user-owned file converted to a symlink
@@ -1013,7 +1196,7 @@ mod tests {
             cleanup();
             return;
         }
-        let unsafe_before = !log_names_are_safe(&dir);
+        let unsafe_before = !log_names_are_safe(&dir, &me());
         let _ = append(&log, "2026-09-20 22:14:02,123 INFO    appended through a link");
         let intact = fs::read(&target).ok();
         cleanup();

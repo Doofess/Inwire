@@ -107,8 +107,29 @@ MAX_PIPE_INSTANCES = 8
 #: first instance only, so the agent never serves a pipe someone else made.
 FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000
 
+#: ``ERROR_ACCESS_DENIED``, what ``FILE_FLAG_FIRST_PIPE_INSTANCE`` returns when
+#: the name exists, and ``ERROR_PIPE_BUSY``: the two errors that mean "the name
+#: is taken" (ADR 0068). Any other failure is a different problem.
+_NAME_TAKEN_ERRORS = (5, 231)
+
 #: Seconds before an instance the system refused is asked for again (ADR 0068).
 INSTANCE_RETRY_SECONDS = 1.0
+
+
+def _name_is_taken(error) -> bool:
+    """Whether a failed first ``CreateNamedPipe`` means the name already exists.
+
+    pywintypes.error carries the code as ``winerror`` on Windows and as
+    ``args[0]`` always; an ``OSError`` on another platform carries it only in
+    ``args``. An error with no code is not taken to mean the name exists, so the
+    log never blames a squatter for what may be a bad name. Same rule as the
+    Rust agent.
+    """
+    code = getattr(error, "winerror", None)
+    if not isinstance(code, int):
+        code = error.args[0] if error.args and isinstance(error.args[0], int) else None
+    return code in _NAME_TAKEN_ERRORS
+
 
 #: Read buffer. A batch is capped at 256 kB and a control message is smaller.
 READ_CHUNK = 64 * 1024
@@ -400,8 +421,9 @@ class PipeServer:
         #: Whether this is the agent's transport. See `start`.
         self.serving = False
         #: Why the server would not start, or None. Set when the pipe name
-        #: already existed (ADR 0068); `agent.main` reads it and ends, rather
-        #: than falling through to the WebSocket this platform must not open.
+        #: already existed or could not be created (ADR 0068); `agent.main`
+        #: reads it and ends, rather than falling through to the WebSocket
+        #: this platform must not open.
         self.refused: Optional[str] = None
         #: The instance made before the accept thread, with
         #: ``FILE_FLAG_FIRST_PIPE_INSTANCE``. See `_begin`.
@@ -439,11 +461,18 @@ class PipeServer:
         try:
             self._first_handle = self._acquire_instance()
         except Exception as error:  # noqa: BLE001 - pywintypes.error on Windows
-            log.error(
-                "%s already exists - another process created it first, "
-                "so the agent will not serve it: %s", self._name, error,
-            )
-            self.refused = "the pipe name is already in use"
+            if _name_is_taken(error):
+                log.error(
+                    "%s already exists - another process created it first, "
+                    "so the agent will not serve it: %s", self._name, error,
+                )
+                self.refused = "the pipe name is already in use"
+            else:
+                log.error(
+                    "could not create %s, so the agent will not serve it: %s",
+                    self._name, error,
+                )
+                self.refused = "the pipe could not be created"
             return
         self._accept_thread = threading.Thread(
             target=self._accept_loop, name="inwire-pipe-accept", daemon=True,

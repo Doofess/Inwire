@@ -215,16 +215,35 @@ fn a_pipe_name_someone_else_created_is_refused() {
     thread::spawn(move || {
         let _ = tx.send(server.join());
     });
+    // A failure, not a clean stop: the SCM then shows a service-specific exit
+    // code, as Python's service reports "agent failed to start".
     rx.recv_timeout(Duration::from_secs(10))
         .expect("the runtime returns by itself rather than serving the squatter's pipe")
         .expect("the runtime did not panic")
-        .expect("a refusal is a clean stop");
+        .expect_err("a refused name is a failure to start");
     assert!(shutdown.requested());
     assert_eq!(shutdown.wait(), "the pipe name is already in use");
+}
 
-    let line = name_taken_message(&name, &io::Error::from_raw_os_error(5));
-    assert!(line.contains("already exists - another process created it first"), "{line}");
-    assert!(line.contains(&name), "{line}");
+/// **Only the errors that mean the name exists are reported as that.** Any
+/// other `CreateNamedPipe` failure used to be logged as "already exists" too,
+/// which sent whoever read the log looking for a squatter that was not there.
+#[test]
+fn only_a_taken_name_is_reported_as_already_existing() {
+    let name = r"\\.\pipe\inwire-test";
+    for code in [5, 231] {
+        // ERROR_ACCESS_DENIED is what FILE_FLAG_FIRST_PIPE_INSTANCE answers when
+        // the name exists; ERROR_PIPE_BUSY when every instance is taken.
+        let (line, reason) = pipe_refusal(name, &io::Error::from_raw_os_error(code));
+        assert!(line.contains("already exists - another process created it first"), "{line}");
+        assert!(line.contains(name), "{line}");
+        assert_eq!(reason, "the pipe name is already in use");
+    }
+    // ERROR_INVALID_NAME: nobody else is involved.
+    let (line, reason) = pipe_refusal(name, &io::Error::from_raw_os_error(123));
+    assert!(line.starts_with(&format!("could not create {name}, so the agent will not serve it: ")), "{line}");
+    assert!(!line.contains("already exists"), "{line}");
+    assert_eq!(reason, "the pipe could not be created");
 }
 
 /// **The guarantee holds for every instance the agent makes while it holds
@@ -274,9 +293,9 @@ fn spare_instance(tag: &str) -> pipe::PipeInstance {
 fn a_lost_instance_is_retried_and_does_not_stop_the_agent() {
     let shutdown = Shutdown::new();
     let mut first = None;
-    let mut failing = false;
+    let failing = AtomicBool::new(false);
     let mut calls = 0u32;
-    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+    let got = next_instance(&mut first, &failing, &shutdown, Duration::from_millis(10), |_| {}, || {
         calls += 1;
         if calls < 3 {
             Err(io::Error::from_raw_os_error(231)) // ERROR_PIPE_BUSY
@@ -287,15 +306,57 @@ fn a_lost_instance_is_retried_and_does_not_stop_the_agent() {
     assert!(got.is_some(), "the third attempt created an instance");
     assert_eq!(calls, 3);
     assert!(!shutdown.requested(), "a lost slot is not a reason to stop");
-    assert!(!failing, "the streak ended with the success");
+    assert!(!failing.load(Ordering::SeqCst), "the streak ended with the success");
+}
+
+/// **One warning per failing streak, not one per acceptor.** Each of the
+/// eight acceptors kept its own streak, so one cause (a user holding the slots)
+/// logged the same line up to eight times. The streak is shared now: the
+/// acceptors fail together for two rounds and succeed together on the third.
+#[test]
+fn a_streak_shared_by_several_acceptors_is_warned_about_once() {
+    const ACCEPTORS: usize = 4;
+    let shutdown = Arc::new(Shutdown::new());
+    let failing = Arc::new(AtomicBool::new(false));
+    let warnings = Arc::new(AtomicU32::new(0));
+    let rounds = Arc::new(std::sync::Barrier::new(ACCEPTORS));
+    let threads: Vec<_> = (0..ACCEPTORS)
+        .map(|n| {
+            let (shutdown, failing, warnings, rounds) =
+                (Arc::clone(&shutdown), Arc::clone(&failing), Arc::clone(&warnings), Arc::clone(&rounds));
+            thread::spawn(move || {
+                let mut first = None;
+                let mut attempt = 0;
+                let warn = |_: &io::Error| {
+                    warnings.fetch_add(1, Ordering::SeqCst);
+                };
+                next_instance(&mut first, &failing, &shutdown, Duration::from_millis(10), warn, || {
+                    attempt += 1;
+                    // Every acceptor makes attempt N before any makes N + 1.
+                    rounds.wait();
+                    if attempt < 3 {
+                        Err(io::Error::from_raw_os_error(231))
+                    } else {
+                        Ok(spare_instance(&format!("streak-{n}")))
+                    }
+                })
+                .is_some()
+            })
+        })
+        .collect();
+    for thread in threads {
+        assert!(thread.join().unwrap(), "every acceptor got its instance");
+    }
+    assert_eq!(warnings.load(Ordering::SeqCst), 1, "one cause, one line");
+    assert!(!failing.load(Ordering::SeqCst), "the streak ended with the successes");
 }
 
 #[test]
 fn the_first_instance_is_used_before_a_new_one_is_created() {
     let shutdown = Shutdown::new();
     let mut first = Some(spare_instance("held"));
-    let mut failing = false;
-    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+    let failing = AtomicBool::new(false);
+    let got = next_instance(&mut first, &failing, &shutdown, Duration::from_millis(10), |_| {}, || {
         panic!("slot 0's first loop uses the instance made before the threads started")
     });
     assert!(got.is_some());
@@ -307,8 +368,8 @@ fn a_stop_ends_the_retrying() {
     let shutdown = Shutdown::new();
     shutdown.request("the service control manager asked");
     let mut first = None;
-    let mut failing = false;
-    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+    let failing = AtomicBool::new(false);
+    let got = next_instance(&mut first, &failing, &shutdown, Duration::from_millis(10), |_| {}, || {
         Err(io::Error::from_raw_os_error(231))
     });
     assert!(got.is_none(), "no instance is created, and no endless loop, once a stop is asked for");

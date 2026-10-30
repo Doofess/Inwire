@@ -42,9 +42,13 @@ instance. There is no descriptor that admits the app and refuses that, and
 
 - **The first instance of the name is created with
   `FILE_FLAG_FIRST_PIPE_INSTANCE`**, before any acceptor thread starts. If it
-  fails, the agent logs `{name} already exists - another process created it
-  first, so the agent will not serve it: {error}` and stops with the reason
-  "the pipe name is already in use". Slot 0 serves that instance. Both agents
+  fails with `ERROR_ACCESS_DENIED` or `ERROR_PIPE_BUSY`, the agent logs
+  `{name} already exists - another process created it first, so the agent will
+  not serve it: {error}` and stops with the reason "the pipe name is already in
+  use"; any other error is logged as `could not create {name}, ...` with the
+  reason "the pipe could not be created". Either way the start counts as a
+  failure: the Rust service reports a service-specific exit code, the Python
+  service "agent failed to start". Slot 0 serves that instance. Both agents
   do this (`pipe.rs`, `runtime.rs`; `pipe_server.py`).
 - **The agent asks for a first instance whenever it holds none, not only at
   start.** It counts the instances it holds - created and not yet dropped,
@@ -58,7 +62,8 @@ instance. There is no descriptor that admits the app and refuses that, and
   drop's close, so the count is never ahead of or behind the name; two
   acceptors at zero may both ask for a first instance, and the loser retries.
 - **A later instance the system refuses is retried, not fatal.** The acceptor
-  logs one warning per failing streak, sleeps `INSTANCE_RETRY` (one second) and
+  logs one warning per failing streak, shared by all eight acceptors in Rust
+  (Python has one acceptor), sleeps `INSTANCE_RETRY` (one second) and
   asks again until a stop is requested. Both agents do this.
 
 ## The residual, accepted

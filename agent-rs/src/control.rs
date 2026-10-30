@@ -88,8 +88,9 @@ pub trait Env {
     fn interfaces(&self) -> Vec<Interface>;
     fn log(&self, level: Level, text: &str);
     /// Ends the process a moment from now so the SCM starts a new one - see
-    /// `restart::exit_for_restart`. Only ever called when that is known to work.
-    fn schedule_restart(&self);
+    /// `restart::exit_for_restart`. Only ever called when that is known to work,
+    /// and the exit asks `Control::restart_may_proceed` for `client` first.
+    fn schedule_restart(&self, client: &str);
 }
 
 /// The capture engine: Npcap, and the threads that read it.
@@ -688,7 +689,25 @@ impl<R> Control<R> {
             return;
         }
         env.log(Level::Info, "restart_agent requested by a client");
-        env.schedule_restart();
+        env.schedule_restart(client);
+    }
+
+    /// Whether a restart `client` asked for may still exit, asked when the
+    /// exit is due.
+    ///
+    /// `restart_agent`'s gate is read `RESTART_DELAY` before the process ends,
+    /// and another client can start a capture in between; the exit would end
+    /// it. So the gate is asked again here, and a capture that is now someone
+    /// else's calls the restart off, with the `capture_busy` the asker would
+    /// have had a moment later. Same rule as Python's deferred exit.
+    pub fn restart_may_proceed(&self, env: &(impl Env + ?Sized), client: &str) -> bool {
+        let st = self.state.lock().unwrap();
+        if Self::busy(env, &st, client) {
+            env.log(Level::Warning, "restart_agent cancelled - another client started a capture");
+            env.send_to(client, &capture_busy());
+            return false;
+        }
+        true
     }
 
     /// Everything that can go wrong before a `Command` exists.
@@ -1071,7 +1090,7 @@ mod tests {
         fn log(&self, level: Level, text: &str) {
             self.logs.lock().unwrap().push((level, text.to_string()));
         }
-        fn schedule_restart(&self) {
+        fn schedule_restart(&self, _client: &str) {
             self.restarts.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -1776,6 +1795,36 @@ mod tests {
 
         control.restart_agent(&env, &allowed, "a");
         assert_eq!(env.restarts.load(Ordering::SeqCst), 1, "the owner may still restart");
+    }
+
+    /// **The gate is asked again at the moment of exiting.** The exit comes
+    /// `RESTART_DELAY` after the request, and a capture another client started
+    /// in that half second was ended by it. Now the restart is called off, and
+    /// the asker told `capture_busy`, as it would have been a moment later.
+    #[test]
+    fn a_capture_started_while_a_restart_waits_calls_the_restart_off() {
+        let env = FakeEnv::with(&["a", "b"], three());
+        let driver = FakeDriver::default();
+        let control = Control::new();
+        let allowed = RestartSupport { allowed: true, reason: String::new() };
+
+        control.restart_agent(&env, &allowed, "a");
+        assert_eq!(env.restarts.load(Ordering::SeqCst), 1, "idle, so it is scheduled");
+        env.take_logs();
+        control.command(&env, &driver, "b", &start());
+        env.take();
+        env.take_logs();
+
+        assert!(!control.restart_may_proceed(&env, "a"), "b's capture would end with the process");
+        assert_eq!(env.take(), vec![(To::One("a".into()), capture_busy())]);
+        assert_eq!(
+            env.take_logs(),
+            vec![(Level::Warning, "restart_agent cancelled - another client started a capture".into())]
+        );
+
+        // The asker's own capture is its to end.
+        assert!(control.restart_may_proceed(&env, "b"));
+        assert!(env.take().is_empty());
     }
 
     // --- the interface list, and Npcap arriving late ---------------------------
