@@ -46,7 +46,7 @@ use std::ffi::{c_void, OsStr};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::framing::{Frame, FrameReader, FramingError, FRAME_BINARY};
 use crate::outbound::{Closed, Item, Outbound};
@@ -641,17 +641,30 @@ impl ClientToken {
 /// One connected client, as the rest of the agent sees it.
 pub struct Connection {
     pub outbound: Arc<Outbound>,
+    /// The instance this connection is served on, so a send that overflows the
+    /// control cap can end the session itself (see `send`). Weak, because the
+    /// session owns the instance and this must not keep it open.
+    instance: Mutex<Option<Weak<PipeInstance>>>,
 }
 
 impl Connection {
     pub fn new() -> Self {
+        Self::with_limits(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES, MAX_CONTROL_BYTES)
+    }
+
+    /// A connection with its own queue bounds, so a test can reach the control
+    /// cap without queueing 4 MB.
+    pub fn with_limits(max_frames: usize, max_bytes: usize, max_control_bytes: usize) -> Self {
         Self {
-            outbound: Arc::new(Outbound::new(
-                MAX_OUTBOUND_FRAMES,
-                MAX_OUTBOUND_BYTES,
-                MAX_CONTROL_BYTES,
-            )),
+            outbound: Arc::new(Outbound::new(max_frames, max_bytes, max_control_bytes)),
+            instance: Mutex::new(None),
         }
+    }
+
+    /// Records the instance this connection is served on. Called when the
+    /// session starts.
+    pub fn bind(&self, instance: &Arc<PipeInstance>) {
+        *self.instance.lock().expect("connection mutex") = Some(Arc::downgrade(instance));
     }
 
     /// Queues one frame. `Err` once the writer has given up.
@@ -662,11 +675,24 @@ impl Connection {
     ///
     /// **Only a binary frame may be shed.** A JSON frame is a control message,
     /// and shedding one loses something the app was never told it lost.
+    ///
+    /// **A send that overflows the control cap ends the session here**, not in
+    /// the writer. The backlog only grows while the writer is blocked in
+    /// `GetOverlappedResult(INFINITE)` on a write the client never drains, and
+    /// a writer in that state never pops the `Shutdown` the overflow queued -
+    /// so left to it, the session stayed in the client table for good.
+    /// `disconnect` cancels that write as well as the reader's read.
     pub fn send(&self, kind: u8, payload: &[u8], records: u64) -> Result<(), SendError> {
         let framed = crate::framing::encode_frame(kind, payload).map_err(SendError::Framing)?;
-        self.outbound
-            .push(framed, records, kind == FRAME_BINARY)
-            .map_err(SendError::Gone)
+        let pushed = self.outbound.push(framed, records, kind == FRAME_BINARY);
+        if pushed.is_err() && self.outbound.overflowed() {
+            // Taken, so the session is ended once however many sends follow.
+            let bound = self.instance.lock().expect("connection mutex").take();
+            if let Some(instance) = bound.and_then(|weak| weak.upgrade()) {
+                disconnect(&instance);
+            }
+        }
+        pushed.map_err(SendError::Gone)
     }
 
     /// **The kernel checked the descriptor before this handle existed.**

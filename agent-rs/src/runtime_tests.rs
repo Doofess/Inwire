@@ -278,6 +278,56 @@ fn a_stop_ends_the_retrying() {
     assert!(got.is_none(), "no instance is created, and no endless loop, once a stop is asked for");
 }
 
+/// **A client that stops reading is dropped, not parked.** The writer is stuck
+/// in `GetOverlappedResult(INFINITE)` on a write the client never drains, so it
+/// can never pop the `Shutdown` the control cap queues; the session has to be
+/// ended from the side that pushed. Without that it stayed in `clients` for
+/// good - connected as far as the watchdog and `busy` were concerned, and every
+/// send to it failing.
+#[test]
+fn a_client_that_stops_reading_has_its_session_ended() {
+    let name = private_pipe("deaf");
+    let instance = Arc::new(pipe::create_instance(&name, pipe::PIPE_SDDL, 2, true).unwrap());
+    // Held to the end: dropping it would break the pipe from the client's side,
+    // which is the other way this session could finish.
+    let Some(_client) = Client::connect(&name) else { return };
+    pipe::accept(&instance).expect("the client connected");
+
+    let shared = new_shared(
+        &Arc::new(Shutdown::new()),
+        Hardware::NPCAP,
+        RestartSupport { allowed: false, reason: restart::NOT_THE_SERVICE.into() },
+    );
+    // 64 kB of control backlog: a pipe buffer's worth, so a few messages fill
+    // the pipe and the rest queue behind the stuck write.
+    let connection = Arc::new(Connection::with_limits(4096, 32 * 1024 * 1024, 64 * 1024));
+    let (done, ended) = mpsc::channel();
+    {
+        let (shared, connection) = (Arc::clone(&shared), Arc::clone(&connection));
+        thread::spawn(move || {
+            let _ = done.send(serve_with(shared, instance, "deaf".into(), connection));
+        });
+    }
+
+    let padding = "x".repeat(16 * 1024);
+    let message = json!({ "type": "agent_log", "pad": padding }).to_string();
+    let mut refused = false;
+    for _ in 0..400 {
+        if connection.send(FRAME_JSON, message.as_bytes(), 0).is_err() {
+            refused = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(refused, "the control cap was reached and the send was refused");
+
+    ended
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the session ended by itself instead of waiting on a client that never reads")
+        .expect("a client that stops reading is not an error");
+    assert!(shared.clients.lock().unwrap().is_empty(), "the session left the client table");
+}
+
 static NPCAP_ARRIVED: AtomicBool = AtomicBool::new(false);
 
 /// Npcap as a machine sees it before the Update Center has installed it - until

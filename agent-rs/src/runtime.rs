@@ -1439,7 +1439,18 @@ fn start_output(
 
 /// Serves one connected client until its pipe closes.
 fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io::Result<()> {
-    let connection = Arc::new(Connection::new());
+    serve_with(shared, instance, client, Arc::new(Connection::new()))
+}
+
+/// `serve`, with the connection given rather than made - which is what lets a
+/// test hold the sending side of a session it is also serving.
+fn serve_with(
+    shared: Arc<Shared>,
+    instance: Arc<PipeInstance>,
+    client: String,
+    connection: Arc<Connection>,
+) -> io::Result<()> {
+    connection.bind(&instance);
     let total = {
         let mut clients = shared.clients.lock().unwrap();
         clients.insert(client.clone(), Arc::clone(&connection));
