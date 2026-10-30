@@ -5,14 +5,13 @@ import type { InfoPatch } from '../services/dissect/types';
 import type { FrameBatch } from '../services/pipelineClient';
 import { FieldBlockWriter } from '../services/dissect/fieldSplit';
 import { captureStore } from '../services/capture/captureClient';
+import { BYTES_RESIDENT_FRAMES } from '../services/bufferBudget';
 import {
   adoptAccounting, commitBatch, prepareBatch, freshAccounting, dropBelowFloor, type BufferAccounting,
 } from '../services/packetBuffer';
 
 /** How often the ingest queue is drained into React state. */
 const PACKET_FLUSH_MS = 100;
-/** How many of the newest frames keep their raw bytes resident. */
-const BYTES_RESIDENT_FRAMES = 25000;
 
 /**
  * The packet buffer: the frames the app is holding, and everything that decides

@@ -108,6 +108,8 @@ interface SettingsPaneProps {
   captureStorage: CaptureStorageState;
   /** Deletes the stored capture. The only thing in the app that does. */
   onDiscardCapture: () => void;
+  /** Why Clear View and Discard are shut (a file is being imported), or null. */
+  importBlockedBy?: string | null;
   /** The display-filter presets, shared with the header's Presets dropdown. */
   filterPresetLibrary: FilterPresetLibrary;
   onFilterPresetLibraryChange: (library: FilterPresetLibrary) => void;
@@ -148,6 +150,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   onClearPackets,
   captureStorage,
   onDiscardCapture,
+  importBlockedBy = null,
   filterPresetLibrary,
   onFilterPresetLibraryChange,
   agentStatus,
@@ -413,7 +416,8 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={onClearPackets}
-                        disabled={totalPacketsCount === 0}
+                        disabled={totalPacketsCount === 0 || importBlockedBy !== null}
+                        title={importBlockedBy ?? undefined}
                         className={DRIVER_ACTION_BUTTON_CLASS}
                       >
                         <Eraser className="w-3.5 h-3.5" />
@@ -421,7 +425,8 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                       </button>
                       <button
                         onClick={onDiscardCapture}
-                        disabled={captureStorage.bytesOnDisk === 0 && totalPacketsCount === 0}
+                        disabled={(captureStorage.bytesOnDisk === 0 && totalPacketsCount === 0) || importBlockedBy !== null}
+                        title={importBlockedBy ?? undefined}
                         className={DESTRUCTIVE_ACTION_BUTTON_CLASS}
                       >
                         <Trash className="w-3.5 h-3.5" />

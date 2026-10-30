@@ -12,6 +12,10 @@
  * can take each as it is cut and let it go. `extractFrames` is the same walk,
  * collected - 15 scripts call it and none may notice.
  *
+ * The walk is also what reads the file (#20): it takes a `File`, reads it in
+ * windows (`byteWindow.ts`) and awaits only between frames, so a file past 2 GB
+ * is no longer one buffer.
+ *
  * ## What is pinned
  *
  * - A walk yields what the file holds, field for field, for both formats,
@@ -28,9 +32,14 @@
  *   `extractFrames` always did.
  * - A pcapng's Decryption Secrets Block reaches the key log once per walk, not
  *   once per pass: a streamed import makes two, and the panel counts bad lines.
+ * - A record split across two windows - a header, or a body - yields the frame
+ *   an in-memory read does, at window sizes that cut at every offset in turn.
+ * - A file of over 4 GiB walks with exact offsets, and no read is longer than a
+ *   window: an unknown block is skipped from its header, its body never loaded.
  */
 import { pcapOf } from '../parity/synthetic';
 import { DSB_SECRETS_TYPE_TLS_KEY_LOG } from '../../src/services/dissect/types';
+import { READ_WINDOW_BYTES, type BlobLike } from '../../src/services/byteWindow';
 import { PcapService } from '../../src/services/pcapParser';
 import { keyLog } from '../../src/services/tls/keyLog';
 import type { ExtractedFrame } from '../../src/services/pcapParser';
@@ -61,60 +70,78 @@ const asFile = (bytes: Uint8Array, name: string): File =>
 const bufferOf = (bytes: Uint8Array): ArrayBuffer =>
   bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 
+/** The bytes as a blob that is not a `File`, so only `size` and `slice` are used. */
+const blobOf = (bytes: Uint8Array): BlobLike => ({
+  size: bytes.length,
+  slice: (start = 0, end = bytes.length) => ({
+    arrayBuffer: async () => bufferOf(bytes.subarray(start, end)),
+  }),
+});
+
+// --- pcapng, built block by block ------------------------------------------------
+
+const u32 = (v: number) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+const u16 = (v: number) => [v & 0xff, (v >>> 8) & 0xff];
+const u64 = (v: number) => [...u32(v >>> 0), ...u32(Math.floor(v / 2 ** 32))];
+const pad = (n: number) => new Array((4 - (n % 4)) % 4).fill(0);
+const option = (code: number, value: number[]) => [...u16(code), ...u16(value.length), ...value, ...pad(value.length)];
+
+function block(type: number, body: number[]): Uint8Array {
+  const out = new Uint8Array(12 + body.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, type, true);
+  view.setUint32(4, out.length, true);
+  out.set(body, 8);
+  view.setUint32(out.length - 4, out.length, true);
+  return out;
+}
+
+/** SHB: byte-order magic, version 1.0, unknown section length, shb_userappl. */
+const shb = (): Uint8Array => block(0x0a0d0d0a, [
+  ...u32(0x1a2b3c4d), ...u16(1), ...u16(0), ...u64(0xffffffff * 2 ** 32 + 0xffffffff),
+  ...option(4, [...'walker'].map((c) => c.charCodeAt(0))), ...u16(0), ...u16(0),
+]);
+/** IDB: Ethernet, snaplen 0 (whole frames), if_name. */
+const idb = (): Uint8Array => block(0x00000001, [
+  ...u16(1), ...u16(0), ...u32(0),
+  ...option(2, [...'eth9'].map((c) => c.charCodeAt(0))), ...u16(0), ...u16(0),
+]);
+/** An EPB holding `frameBytes(i)`, stamped 1,000,000 + i microseconds. */
+const epb = (i: number): Uint8Array => {
+  const data = [...frameBytes(i)];
+  return block(0x00000006, [
+    ...u32(0), ...u32(0), ...u32(1_000_000 + i), ...u32(data.length), ...u32(data.length),
+    ...data, ...pad(data.length),
+  ]);
+};
+/** ISB: the interface's counters, which no frame precedes. */
+const isb = (): Uint8Array => block(0x00000005, [
+  ...u32(0), ...u32(0), ...u32(0),
+  ...option(4, u64(1234)), ...option(5, u64(56)), ...u16(0), ...u16(0),
+]);
+
+const joined = (blocks: Uint8Array[]): Uint8Array => {
+  const out = new Uint8Array(blocks.reduce((n, b) => n + b.length, 0));
+  let at = 0;
+  for (const b of blocks) { out.set(b, at); at += b.length; }
+  return out;
+};
+
 /**
  * A pcapng: SHB, one IDB, `count` EPBs, then an ISB after the last of them -
  * and, given `secrets`, a TLS key-log DSB ahead of the frames.
  */
 function pcapngOf(count: number, secrets?: string): Uint8Array {
-  const blocks: Uint8Array[] = [];
-  const block = (type: number, body: number[]): Uint8Array => {
-    const out = new Uint8Array(12 + body.length);
-    const view = new DataView(out.buffer);
-    view.setUint32(0, type, true);
-    view.setUint32(4, out.length, true);
-    out.set(body, 8);
-    view.setUint32(out.length - 4, out.length, true);
-    return out;
-  };
-  const u32 = (v: number) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
-  const u16 = (v: number) => [v & 0xff, (v >>> 8) & 0xff];
-  const u64 = (v: number) => [...u32(v >>> 0), ...u32(Math.floor(v / 2 ** 32))];
-  const pad = (n: number) => new Array((4 - (n % 4)) % 4).fill(0);
-  const option = (code: number, value: number[]) => [...u16(code), ...u16(value.length), ...value, ...pad(value.length)];
-
-  // SHB: byte-order magic, version 1.0, unknown section length, shb_userappl.
-  blocks.push(block(0x0a0d0d0a, [
-    ...u32(0x1a2b3c4d), ...u16(1), ...u16(0), ...u64(0xffffffff * 2 ** 32 + 0xffffffff),
-    ...option(4, [...'walker'].map((c) => c.charCodeAt(0))), ...u16(0), ...u16(0),
-  ]));
-  // IDB: Ethernet, snaplen 0 (whole frames), if_name.
-  blocks.push(block(0x00000001, [
-    ...u16(1), ...u16(0), ...u32(0),
-    ...option(2, [...'eth9'].map((c) => c.charCodeAt(0))), ...u16(0), ...u16(0),
-  ]));
+  const blocks: Uint8Array[] = [shb(), idb()];
   if (secrets !== undefined) {
     const text = [...new TextEncoder().encode(secrets)];
     blocks.push(block(0x0000000a, [
       ...u32(DSB_SECRETS_TYPE_TLS_KEY_LOG), ...u32(text.length), ...text, ...pad(text.length),
     ]));
   }
-  for (let i = 0; i < count; i++) {
-    const data = [...frameBytes(i)];
-    blocks.push(block(0x00000006, [
-      ...u32(0), ...u32(0), ...u32(1_000_000 + i), ...u32(data.length), ...u32(data.length),
-      ...data, ...pad(data.length),
-    ]));
-  }
-  // ISB, last: the interface's counters, which no frame precedes.
-  blocks.push(block(0x00000005, [
-    ...u32(0), ...u32(0), ...u32(0),
-    ...option(4, u64(1234)), ...option(5, u64(56)), ...u16(0), ...u16(0),
-  ]));
-
-  const out = new Uint8Array(blocks.reduce((n, b) => n + b.length, 0));
-  let at = 0;
-  for (const b of blocks) { out.set(b, at); at += b.length; }
-  return out;
+  for (let i = 0; i < count; i++) blocks.push(epb(i));
+  blocks.push(isb());
+  return joined(blocks);
 }
 
 /**
@@ -131,7 +158,11 @@ const classicTs = (i: number) => BigInt(1_700_000_000 + i) * 1_000_000_000n;
 const ngTs = (i: number) => BigInt(1_000_000 + i) * 1_000n;
 
 /** Every frame of one pass, with the pass left to run to its end. */
-const collect = (pass: Iterable<ExtractedFrame>): ExtractedFrame[] => [...pass];
+const collect = async (pass: AsyncIterable<ExtractedFrame>): Promise<ExtractedFrame[]> => {
+  const out: ExtractedFrame[] = [];
+  for await (const frame of pass) out.push(frame);
+  return out;
+};
 
 function sameFrames(name: string, walked: ExtractedFrame[], expected: ExtractedFrame[]): void {
   check(`${name}: same count`, walked.length, expected.length);
@@ -153,9 +184,9 @@ const classicBytes = pcapOf([0, 1, 2, 3, 4].map(frameBytes));
 const classic = bufferOf(classicBytes);
 const classicExtracted = await PcapService.extractFrames(asFile(classicBytes, 'five.pcap'), Number.POSITIVE_INFINITY);
 {
-  const walk = PcapService.frameWalk(classic);
+  const walk = await PcapService.frameWalk(classic);
   check('classic: before a pass, nothing is claimed', [walk.totalFrames, walk.facts.interfaces.length], [0, 0]);
-  const frames = collect(walk.frames());
+  const frames = await collect(walk.frames());
   sameFrames('classic', frames, expectedFrames(5, classicTs));
   check('classic: totalFrames', walk.totalFrames, 5);
   check('classic: extractFrames collects the same facts', walk.facts, classicExtracted.facts);
@@ -169,8 +200,8 @@ const ngBytes = pcapngOf(5);
 const ng = bufferOf(ngBytes);
 const ngExtracted = await PcapService.extractFrames(asFile(ngBytes, 'five.pcapng'), Number.POSITIVE_INFINITY);
 {
-  const walk = PcapService.frameWalk(ng);
-  const frames = collect(walk.frames());
+  const walk = await PcapService.frameWalk(ng);
+  const frames = await collect(walk.frames());
   sameFrames('pcapng', frames, expectedFrames(5, ngTs));
   check('pcapng: totalFrames', walk.totalFrames, 5);
   check('pcapng: extractFrames collects the same facts', walk.facts, ngExtracted.facts);
@@ -186,24 +217,27 @@ const ngExtracted = await PcapService.extractFrames(asFile(ngBytes, 'five.pcapng
 
 {
   // Review Focus 2: five frames, far below SCORING_FRAMES.
-  const walk = PcapService.frameWalk(ng);
-  const first = collect(walk.frames());
-  const second = collect(walk.frames());
+  const walk = await PcapService.frameWalk(ng);
+  const first = await collect(walk.frames());
+  const second = await collect(walk.frames());
   check('two passes: both yield every frame', [first.length, second.length], [5, 5]);
   sameFrames('two passes: the second equals the first', second, first);
   check('two passes: facts are still complete', walk.facts, ngExtracted.facts);
 }
 {
   // A prefix pass abandoned early, then the full one.
-  const walk = PcapService.frameWalk(ng);
-  for (const _frame of walk.frames()) break;
-  const full = collect(walk.frames());
+  const walk = await PcapService.frameWalk(ng);
+  for await (const _frame of walk.frames()) break;
+  const full = await collect(walk.frames());
   check('abandoned pass: the next one yields every frame', full.length, 5);
   check('abandoned pass: totalFrames', walk.totalFrames, 5);
   check('abandoned pass: facts are complete', walk.facts, ngExtracted.facts);
 }
 
 // --- a truncated trailing record -------------------------------------------------
+
+// Window sizes that end inside the torn record, and one that holds the file.
+const WINDOW_SIZES = [16, 17, 29, 64, 1000];
 
 {
   // Review Focus 4: the last header claims 1000 bytes and 10 follow.
@@ -214,10 +248,15 @@ const ngExtracted = await PcapService.extractFrames(asFile(ngBytes, 'five.pcapng
   view.setUint32(good.length + 8, 1000, true);
   view.setUint32(good.length + 12, 1000, true);
   const expected = await PcapService.extractFrames(asFile(torn, 'torn.pcap'), Number.POSITIVE_INFINITY);
-  const walk = PcapService.frameWalk(bufferOf(torn));
-  const frames = collect(walk.frames());
+  const walk = await PcapService.frameWalk(bufferOf(torn));
+  const frames = await collect(walk.frames());
   sameFrames('truncated record', frames, expectedFrames(3, classicTs));
   check('truncated record: totalFrames', [walk.totalFrames, expected.totalFrames], [3, 3]);
+  for (const size of WINDOW_SIZES) {
+    const windowed = await PcapService.frameWalk(blobOf(torn), size);
+    const got = await collect(windowed.frames());
+    check(`truncated record, window ${size}: three frames, three counted`, [got.length, windowed.totalFrames], [3, 3]);
+  }
 }
 {
   // The same for pcapng: a trailing EPB whose length claims 1000 bytes and 20 follow.
@@ -227,24 +266,217 @@ const ngExtracted = await PcapService.extractFrames(asFile(ngBytes, 'five.pcapng
   const view = new DataView(torn.buffer);
   view.setUint32(good.length, 0x00000006, true);
   view.setUint32(good.length + 4, 1000, true);
-  const walk = PcapService.frameWalk(bufferOf(torn));
-  const frames = collect(walk.frames());
+  const walk = await PcapService.frameWalk(bufferOf(torn));
+  const frames = await collect(walk.frames());
   sameFrames('truncated pcapng block', frames, expectedFrames(3, ngTs));
   check('truncated pcapng block: totalFrames', walk.totalFrames, 3);
+  for (const size of WINDOW_SIZES) {
+    const windowed = await PcapService.frameWalk(blobOf(torn), size);
+    const got = await collect(windowed.frames());
+    check(`truncated pcapng block, window ${size}: three frames, three counted`, [got.length, windowed.totalFrames], [3, 3]);
+  }
+}
+
+// --- a record split across windows --------------------------------------------------
+
+for (const [format, bytes, ts, whole] of [
+  ['classic', classicBytes, classicTs, classicExtracted],
+  ['pcapng', ngBytes, ngTs, ngExtracted],
+] as const) {
+  // Review Focus 1: every window size cuts the file at different offsets, so
+  // some header and some body is split in each.
+  for (const size of WINDOW_SIZES) {
+    const walk = await PcapService.frameWalk(blobOf(bytes), size);
+    const frames = await collect(walk.frames());
+    sameFrames(`${format}, window ${size}`, frames, expectedFrames(5, ts));
+    check(`${format}, window ${size}: totalFrames and facts`,
+      [walk.totalFrames, walk.facts], [5, whole.facts]);
+  }
+  // A File is a BlobLike too, at the real window size.
+  const fromFile = await PcapService.frameWalk(asFile(bytes, `five.${format}`));
+  sameFrames(`${format} from a File`, await collect(fromFile.frames()), expectedFrames(5, ts));
+  check(`${format} from a File: totalFrames and facts`, [fromFile.totalFrames, fromFile.facts], [5, whole.facts]);
+}
+
+// --- a file over 4 GiB --------------------------------------------------------------
+
+{
+  // Review Focus 2. SHB, IDB, EPB 1, an unknown block of 2.5 GiB, EPB 2 (which
+  // starts past 2^31), an unknown block of 2 GiB, EPB 3 (past 2^32), ISB. The
+  // unknown blocks are only a header: their bodies are never asked for, and the
+  // virtual file would not be allocatable if they were.
+  const unknownHeader = (length: number): Uint8Array => {
+    const out = new Uint8Array(8);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, 0x00000bad, true);
+    view.setUint32(4, length, true);
+    return out;
+  };
+  const GIB = 2 ** 30;
+  const parts: Array<{ at: number; bytes: Uint8Array }> = [];
+  let at = 0;
+  const lay = (bytes: Uint8Array, span = bytes.length) => { parts.push({ at, bytes }); at += span; };
+  lay(shb()); lay(idb()); lay(epb(0));
+  lay(unknownHeader(2.5 * GIB), 2.5 * GIB);
+  const epb2At = at;
+  lay(epb(1));
+  lay(unknownHeader(2 * GIB), 2 * GIB);
+  const epb3At = at;
+  lay(epb(2)); lay(isb());
+  const size = at;
+
+  const reads: Array<[number, number]> = [];
+  const virtual: BlobLike = {
+    size,
+    slice: (start = 0, end = size) => {
+      reads.push([start, end]);
+      return {
+        arrayBuffer: async () => {
+          const out = new Uint8Array(end - start);
+          for (const part of parts) {
+            const from = Math.max(start, part.at);
+            const to = Math.min(end, part.at + part.bytes.length);
+            if (from < to) out.set(part.bytes.subarray(from - part.at, to - part.at), from - start);
+          }
+          return out.buffer;
+        },
+      };
+    },
+  };
+
+  checkTrue('over 4 GiB: the file is over 4 GiB, and its frames start past 2^31 and 2^32',
+    size > 2 ** 32 && epb2At > 2 ** 31 && epb3At > 2 ** 32);
+  const walk = await PcapService.frameWalk(virtual);
+  const frames = await collect(walk.frames());
+  sameFrames('over 4 GiB', frames, expectedFrames(3, ngTs));
+  check('over 4 GiB: totalFrames', walk.totalFrames, 3);
+  check('over 4 GiB: the trailing ISB was read',
+    [walk.facts.interfaces[0]?.received, walk.facts.interfaces[0]?.dropped], [1234, 56]);
+  check('over 4 GiB: no read is longer than a window',
+    reads.filter(([start, end]) => end - start > READ_WINDOW_BYTES), []);
+  checkTrue('over 4 GiB: the file was read in more than one piece', reads.length > 1);
+}
+
+// --- a record or block claiming more than a window is corrupt -----------------------
+
+{
+  // A block this walk loads whole used to be loaded at whatever length it
+  // claimed: a corrupt SHB of 1.9 GB in a 2.7 GB file was 1.9 GB in the
+  // renderer, and past 2 GB `arrayBuffer()` rejected and the import failed.
+  // Now the walk stops there as it does at a torn record, with the totals so far.
+  const W = READ_WINDOW_BYTES;
+  type Part = { at: number; bytes: Uint8Array };
+  /** A file that is mostly zeros: only `parts` hold bytes, and `reads` records each slice. */
+  const virtualFile = (parts: Part[], size: number) => {
+    const reads: Array<[number, number]> = [];
+    const fill = (start: number, end: number): ArrayBuffer => {
+      const out = new Uint8Array(end - start);
+      for (const part of parts) {
+        const from = Math.max(start, part.at);
+        const to = Math.min(end, part.at + part.bytes.length);
+        if (from < to) out.set(part.bytes.subarray(from - part.at, to - part.at), from - start);
+      }
+      return out.buffer;
+    };
+    const blob: BlobLike = {
+      size,
+      slice: (start = 0, end = size) => {
+        reads.push([start, end]);
+        return { arrayBuffer: async () => fill(start, end) };
+      },
+    };
+    return { blob, reads, buffer: () => fill(0, size) };
+  };
+  /** A block header claiming `length`, and for an EPB a head whose own capLen is sane. */
+  const claim = (type: number, length: number, capLen = 20): Uint8Array => {
+    const out = new Uint8Array(type === 0x00000006 ? 28 : 8);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, type, true);
+    view.setUint32(4, length, true);
+    if (type === 0x00000006) { view.setUint32(20, capLen, true); view.setUint32(24, capLen, true); }
+    return out;
+  };
+
+  const ngPrefix = joined([shb(), idb(), epb(0)]);
+  const ngCases: Array<[string, Part[], number]> = [];
+  for (const [name, type] of [
+    ['ISB', 0x00000005], ['IDB', 0x00000001], ['DSB', 0x0000000a], ['EPB', 0x00000006],
+  ] as const) {
+    const length = W + 4;
+    ngCases.push([
+      `pcapng ${name} of window + 4`,
+      [{ at: 0, bytes: ngPrefix }, { at: ngPrefix.length, bytes: claim(type, length) }],
+      ngPrefix.length + length,
+    ]);
+  }
+  {
+    // The block is small; the frame it holds claims more than a window.
+    const head = claim(0x00000006, 28, W + 1);
+    ngCases.push([
+      'pcapng EPB whose capLen is window + 1',
+      [{ at: 0, bytes: ngPrefix }, { at: ngPrefix.length, bytes: head }],
+      ngPrefix.length + 28 + W + 1,
+    ]);
+  }
+  {
+    // The first block: an SHB that claims more than a window, before any frame.
+    ngCases.push(['pcapng SHB of window + 4', [{ at: 0, bytes: claim(0x0a0d0d0a, W + 4) }], W + 4]);
+  }
+
+  const classicPrefix = pcapOf([0, 1].map(frameBytes));
+  const record = new Uint8Array(16);
+  new DataView(record.buffer).setUint32(8, W + 1, true);
+  new DataView(record.buffer).setUint32(12, W + 1, true);
+  const classicCase: [string, Part[], number] = [
+    'classic record of capLen window + 1',
+    [{ at: 0, bytes: classicPrefix }, { at: classicPrefix.length, bytes: record }],
+    classicPrefix.length + 16 + W + 1,
+  ];
+
+  for (const [name, parts, size] of [...ngCases, classicCase]) {
+    const classicFile = name.startsWith('classic');
+    const before = name.includes('SHB') ? 0 : classicFile ? 2 : 1;
+    const expected = expectedFrames(before, classicFile ? classicTs : ngTs);
+    const virtual = virtualFile(parts, size);
+    for (const [via, source] of [['a blob', virtual.blob], ['a buffer', virtual.buffer()]] as const) {
+      const walk = await PcapService.frameWalk(source);
+      const frames = await collect(walk.frames());
+      sameFrames(`${name}, ${via}`, frames, expected);
+      check(`${name}, ${via}: the walk stops there, counting what it yielded`, walk.totalFrames, before);
+      // A limited pass counts by the same rule: its total is the unlimited one's.
+      const limited = await PcapService.frameWalk(source);
+      await collect(limited.frames(0));
+      check(`${name}, ${via}: frames(0) counts the same`, limited.totalFrames, before);
+    }
+    check(`${name}: no read is longer than a window`,
+      virtual.reads.filter(([start, end]) => end - start > W), []);
+  }
+}
+
+// --- progress ---------------------------------------------------------------------
+
+{
+  const walk = await PcapService.frameWalk(blobOf(ngBytes), 100);
+  const ends: number[] = [];
+  const sizes = new Set<number>();
+  await collect(walk.frames(undefined, (end, size) => { ends.push(end); sizes.add(size); }));
+  checkTrue('progress: several loads, each further than the last',
+    ends.length > 1 && ends.every((end, i) => i === 0 || end > ends[i - 1]));
+  check('progress: the last load reaches the file\'s size', [ends.at(-1), [...sizes]], [ngBytes.length, [ngBytes.length]]);
 }
 
 // --- laziness --------------------------------------------------------------------
 
 {
   const three = bufferOf(pcapOf([0, 1, 2].map(frameBytes)));
-  const walk = PcapService.frameWalk(three);
+  const walk = await PcapService.frameWalk(three);
   const pass = walk.frames();
-  const one = pass.next();
+  const one = await pass.next();
   // Frame 2's data starts after the header (24), frame 1 (16 + 20) and its own header (16).
   const secondAt = 24 + 16 + frameBytes(0).length + 16;
   const before = new Uint8Array(three)[secondAt];
   new Uint8Array(three)[secondAt] = (before + 1) & 0xff;
-  const two = pass.next();
+  const two = await pass.next();
   check('lazy: frame 1 was cut before the file changed', one.value?.rawBytes[0], frameBytes(0)[0]);
   check('lazy: frame 2 is cut when it is pulled', two.value?.rawBytes[0], (before + 1) & 0xff);
 }
@@ -263,8 +495,9 @@ const ngExtracted = await PcapService.extractFrames(asFile(ngBytes, 'five.pcapng
 // --- a limited pass cuts no frame past its limit -------------------------------------
 
 for (const [format, buffer] of [['classic', classic], ['pcapng', ng]] as const) {
-  // Counted at the cut itself: past the limit only record headers are read.
-  const walk = PcapService.frameWalk(buffer);
+  // Counted at the cut itself, `ByteWindow.copy`: past the limit only record
+  // headers are read.
+  const walk = await PcapService.frameWalk(buffer);
   const slice = ArrayBuffer.prototype.slice;
   let cuts = 0;
   ArrayBuffer.prototype.slice = function (this: ArrayBuffer, ...args: [number?, number?]) {
@@ -273,7 +506,7 @@ for (const [format, buffer] of [['classic', classic], ['pcapng', ng]] as const) 
   };
   let frames: ExtractedFrame[];
   try {
-    frames = collect(walk.frames(3));
+    frames = await collect(walk.frames(3));
   } finally {
     ArrayBuffer.prototype.slice = slice;
   }
@@ -288,10 +521,15 @@ for (const [format, buffer] of [['classic', classic], ['pcapng', ng]] as const) 
   // the secrets block is ahead of both, and its malformed line counts once.
   const secrets = pcapngOf(5, 'NOT A KEY LOG LINE\n');
   keyLog.clear();
-  const walk = PcapService.frameWalk(bufferOf(secrets));
-  collect(walk.frames());
-  collect(walk.frames());
+  const walk = await PcapService.frameWalk(bufferOf(secrets));
+  await collect(walk.frames());
+  await collect(walk.frames());
   check('DSB: two passes over one walk count its bad line once', keyLog.stats().ignored, 1);
+  keyLog.clear();
+  const windowed = await PcapService.frameWalk(blobOf(secrets), 16);
+  await collect(windowed.frames());
+  await collect(windowed.frames());
+  check('DSB: two windowed passes count its bad line once', keyLog.stats().ignored, 1);
   keyLog.clear();
   await PcapService.streamCaptureFile(asFile(secrets, 'secrets.pcapng'), () => {});
   check('DSB: a streamed import counts its bad line once', keyLog.stats().ignored, 1);

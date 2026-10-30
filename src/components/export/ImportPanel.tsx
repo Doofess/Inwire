@@ -8,6 +8,10 @@ import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
 import type { CaptureFileFacts } from '../../services/captureFileFacts';
+import {
+  beginImportJob, endImportJob, getImportJob, importJobProgress, useImportJob, type ImportResult,
+} from '../../services/importJob';
+import { importProgressText } from '../../lib/importProgress';
 
 /**
  * The Import half of the Import/Export centre.
@@ -33,6 +37,24 @@ interface ImportPanelProps {
    * below says so.
    */
   onImportBatch?: ImportBatchSink;
+  /**
+   * Called before the file is read, and awaited: a live capture is stopped and
+   * sealed and the view emptied here, so nothing the renderer does between the
+   * file's windows can reach the capture the import is writing
+   * (`importLifecycle.ts`). Rejects when that cannot be done.
+   */
+  onImportBegin?: () => Promise<void>;
+  /**
+   * The import failed after `onImportBegin` resolved: discard what it wrote
+   * and give the previous capture back. Called before `onFailure`.
+   */
+  onImportFailed?: () => void;
+  /**
+   * The highest frame id the store can already supply bytes for (0 = none), so
+   * the import's RAM tail releases a row's raw bytes only when the store has
+   * them.
+   */
+  bytesStoredThrough?: () => number;
   onFailure: (filename: string, failure: ImportFailure) => void;
   /** Set when the error dialog's "Choose another file" reopens the picker. */
   retryToken: number;
@@ -48,14 +70,22 @@ interface ImportPanelProps {
 export const ImportPanel: React.FC<ImportPanelProps> = ({
   onImportPackets,
   onImportBatch,
+  onImportBegin,
+  onImportFailed,
+  bytesStoredThrough,
   onFailure,
   retryToken,
   blockedBy = null,
 }) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [notes, setNotes] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  // Whether an import is running is `importJob.ts`'s, not this panel's: the side
+  // bar can be closed and reopened mid-import, and a remounted panel must still
+  // refuse a second one and still show where the first has got to. So is the
+  // last result, for the same reason: it can arrive while the panel is closed.
+  const job = useImportJob();
+  const busy = job.status === 'running';
+  const status = job.status === 'idle' ? job.result?.message ?? null : null;
+  const notes = job.status === 'idle' ? job.result?.notes ?? [] : [];
   const [dragging, setDragging] = useState(false);
   // The import may not outgrow the buffer the app is set to hold.
   const [perf] = usePreferenceValue(performanceStore);
@@ -67,13 +97,17 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   }, [retryToken]);
 
   const handleFile = async (file: File | undefined) => {
-    if (!file || busy || blockedBy !== null) return;
+    // Read from the store, not from the render's copy: this closure can be old.
+    if (!file || getImportJob().status === 'running' || blockedBy !== null) return;
 
-    setBusy(true);
-    setStatus(`Reading ${file.name}...`);
-    setNotes([]);
+    beginImportJob(file.name, file.size);
+    let result: ImportResult | undefined;
+    // Whether `onImportBegin` resolved: only then is there anything to undo.
+    let begun = false;
 
     try {
+      await onImportBegin?.();
+      begun = true;
       // With a sink the file is imported whole and the rest is on disk, so the
       // budget's BYTES bound what stays resident (`residentBytes`, measured per
       // row); the frame count is only a ceiling beside it. Without a sink
@@ -84,25 +118,29 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         maxFrames: framesForBudget(budget, AVERAGE_FRAME_BYTES),
         residentBytes: budget,
         onBatch: onImportBatch,
+        onProgress: importJobProgress,
+        bytesStoredThrough,
       });
       if (outcome.ok === false) {
-        setStatus(null);
+        if (begun) onImportFailed?.();
         onFailure(file.name, outcome.failure);
         return;
       }
       // The name travels with the frames: it is the capture's source in
       // everything exported from them.
       onImportPackets(outcome.packets, { filename: file.name, facts: outcome.facts });
-      setStatus(`Imported ${outcome.packets.length.toLocaleString()} packets from ${file.name}`);
-      setNotes(outcome.notes);
+      result = {
+        message: `Imported ${outcome.packets.length.toLocaleString()} packets from ${file.name}`,
+        notes: outcome.notes,
+      };
     } catch (err) {
-      setStatus(null);
+      if (begun) onImportFailed?.();
       onFailure(file.name, {
         kind: 'unreadable',
         message: err instanceof Error ? err.message : 'This file could not be imported.',
       });
     } finally {
-      setBusy(false);
+      endImportJob(result);
     }
   };
 
@@ -176,7 +214,11 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         </p>
       </div>
 
-      {status && (
+      {job.status === 'running' ? (
+        <div className="text-muted-foreground font-medium" role="status">
+          {importProgressText(job.fileName, job.readBytes, job.totalBytes)}
+        </div>
+      ) : status && (
         <div className="text-emerald-500 flex items-start gap-1.5 font-medium">
           <Check className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{status}</span>

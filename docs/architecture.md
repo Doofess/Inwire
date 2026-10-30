@@ -295,10 +295,15 @@ See [ADR 0051](decisions/0051-the-version-is-0x-in-development.md).
 
 Live capture dissects in the Worker. File import currently runs
 `PcapService.streamCaptureFile` in the renderer, streams batches to the store
-and keeps a bounded newest window. It still reads the input with one
-`arrayBuffer()` and blocks renderer dissection time; streaming output does not
-make the input or parsing asynchronous. `IMPORT_PATCH_WINDOW` preserves earlier
-frames long enough for cross-frame amendments.
+and keeps a bounded newest window. It reads the file in windows of
+`READ_WINDOW_BYTES` (64 MiB, `byteWindow.ts`), so a file of any size imports
+with about one window resident (#20). Dissection stays synchronous per frame;
+the pass awaits only a file read between frames, so the renderer runs between
+windows. Because it does, an import is a job (`importJob.ts`): a second import
+is refused, the panel shows a progress line that survives the side bar being
+closed, and Start, a scheduled capture, Reopen, Clear View, Discard and export
+wait for it with a reason. `IMPORT_PATCH_WINDOW` preserves earlier frames long
+enough for cross-frame amendments.
 
 `pcapParser.ts` is the front door. `dissectors/linkLayer.ts` reads link type;
 network, TCP, UDP and portless dispatch are separate modules. L3 fragments use

@@ -145,6 +145,8 @@ import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
 import type { CaptureSource } from './services/export/captureMeta';
 import type { CaptureFileFacts } from './services/captureFileFacts';
 import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
+import { getImportJob, IMPORT_RUNNING_REASON, IMPORT_RUNNING_START, useImportJob } from './services/importJob';
+import { createImportLifecycle, type ImportEffects } from './services/importLifecycle';
 import { FilterEngine } from './services/filterEngine';
 import { pushRecentFilter, recentFiltersStore } from './services/recentFilters';
 
@@ -779,6 +781,9 @@ export default function App() {
   lastCaptureRef.current = lastCapture;
   /** True while `reopenLastCapture` runs, from its first read to its last row. */
   const [reopening, setReopening] = useState(false);
+  // A file being imported, for the reasons shown at render. The handlers that
+  // must refuse one read `getImportJob()` instead, which is never a render old.
+  const importRunning = useImportJob().status === 'running';
   // Bumped by the welcome's "Open a capture file…"; the Export / Import panel
   // opens its file picker when it changes. Reset when the panel goes away, so a
   // stale count cannot open the picker the next time the panel is shown.
@@ -957,7 +962,10 @@ export default function App() {
   // reason, rather than by a refusal after the click.
   const startBlockedReason = agentBlocksStart(agentHealth)
     ?? (reopening ? 'Reopening the last capture - Start waits for it.' : null)
+    ?? (importRunning ? IMPORT_RUNNING_START : null)
     ?? filterBlocksStart(captureFilterVerdict) ?? ringProblem(captureOptions);
+  // What every other control that would change the capture says meanwhile.
+  const importBlockedReason = importRunning ? IMPORT_RUNNING_REASON : null;
   const startBlockedRef = useRef(startBlockedReason);
   startBlockedRef.current = startBlockedReason;
   const filterToCheck = effectiveFilter(captureOptions);
@@ -987,43 +995,37 @@ export default function App() {
    * `tellAgent` is false when the agent has already stopped. **Once per
    * capture**: Stop is answered by the agent's own `idle`, which arrives here
    * too, and a second seal would be a second `finish` racing the first.
+   *
+   * **Answers the seal**: the promise settles once the store has been told to
+   * finish, and a call for a capture already sealed answers the seal still in
+   * flight, or settles at once. An import awaits it (`importLifecycle.ts`)
+   * before it points the store at its own capture.
    */
   const sealedCaptureRef = useRef<string | null>(null);
-  const stopCaptureAndSeal = (tellAgent: boolean) => {
+  const sealInFlightRef = useRef<Promise<void> | null>(null);
+  const stopCaptureAndSeal = (tellAgent: boolean): Promise<void> => {
     if (tellAgent) sendAgentCommand({ type: 'stop_capture' });
     isCapturingRef.current = false;
     setIsCapturing(false);
     captureStartedAtRef.current = null;
     const id = captureIdRef.current;
-    if (id !== null && sealedCaptureRef.current === id) return;
+    if (id !== null && sealedCaptureRef.current === id) return sealInFlightRef.current ?? Promise.resolve();
     sealedCaptureRef.current = id;
     // A finish sent straight away overtook the tail the Worker still held in
     // its ordering window, which then sat staged until the store next closed.
     // The drain puts the tail's bytes and records in the store and its rows in
     // the queue; `flushNow` sends those rows on this same port, ahead of the
     // finish.
-    void pipeline.drain().then(() => {
+    const sealed: Promise<void> = pipeline.drain().then(() => {
       flushNow();
       captureStore.finish();
+      if (sealInFlightRef.current === sealed) sealInFlightRef.current = null;
     });
+    sealInFlightRef.current = sealed;
+    return sealed;
   };
   stopCaptureRef.current = stopCaptureAndSeal;
   autoPauseRef.current = () => stopCaptureAndSeal(true);
-  /**
-   * An import replaces the capture, so a live one has to actually stop - not
-   * only read as stopped. Setting `isCapturing` alone left the agent sniffing,
-   * its drop counters refilled a second later, and every export of the
-   * imported file then printed the live capture's losses as its own. The same
-   * stop the Stop button sends. Assigned every render, like the one above,
-   * because the import's batch callback is memoized with no deps.
-   */
-  const stopCaptureForImportRef = useRef<() => void>(() => {});
-  stopCaptureForImportRef.current = () => {
-    if (!isCapturingRef.current) return;
-    sendAgentCommand({ type: 'stop_capture' });
-    setIsCapturing(false);
-    captureStartedAtRef.current = null;
-  };
 
   // --- the capture schedule ---------------------------------------------------
   /**
@@ -1062,6 +1064,10 @@ export default function App() {
     }
     if (restoringRef.current) {
       setNavNotice('Scheduled capture skipped: the last capture was being reopened.');
+      return false;
+    }
+    if (getImportJob().status === 'running') {
+      setNavNotice('Scheduled capture skipped: a file was being imported.');
       return false;
     }
     handleClearPackets();
@@ -1221,6 +1227,8 @@ export default function App() {
   const reopenLastCapture = async (): Promise<void> => {
     const meta = lastCaptureRef.current;
     if (meta === null || isCapturingRef.current || restoringRef.current) return;
+    // An import replaces the capture this would read, and re-opens the store.
+    if (getImportJob().status === 'running') return;
     restoringRef.current = true;
     setReopening(true);
     setLastCapture(null);
@@ -2423,6 +2431,9 @@ export default function App() {
    * the clear and resurrect part of the previous capture.
    */
   const handleStartCapture = async () => {
+    // The palette and Ctrl+E reach this guarded only by a render-time ref; the
+    // job is read live. A Start here would replace the capture the import writes.
+    if (getImportJob().status === 'running') return;
     // Before anything touches the store: an export reading the previous
     // capture ends - its file removed - and says why, rather than reading on
     // into the new one (`cancelExportForChange`). Every Start goes through
@@ -2537,6 +2548,7 @@ export default function App() {
    * capturing: that capture goes on, into the same directory.
    */
   const handleClearView = () => {
+    if (getImportJob().status === 'running') return;
     const offer = isCapturingRef.current ? null : offeredCapture(sessionMetaNow());
     handleClearPackets();
     if (offer !== null) {
@@ -2555,6 +2567,7 @@ export default function App() {
    * (docs/decisions/0012-stored-captures-persist.md).
    */
   const handleDiscardCapture = useCallback(async () => {
+    if (getImportJob().status === 'running') return;
     await cancelExportForChange('the capture was discarded');
     await clearSession();
     setSelectedPacket(null);
@@ -2766,19 +2779,89 @@ export default function App() {
   }, [streamToFollow, view, setView]);
 
   /**
-   * The capture directory an import is writing into, while it writes.
-   *
-   * Opened on the first batch rather than before the file is read: a file that
-   * turns out not to be a capture, or that fails to parse, must not leave an
-   * empty directory behind for the next startup to find and restore from.
-   */
-  const importCaptureIdRef = useRef<string | null>(null);
-  /**
    * The import's decrypted answers (ADR 0049), held until the import's reset
    * has emptied the Worker's and then handed over. Memory only, and never to
    * the store.
    */
   const importDerivedRef = useRef<DerivedStore | null>(null);
+
+  /**
+   * What an import does, and in what order (`services/importLifecycle.ts`,
+   * which holds the order; this binds the effects).
+   *
+   * **The import stops the capture first, and waits for the seal.** It reads
+   * its file a window at a time, so the renderer runs between windows; the
+   * agent's stop notice used to land there and seal the store the import had
+   * re-opened, part-way. Sealed first, the notice finds the capture already
+   * sealed (`stopCaptureAndSeal`) and does nothing. Late frames cannot follow
+   * it into the import's store either: the Worker's drain sets its own
+   * `capturing` false, and a batch that arrives while it is false is dropped
+   * (`receiveBatch`) - the same thing that makes Stop then Start safe. The
+   * agent really is told to stop, or its drop counters would refill and every
+   * export would print the live capture's losses as the file's.
+   *
+   * **The view is emptied before the file is read**, with the capture it held
+   * kept aside as an offer. The store is the import's from the first batch, and
+   * a row older than the resident tail reads its bytes from whatever the store
+   * holds (`captureStore.readBytes` has no capture id), so the old rows would
+   * show the import's frames. `handleClearPackets` and not `handleClearView`:
+   * the latter refuses while an import runs, which is now.
+   *
+   * **A failed import gives the previous capture back**: its directory is only
+   * pruned on success, so the offer still points at something.
+   *
+   * Effects are read through a ref, assigned every render, because the batch
+   * callback is memoized with no deps and the lifecycle outlives a render.
+   */
+  const importLifecycleEffects: ImportEffects<SessionMeta> = {
+    capturing: () => isCapturingRef.current || sealInFlightRef.current !== null,
+    stopAndSeal: () => (isCapturingRef.current
+      ? stopCaptureAndSeal(true)
+      : sealInFlightRef.current ?? Promise.resolve()),
+    currentOffer: () => offeredCapture(sessionMetaNow()),
+    clearView: () => {
+      setLastCapture(null);
+      handleClearPackets();
+    },
+    newCaptureId,
+    openStore: (captureId) => {
+      // Before the store is re-opened. The panel shuts the import while an
+      // export runs; this is the other door, and the export's reader refuses
+      // to read on across the re-open either way (`guardedReader`).
+      cancelExportJob('an import started');
+      // An import is a new capture with no marks of its own.
+      adoptMarks(EMPTY_MARKS);
+      // The Worker's budget, so an import keeps what a live capture would.
+      importDerivedRef.current = new DerivedStore(derivedBudgetRef.current);
+      captureStore.begin(captureId);
+    },
+    discardStore: (captureId) => {
+      captureStore.discard(captureId);
+      importDerivedRef.current = null;
+    },
+    sealStore: (captureId) => {
+      captureStore.finish();
+      captureIdRef.current = captureId;
+    },
+    // The previous capture's directory goes, the same rule Start follows.
+    pruneOthers: (captureId) => captureStore.prune([captureId]),
+    // What a relaunch offers, too: the throttled write may be seconds behind.
+    offer: (kept) => {
+      setLastCapture(kept);
+      void saveSessionMeta(kept);
+    },
+  };
+  const importEffectsRef = useRef(importLifecycleEffects);
+  importEffectsRef.current = importLifecycleEffects;
+  const [importLifecycle] = useState(() => createImportLifecycle<SessionMeta>(() => importEffectsRef.current));
+  const handleImportBegin = async (): Promise<void> => {
+    // Unreachable past the job's own refusal; thrown rather than ignored so a
+    // second import cannot go on to write into the first one's store.
+    if (!(await importLifecycle.begin())) throw new Error('A file is already being imported.');
+  };
+  const handleImportFailed = (): void => importLifecycle.fail();
+  /** What the store can already supply bytes for, so the import's tail keeps the rest. */
+  const bytesStoredThrough = (): number => captureStore.storedRange?.last ?? 0;
 
   /**
    * Every frame an import produced, on its way to disk.
@@ -2790,21 +2873,9 @@ export default function App() {
    * it scrolls into a live capture's history.
    */
   const handleImportBatch = useCallback((batch: Packet[], records: FrameRecordEntry[]) => {
-    if (importCaptureIdRef.current === null) {
-      // Before the store is re-opened. The panel shuts the import while an
-      // export runs; this is the other door, and the export's reader refuses
-      // to read on across the re-open either way (`guardedReader`).
-      cancelExportJob('an import started');
-      stopCaptureForImportRef.current();
-      importCaptureIdRef.current = newCaptureId();
-      // The offered capture is pruned when this one is stored, as Start's is.
-      setLastCapture(null);
-      // An import is a new capture with no marks of its own.
-      adoptMarks(EMPTY_MARKS);
-      // The Worker's budget, so an import keeps what a live capture would.
-      importDerivedRef.current = new DerivedStore(derivedBudgetRef.current);
-      captureStore.begin(importCaptureIdRef.current);
-    }
+    // The first batch opens the store; the offered capture is pruned when this
+    // one is stored, as Start's is.
+    importLifecycle.onBatch();
     // Records first, so each is in the store before its frame: a record that
     // arrives after its frame's chunk has sealed is dropped (ADR 0049).
     captureStore.appendRecords(records);
@@ -2815,7 +2886,6 @@ export default function App() {
   }, []);
 
   const handleImportPackets = (imported: Packet[], info?: { filename: string; facts?: CaptureFileFacts }) => {
-    stopCaptureForImportRef.current();
     setIsCapturing(false);
     setCaptureSource(info
       ? { kind: 'import', fileName: info.filename, ...(info.facts === undefined ? {} : { facts: info.facts }) }
@@ -2841,13 +2911,7 @@ export default function App() {
     // An import that reached the store owns a capture directory now, so the
     // frames it wrote are persisted through the last of them - and the
     // previous capture's directory goes, the same rule Start follows.
-    const storedImport = importCaptureIdRef.current;
-    if (storedImport !== null) {
-      captureStore.finish();
-      captureIdRef.current = storedImport;
-      captureStore.prune([storedImport]);
-      importCaptureIdRef.current = null;
-    }
+    const storedImport = importLifecycle.succeed();
     // The first batch cleared the marks, but a Ctrl+M on an old row while the
     // file loaded added to them under the old capture's id - which the store
     // dropped and the set kept. The imported capture has no marks.
@@ -2863,6 +2927,14 @@ export default function App() {
     }
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
+    // Except that a stored import got frames, and `lastPacketMs` is how the
+    // session says so (`offeredCapture`). Left null, nothing ever offered it
+    // again: not Clear View, not a relaunch, and not a failed import after it,
+    // which emptied the view and left no Reopen. The Worker's clock only seeds
+    // live frames, and a Start clears before any arrive.
+    if (storedImport !== null && imported.length > 0) {
+      lastPacketTimeRef.current = imported[imported.length - 1].tsUs;
+    }
     // Always assigned, never left alone: a selection held over from the
     // previous buffer would keep the tree and hex views showing a frame that
     // is not in the list any more.
@@ -3288,6 +3360,9 @@ export default function App() {
                 captureSource={captureSource}
                 onImportPackets={handleImportPackets}
                 onImportBatch={handleImportBatch}
+                onImportBegin={handleImportBegin}
+                onImportFailed={handleImportFailed}
+                bytesStoredThrough={bytesStoredThrough}
                 captureId={captureStorage.captureId}
                 capturedFileCount={keptFiles(captureFiles).length}
                 capturing={isCapturing}
@@ -3442,6 +3517,7 @@ export default function App() {
               onClearPackets={handleClearView}
               captureStorage={captureStorage}
               onDiscardCapture={handleDiscardCapture}
+              importBlockedBy={importBlockedReason}
               filterPresetLibrary={filterPresetLibrary}
               onFilterPresetLibraryChange={handleFilterPresetLibraryChange}
             />
@@ -3495,7 +3571,7 @@ export default function App() {
                     gate={startGateResult}
                     agentProblem={agentBlocksStart(agentHealth)}
                     previousCapture={lastCaptureLabel === null ? null
-                      : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
+                      : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); }, blockedBy: importBlockedReason }}
                     onStart={handleStartCapture}
                     onClearPackets={handleClearPackets}
                     onOpenFile={() => { showSideBar('transfer'); setPickRequest((n) => n + 1); }}
@@ -3511,7 +3587,7 @@ export default function App() {
               >
                 <PacketList
                   previousCapture={lastCaptureLabel === null ? null
-                    : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
+                    : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); }, blockedBy: importBlockedReason }}
                   capturing={isCapturing}
                   onChooseAdapter={() => showSideBar('interfaces')}
                   onClearFilter={() => { setFilterText(''); applyFilter(''); }}

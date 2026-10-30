@@ -32,7 +32,8 @@ export interface WelcomeProps {
   gate: StartGate;
   /** Why the agent cannot capture yet (`agentBlocksStart`), or null once it is connected. */
   agentProblem: string | null;
-  previousCapture: { label: string; onReopen: () => void } | null;
+  /** `blockedBy` is why Reopen is shut for now (a file is being imported), or null. */
+  previousCapture: { label: string; onReopen: () => void; blockedBy?: string | null } | null;
   onStart: () => void;
   onClearPackets: () => void;
   onOpenFile: () => void;
@@ -221,7 +222,9 @@ export const Welcome: React.FC<WelcomeProps> = ({
               <button
                 type="button"
                 onClick={previousCapture.onReopen}
-                className={`${QUIET_BUTTON} inline-flex items-center gap-1.5`}
+                disabled={previousCapture.blockedBy != null}
+                title={previousCapture.blockedBy ?? undefined}
+                className={`${QUIET_BUTTON} inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed`}
               >
                 <History className="w-3.5 h-3.5" aria-hidden />
                 Reopen the last capture

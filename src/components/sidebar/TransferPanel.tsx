@@ -18,6 +18,7 @@ import {
   beginExportJob, cancelExportJob, dismissExportJob, type ExportFormat, type ExportJobState, type ExportPhase,
 } from '../../services/export/exportJob';
 import { useExportJob } from '../../lib/useExportJob';
+import { getImportJob, IMPORT_RUNNING_REASON, useImportJob } from '../../services/importJob';
 import type { CaptureFilterState } from '../../lib/useCaptureFilter';
 import type { AgentInterface, CaptureDropStats } from '../../services/agentProtocol';
 import type { Capabilities, Packet } from '../../types/packet';
@@ -103,6 +104,10 @@ export interface TransferPanelProps {
   captureSource: CaptureSource;
   onImportPackets: (packets: Packet[], info: { filename: string; facts?: CaptureFileFacts }) => void;
   onImportBatch?: ImportBatchSink;
+  /** The import lifecycle's ends, handed to the Import panel (`importLifecycle.ts`). */
+  onImportBegin?: () => Promise<void>;
+  onImportFailed?: () => void;
+  bytesStoredThrough?: () => number;
   /** The capture on disk, whose own files "As captured" copies. */
   captureId: string | null;
   /** How many pcapng files the agent wrote for it and still keeps. 0 hides the row. */
@@ -174,6 +179,7 @@ const PHASE_LABEL: Record<ExportPhase, string> = {
 export const TransferPanel: React.FC<TransferPanelProps> = ({
   packets, appliedFilter, permissions, captureStats, belowWindow, captureFloor, captureRowCount, filteredRowCount,
   filterScan, filterUncovered, onRescan, agentInterfaces, captureSource, onImportPackets, onImportBatch,
+  onImportBegin, onImportFailed, bytesStoredThrough,
   captureId, capturedFileCount, capturing, importBlockedBy = null, pickRequest = 0, marks,
 }) => {
   const [scope, setScope] = useState<Scope>('capture');
@@ -258,7 +264,9 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
         ? { ready: false, detail: 'None of the marked packets are kept.' }
         : { ready: true, detail: `${COUNT.format(markedCount)} frames` };
   const busy = job.status === 'running';
-  const canExport = captureRowCount > 0 && filterValid && !busy
+  // An import replaces the frames an export reads, so it shuts every export row.
+  const importing = useImportJob().status === 'running';
+  const canExport = captureRowCount > 0 && filterValid && !busy && !importing
     && (effectiveScope === 'capture'
       || (effectiveScope === 'filter' && filtered.ready)
       || (effectiveScope === 'marked' && marked.ready));
@@ -272,7 +280,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
    * this moment, which is the only moment anybody chose.
    */
   const start = async (format: ExportFormat) => {
-    if (!canExport) return;
+    if (!canExport || getImportJob().status === 'running') return;
     const handle = beginExportJob(format);
     if (handle === null) return;
     try {
@@ -418,7 +426,8 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
       type="button"
       onClick={() => { void start(f.id); }}
       disabled={!canExport || f.disabled}
-      title={f.disabled ? 'Exporting raw captures is restricted for this role' : undefined}
+      title={importing ? IMPORT_RUNNING_REASON
+        : f.disabled ? 'Exporting raw captures is restricted for this role' : undefined}
       className={`${ROW} hover:bg-accent`}
     >
       <span className="flex items-center gap-2">
@@ -539,7 +548,8 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
             <button
               type="button"
               onClick={() => { void saveAsCaptured(); }}
-              disabled={capturing}
+              disabled={capturing || importing}
+              title={importing ? IMPORT_RUNNING_REASON : undefined}
               className={`${ROW} hover:bg-accent`}
             >
               <span className="flex items-center gap-2">
@@ -593,6 +603,9 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
           <ImportPanel
             onImportPackets={onImportPackets}
             onImportBatch={onImportBatch}
+            onImportBegin={onImportBegin}
+            onImportFailed={onImportFailed}
+            bytesStoredThrough={bytesStoredThrough}
             onFailure={(filename, failure) => setRejected({ filename, failure })}
             retryToken={retryToken}
             blockedBy={busy ? 'Not while an export is running - an import would replace the frames it is reading.' : importBlockedBy}

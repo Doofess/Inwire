@@ -544,10 +544,12 @@ export const ActivityRail: React.FC<ActivityRailProps> = ({
   const confirmRef = React.useRef<HTMLDivElement | null>(null);
 
   // A capture that STARTS while the prompt is up, or a buffer that empties from
-  // somewhere else, has answered the question by other means.
+  // somewhere else, has answered the question by other means. So has a Start
+  // that became blocked (an import began): the confirm's button would otherwise
+  // still discard, past the gate that shut the other Starts.
   React.useEffect(() => {
-    if (isCapturing || !restartDiscards) setConfirmRestart(false);
-  }, [isCapturing, restartDiscards]);
+    if (isCapturing || !restartDiscards || gate.blocked !== null) setConfirmRestart(false);
+  }, [isCapturing, restartDiscards, gate.blocked]);
 
   // Claimed before the view-level handler can read it: Escape in a non-Packets
   // view switches to Packets, and dismissing a prompt must not also navigate.

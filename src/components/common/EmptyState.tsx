@@ -47,18 +47,23 @@ export function EmptyState({
 
 /** A button in an empty state: `primary` for the step the text recommends, plain for the rest. */
 export function EmptyStateButton({
-  icon: Icon, children, onClick, primary = false,
+  icon: Icon, children, onClick, primary = false, disabled = false, title,
 }: {
   icon?: LucideIcon;
   children: React.ReactNode;
   onClick: () => void;
   primary?: boolean;
+  /** Shut, with `title` saying why. */
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer
+      disabled={disabled}
+      title={title}
+      className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed
         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
         ${primary
           ? 'bg-primary text-primary-foreground hover:bg-primary/90'
