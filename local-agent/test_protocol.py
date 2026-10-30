@@ -2314,13 +2314,17 @@ except ValueError:
 import pipe_server
 
 
+sheddables = []
+
+
 def _connection():
     written = []
     loop = asyncio.new_event_loop()
     # Takes the record count `send` now passes - the transport's writer needs
     # it so the shed counter can be in packets rather than in queued items.
-    def _write(frame, records=0):
+    def _write(frame, records=0, sheddable=False):
         written.append(frame)
+        sheddables.append(sheddable)
     conn = pipe_server.PipeConnection(loop, _write, lambda: None)
     return loop, conn, written
 
@@ -2334,6 +2338,9 @@ check("a string is sent as a JSON frame",
       "11 00 00 00 00 7b 22 74 79 70 65 22 3a 22 73 74 61 74 65 22 7d")
 _loop.run_until_complete(_conn.send(b"IWP1"))
 check("bytes are sent as a binary frame", _written[-1].hex(" "), "05 00 00 00 01 49 57 50 31")
+# Only a packet batch may be shed; a control message never is, because nothing
+# tells the app that a shed one was lost.
+check("a control message is sent as unsheddable, and a batch as sheddable", sheddables[-2:], [False, True])
 
 
 async def _drain(conn, expected):
@@ -2397,28 +2404,53 @@ _loop.close()
 # 37,793 shed batches accounted for 398,000 missing packets.
 _ob = pipe_server._Outbound(max_frames=3, max_bytes=10_000)
 for _i in range(3):
-    _ob.put(bytes([_i]) * 10, records=12)
+    _ob.put(bytes([_i]) * 10, records=12, sheddable=True)
 check("frames queue up to the count bound", _ob.qsize(), 3)
 check("...losing none of them", _ob.dropped, 0)
-_ob.put(b"\x09" * 10, records=12)
+_ob.put(b"\x09" * 10, records=12, sheddable=True)
 check("past the bound the queue does not grow", _ob.qsize(), 3)
 check("...and the shed batch is counted in PACKETS, not as one item",
       _ob.dropped, 12)
 check("...the OLDEST being the one shed, as in the sniffer queue",
       _ob.get(), b"\x01" * 10)
 
-# A control message carries no packets, so shedding one loses none - and the
-# default is 0, so a caller that forgets cannot inflate the figure.
-_obc = pipe_server._Outbound(max_frames=1, max_bytes=10_000)
-_obc.put(b"{}")
-_obc.put(b"{}")
-check("shedding a control message loses no packets", _obc.dropped, 0)
+# **A control message is never shed.** It used to be the oldest item of any kind
+# that went, so a capture_boundary, a capture_stopped or an error could vanish
+# under backpressure - uncounted, because a control message carries no packets.
+_obc = pipe_server._Outbound(max_frames=3, max_bytes=10_000_000)
+_obc.put(b"\x01", records=10, sheddable=True)
+_obc.put(b"ctl", records=0, sheddable=False)
+_obc.put(b"\x02", records=10, sheddable=True)
+_obc.put(b"\x03", records=10, sheddable=True)   # over by one: \x01 goes, "ctl" stays
+check("a control message is never shed",
+      [_obc.get(), _obc.get(), _obc.get()], [b"ctl", b"\x02", b"\x03"])
+check("...and only the batch is counted, in packets", _obc.dropped, 10)
+
+# The case the rule exists for: the control message is the OLDEST item.
+_obo = pipe_server._Outbound(max_frames=3, max_bytes=10_000_000)
+_obo.put(b"ctl", records=0, sheddable=False)
+for _i in (1, 2, 3):
+    _obo.put(bytes([_i]), records=4, sheddable=True)
+check("...even when it is the oldest item",
+      [_obo.get(), _obo.get(), _obo.get()], [b"ctl", b"\x02", b"\x03"])
+check("...and what made room was the oldest batch", _obo.dropped, 4)
+
+# A client that lets 4 MB of control messages queue is not reading at all: the
+# connection ends rather than the queue growing without bound.
+_obx = pipe_server._Outbound(max_frames=4096, max_bytes=10_000_000, max_control_bytes=8)
+check("a control backlog under its cap is accepted", _obx.put(b"\x00" * 6, sheddable=False), True)
+check("a control backlog past its cap ends the connection",
+      _obx.put(b"\x00" * 6, sheddable=False), False)
+check("...the queue holds only the stop signal", _obx.get(), pipe_server._SHUTDOWN)
+check_true("...and says why", _obx.overflowed)
+check("...and takes nothing more", _obx.put(b"\x00", sheddable=False), False)
+check("the cap is 4 MB", pipe_server.MAX_CONTROL_BYTES, 4 * 1024 * 1024)
 
 # The byte bound bites first when the items are big, which is the case the
 # count bound could not express at all.
 _ob2 = pipe_server._Outbound(max_frames=4096, max_bytes=1000)
 for _ in range(5):
-    _ob2.put(b"\x00" * 400, records=7)
+    _ob2.put(b"\x00" * 400, records=7, sheddable=True)
 check_true("a byte budget sheds before the count bound is anywhere near",
            _ob2.qsize() < 4096 and _ob2.dropped > 0)
 check("...counting every packet in every batch it shed", _ob2.dropped % 7, 0)
@@ -2427,7 +2459,7 @@ check_true("...leaving the queue inside its budget", _ob2.pending_bytes() <= 100
 # A single frame larger than the whole budget must still be delivered: a queue
 # that evicts its own newest arrival delivers nothing at all.
 _ob3 = pipe_server._Outbound(max_frames=4096, max_bytes=100)
-_ob3.put(b"\x00" * 500)
+_ob3.put(b"\x00" * 500, sheddable=True)
 check("an oversized frame is kept rather than shed into nothing", _ob3.qsize(), 1)
 
 # The writer thread blocks on `get()` waiting for the stop signal, so shedding
@@ -2435,7 +2467,7 @@ check("an oversized frame is kept rather than shed into nothing", _ob3.qsize(), 
 _ob4 = pipe_server._Outbound(max_frames=1, max_bytes=10)
 _ob4.put(pipe_server._SHUTDOWN)
 for _ in range(4):
-    _ob4.put(b"\x00" * 50)
+    _ob4.put(b"\x00" * 50, sheddable=True)
 check("the stop signal is never shed", _ob4.get(), pipe_server._SHUTDOWN)
 
 # The descriptor is the whole security model now, so its shape is worth

@@ -133,6 +133,11 @@ MAX_OUTBOUND_FRAMES = 4096
 #: order of magnitude as every other buffer on this path.
 MAX_OUTBOUND_BYTES = 32 * 1024 * 1024
 
+#: Control bytes a client may leave unread before its connection is ended.
+#: Control messages are never shed, so this is what bounds them: a client that
+#: lets 4 MB of them queue is not reading at all.
+MAX_CONTROL_BYTES = 4 * 1024 * 1024
+
 _SHUTDOWN = object()
 
 
@@ -158,23 +163,46 @@ class _Outbound:
     per-drop log line and nothing in ``capture_stats``.
     """
 
-    def __init__(self, max_frames: int, max_bytes: int) -> None:
+    def __init__(self, max_frames: int, max_bytes: int,
+                 max_control_bytes: int = MAX_CONTROL_BYTES) -> None:
         self._frames: collections.deque = collections.deque()
-        # How many captured packets each queued frame carries, in step with
-        # `_frames`. Kept apart rather than stored as a tuple so the hot path -
-        # the writer thread's `get()` - still pops a plain bytes object.
+        # How many captured packets each queued frame carries, and whether it
+        # may be shed, both in step with `_frames` (the stop signal included,
+        # as 0 and False). Kept apart rather than stored as a tuple so the hot
+        # path - the writer thread's `get()` - still pops a plain bytes object.
         self._records: collections.deque = collections.deque()
+        self._sheddable: collections.deque = collections.deque()
         self._bytes = 0
+        #: Bytes of unsheddable frames queued - what `max_control_bytes` bounds.
+        self._control_bytes = 0
         self._max_frames = max_frames
         self._max_bytes = max_bytes
+        self._max_control_bytes = max_control_bytes
         self._cond = threading.Condition()
         self.dropped = 0
+        #: Set when the control cap ended this queue. See `put`.
+        self.overflowed = False
 
-    def put(self, frame, records: int = 0) -> None:
-        """Queues one outbound frame.
+    def _append(self, frame, records: int, sheddable: bool) -> None:
+        self._frames.append(frame)
+        self._records.append(records)
+        self._sheddable.append(sheddable)
+
+    def put(self, frame, records: int = 0, sheddable: bool = False) -> bool:
+        """Queues one outbound frame. False means the connection is over.
 
         `records` is **how many captured packets this frame carries** - a
         packet batch holds up to 512 of them, a control message holds none.
+
+        **`sheddable` is True for a packet batch and False for a control
+        message, and the default is False so a caller that forgets sheds
+        nothing.** Shedding takes the oldest SHEDDABLE frame wherever it sits; a
+        capture_boundary, a capture_stopped or an error was lost under
+        backpressure when it took the oldest of any kind, uncounted, because a
+        control message carries no packets. Control messages are bounded by
+        their own byte cap instead: a client that lets that much queue is not
+        reading at all, so the queue is emptied, the stop signal queued, and
+        this returns False so the connection ends through the normal path.
 
         **The counter is in packets, and getting that wrong was a real bug.**
         It counted ITEMS, and the items here are batches; the app adds
@@ -189,34 +217,65 @@ class _Outbound:
         handed over, and it did not.
         """
         with self._cond:
-            self._frames.append(frame)
-            if frame is not _SHUTDOWN:
-                self._bytes += len(frame)
-                self._records.append(records)
-            # `> 1` so the frame just queued is never the one shed: a queue that
-            # evicted its own newest arrival would deliver nothing at all once
-            # a single frame exceeded the budget.
+            if frame is _SHUTDOWN:
+                # Never shed - the writer thread is waiting for it and would
+                # block until the handle closed under it.
+                self._append(frame, 0, False)
+                self._cond.notify()
+                return True
+            if self.overflowed:
+                return False
+            if not sheddable:
+                self._control_bytes += len(frame)
+                if self._control_bytes > self._max_control_bytes:
+                    # Nothing here will be read. The batches waiting go with
+                    # the connection, and are counted like any other loss.
+                    self.dropped += sum(
+                        records for records, shed in zip(self._records, self._sheddable) if shed
+                    )
+                    self._frames.clear()
+                    self._records.clear()
+                    self._sheddable.clear()
+                    self._bytes = 0
+                    self._control_bytes = 0
+                    self.overflowed = True
+                    self._append(_SHUTDOWN, 0, False)
+                    self._cond.notify()
+                    return False
+            self._append(frame, records, sheddable)
+            self._bytes += len(frame)
+            # `range(len - 1)` so the frame just queued is never the one shed: a
+            # queue that evicted its own newest arrival would deliver nothing at
+            # all once a single frame exceeded the budget. Unsheddable frames
+            # and the stop signal are skipped.
             while (len(self._frames) > self._max_frames
-                   or self._bytes > self._max_bytes) and len(self._frames) > 1:
-                oldest = self._frames.popleft()
-                if oldest is _SHUTDOWN:
-                    # Never shed the stop signal - the writer thread is waiting
-                    # for it and would block until the handle closed under it.
-                    self._frames.appendleft(oldest)
+                   or self._bytes > self._max_bytes):
+                victim = next(
+                    (i for i in range(len(self._frames) - 1) if self._sheddable[i]), None,
+                )
+                if victim is None:
                     break
-                self._bytes -= len(oldest)
+                shed = self._frames[victim]
+                del self._frames[victim]
+                del self._sheddable[victim]
+                self._bytes -= len(shed)
                 # In PACKETS, not in queued items. See `put`.
-                self.dropped += self._records.popleft()
+                self.dropped += self._records[victim]
+                del self._records[victim]
             self._cond.notify()
+            return True
 
     def get(self):
         with self._cond:
             while not self._frames:
                 self._cond.wait()
             frame = self._frames.popleft()
+            self._records.popleft()
+            sheddable = self._sheddable.popleft()
             if frame is not _SHUTDOWN:
                 self._bytes -= len(frame)
-                self._records.popleft()
+                if not sheddable:
+                    self._control_bytes -= len(frame)
             return frame
 
     def qsize(self) -> int:
@@ -264,11 +323,15 @@ class PipeConnection:
         """
         if self._closed:
             raise ConnectionError("the pipe client has gone")
+        # Only a packet batch may be shed. A `str` is a control message, and
+        # shedding one loses something the app was never told it lost.
         if isinstance(data, str):
             frame = pipe_frame.encode_frame(pipe_frame.FRAME_JSON, data.encode("utf-8"))
+            sheddable = False
         else:
             frame = pipe_frame.encode_frame(pipe_frame.FRAME_BINARY, bytes(data))
-        self._write(frame, records)
+            sheddable = True
+        self._write(frame, records, sheddable)
 
     def __aiter__(self):
         return self
@@ -506,7 +569,7 @@ class PipeServer:
         outbound = _Outbound(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES)
         closed = threading.Event()
 
-        def write(frame: bytes, records: int = 0) -> None:
+        def write(frame: bytes, records: int = 0, sheddable: bool = False) -> None:
             if closed.is_set():
                 # **Raised, not returned.** This used to return silently while
                 # `PipeConnection.send` tested a DIFFERENT flag - its own
@@ -515,7 +578,12 @@ class PipeServer:
                 # has an `except` that exists for exactly this and could never
                 # fire. One flag decides now, and it decides out loud.
                 raise ConnectionError("the pipe client has gone")
-            outbound.put(frame, records)
+            if not outbound.put(frame, records, sheddable):
+                # The control cap: this client reads nothing. `closed` ends the
+                # reader at its next bounded wait, so the connection goes
+                # through the normal disconnect path.
+                closed.set()
+                raise ConnectionError("the pipe client is not reading")
 
         def close() -> None:
             closed.set()

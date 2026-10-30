@@ -48,7 +48,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::sync::Arc;
 
-use crate::framing::{Frame, FrameReader, FramingError};
+use crate::framing::{Frame, FrameReader, FramingError, FRAME_BINARY};
 use crate::outbound::{Closed, Item, Outbound};
 
 type Handle = *mut c_void;
@@ -190,6 +190,11 @@ pub const READ_CHUNK: usize = 64 * 1024;
 
 pub const MAX_OUTBOUND_FRAMES: usize = 4096;
 pub const MAX_OUTBOUND_BYTES: usize = 32 * 1024 * 1024;
+
+/// Control bytes a client may leave unread before its connection is ended.
+/// Control messages are never shed, so this is what bounds them: a client that
+/// lets 4 MB of them queue is not reading at all.
+pub const MAX_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -429,7 +434,17 @@ pub fn write_loop(instance: &PipeInstance, outbound: &Outbound) -> io::Result<()
     let event = Event::manual_reset()?;
     loop {
         let frame = match outbound.pop() {
-            Item::Shutdown => return Ok(()),
+            Item::Shutdown => {
+                // `Shutdown` ends this thread and nothing else: the reader is
+                // blocked in `ReadFile` for a command the client may never send.
+                // When the control cap queued it, the client is not reading and
+                // the whole session has to end, through the same path a client
+                // leaving takes (`disconnect` fails the reader's read).
+                if outbound.overflowed() {
+                    disconnect(instance);
+                }
+                return Ok(());
+            }
             // The record count is the queue's business, for its shed counter.
             // Once a frame is being written it has not been lost, so the writer
             // has no use for it.
@@ -631,7 +646,11 @@ pub struct Connection {
 impl Connection {
     pub fn new() -> Self {
         Self {
-            outbound: Arc::new(Outbound::new(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES)),
+            outbound: Arc::new(Outbound::new(
+                MAX_OUTBOUND_FRAMES,
+                MAX_OUTBOUND_BYTES,
+                MAX_CONTROL_BYTES,
+            )),
         }
     }
 
@@ -640,9 +659,14 @@ impl Connection {
     /// `records` is how many captured packets `payload` carries, so the shed
     /// counter can be in packets rather than in queued items - see
     /// `Outbound::push`. A control message passes 0.
+    ///
+    /// **Only a binary frame may be shed.** A JSON frame is a control message,
+    /// and shedding one loses something the app was never told it lost.
     pub fn send(&self, kind: u8, payload: &[u8], records: u64) -> Result<(), SendError> {
         let framed = crate::framing::encode_frame(kind, payload).map_err(SendError::Framing)?;
-        self.outbound.push(framed, records).map_err(SendError::Gone)
+        self.outbound
+            .push(framed, records, kind == FRAME_BINARY)
+            .map_err(SendError::Gone)
     }
 
     /// **The kernel checked the descriptor before this handle existed.**
@@ -691,6 +715,23 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         )
+    }
+
+    /// `Connection::send` decides what may be shed: a binary frame is a packet
+    /// batch, a JSON frame is a control message and never is.
+    #[test]
+    fn a_json_frame_is_never_shed_but_a_batch_is() {
+        let c = Connection::new();
+        c.send(crate::framing::FRAME_JSON, b"{\"type\":\"capture_boundary\"}", 0).unwrap();
+        for _ in 0..MAX_OUTBOUND_FRAMES {
+            c.send(FRAME_BINARY, b"batch", 3).unwrap();
+        }
+        // One over the frame bound: a batch went, the control message did not.
+        assert_eq!(c.outbound.dropped(), 3);
+        match c.outbound.pop() {
+            Item::Frame(first, _) => assert_eq!(first[4], crate::framing::FRAME_JSON),
+            Item::Shutdown => panic!("not a shutdown"),
+        }
     }
 
     /// ADR 0068: the first instance of the name is created with
