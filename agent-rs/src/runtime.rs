@@ -1439,7 +1439,18 @@ fn start_output(
 
 /// Serves one connected client until its pipe closes.
 fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io::Result<()> {
-    let connection = Arc::new(Connection::new());
+    serve_with(shared, instance, client, Arc::new(Connection::new()))
+}
+
+/// `serve`, with the connection given rather than made - which is what lets a
+/// test hold the sending side of a session it is also serving.
+fn serve_with(
+    shared: Arc<Shared>,
+    instance: Arc<PipeInstance>,
+    client: String,
+    connection: Arc<Connection>,
+) -> io::Result<()> {
+    connection.bind(&instance);
     let total = {
         let mut clients = shared.clients.lock().unwrap();
         clients.insert(client.clone(), Arc::clone(&connection));
@@ -1609,7 +1620,7 @@ fn serve(shared: Arc<Shared>, instance: Arc<PipeInstance>, client: String) -> io
             Command::RestartAgent => {
                 // Refused unless this process is the SCM's and a restart policy
                 // will bring it back - see `restart.rs`.
-                control::restart_agent(&*shared, &shared.restart, &client);
+                shared.control.restart_agent(&*shared, &shared.restart, &client);
             }
             _ => {
                 // Nothing reaches here today: the three capture commands were
@@ -1699,6 +1710,54 @@ pub fn run_on(shutdown: Arc<Shutdown>, name: &str) -> io::Result<()> {
     run_with(shutdown, name, Hardware::NPCAP)
 }
 
+/// The line logged when the very first `CreateNamedPipe` is refused (ADR 0068).
+fn name_taken_message(name: &str, error: &io::Error) -> String {
+    format!(
+        "{name} already exists - another process created it first, so the agent will not serve it: {error}"
+    )
+}
+
+/// The instance an acceptor serves next (ADR 0068).
+///
+/// `first` is the one made before the threads started, used once by slot 0.
+/// Every other instance comes from `create`. A refusal is **not** a reason to
+/// stop the agent - any user can take a slot - so it is logged once per failing
+/// streak and retried every `retry` until it works or a stop is asked for.
+/// `None` means a stop was asked for.
+fn next_instance(
+    first: &mut Option<pipe::PipeInstance>,
+    failing: &mut bool,
+    shutdown: &Shutdown,
+    retry: Duration,
+    mut create: impl FnMut() -> io::Result<pipe::PipeInstance>,
+) -> Option<pipe::PipeInstance> {
+    if let Some(instance) = first.take() {
+        return Some(instance);
+    }
+    loop {
+        if shutdown.requested() {
+            return None;
+        }
+        match create() {
+            Ok(instance) => {
+                *failing = false;
+                return Some(instance);
+            }
+            Err(error) => {
+                if !*failing {
+                    *failing = true;
+                    crate::log_warn!("could not create a pipe instance, retrying: {error}");
+                }
+                // In short slices, so a stop is not held up by the retry wait.
+                let until = Instant::now() + retry;
+                while Instant::now() < until && !shutdown.requested() {
+                    thread::sleep(retry.min(Duration::from_millis(50)));
+                }
+            }
+        }
+    }
+}
+
 /// `run_on`, with how Npcap is loaded given - which is what lets a test stand
 /// in for a machine where Npcap is installed after the agent started.
 fn run_with(shutdown: Arc<Shutdown>, name: &str, hardware: Hardware) -> io::Result<()> {
@@ -1729,27 +1788,46 @@ fn run_with(shutdown: Arc<Shutdown>, name: &str, hardware: Hardware) -> io::Resu
     // sessions from outside - see `pipe::disconnect` and the foot of this
     // function.
     let live: Arc<Mutex<HashMap<u32, Arc<PipeInstance>>>> = Arc::new(Mutex::new(HashMap::new()));
+    //
+    // **The first instance is made here, before any thread**, with
+    // `FILE_FLAG_FIRST_PIPE_INSTANCE` (ADR 0068): if another process created the
+    // name first, the agent refuses it rather than serving a pipe whose
+    // descriptor someone else chose. Slot 0 then serves that instance.
+    //
+    // Every instance is made through `held`, which counts them: whenever the
+    // agent holds none, the next one is asked for as a first instance again, so
+    // a name a user drained and recreated is refused rather than joined.
+    let held = pipe::Held::new();
+    let first_instance =
+        match held.create(name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES) {
+            Ok(instance) => instance,
+            Err(error) => {
+                crate::log_error!("{}", name_taken_message(name, &error));
+                shutdown.request("the pipe name is already in use");
+                crate::log_info!("shutting down: {}", shutdown.wait());
+                return Ok(());
+            }
+        };
+    let mut first_instance = Some(first_instance);
     let mut acceptors = Vec::new();
     for slot in 0..pipe::MAX_INSTANCES {
         let shared = Arc::clone(&shared);
         let shutdown = Arc::clone(&shutdown);
         let name = name.to_string();
         let live = Arc::clone(&live);
+        let held = held.clone();
+        let mut first = if slot == 0 { first_instance.take() } else { None };
         acceptors.push(thread::spawn(move || {
             let mut serial = 0u64;
+            let mut failing = false;
             while !shutdown.requested() {
-                let instance =
-                    match pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES) {
-                        Ok(instance) => Arc::new(instance),
-                        Err(error) => {
-                            // The one failure that must not be retried in a tight
-                            // loop: if the name cannot be created at all, the
-                            // agent has nothing to offer and says so once.
-                            crate::log_error!("could not create a pipe instance: {error}");
-                            shutdown.request("the pipe could not be served");
-                            return;
-                        }
-                    };
+                let create = || held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES);
+                let Some(instance) =
+                    next_instance(&mut first, &mut failing, &shutdown, pipe::INSTANCE_RETRY, create)
+                else {
+                    return;
+                };
+                let instance = Arc::new(instance);
                 if pipe::accept(&instance).is_err() {
                     continue;
                 }

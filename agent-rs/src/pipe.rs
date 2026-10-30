@@ -46,9 +46,9 @@ use std::ffi::{c_void, OsStr};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
-use crate::framing::{Frame, FrameReader, FramingError};
+use crate::framing::{Frame, FrameReader, FramingError, FRAME_BINARY};
 use crate::outbound::{Closed, Item, Outbound};
 
 type Handle = *mut c_void;
@@ -152,6 +152,8 @@ const TOKEN_IMPERSONATION: u32 = 2;
 
 const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+/// Fails `CreateNamedPipe` when the name already exists (ADR 0068).
+const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
 const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
 const PIPE_READMODE_BYTE: u32 = 0x0000_0000;
 const PIPE_WAIT: u32 = 0x0000_0000;
@@ -178,11 +180,21 @@ pub const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 /// against the one machine-wide service, and `capture_busy` arbitrates.
 pub const MAX_INSTANCES: u32 = 8;
 
+/// How long an acceptor waits before asking for an instance again after the
+/// system refused one (ADR 0068). A user who takes a slot costs the agent a
+/// second of that slot, not its life.
+pub const INSTANCE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Read buffer. A batch is capped at 256 kB and a control message is smaller.
 pub const READ_CHUNK: usize = 64 * 1024;
 
 pub const MAX_OUTBOUND_FRAMES: usize = 4096;
 pub const MAX_OUTBOUND_BYTES: usize = 32 * 1024 * 1024;
+
+/// Control bytes a client may leave unread before its connection is ended.
+/// Control messages are never shed, so this is what bounds them: a client that
+/// lets 4 MB of them queue is not reading at all.
+pub const MAX_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -243,6 +255,8 @@ impl Drop for Event {
 /// One pipe instance, closed on drop.
 pub struct PipeInstance {
     handle: Handle,
+    /// The count this instance is part of, when it was made through `Held`.
+    held: Option<Arc<Mutex<usize>>>,
 }
 
 // The handle is moved to a serving thread and used from there.
@@ -266,6 +280,13 @@ unsafe impl Sync for PipeInstance {}
 
 impl Drop for PipeInstance {
     fn drop(&mut self) {
+        // Locked across the close, so a creation deciding `first` never sees a
+        // count that still includes a handle already gone (or the reverse):
+        // see `Held`.
+        let mut count = self
+            .held
+            .as_ref()
+            .map(|held| held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         if !self.handle.is_null() {
             unsafe {
                 DisconnectNamedPipe(self.handle);
@@ -273,6 +294,56 @@ impl Drop for PipeInstance {
             }
             self.handle = ptr::null_mut();
         }
+        if let Some(count) = count.as_mut() {
+            **count -= 1;
+        }
+    }
+}
+
+/// How many instances of its pipe the agent holds right now - created and not
+/// yet dropped, connected or listening (ADR 0068).
+///
+/// **Why the agent counts.** `FILE_FLAG_FIRST_PIPE_INSTANCE` protects only the
+/// instance that creates the name. A user can take every slot the agent frees,
+/// let the agent's count of instances reach zero, close their own, and create
+/// the name again with a descriptor they chose; an agent that then asked for a
+/// non-first instance would join it. So the agent asks for a first instance
+/// whenever it holds none: a name that still exists, or that someone else made
+/// again, is refused and retried like any other failure.
+///
+/// The decision and the creation happen under one lock, and so does a drop's
+/// close and decrement. Two acceptors at zero may both ask for a first
+/// instance; one fails and retries, which costs a second and nothing else.
+#[derive(Clone, Default)]
+pub struct Held(Arc<Mutex<usize>>);
+
+impl Held {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Instances held now.
+    pub fn count(&self) -> usize {
+        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Creates the next instance of `name`, as the first one when none is held.
+    pub fn create(&self, name: &str, sddl: &str, max_instances: u32) -> io::Result<PipeInstance> {
+        self.create_with(|first| create_instance(name, sddl, max_instances, first))
+    }
+
+    /// `create`, with the creation given - so a test sees what `first` was
+    /// asked for.
+    pub fn create_with(
+        &self,
+        make: impl FnOnce(bool) -> io::Result<PipeInstance>,
+    ) -> io::Result<PipeInstance> {
+        let mut count = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let first = *count == 0;
+        let mut instance = make(first)?;
+        instance.held = Some(Arc::clone(&self.0));
+        *count += 1;
+        Ok(instance)
     }
 }
 
@@ -283,7 +354,17 @@ impl Drop for PipeInstance {
 /// which for a LocalSystem service is exactly the descriptor that locks the app
 /// out. Passing our own means creating the instances ourselves, and once we are
 /// doing that the threads are the simpler half.
-pub fn create_instance(name: &str, sddl: &str, max_instances: u32) -> io::Result<PipeInstance> {
+///
+/// **`first` is for the very first instance of the name** (ADR 0068). It adds
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, which makes the call fail when any process
+/// has already created the name - so the agent never serves a pipe that
+/// someone else made, and whose descriptor they chose.
+pub fn create_instance(
+    name: &str,
+    sddl: &str,
+    max_instances: u32,
+    first: bool,
+) -> io::Result<PipeInstance> {
     let descriptor = Descriptor::from_sddl(sddl)?;
     let mut attrs = SecurityAttributes {
         n_length: std::mem::size_of::<SecurityAttributes>() as u32,
@@ -294,7 +375,9 @@ pub fn create_instance(name: &str, sddl: &str, max_instances: u32) -> io::Result
     let handle = unsafe {
         CreateNamedPipeW(
             wide_name.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_ACCESS_DUPLEX
+                | FILE_FLAG_OVERLAPPED
+                | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 },
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             max_instances,
             READ_CHUNK as u32,
@@ -306,7 +389,7 @@ pub fn create_instance(name: &str, sddl: &str, max_instances: u32) -> io::Result
     if handle as isize == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(PipeInstance { handle })
+    Ok(PipeInstance { handle, held: None })
 }
 
 /// Waits for a client. Returns when one has connected.
@@ -410,7 +493,17 @@ pub fn write_loop(instance: &PipeInstance, outbound: &Outbound) -> io::Result<()
     let event = Event::manual_reset()?;
     loop {
         let frame = match outbound.pop() {
-            Item::Shutdown => return Ok(()),
+            Item::Shutdown => {
+                // `Shutdown` ends this thread and nothing else: the reader is
+                // blocked in `ReadFile` for a command the client may never send.
+                // When the control cap queued it, the client is not reading and
+                // the whole session has to end, through the same path a client
+                // leaving takes (`disconnect` fails the reader's read).
+                if outbound.overflowed() {
+                    disconnect(instance);
+                }
+                return Ok(());
+            }
             // The record count is the queue's business, for its shed counter.
             // Once a frame is being written it has not been lost, so the writer
             // has no use for it.
@@ -607,13 +700,30 @@ impl ClientToken {
 /// One connected client, as the rest of the agent sees it.
 pub struct Connection {
     pub outbound: Arc<Outbound>,
+    /// The instance this connection is served on, so a send that overflows the
+    /// control cap can end the session itself (see `send`). Weak, because the
+    /// session owns the instance and this must not keep it open.
+    instance: Mutex<Option<Weak<PipeInstance>>>,
 }
 
 impl Connection {
     pub fn new() -> Self {
+        Self::with_limits(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES, MAX_CONTROL_BYTES)
+    }
+
+    /// A connection with its own queue bounds, so a test can reach the control
+    /// cap without queueing 4 MB.
+    pub fn with_limits(max_frames: usize, max_bytes: usize, max_control_bytes: usize) -> Self {
         Self {
-            outbound: Arc::new(Outbound::new(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES)),
+            outbound: Arc::new(Outbound::new(max_frames, max_bytes, max_control_bytes)),
+            instance: Mutex::new(None),
         }
+    }
+
+    /// Records the instance this connection is served on. Called when the
+    /// session starts.
+    pub fn bind(&self, instance: &Arc<PipeInstance>) {
+        *self.instance.lock().expect("connection mutex") = Some(Arc::downgrade(instance));
     }
 
     /// Queues one frame. `Err` once the writer has given up.
@@ -621,9 +731,27 @@ impl Connection {
     /// `records` is how many captured packets `payload` carries, so the shed
     /// counter can be in packets rather than in queued items - see
     /// `Outbound::push`. A control message passes 0.
+    ///
+    /// **Only a binary frame may be shed.** A JSON frame is a control message,
+    /// and shedding one loses something the app was never told it lost.
+    ///
+    /// **A send that overflows the control cap ends the session here**, not in
+    /// the writer. The backlog only grows while the writer is blocked in
+    /// `GetOverlappedResult(INFINITE)` on a write the client never drains, and
+    /// a writer in that state never pops the `Shutdown` the overflow queued -
+    /// so left to it, the session stayed in the client table for good.
+    /// `disconnect` cancels that write as well as the reader's read.
     pub fn send(&self, kind: u8, payload: &[u8], records: u64) -> Result<(), SendError> {
         let framed = crate::framing::encode_frame(kind, payload).map_err(SendError::Framing)?;
-        self.outbound.push(framed, records).map_err(SendError::Gone)
+        let pushed = self.outbound.push(framed, records, kind == FRAME_BINARY);
+        if pushed.is_err() && self.outbound.overflowed() {
+            // Taken, so the session is ended once however many sends follow.
+            let bound = self.instance.lock().expect("connection mutex").take();
+            if let Some(instance) = bound.and_then(|weak| weak.upgrade()) {
+                disconnect(&instance);
+            }
+        }
+        pushed.map_err(SendError::Gone)
     }
 
     /// **The kernel checked the descriptor before this handle existed.**
@@ -658,3 +786,86 @@ impl core::fmt::Display for SendError {
 }
 
 impl std::error::Error for SendError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A pipe name nothing else uses - never the production one.
+    fn unique_pipe_name(tag: &str) -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        format!(
+            r"\\.\pipe\inwire-pipe-test-{}-{tag}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// `Connection::send` decides what may be shed: a binary frame is a packet
+    /// batch, a JSON frame is a control message and never is.
+    #[test]
+    fn a_json_frame_is_never_shed_but_a_batch_is() {
+        let c = Connection::new();
+        c.send(crate::framing::FRAME_JSON, b"{\"type\":\"capture_boundary\"}", 0).unwrap();
+        for _ in 0..MAX_OUTBOUND_FRAMES {
+            c.send(FRAME_BINARY, b"batch", 3).unwrap();
+        }
+        // One over the frame bound: a batch went, the control message did not.
+        assert_eq!(c.outbound.dropped(), 3);
+        match c.outbound.pop() {
+            Item::Frame(first, _) => assert_eq!(first[4], crate::framing::FRAME_JSON),
+            Item::Shutdown => panic!("not a shutdown"),
+        }
+    }
+
+    /// ADR 0068: the first instance of the name is created with
+    /// `FILE_FLAG_FIRST_PIPE_INSTANCE`, which fails when anyone else made the
+    /// name first. Later instances of our own name must still be created.
+    /// ADR 0068: the agent asks for a first instance whenever it holds none,
+    /// not only for the very first one it ever made - and the count goes down
+    /// when an instance is dropped, wherever it was kept.
+    #[test]
+    fn a_first_instance_is_asked_for_whenever_none_is_held() {
+        let name = unique_pipe_name("held");
+        let held = Held::new();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let make = |first: bool| {
+            asked.borrow_mut().push(first);
+            create_instance(&name, PIPE_SDDL, 4, first)
+        };
+
+        let a = held.create_with(make).unwrap();
+        let b = held.create_with(make).unwrap();
+        assert_eq!(held.count(), 2);
+        // Held in an Arc, as a session holds one: the count follows the last
+        // owner, not the first.
+        let shared = Arc::new(a);
+        let also = Arc::clone(&shared);
+        drop(shared);
+        assert_eq!(held.count(), 2, "an instance another owner still has is still held");
+        drop(also);
+        drop(b);
+        assert_eq!(held.count(), 0);
+        let _c = held.create_with(make).unwrap();
+        assert_eq!(*asked.borrow(), vec![true, false, true]);
+    }
+
+    /// A failed creation is not counted: nothing is held.
+    #[test]
+    fn a_refused_creation_holds_nothing() {
+        let name = unique_pipe_name("refused");
+        let _squatter = create_instance(&name, PIPE_SDDL, 4, true).unwrap();
+        let held = Held::new();
+        assert!(held.create(&name, PIPE_SDDL, 4).is_err());
+        assert_eq!(held.count(), 0);
+    }
+
+    #[test]
+    fn a_second_first_instance_is_refused() {
+        let name = unique_pipe_name("first");
+        let _a = create_instance(&name, PIPE_SDDL, 2, true).unwrap();
+        assert!(create_instance(&name, PIPE_SDDL, 2, true).is_err());
+        assert!(create_instance(&name, PIPE_SDDL, 2, false).is_ok());
+    }
+}

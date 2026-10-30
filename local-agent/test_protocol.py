@@ -1306,6 +1306,51 @@ if os.name != "nt":
     check("failure policy is false off Windows", agent._ensure_failure_policy(), False)
 
 
+# Exiting ends a capture, so restart_agent is the capture owner's to give, like
+# stop_capture: another window gets capture_busy and nothing is scheduled. The
+# owner, and anyone while idle, may still restart.
+class _RestartWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, data):
+        self.sent.append(json.loads(data))
+
+
+async def _restart_as(server, ws):
+    server.authenticated.add(ws)
+    await server._handle_message(ws, json.dumps({"type": "restart_agent"}))
+    await asyncio.sleep(0.7)  # the exit is deferred by 0.5s, so wait it out
+
+
+class _CapturingSniffer:
+    def is_sniffing(self):
+        return True
+
+
+_rs_prev = (getattr(agent, "sniffer", None), agent.RESTART_SUPPORTED, agent.exit_for_restart)
+_rs_calls = []
+try:
+    agent.RESTART_SUPPORTED = True
+    agent.exit_for_restart = lambda: _rs_calls.append(1)
+    agent.sniffer = _CapturingSniffer()
+    _rs = agent.AgentServer()
+    _rs_owner, _rs_other = _RestartWS(), _RestartWS()
+    _rs.connections.update({_rs_owner, _rs_other})
+    _rs.capture_owner = _rs_owner
+
+    asyncio.run(_restart_as(_rs, _rs_other))
+    check("restart_agent from a non-owner is told capture_busy",
+          [m.get("code") for m in _rs_other.sent], ["capture_busy"])
+    check("...and no restart is scheduled", _rs_calls, [])
+    asyncio.run(_restart_as(_rs, _rs_owner))
+    check("the owner's own restart_agent is still honoured", _rs_calls, [1])
+finally:
+    agent.sniffer, agent.RESTART_SUPPORTED, agent.exit_for_restart = _rs_prev
+    if agent.sniffer is None:
+        del agent.sniffer
+
+
 
 import adapters
 
@@ -2269,13 +2314,17 @@ except ValueError:
 import pipe_server
 
 
+sheddables = []
+
+
 def _connection():
     written = []
     loop = asyncio.new_event_loop()
     # Takes the record count `send` now passes - the transport's writer needs
     # it so the shed counter can be in packets rather than in queued items.
-    def _write(frame, records=0):
+    def _write(frame, records=0, sheddable=False):
         written.append(frame)
+        sheddables.append(sheddable)
     conn = pipe_server.PipeConnection(loop, _write, lambda: None)
     return loop, conn, written
 
@@ -2289,6 +2338,9 @@ check("a string is sent as a JSON frame",
       "11 00 00 00 00 7b 22 74 79 70 65 22 3a 22 73 74 61 74 65 22 7d")
 _loop.run_until_complete(_conn.send(b"IWP1"))
 check("bytes are sent as a binary frame", _written[-1].hex(" "), "05 00 00 00 01 49 57 50 31")
+# Only a packet batch may be shed; a control message never is, because nothing
+# tells the app that a shed one was lost.
+check("a control message is sent as unsheddable, and a batch as sheddable", sheddables[-2:], [False, True])
 
 
 async def _drain(conn, expected):
@@ -2352,28 +2404,53 @@ _loop.close()
 # 37,793 shed batches accounted for 398,000 missing packets.
 _ob = pipe_server._Outbound(max_frames=3, max_bytes=10_000)
 for _i in range(3):
-    _ob.put(bytes([_i]) * 10, records=12)
+    _ob.put(bytes([_i]) * 10, records=12, sheddable=True)
 check("frames queue up to the count bound", _ob.qsize(), 3)
 check("...losing none of them", _ob.dropped, 0)
-_ob.put(b"\x09" * 10, records=12)
+_ob.put(b"\x09" * 10, records=12, sheddable=True)
 check("past the bound the queue does not grow", _ob.qsize(), 3)
 check("...and the shed batch is counted in PACKETS, not as one item",
       _ob.dropped, 12)
 check("...the OLDEST being the one shed, as in the sniffer queue",
       _ob.get(), b"\x01" * 10)
 
-# A control message carries no packets, so shedding one loses none - and the
-# default is 0, so a caller that forgets cannot inflate the figure.
-_obc = pipe_server._Outbound(max_frames=1, max_bytes=10_000)
-_obc.put(b"{}")
-_obc.put(b"{}")
-check("shedding a control message loses no packets", _obc.dropped, 0)
+# **A control message is never shed.** It used to be the oldest item of any kind
+# that went, so a capture_boundary, a capture_stopped or an error could vanish
+# under backpressure - uncounted, because a control message carries no packets.
+_obc = pipe_server._Outbound(max_frames=3, max_bytes=10_000_000)
+_obc.put(b"\x01", records=10, sheddable=True)
+_obc.put(b"ctl", records=0, sheddable=False)
+_obc.put(b"\x02", records=10, sheddable=True)
+_obc.put(b"\x03", records=10, sheddable=True)   # over by one: \x01 goes, "ctl" stays
+check("a control message is never shed",
+      [_obc.get(), _obc.get(), _obc.get()], [b"ctl", b"\x02", b"\x03"])
+check("...and only the batch is counted, in packets", _obc.dropped, 10)
+
+# The case the rule exists for: the control message is the OLDEST item.
+_obo = pipe_server._Outbound(max_frames=3, max_bytes=10_000_000)
+_obo.put(b"ctl", records=0, sheddable=False)
+for _i in (1, 2, 3):
+    _obo.put(bytes([_i]), records=4, sheddable=True)
+check("...even when it is the oldest item",
+      [_obo.get(), _obo.get(), _obo.get()], [b"ctl", b"\x02", b"\x03"])
+check("...and what made room was the oldest batch", _obo.dropped, 4)
+
+# A client that lets 4 MB of control messages queue is not reading at all: the
+# connection ends rather than the queue growing without bound.
+_obx = pipe_server._Outbound(max_frames=4096, max_bytes=10_000_000, max_control_bytes=8)
+check("a control backlog under its cap is accepted", _obx.put(b"\x00" * 6, sheddable=False), True)
+check("a control backlog past its cap ends the connection",
+      _obx.put(b"\x00" * 6, sheddable=False), False)
+check("...the queue holds only the stop signal", _obx.get(), pipe_server._SHUTDOWN)
+check_true("...and says why", _obx.overflowed)
+check("...and takes nothing more", _obx.put(b"\x00", sheddable=False), False)
+check("the cap is 4 MB", pipe_server.MAX_CONTROL_BYTES, 4 * 1024 * 1024)
 
 # The byte bound bites first when the items are big, which is the case the
 # count bound could not express at all.
 _ob2 = pipe_server._Outbound(max_frames=4096, max_bytes=1000)
 for _ in range(5):
-    _ob2.put(b"\x00" * 400, records=7)
+    _ob2.put(b"\x00" * 400, records=7, sheddable=True)
 check_true("a byte budget sheds before the count bound is anywhere near",
            _ob2.qsize() < 4096 and _ob2.dropped > 0)
 check("...counting every packet in every batch it shed", _ob2.dropped % 7, 0)
@@ -2382,7 +2459,7 @@ check_true("...leaving the queue inside its budget", _ob2.pending_bytes() <= 100
 # A single frame larger than the whole budget must still be delivered: a queue
 # that evicts its own newest arrival delivers nothing at all.
 _ob3 = pipe_server._Outbound(max_frames=4096, max_bytes=100)
-_ob3.put(b"\x00" * 500)
+_ob3.put(b"\x00" * 500, sheddable=True)
 check("an oversized frame is kept rather than shed into nothing", _ob3.qsize(), 1)
 
 # The writer thread blocks on `get()` waiting for the stop signal, so shedding
@@ -2390,7 +2467,7 @@ check("an oversized frame is kept rather than shed into nothing", _ob3.qsize(), 
 _ob4 = pipe_server._Outbound(max_frames=1, max_bytes=10)
 _ob4.put(pipe_server._SHUTDOWN)
 for _ in range(4):
-    _ob4.put(b"\x00" * 50)
+    _ob4.put(b"\x00" * 50, sheddable=True)
 check("the stop signal is never shed", _ob4.get(), pipe_server._SHUTDOWN)
 
 # The descriptor is the whole security model now, so its shape is worth
@@ -2406,6 +2483,216 @@ check_true("...and SYSTEM and administrators",
 check_true("...and is protected, so nothing is inherited", "D:P" in _sddl_source)
 check_true("...and admits nobody else",
            all(sid not in _sddl_source for sid in (";;;WD)", ";;;AN)", ";;;NU)")))
+
+# The log folder is the other thing a LocalSystem service rotates with
+# remove/rename, so the same rule as agent-rs/src/agent_log.rs: admin-owned,
+# protected, and a junction is refused. The real ACL needs pywin32 on Windows,
+# so like the pipe's descriptor above this pins the source where it cannot run.
+import logging_setup
+_log_source = inspect.getsource(logging_setup)
+check_true("the log folder descriptor is admin-owned and protected",
+           "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)" in _log_source)
+check_true("...a reparse point is refused", "0x400" in _log_source)
+check_true("...and the DACL is protected, so nothing is inherited",
+           "PROTECTED_DACL_SECURITY_INFORMATION" in _log_source)
+check_true("...and links planted under a log name are cleared", "_clear_planted_links" in _log_source)
+# The folder is opened once and the reparse check and the change both use that
+# handle; a check on the path followed by a change on the path can be raced by a
+# user who owns the folder (agent-rs/src/agent_log.rs has the long version).
+_harden_source = inspect.getsource(logging_setup._harden_directory)
+check_true("...and the folder is opened once without following a reparse point",
+           "FILE_FLAG_OPEN_REPARSE_POINT" in _harden_source and "GetFileInformationByHandle" in _harden_source)
+check_true("...and the change is made on that handle, not on the path",
+           "SetSecurityInfo(" in _harden_source and "SetNamedSecurityInfo" not in _harden_source
+           and "GetFileAttributes(" not in _harden_source)
+check_true("...and the service, which is SYSTEM, is what asks for it",
+           "harden=True" in (pathlib.Path(__file__).parent / "service_windows.py").read_text(encoding="utf-8"))
+
+# Behaviour that runs without pywin32: a link planted under a log name is
+# removed and what it pointed at is not, and a folder that cannot be secured
+# is not written to. (On Windows the second would really harden a temp folder.)
+_planted_dir = tempfile.mkdtemp()
+_planted_target = tempfile.mkdtemp()
+with open(os.path.join(_planted_target, "keep"), "w") as _f:
+    _f.write("x")
+try:
+    os.symlink(_planted_target, os.path.join(_planted_dir, "agent.log.3"), target_is_directory=True)
+    os.symlink(os.path.join(_planted_target, "keep"), os.path.join(_planted_dir, "agent.log.1"))
+    _can_link = True
+except (OSError, NotImplementedError):
+    _can_link = False  # an unprivileged Windows account cannot make symlinks
+if _can_link:
+    logging_setup._clear_planted_links(_planted_dir)
+    check_true("a planted directory link is removed",
+               not os.path.lexists(os.path.join(_planted_dir, "agent.log.3")))
+    check_true("a planted file link is removed",
+               not os.path.lexists(os.path.join(_planted_dir, "agent.log.1")))
+    check_true("what the links pointed at is kept",
+               os.path.exists(os.path.join(_planted_target, "keep")))
+# Before the folder was first hardened any user could create entries in it, and
+# clearing can fail (a non-empty directory) or be raced. A hard link has no
+# reparse tag to find, so it is found by its link count; removing one name of a
+# hard link deletes only that name. What cannot be cleared must make the setup
+# run with no file log, which is what _log_names_are_safe decides.
+_hardlink_dir = tempfile.mkdtemp()
+_hardlink_outside = tempfile.mkdtemp()
+_hardlink_target = os.path.join(_hardlink_outside, "victim")
+with open(_hardlink_target, "w") as _f:
+    _f.write("precious")
+os.link(_hardlink_target, os.path.join(_hardlink_dir, "agent.log.2"))
+logging_setup._clear_planted_links(_hardlink_dir)
+check_true("a planted hard link under a log name is removed",
+           not os.path.lexists(os.path.join(_hardlink_dir, "agent.log.2")))
+with open(_hardlink_target) as _f:
+    check("...and the file it linked to is intact", _f.read(), "precious")
+
+_stuck_dir = tempfile.mkdtemp()
+os.makedirs(os.path.join(_stuck_dir, "agent.log.2"))
+with open(os.path.join(_stuck_dir, "agent.log.2", "inside"), "w") as _f:
+    _f.write("x")
+check_true("a non-empty directory under a log name is not a safe folder",
+           not logging_setup._log_names_are_safe(_stuck_dir))
+logging_setup._clear_planted_links(_stuck_dir)
+check_true("...and clearing cannot make it one", not logging_setup._log_names_are_safe(_stuck_dir))
+os.link(_hardlink_target, os.path.join(_hardlink_dir, "agent.log.1"))
+check_true("a hard link left in place is not a safe folder",
+           not logging_setup._log_names_are_safe(_hardlink_dir))
+_plain_dir = tempfile.mkdtemp()
+check_true("an empty folder is safe", logging_setup._log_names_are_safe(_plain_dir))
+with open(os.path.join(_plain_dir, "agent.log"), "w") as _f:
+    _f.write("x")
+check_true("...and so is one holding a plain log file", logging_setup._log_names_are_safe(_plain_dir))
+check_true("...and setup_logging asks, so an unsafe folder gets no file handler",
+           "_log_names_are_safe" in inspect.getsource(logging_setup.setup_logging))
+if os.name != "nt":
+    _hl = logging.getLogger("inwire")
+    _hl_saved = (list(_hl.handlers), _hl.level, _hl.propagate)
+    _hl_dir = tempfile.mkdtemp()
+    try:
+        logging_setup._configured_with = None
+        logging_setup.setup_logging(_hl_dir, to_stderr=False, harden=True)
+        check_true("a folder that cannot be secured gets no file handler",
+                   not any(isinstance(h, logging.FileHandler) for h in _hl.handlers))
+        check("...and no log file is created in it", os.listdir(_hl_dir), [])
+        # agent.main() calls setup_logging again for the same folder without
+        # `harden`, because it cannot know it runs as the service. That second
+        # call must not undo the first: a plain handler would have SYSTEM
+        # writing through whatever a user planted in the folder.
+        logging_setup.setup_logging(_hl_dir, to_stderr=False)
+        check_true("a later call without harden keeps the hardened setup",
+                   not any(isinstance(h, logging.FileHandler) for h in _hl.handlers))
+        check("...and still creates no log file", os.listdir(_hl_dir), [])
+    finally:
+        for _h in list(_hl.handlers):
+            _hl.removeHandler(_h)
+            _h.close()
+        for _h in _hl_saved[0]:
+            _hl.addHandler(_h)
+        _hl.setLevel(_hl_saved[1])
+        _hl.propagate = _hl_saved[2]
+        logging_setup._configured_with = None
+        logging_setup._hardened_directories.clear()
+
+# --- a pipe name someone else created, and a lost instance (ADR 0068) --------------
+#
+# The first instance carries FILE_FLAG_FIRST_PIPE_INSTANCE, so a name a user
+# made before the service started is refused instead of joined; and an instance
+# the system will not give is retried instead of ending the server. The real
+# CreateNamedPipe needs Windows and pywin32, and CI runs this file on ubuntu and
+# macOS - so the flag is held by a source check, and the decisions by a server
+# whose `_create_instance` is a stand-in.
+check_true("the first pipe instance asks for FILE_FLAG_FIRST_PIPE_INSTANCE",
+           pipe_server.FILE_FLAG_FIRST_PIPE_INSTANCE == 0x00080000
+           and "FILE_FLAG_FIRST_PIPE_INSTANCE if first" in inspect.getsource(pipe_server.PipeServer._create_instance))
+
+import logging as _logging
+
+
+class _Lines(_logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append((record.levelname, record.getMessage()))
+
+
+class _FakePipes(pipe_server.PipeServer):
+    """A PipeServer whose instances are strings, and whose creation can fail."""
+
+    def __init__(self, outcomes):
+        super().__init__(asyncio.new_event_loop(), lambda connection: None, name=r"\\.\pipe\inwire-test")
+        self._outcomes = list(outcomes)
+        self.asked = []
+        self._retry = 0.01
+        self.closed = []
+
+    def _create_instance(self, first):
+        self.asked.append(first)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def _close_handle(self, handle):
+        self.closed.append(handle)
+
+
+_lines = _Lines()
+pipe_server.log.addHandler(_lines)
+try:
+    _squatted = _FakePipes([OSError(5, "Access is denied.")])
+    _squatted._begin()
+    check("a name that already exists is refused", _squatted.refused, "the pipe name is already in use")
+    check("...the refusal asked for the FIRST instance", _squatted.asked, [True])
+    check_true("...and nothing is serving or accepting", not _squatted.serving and _squatted._accept_thread is None)
+    check_true("...the log says another process created it first",
+               any(level == "ERROR" and "already exists - another process created it first" in text
+                   for level, text in _lines.lines))
+
+    # A lost instance is retried, and said once per failing streak.
+    _lines.lines.clear()
+    _lost = _FakePipes(["first-instance", OSError(231, "busy"), OSError(231, "busy"), "second-instance"])
+    _lost._first_handle = _lost._acquire_instance()
+    check("the first call hands over the instance made before the thread",
+          _lost._next_instance(), "first-instance")
+    check("a refused instance is retried until the system gives one",
+          _lost._next_instance(), "second-instance")
+    check("...asking for a non-first instance every time", _lost.asked, [True, False, False, False])
+    check("...logging the streak once, not once per attempt",
+          sum(1 for level, text in _lines.lines if "could not create a pipe instance, retrying" in text), 1)
+    check_true("...and not refusing: a lost slot does not stop the server", _lost.refused is None)
+
+    _stopping = _FakePipes([OSError(231, "busy")] * 3)
+    _stopping._stopping.set()
+    check("a stop ends the retrying", _stopping._next_instance(), None)
+
+    # The first-instance guarantee holds whenever the server holds no instance,
+    # not only for the very first one: a user who drains the slots and
+    # recreates the name must not be joined by the next retry.
+    _drained = _FakePipes(["a", "b", "c", OSError(5, "Access is denied."), "d"])
+    _a = _drained._acquire_instance()
+    _b = _drained._acquire_instance()
+    check("a second instance is not asked for as a first", _drained.asked, [True, False])
+    check("...and both are counted", _drained._held, 2)
+    _drained._release_instance(_a)
+    check("an instance the server still holds another of is not a reason to ask for a first",
+          (_drained._held, _drained._acquire_instance()), (1, "c"))
+    check("...asked for non-first again", _drained.asked, [True, False, False])
+    _drained._release_instance(_b)
+    _drained._release_instance("c")
+    check("closing an instance counts it out", (_drained._held, _drained.closed), (0, ["a", "b", "c"]))
+    try:
+        _drained._acquire_instance()
+    except OSError:
+        pass
+    check("with none held, the next creation asks for a FIRST instance", _drained.asked[-1], True)
+    check("...a refusal is not counted as held", _drained._held, 0)
+    check("...and the retry after it asks for a first instance again",
+          (_drained._next_instance(), _drained.asked[-1]), ("d", True))
+    check("...which is then held", _drained._held, 1)
+finally:
+    pipe_server.log.removeHandler(_lines)
 
 
 # The one claim a pipe connection makes that a socket cannot: the descriptor

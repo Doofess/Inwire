@@ -103,6 +103,13 @@ PIPE_NAME = os.environ.get("INWIRE_AGENT_PIPE") or r"\\.\pipe\inwire-agent"
 #: against the one machine-wide service, and `capture_busy` is what arbitrates.
 MAX_PIPE_INSTANCES = 8
 
+#: Fails ``CreateNamedPipe`` when the name already exists (ADR 0068). Set on the
+#: first instance only, so the agent never serves a pipe someone else made.
+FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000
+
+#: Seconds before an instance the system refused is asked for again (ADR 0068).
+INSTANCE_RETRY_SECONDS = 1.0
+
 #: Read buffer. A batch is capped at 256 kB and a control message is smaller.
 READ_CHUNK = 64 * 1024
 
@@ -125,6 +132,11 @@ MAX_OUTBOUND_FRAMES = 4096
 #: 32 MB, matching ``MAX_QUEUED_BYTES`` and ``KERNEL_BUFFER_BYTES`` - the same
 #: order of magnitude as every other buffer on this path.
 MAX_OUTBOUND_BYTES = 32 * 1024 * 1024
+
+#: Control bytes a client may leave unread before its connection is ended.
+#: Control messages are never shed, so this is what bounds them: a client that
+#: lets 4 MB of them queue is not reading at all.
+MAX_CONTROL_BYTES = 4 * 1024 * 1024
 
 _SHUTDOWN = object()
 
@@ -151,23 +163,46 @@ class _Outbound:
     per-drop log line and nothing in ``capture_stats``.
     """
 
-    def __init__(self, max_frames: int, max_bytes: int) -> None:
+    def __init__(self, max_frames: int, max_bytes: int,
+                 max_control_bytes: int = MAX_CONTROL_BYTES) -> None:
         self._frames: collections.deque = collections.deque()
-        # How many captured packets each queued frame carries, in step with
-        # `_frames`. Kept apart rather than stored as a tuple so the hot path -
-        # the writer thread's `get()` - still pops a plain bytes object.
+        # How many captured packets each queued frame carries, and whether it
+        # may be shed, both in step with `_frames` (the stop signal included,
+        # as 0 and False). Kept apart rather than stored as a tuple so the hot
+        # path - the writer thread's `get()` - still pops a plain bytes object.
         self._records: collections.deque = collections.deque()
+        self._sheddable: collections.deque = collections.deque()
         self._bytes = 0
+        #: Bytes of unsheddable frames queued - what `max_control_bytes` bounds.
+        self._control_bytes = 0
         self._max_frames = max_frames
         self._max_bytes = max_bytes
+        self._max_control_bytes = max_control_bytes
         self._cond = threading.Condition()
         self.dropped = 0
+        #: Set when the control cap ended this queue. See `put`.
+        self.overflowed = False
 
-    def put(self, frame, records: int = 0) -> None:
-        """Queues one outbound frame.
+    def _append(self, frame, records: int, sheddable: bool) -> None:
+        self._frames.append(frame)
+        self._records.append(records)
+        self._sheddable.append(sheddable)
+
+    def put(self, frame, records: int = 0, sheddable: bool = False) -> bool:
+        """Queues one outbound frame. False means the connection is over.
 
         `records` is **how many captured packets this frame carries** - a
         packet batch holds up to 512 of them, a control message holds none.
+
+        **`sheddable` is True for a packet batch and False for a control
+        message, and the default is False so a caller that forgets sheds
+        nothing.** Shedding takes the oldest SHEDDABLE frame wherever it sits; a
+        capture_boundary, a capture_stopped or an error was lost under
+        backpressure when it took the oldest of any kind, uncounted, because a
+        control message carries no packets. Control messages are bounded by
+        their own byte cap instead: a client that lets that much queue is not
+        reading at all, so the queue is emptied, the stop signal queued, and
+        this returns False so the connection ends through the normal path.
 
         **The counter is in packets, and getting that wrong was a real bug.**
         It counted ITEMS, and the items here are batches; the app adds
@@ -182,34 +217,65 @@ class _Outbound:
         handed over, and it did not.
         """
         with self._cond:
-            self._frames.append(frame)
-            if frame is not _SHUTDOWN:
-                self._bytes += len(frame)
-                self._records.append(records)
-            # `> 1` so the frame just queued is never the one shed: a queue that
-            # evicted its own newest arrival would deliver nothing at all once
-            # a single frame exceeded the budget.
+            if frame is _SHUTDOWN:
+                # Never shed - the writer thread is waiting for it and would
+                # block until the handle closed under it.
+                self._append(frame, 0, False)
+                self._cond.notify()
+                return True
+            if self.overflowed:
+                return False
+            if not sheddable:
+                self._control_bytes += len(frame)
+                if self._control_bytes > self._max_control_bytes:
+                    # Nothing here will be read. The batches waiting go with
+                    # the connection, and are counted like any other loss.
+                    self.dropped += sum(
+                        records for records, shed in zip(self._records, self._sheddable) if shed
+                    )
+                    self._frames.clear()
+                    self._records.clear()
+                    self._sheddable.clear()
+                    self._bytes = 0
+                    self._control_bytes = 0
+                    self.overflowed = True
+                    self._append(_SHUTDOWN, 0, False)
+                    self._cond.notify()
+                    return False
+            self._append(frame, records, sheddable)
+            self._bytes += len(frame)
+            # `range(len - 1)` so the frame just queued is never the one shed: a
+            # queue that evicted its own newest arrival would deliver nothing at
+            # all once a single frame exceeded the budget. Unsheddable frames
+            # and the stop signal are skipped.
             while (len(self._frames) > self._max_frames
-                   or self._bytes > self._max_bytes) and len(self._frames) > 1:
-                oldest = self._frames.popleft()
-                if oldest is _SHUTDOWN:
-                    # Never shed the stop signal - the writer thread is waiting
-                    # for it and would block until the handle closed under it.
-                    self._frames.appendleft(oldest)
+                   or self._bytes > self._max_bytes):
+                victim = next(
+                    (i for i in range(len(self._frames) - 1) if self._sheddable[i]), None,
+                )
+                if victim is None:
                     break
-                self._bytes -= len(oldest)
+                shed = self._frames[victim]
+                del self._frames[victim]
+                del self._sheddable[victim]
+                self._bytes -= len(shed)
                 # In PACKETS, not in queued items. See `put`.
-                self.dropped += self._records.popleft()
+                self.dropped += self._records[victim]
+                del self._records[victim]
             self._cond.notify()
+            return True
 
     def get(self):
         with self._cond:
             while not self._frames:
                 self._cond.wait()
             frame = self._frames.popleft()
+            self._records.popleft()
+            sheddable = self._sheddable.popleft()
             if frame is not _SHUTDOWN:
                 self._bytes -= len(frame)
-                self._records.popleft()
+                if not sheddable:
+                    self._control_bytes -= len(frame)
             return frame
 
     def qsize(self) -> int:
@@ -257,11 +323,15 @@ class PipeConnection:
         """
         if self._closed:
             raise ConnectionError("the pipe client has gone")
+        # Only a packet batch may be shed. A `str` is a control message, and
+        # shedding one loses something the app was never told it lost.
         if isinstance(data, str):
             frame = pipe_frame.encode_frame(pipe_frame.FRAME_JSON, data.encode("utf-8"))
+            sheddable = False
         else:
             frame = pipe_frame.encode_frame(pipe_frame.FRAME_BINARY, bytes(data))
-        self._write(frame, records)
+            sheddable = True
+        self._write(frame, records, sheddable)
 
     def __aiter__(self):
         return self
@@ -329,6 +399,19 @@ class PipeServer:
         self._accept_thread: Optional[threading.Thread] = None
         #: Whether this is the agent's transport. See `start`.
         self.serving = False
+        #: Why the server would not start, or None. Set when the pipe name
+        #: already existed (ADR 0068); `agent.main` reads it and ends, rather
+        #: than falling through to the WebSocket this platform must not open.
+        self.refused: Optional[str] = None
+        #: The instance made before the accept thread, with
+        #: ``FILE_FLAG_FIRST_PIPE_INSTANCE``. See `_begin`.
+        self._first_handle = None
+        #: Seconds before an instance the system refused is asked for again.
+        self._retry = INSTANCE_RETRY_SECONDS
+        #: How many instances of the pipe this server holds right now - made
+        #: and not yet closed, connected or listening. See `_acquire_instance`.
+        self._held = 0
+        self._held_lock = threading.Lock()
 
     def start(self) -> None:
         if sys.platform != "win32":
@@ -342,6 +425,26 @@ class PipeServer:
             # honest thing is to leave those platforms exactly as they were.
             log.info("named pipe not started: this platform uses the socket")
             return
+        self._begin()
+
+    def _begin(self) -> None:
+        """Makes the first instance, then starts accepting on it.
+
+        **The first instance is created here, before the thread, with
+        ``FILE_FLAG_FIRST_PIPE_INSTANCE``** (ADR 0068): if another process
+        created the name first, creation fails and the agent refuses to serve a
+        pipe whose descriptor someone else chose. Same sentence as the Rust
+        agent.
+        """
+        try:
+            self._first_handle = self._acquire_instance()
+        except Exception as error:  # noqa: BLE001 - pywintypes.error on Windows
+            log.error(
+                "%s already exists - another process created it first, "
+                "so the agent will not serve it: %s", self._name, error,
+            )
+            self.refused = "the pipe name is already in use"
+            return
         self._accept_thread = threading.Thread(
             target=self._accept_loop, name="inwire-pipe-accept", daemon=True,
         )
@@ -354,41 +457,112 @@ class PipeServer:
 
     # -- the threads ---------------------------------------------------------
 
-    def _accept_loop(self) -> None:
-        import pywintypes  # noqa: PLC0415
-        import win32event  # noqa: PLC0415
+    def _create_instance(self, first: bool):
+        """Creates one pipe instance carrying the descriptor (Windows only).
+
+        ``first`` adds ``FILE_FLAG_FIRST_PIPE_INSTANCE``, which fails the call
+        when any process has already created the name (ADR 0068).
+        """
         import win32file  # noqa: PLC0415
         import win32pipe  # noqa: PLC0415
-        import winerror  # noqa: PLC0415
+
+        return win32pipe.CreateNamedPipe(
+            self._name,
+            # OVERLAPPED because the reader and the writer are two
+            # threads on one handle; see the header. Without it a write
+            # queues behind whatever read is outstanding.
+            win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_OVERLAPPED
+            | (FILE_FLAG_FIRST_PIPE_INSTANCE if first else 0),
+            # BYTE mode both ways: the framing is ours, and message
+            # mode would add a second, redundant idea of a boundary
+            # that the two ends would then have to agree about twice.
+            win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE
+            | win32pipe.PIPE_WAIT | win32pipe.PIPE_REJECT_REMOTE_CLIENTS,
+            MAX_PIPE_INSTANCES,
+            READ_CHUNK, READ_CHUNK,
+            0,
+            _security_attributes(),
+        )
+
+    def _acquire_instance(self):
+        """Creates the next instance, as the first one when none is held.
+
+        **Why the server counts** (ADR 0068). ``FILE_FLAG_FIRST_PIPE_INSTANCE``
+        protects only the instance that creates the name. A user can take every
+        slot the server frees, let its count of instances reach zero, close
+        their own, and create the name again with a descriptor they chose; a
+        server that then asked for a non-first instance would join it. So it
+        asks for a first instance whenever it holds none: a name that still
+        exists, or that someone else made again, is refused and retried like
+        any other failure. Same rule as the Rust agent's ``Held``.
+
+        The decision and the creation share one lock with `_release_instance`'s
+        close and decrement. Two acceptors at zero may both ask for a first
+        instance; one fails and retries, which costs a second and nothing else.
+        """
+        with self._held_lock:
+            first = self._held == 0
+            handle = self._create_instance(first)
+            self._held += 1
+            return handle
+
+    def _release_instance(self, handle) -> None:
+        """Closes an instance made by `_acquire_instance` and stops counting it.
+
+        Closed under the lock, so a creation deciding ``first`` never sees a
+        count that still includes a handle already gone, or the reverse.
+        """
+        with self._held_lock:
+            try:
+                self._close_handle(handle)
+            finally:
+                self._held -= 1
+
+    def _close_handle(self, handle) -> None:
+        import win32file  # noqa: PLC0415
+
+        win32file.CloseHandle(handle)
+
+    def _next_instance(self):
+        """The instance to wait for a client on, or None once stopping.
+
+        The first call hands over the instance made before the thread started.
+        After that, a refusal is **not** a reason to stop - any user can take a
+        slot - so it is logged once per failing streak and retried (ADR 0068).
+        """
+        if self._first_handle is not None:
+            handle, self._first_handle = self._first_handle, None
+            return handle
+        failing = False
+        while not self._stopping.is_set():
+            try:
+                return self._acquire_instance()
+            except Exception as error:  # noqa: BLE001 - pywintypes.error on Windows
+                if not failing:
+                    failing = True
+                    log.warning("could not create a pipe instance, retrying: %s", error)
+                self._stopping.wait(self._retry)
+        return None
+
+    def _accept_loop(self) -> None:
+        import pywintypes  # noqa: PLC0415
 
         while not self._stopping.is_set():
-            handle = None
+            handle = self._next_instance()
+            if handle is None:
+                return
             try:
-                handle = win32pipe.CreateNamedPipe(
-                    self._name,
-                    # OVERLAPPED because the reader and the writer are two
-                    # threads on one handle; see the header. Without it a write
-                    # queues behind whatever read is outstanding.
-                    win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_OVERLAPPED,
-                    # BYTE mode both ways: the framing is ours, and message
-                    # mode would add a second, redundant idea of a boundary
-                    # that the two ends would then have to agree about twice.
-                    win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE
-                    | win32pipe.PIPE_WAIT | win32pipe.PIPE_REJECT_REMOTE_CLIENTS,
-                    MAX_PIPE_INSTANCES,
-                    READ_CHUNK, READ_CHUNK,
-                    0,
-                    _security_attributes(),
-                )
                 if not self._await_client(handle):
-                    win32file.CloseHandle(handle)
+                    self._release_instance(handle)
                     return
             except pywintypes.error as error:
                 if self._stopping.is_set():
+                    # Released too: an instance left uncounted-for would keep
+                    # the held count above zero for good.
+                    self._release_instance(handle)
                     return
                 log.warning("pipe accept failed: %s", error)
-                if handle is not None:
-                    win32file.CloseHandle(handle)
+                self._release_instance(handle)
                 # A tight retry loop on a persistent failure would fill the log
                 # faster than anyone could read it.
                 self._stopping.wait(1.0)
@@ -434,13 +608,12 @@ class PipeServer:
 
     def _serve(self, handle) -> None:
         import pywintypes  # noqa: PLC0415
-        import win32file  # noqa: PLC0415
         import win32pipe  # noqa: PLC0415
 
         outbound = _Outbound(MAX_OUTBOUND_FRAMES, MAX_OUTBOUND_BYTES)
         closed = threading.Event()
 
-        def write(frame: bytes, records: int = 0) -> None:
+        def write(frame: bytes, records: int = 0, sheddable: bool = False) -> None:
             if closed.is_set():
                 # **Raised, not returned.** This used to return silently while
                 # `PipeConnection.send` tested a DIFFERENT flag - its own
@@ -449,7 +622,12 @@ class PipeServer:
                 # has an `except` that exists for exactly this and could never
                 # fire. One flag decides now, and it decides out loud.
                 raise ConnectionError("the pipe client has gone")
-            outbound.put(frame, records)
+            if not outbound.put(frame, records, sheddable):
+                # The control cap: this client reads nothing. `closed` ends the
+                # reader at its next bounded wait, so the connection goes
+                # through the normal disconnect path.
+                closed.set()
+                raise ConnectionError("the pipe client is not reading")
 
         def close() -> None:
             closed.set()
@@ -491,7 +669,7 @@ class PipeServer:
             except Exception:  # noqa: BLE001 - the handle may already be gone
                 pass
             try:
-                win32file.CloseHandle(handle)
+                self._release_instance(handle)
             except Exception:  # noqa: BLE001
                 pass
 

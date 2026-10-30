@@ -1391,7 +1391,9 @@ class AgentServer:
                 }))
                 return
 
-        if msg_type in ("start_capture", "stop_capture", "set_interfaces") and self.owned_by_other(ws):
+        # restart_agent is on the list because it ends the capture by exiting:
+        # it is the owner's to give, like stop_capture.
+        if msg_type in ("start_capture", "stop_capture", "set_interfaces", "restart_agent") and self.owned_by_other(ws):
             await ws.send(json.dumps({
                 "type": "error",
                 "code": "capture_busy",
@@ -2595,6 +2597,11 @@ async def main(to_stderr=True):
     # with a different name.
     pipes = pipe_server.PipeServer(agent.loop, agent.register)
     pipes.start()
+    if pipes.refused:
+        # The pipe name existed before this process made it (ADR 0068). Already
+        # logged by `PipeServer`; ending here also keeps a refusal from falling
+        # through to the WebSocket, which Windows must never open.
+        return False
 
     if pipes.serving:
         try:

@@ -175,6 +175,8 @@ invariant marked "unenforced" there means exactly that.
   `src/main.tsx`; the check walks the import graph and names the chain.
 - Windows uses the named pipe ACL, not application credentials or a network listener.
   Interactive local users may connect; capture ownership controls their commands.
+  The agent refuses a pipe name it did not create, but another interactive user can
+  still serve an instance while it runs: an accepted residual (ADR 0068).
   `PIPE_SDDL` in `agent-rs/src/pipe.rs` is the same literal as the Python one and
   nothing asserts it; `test_protocol.py` reads only Python's.
 - The agent writes capture files as its connected client, never with SYSTEM's file rights.

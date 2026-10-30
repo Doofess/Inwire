@@ -199,6 +199,171 @@ fn stop(shutdown: Arc<Shutdown>, server: thread::JoinHandle<io::Result<()>>) -> 
     asked.elapsed()
 }
 
+// --- ADR 0068: the pipe name, and a lost instance ---------------------------
+
+/// **A name someone else created first is not served.** Without
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE` the agent joined a pipe a user had made
+/// before the service started, and served the app from it.
+#[test]
+fn a_pipe_name_someone_else_created_is_refused() {
+    let name = private_pipe("squatted");
+    let _squatter = pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, false)
+        .expect("the squatter creates the name first");
+
+    let (shutdown, server) = serve_in_background(&name, Hardware::NPCAP);
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(server.join());
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("the runtime returns by itself rather than serving the squatter's pipe")
+        .expect("the runtime did not panic")
+        .expect("a refusal is a clean stop");
+    assert!(shutdown.requested());
+    assert_eq!(shutdown.wait(), "the pipe name is already in use");
+
+    let line = name_taken_message(&name, &io::Error::from_raw_os_error(5));
+    assert!(line.contains("already exists - another process created it first"), "{line}");
+    assert!(line.contains(&name), "{line}");
+}
+
+/// **The guarantee holds for every instance the agent makes while it holds
+/// none, not only for the first one ever.** A user who drains the agent's
+/// slots, closes their own, and creates the name again must not be joined by the
+/// agent's next retry.
+#[test]
+fn a_pipe_name_recreated_by_someone_else_is_not_joined() {
+    let name = private_pipe("drained");
+    let held = pipe::Held::new();
+    let ours = held
+        .create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES)
+        .expect("the agent makes the name");
+    // While the agent holds an instance, adding another is the ordinary case.
+    let second = held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).expect("a later slot");
+    // The user takes a slot, and the agent's instances go (their clients left).
+    let takeover = pipe::create_instance(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES, false)
+        .expect("the user takes the freed slot");
+    drop((ours, second));
+    assert_eq!(held.count(), 0);
+    // The name still exists, made by the user: the agent refuses it.
+    assert!(
+        held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).is_err(),
+        "the agent joined a pipe it does not hold an instance of"
+    );
+    // They close theirs and recreate the name with a descriptor of their own.
+    drop(takeover);
+    let recreated = pipe::create_instance(&name, "D:(A;;GA;;;WD)", pipe::MAX_INSTANCES, true)
+        .expect("the user recreates the name");
+    assert!(
+        held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).is_err(),
+        "the agent joined a recreated pipe"
+    );
+    // With the name free again the agent makes it, as it did at the start.
+    drop(recreated);
+    assert!(held.create(&name, pipe::PIPE_SDDL, pipe::MAX_INSTANCES).is_ok());
+}
+
+/// A pipe instance for the retry tests, on a name of its own.
+fn spare_instance(tag: &str) -> pipe::PipeInstance {
+    pipe::create_instance(&private_pipe(tag), pipe::PIPE_SDDL, 2, false).unwrap()
+}
+
+/// **A lost instance slot is retried, not fatal.** Any user who took a slot used
+/// to stop the agent, because the acceptor answered every failure with a shutdown.
+#[test]
+fn a_lost_instance_is_retried_and_does_not_stop_the_agent() {
+    let shutdown = Shutdown::new();
+    let mut first = None;
+    let mut failing = false;
+    let mut calls = 0u32;
+    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+        calls += 1;
+        if calls < 3 {
+            Err(io::Error::from_raw_os_error(231)) // ERROR_PIPE_BUSY
+        } else {
+            Ok(spare_instance("retry"))
+        }
+    });
+    assert!(got.is_some(), "the third attempt created an instance");
+    assert_eq!(calls, 3);
+    assert!(!shutdown.requested(), "a lost slot is not a reason to stop");
+    assert!(!failing, "the streak ended with the success");
+}
+
+#[test]
+fn the_first_instance_is_used_before_a_new_one_is_created() {
+    let shutdown = Shutdown::new();
+    let mut first = Some(spare_instance("held"));
+    let mut failing = false;
+    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+        panic!("slot 0's first loop uses the instance made before the threads started")
+    });
+    assert!(got.is_some());
+    assert!(first.is_none());
+}
+
+#[test]
+fn a_stop_ends_the_retrying() {
+    let shutdown = Shutdown::new();
+    shutdown.request("the service control manager asked");
+    let mut first = None;
+    let mut failing = false;
+    let got = next_instance(&mut first, &mut failing, &shutdown, Duration::from_millis(10), || {
+        Err(io::Error::from_raw_os_error(231))
+    });
+    assert!(got.is_none(), "no instance is created, and no endless loop, once a stop is asked for");
+}
+
+/// **A client that stops reading is dropped, not parked.** The writer is stuck
+/// in `GetOverlappedResult(INFINITE)` on a write the client never drains, so it
+/// can never pop the `Shutdown` the control cap queues; the session has to be
+/// ended from the side that pushed. Without that it stayed in `clients` for
+/// good - connected as far as the watchdog and `busy` were concerned, and every
+/// send to it failing.
+#[test]
+fn a_client_that_stops_reading_has_its_session_ended() {
+    let name = private_pipe("deaf");
+    let instance = Arc::new(pipe::create_instance(&name, pipe::PIPE_SDDL, 2, true).unwrap());
+    // Held to the end: dropping it would break the pipe from the client's side,
+    // which is the other way this session could finish.
+    let Some(_client) = Client::connect(&name) else { return };
+    pipe::accept(&instance).expect("the client connected");
+
+    let shared = new_shared(
+        &Arc::new(Shutdown::new()),
+        Hardware::NPCAP,
+        RestartSupport { allowed: false, reason: restart::NOT_THE_SERVICE.into() },
+    );
+    // 64 kB of control backlog: a pipe buffer's worth, so a few messages fill
+    // the pipe and the rest queue behind the stuck write.
+    let connection = Arc::new(Connection::with_limits(4096, 32 * 1024 * 1024, 64 * 1024));
+    let (done, ended) = mpsc::channel();
+    {
+        let (shared, connection) = (Arc::clone(&shared), Arc::clone(&connection));
+        thread::spawn(move || {
+            let _ = done.send(serve_with(shared, instance, "deaf".into(), connection));
+        });
+    }
+
+    let padding = "x".repeat(16 * 1024);
+    let message = json!({ "type": "agent_log", "pad": padding }).to_string();
+    let mut refused = false;
+    for _ in 0..400 {
+        if connection.send(FRAME_JSON, message.as_bytes(), 0).is_err() {
+            refused = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(refused, "the control cap was reached and the send was refused");
+
+    ended
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the session ended by itself instead of waiting on a client that never reads")
+        .expect("a client that stops reading is not an error");
+    assert!(shared.clients.lock().unwrap().is_empty(), "the session left the client table");
+}
+
 static NPCAP_ARRIVED: AtomicBool = AtomicBool::new(false);
 
 /// Npcap as a machine sees it before the Update Center has installed it - until

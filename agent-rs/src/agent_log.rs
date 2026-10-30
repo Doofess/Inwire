@@ -41,8 +41,12 @@
 #![cfg(windows)]
 
 use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -106,7 +110,36 @@ static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 ///
 /// `to_stderr` is false under the SCM, where stderr reaches nobody, and true
 /// for `inwire-agent debug`.
-pub fn init(directory: &Path, to_stderr: bool) {
+///
+/// `harden` is true under the SCM only. The service rotates this folder as
+/// SYSTEM with `remove_file` and `rename`, so a user who owned it, or could
+/// plant entries in it, could aim SYSTEM's delete or rename anywhere. With
+/// `harden` the folder is created, then given `LOG_DIR_SDDL` (owner
+/// Administrators, protected DACL), then any link planted under a log name is
+/// removed. A folder that is already a junction is refused rather than
+/// followed, and a folder that cannot be secured is not written to at all - nor
+/// is one where a log name is still held by a link, a directory or a file with
+/// other names after clearing. Every open of a log file declines to follow a
+/// reparse point. A
+/// hand run is not the service and cannot set the owner, so it passes false.
+pub fn init(directory: &Path, to_stderr: bool, harden: bool) {
+    let mut unsecured: Option<io::Error> = None;
+    if harden {
+        match fs::create_dir_all(directory).and_then(|()| harden_directory(directory, LOG_DIR_SDDL)) {
+            Ok(()) => {
+                clear_planted_links(directory);
+                // An entry that could not be removed is run past, not trusted:
+                // no file log, exactly as for a folder that is a junction.
+                if !log_names_are_safe(directory) {
+                    unsecured = Some(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "a log file name is held by a link, a directory or a file with other names",
+                    ));
+                }
+            }
+            Err(error) => unsecured = Some(error),
+        }
+    }
     // **Probed here, not on the first line**, which is what `logging_setup.py`
     // does by constructing its handler inside the same `try`. The realistic
     // failure is not an unwritable directory: `%ProgramData%\Inwire` grants
@@ -115,19 +148,23 @@ pub fn init(directory: &Path, to_stderr: bool) {
     // unelevated, beside an installed service can create nothing and append to
     // nothing. Finding that out once and saying so beats discovering it per
     // line and saying nothing.
-    let path = fs::create_dir_all(directory)
-        .and_then(|()| {
-            let path = directory.join("agent.log");
-            OpenOptions::new().create(true).append(true).open(&path)?;
-            Ok(path)
-        })
-        .map_err(|error| {
-            if to_stderr {
-                eprintln!("[agent] WARNING: cannot write a log in {directory:?}: {error}");
-                eprintln!("[agent] lines go to stderr and to subscribers, and nothing is kept");
-            }
-        })
-        .ok();
+    let path = if unsecured.is_some() {
+        None
+    } else {
+        fs::create_dir_all(directory)
+            .and_then(|()| {
+                let path = directory.join("agent.log");
+                open_append(&path)?;
+                Ok(path)
+            })
+            .map_err(|error| {
+                if to_stderr {
+                    eprintln!("[agent] WARNING: cannot write a log in {directory:?}: {error}");
+                    eprintln!("[agent] lines go to stderr and to subscribers, and nothing is kept");
+                }
+            })
+            .ok()
+    };
     *SINK.lock().unwrap() = Some(Sink {
         path,
         to_stderr,
@@ -135,12 +172,298 @@ pub fn init(directory: &Path, to_stderr: bool) {
         first_pending: 0,
         next: 0,
     });
+    if let Some(error) = unsecured {
+        write(
+            "WARNING",
+            &format!(
+                "agent log folder {directory:?} could not be secured ({error}) - logging to subscribers only"
+            ),
+        );
+    }
+}
+
+/// The service's descriptor for its log folder: owned by Administrators,
+/// protected (nothing inherited from ProgramData), SYSTEM and Administrators
+/// full control, and `Users` read-and-execute only. Inheritable, so the log
+/// files take it too.
+pub const LOG_DIR_SDDL: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
+
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const SDDL_REVISION_1: u32 = 1;
+const SE_FILE_OBJECT: u32 = 1;
+const OWNER_SECURITY_INFORMATION: u32 = 0x1;
+const DACL_SECURITY_INFORMATION: u32 = 0x4;
+const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+const READ_CONTROL: u32 = 0x0002_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
+const WRITE_OWNER: u32 = 0x0008_0000;
+const FILE_SHARE_READ: u32 = 0x1;
+const FILE_SHARE_WRITE: u32 = 0x2;
+const FILE_SHARE_DELETE: u32 = 0x4;
+const OPEN_EXISTING: u32 = 3;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
+
+#[repr(C)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+
+/// `BY_HANDLE_FILE_INFORMATION`.
+#[repr(C)]
+struct ByHandleFileInformation {
+    file_attributes: u32,
+    creation_time: FileTime,
+    last_access_time: FileTime,
+    last_write_time: FileTime,
+    volume_serial_number: u32,
+    file_size_high: u32,
+    file_size_low: u32,
+    number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: *mut c_void,
+        disposition: u32,
+        flags: u32,
+        template: *mut c_void,
+    ) -> *mut c_void;
+    fn GetFileInformationByHandle(file: *mut c_void, information: *mut ByHandleFileInformation) -> i32;
+    fn LocalFree(memory: *mut c_void) -> *mut c_void;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl: *const u16,
+        revision: u32,
+        descriptor: *mut *mut c_void,
+        size: *mut u32,
+    ) -> i32;
+    fn GetSecurityDescriptorOwner(descriptor: *mut c_void, owner: *mut *mut c_void, defaulted: *mut i32) -> i32;
+    fn GetSecurityDescriptorDacl(
+        descriptor: *mut c_void,
+        present: *mut i32,
+        dacl: *mut *mut c_void,
+        defaulted: *mut i32,
+    ) -> i32;
+    fn SetSecurityInfo(
+        handle: *mut c_void,
+        object_type: u32,
+        information: u32,
+        owner: *mut c_void,
+        group: *mut c_void,
+        dacl: *mut c_void,
+        sacl: *mut c_void,
+    ) -> u32;
+}
+
+fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
+    text.encode_wide().chain(Some(0)).collect()
+}
+
+/// Gives `dir` the owner and DACL of `sddl`, protected, and propagates them to
+/// what is already inside.
+///
+/// **A reparse point is refused**, not followed: re-ACLing a junction's target
+/// would be done as SYSTEM. The owner is applied only when `sddl` names one.
+///
+/// **The folder is opened once and the check and the change both use that
+/// handle.** A user who owns a pre-existing folder can replace it between a
+/// check made on its path and a change made on its path (an oplock says when),
+/// so neither names the path twice. The handle is opened with every share flag
+/// and explicit rights: `SetSecurityInfo` propagates inheritable entries to what
+/// is already inside, but not through a handle opened exclusively or with
+/// `MAXIMUM_ALLOWED`.
+pub fn harden_directory(dir: &Path, sddl: &str) -> io::Result<()> {
+    harden_directory_with(dir, sddl, || {})
+}
+
+/// `harden_directory`, with a hook that runs between the check and the change -
+/// the only gap a swap could use. Tests put the swap there.
+fn harden_directory_with(dir: &Path, sddl: &str, between_check_and_apply: impl FnOnce()) -> io::Result<()> {
+    let sddl_wide = wide(std::ffi::OsStr::new(sddl));
+    let mut descriptor: *mut c_void = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let result = (|| {
+        let mut owner: *mut c_void = std::ptr::null_mut();
+        let mut dacl: *mut c_void = std::ptr::null_mut();
+        let (mut defaulted, mut present) = (0i32, 0i32);
+        if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+        let mut access = READ_CONTROL | WRITE_DAC;
+        if !owner.is_null() {
+            information |= OWNER_SECURITY_INFORMATION;
+            access |= WRITE_OWNER;
+        }
+
+        let name = wide(dir.as_os_str());
+        let raw = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // Closed when this goes out of scope, on every path below.
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let raw = handle.as_raw_handle();
+
+        let mut info: ByHandleFileInformation = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(raw, &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{dir:?} is a reparse point and is not followed"),
+            ));
+        }
+        if info.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{dir:?} is not a directory"),
+            ));
+        }
+
+        between_check_and_apply();
+
+        let status = unsafe {
+            SetSecurityInfo(
+                raw,
+                SE_FILE_OBJECT,
+                information,
+                owner,
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        Ok(())
+    })();
+    unsafe { LocalFree(descriptor) };
+    result
+}
+
+/// `agent.log` and its rotated names, which are the only entries the agent
+/// opens, renames or deletes in its folder.
+fn log_names(dir: &Path) -> Vec<PathBuf> {
+    let live = dir.join("agent.log");
+    let mut names = vec![live.clone()];
+    names.extend((1..=BACKUP_COUNT).map(|n| live.with_extension(format!("log.{n}"))));
+    names
+}
+
+/// How many names the file at `path` has, read without following a reparse
+/// point. A log file has one; a hard link planted by a user has two or more.
+fn link_count(path: &Path) -> io::Result<u32> {
+    // Only `FILE_READ_ATTRIBUTES`, so this succeeds on a file the account may
+    // not read, and every share flag so it cannot make a user's own open fail.
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    let file = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut info: ByHandleFileInformation = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.number_of_links)
+}
+
+/// Whether `meta` describes something other than a plain file: a symlink, a
+/// junction or any other reparse point, or a directory.
+fn is_link_or_directory(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink() || meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Removes what a user planted under a log name: a symlink, junction or
+/// directory, or a regular file with more than one name.
+///
+/// Rotation renames and deletes these names as SYSTEM, and every append opens
+/// one; a link under one is how that is aimed elsewhere. Only the entry goes,
+/// never what it points at: `remove_dir` on a junction removes the junction, and
+/// removing one name of a hard link leaves the file and its other names alone.
+/// Errors are ignored here because `log_names_are_safe` is what decides what to
+/// do about an entry that stayed.
+fn clear_planted_links(dir: &Path) {
+    for name in log_names(dir) {
+        let Ok(meta) = fs::symlink_metadata(&name) else { continue };
+        if is_link_or_directory(&meta) {
+            let _ = fs::remove_dir(&name).or_else(|_| fs::remove_file(&name));
+        } else if link_count(&name).map_or(false, |links| links > 1) {
+            let _ = fs::remove_file(&name);
+        }
+    }
+}
+
+/// True when every log name is absent or a plain regular file with one name.
+///
+/// Checked after `clear_planted_links`: an entry that is still a reparse point,
+/// a directory or a multi-link file is one a user could remove-proof (a symlink
+/// held open without `FILE_SHARE_DELETE`, a directory with something inside),
+/// and the agent then writes no file log at all rather than rotate into it. A
+/// name whose state cannot be read counts as unsafe.
+fn log_names_are_safe(dir: &Path) -> bool {
+    log_names(dir).iter().all(|name| match fs::symlink_metadata(name) {
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+        Ok(meta) => !is_link_or_directory(&meta) && meta.is_file() && link_count(name).map_or(false, |links| links == 1),
+    })
+}
+
+/// Opens a log file for appending without following a reparse point, so a
+/// symlink that clearing could not remove, or that appeared afterwards, is
+/// opened itself and never what it points at.
+fn open_append(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 /// `%ProgramData%\Inwire`, which is where the Python agent keeps its own.
 ///
 /// Populated before anybody logs in, which a LocalSystem service starting at
-/// boot needs, and it inherits ProgramData's ACLs.
+/// boot needs. Under the SCM `init` gives it `LOG_DIR_SDDL`; the installer
+/// only creates it.
 pub fn directory() -> PathBuf {
     let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
     PathBuf::from(base).join("Inwire")
@@ -192,10 +515,10 @@ pub fn write(level: &str, message: &str) {
 
 /// Appends a line, rotating first when the file has reached its cap.
 fn append(path: &Path, line: &str) -> std::io::Result<()> {
-    if fs::metadata(path).map(|m| m.len()).unwrap_or(0) >= MAX_BYTES {
+    if fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0) >= MAX_BYTES {
         rotate(path);
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = open_append(path)?;
     writeln!(file, "{line}")
 }
 
@@ -269,7 +592,10 @@ pub fn backlog() -> Vec<Value> {
             None => return Vec::new(),
         }
     };
-    let Ok(mut file) = File::open(&path) else { return Vec::new() };
+    // Not `File::open`, which would follow a link on the log's name.
+    let Ok(mut file) = OpenOptions::new().read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&path) else {
+        return Vec::new();
+    };
     let Ok(size) = file.metadata().map(|m| m.len()) else { return Vec::new() };
     let from = size.saturating_sub(BACKLOG_BYTES);
     if file.seek(SeekFrom::Start(from)).is_err() {
@@ -407,5 +733,309 @@ mod tests {
         assert_eq!(entry["message"], "a message");
         let short = format!("{} {:LEVEL_FIELD_WIDTH$} {}", stamp(), "INFO", "a message");
         assert_eq!(parse_line(&short)["message"], "a message");
+    }
+
+    // --- the log folder's ACL, and links planted in it ---
+
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn GetNamedSecurityInfoW(
+            name: *const u16,
+            object_type: u32,
+            information: u32,
+            owner: *mut *mut std::ffi::c_void,
+            group: *mut *mut std::ffi::c_void,
+            dacl: *mut *mut std::ffi::c_void,
+            sacl: *mut *mut std::ffi::c_void,
+            descriptor: *mut *mut std::ffi::c_void,
+        ) -> u32;
+        fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor: *const std::ffi::c_void,
+            revision: u32,
+            information: u32,
+            string: *mut *mut u16,
+            length: *mut u32,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A path under the temp folder that nothing has created yet.
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "inwire-agent-log-{label}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn temp(label: &str) -> PathBuf {
+        let path = temp_path(label);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// `cmd /c mklink /J`, which needs no privilege.
+    fn mklink_junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "mklink /J failed: {output:?}");
+    }
+
+    /// The directory's DACL as SDDL text, read back from the filesystem.
+    fn read_dacl_sddl(dir: &Path) -> String {
+        let name: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                name.as_ptr(),
+                1, // SE_FILE_OBJECT
+                4, // DACL_SECURITY_INFORMATION
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(status, 0, "GetNamedSecurityInfoW");
+        let mut text: *mut u16 = std::ptr::null_mut();
+        let mut length = 0u32;
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4, &mut text, &mut length)
+        };
+        assert_ne!(ok, 0, "ConvertSecurityDescriptorToStringSecurityDescriptorW");
+        let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length as usize) });
+        unsafe {
+            LocalFree(text.cast());
+            LocalFree(descriptor);
+        }
+        sddl.trim_end_matches('\0').to_string()
+    }
+
+    #[test]
+    fn the_service_descriptor_is_admin_only() {
+        assert_eq!(LOG_DIR_SDDL, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)");
+    }
+
+    #[test]
+    fn hardening_protects_the_dacl() {
+        // No `O:` - an unelevated test cannot set the owner to Administrators.
+        let dir = temp("harden");
+        harden_directory(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)").unwrap();
+        let sddl = read_dacl_sddl(&dir);
+        let _ = fs::remove_dir(&dir);
+        assert!(sddl.starts_with("D:P"), "{sddl}");
+        assert!(!sddl.contains(";ID;"), "nothing inherited survives: {sddl}");
+    }
+
+    #[test]
+    fn a_reparse_point_is_refused() {
+        let target = temp("target");
+        let link = temp_path("junction");
+        mklink_junction(&link, &target);
+        let before = read_dacl_sddl(&target);
+        let refused = harden_directory(&link, "D:P(A;OICI;FA;;;SY)");
+        let after = read_dacl_sddl(&target);
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir(&target);
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(after, before, "the junction's target was not re-ACLed");
+    }
+
+    /// **The check and the change are one object.** A user who owns the
+    /// pre-existing folder can swap it for a junction between a path-based
+    /// reparse check and the `SetNamedSecurityInfoW` that follows it, and SYSTEM
+    /// would then re-ACL the junction's target. The swap is made in the hook,
+    /// where it would be made by hand: the folder is renamed away and a junction
+    /// takes its name.
+    #[test]
+    fn a_folder_swapped_for_a_junction_after_the_check_is_not_followed() {
+        let dir = temp("race");
+        let moved = temp_path("race-moved");
+        let target = temp("race-target");
+        let before = read_dacl_sddl(&target);
+        let result = harden_directory_with(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", || {
+            fs::rename(&dir, &moved).unwrap();
+            mklink_junction(&dir, &target);
+        });
+        let after = read_dacl_sddl(&target);
+        let swapped_in = read_dacl_sddl(&dir);
+        let checked = read_dacl_sddl(&moved);
+        let _ = fs::remove_dir(&dir);
+        let _ = fs::remove_dir(&moved);
+        let _ = fs::remove_dir(&target);
+        result.unwrap();
+        assert_eq!(after, before, "the junction's target was re-ACLed");
+        // Measured: on this Windows `SetNamedSecurityInfoW` does not follow a
+        // junction at the final component, it re-ACLs the junction itself - so
+        // the target above survives even the path-based code. What fails there
+        // is the object: the change must land on the folder that passed the
+        // check, not on whatever the name has come to mean.
+        assert!(checked.starts_with("D:P"), "the checked folder was hardened: {checked}");
+        assert!(!swapped_in.starts_with("D:P"), "the swapped-in junction was changed: {swapped_in}");
+    }
+
+    /// Opening a handle instead of naming a path must not lose the propagation
+    /// to what is already inside, which is how an old log file gets the new
+    /// descriptor.
+    #[test]
+    fn an_existing_child_inherits_the_hardened_descriptor() {
+        let dir = temp("children");
+        let child = dir.join("agent.log");
+        fs::write(&child, b"x").unwrap();
+        let before = read_dacl_sddl(&child);
+        harden_directory(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)").unwrap();
+        let after = read_dacl_sddl(&child);
+        let _ = fs::remove_file(&child);
+        let _ = fs::remove_dir(&dir);
+        assert_ne!(after, before);
+        assert!(after.contains("(A;ID;FA;;;SY)"), "{after}");
+        assert_eq!(after.matches("(A;").count(), 2, "only the hardened entries: {after}");
+    }
+
+    #[test]
+    fn a_file_is_refused_as_a_log_folder() {
+        let dir = temp("not-a-folder");
+        let file = dir.join("file");
+        fs::write(&file, b"x").unwrap();
+        let refused = harden_directory(&file, "D:P(A;OICI;FA;;;SY)");
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir(&dir);
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn planted_links_are_cleared() {
+        let dir = temp("planted");
+        let target = temp("planted-target");
+        fs::write(target.join("keep"), b"x").unwrap();
+        mklink_junction(&dir.join("agent.log.3"), &target);
+        clear_planted_links(&dir);
+        let gone = !dir.join("agent.log.3").exists();
+        let kept = target.join("keep").exists();
+        let _ = fs::remove_file(target.join("keep"));
+        let _ = fs::remove_dir(&target);
+        let _ = fs::remove_dir(&dir);
+        assert!(gone);
+        assert!(kept, "the link went, not what it pointed at");
+    }
+
+    /// Before the folder was first hardened any user could create entries in
+    /// it. A hard link under a log name makes rotation's `rename` and the next
+    /// append act on a file the user chose, and unlike a symlink it has no
+    /// reparse tag to find. Removing a hard link's name deletes only that name.
+    #[test]
+    fn a_planted_hard_link_is_removed_and_its_target_is_intact() {
+        let dir = temp("hardlink");
+        let outside = temp("hardlink-outside");
+        let target = outside.join("victim");
+        fs::write(&target, b"precious").unwrap();
+        fs::hard_link(&target, dir.join("agent.log.2")).unwrap();
+        let unsafe_before = !log_names_are_safe(&dir);
+        clear_planted_links(&dir);
+        let gone = !dir.join("agent.log.2").exists();
+        let intact = fs::read(&target).ok();
+        let safe_after = log_names_are_safe(&dir);
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(&outside);
+        let _ = fs::remove_dir(&dir);
+        assert!(unsafe_before, "a multi-link file is not a plain log file");
+        assert!(gone);
+        assert_eq!(intact.as_deref(), Some(&b"precious"[..]));
+        assert!(safe_after);
+    }
+
+    /// A non-empty directory cannot be removed by `remove_dir`, and an entry
+    /// that stays is one SYSTEM would still rotate into. The caller must see
+    /// that and run with no file log, as it does for a junction folder.
+    #[test]
+    fn a_name_that_cannot_be_cleared_makes_the_folder_unsafe() {
+        let dir = temp("stuck");
+        let stuck = dir.join("agent.log.2");
+        fs::create_dir_all(&stuck).unwrap();
+        fs::write(stuck.join("inside"), b"x").unwrap();
+        let before = log_names_are_safe(&dir);
+        clear_planted_links(&dir);
+        let after = log_names_are_safe(&dir);
+        let _ = fs::remove_file(stuck.join("inside"));
+        let _ = fs::remove_dir(&stuck);
+        let _ = fs::remove_dir(&dir);
+        assert!(!before);
+        assert!(!after, "the directory is still there");
+    }
+
+    #[test]
+    fn plain_log_files_and_absent_names_are_safe() {
+        let dir = temp("plain");
+        assert!(log_names_are_safe(&dir), "an empty folder");
+        fs::write(dir.join("agent.log"), b"x").unwrap();
+        fs::write(dir.join("agent.log.1"), b"x").unwrap();
+        let safe = log_names_are_safe(&dir);
+        let _ = fs::remove_file(dir.join("agent.log"));
+        let _ = fs::remove_file(dir.join("agent.log.1"));
+        let _ = fs::remove_dir(&dir);
+        assert!(safe);
+    }
+
+    /// The case clearing cannot win: a user-owned file converted to a symlink
+    /// after the folder was checked. Appending opens the link itself, never
+    /// what it points at. Creating a symlink needs Developer Mode or the
+    /// privilege, so this skips on an account that has neither.
+    #[test]
+    fn appending_never_follows_a_symlink_on_a_log_name() {
+        let dir = temp("symlink");
+        let outside = temp("symlink-outside");
+        let target = outside.join("victim");
+        fs::write(&target, b"precious").unwrap();
+        let log = dir.join("agent.log");
+        let cleanup = || {
+            let _ = fs::remove_file(&log);
+            let _ = fs::remove_file(&target);
+            let _ = fs::remove_dir(&outside);
+            let _ = fs::remove_dir(&dir);
+        };
+        if std::os::windows::fs::symlink_file(&target, &log).is_err() {
+            eprintln!("skipped: this account cannot create a symlink");
+            cleanup();
+            return;
+        }
+        let unsafe_before = !log_names_are_safe(&dir);
+        let _ = append(&log, "2026-09-20 22:14:02,123 INFO    appended through a link");
+        let intact = fs::read(&target).ok();
+        cleanup();
+        assert!(unsafe_before, "a symlink is not a plain log file");
+        assert_eq!(intact.as_deref(), Some(&b"precious"[..]), "the link's target was written");
+    }
+
+    /// Hardening runs before `clear_planted_links`, and `SetNamedSecurityInfoW`
+    /// propagates to children - so a junction planted under any other name is
+    /// already inside when it does. Measured: the propagation does not follow
+    /// it. This pins that, rather than a property of `harden_directory` itself.
+    #[test]
+    fn propagation_does_not_follow_a_junction_inside() {
+        let dir = temp("inside-parent");
+        let target = temp("inside-target");
+        mklink_junction(&dir.join("elsewhere"), &target);
+        let before = read_dacl_sddl(&target);
+        harden_directory(&dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)").unwrap();
+        let after = read_dacl_sddl(&target);
+        let _ = fs::remove_dir(dir.join("elsewhere"));
+        let _ = fs::remove_dir(&target);
+        let _ = fs::remove_dir(&dir);
+        assert_eq!(after, before, "propagation re-ACLed a child junction's target");
     }
 }
