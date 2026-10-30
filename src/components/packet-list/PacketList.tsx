@@ -82,7 +82,7 @@ interface PacketListProps {
    * shows and what a reader looks at to see what is there. Null when there is
    * nothing to offer, or once the buffer holds anything.
    */
-  previousCapture?: { label: string; onReopen: () => void } | null;
+  previousCapture?: { label: string; onReopen: () => void; blockedBy?: string | null } | null;
   /** Whether a capture is running, so an empty list can say it is waiting rather than idle. */
   capturing?: boolean;
   /** Opens the adapter panel, from the empty list's "Choose an adapter". */
@@ -1525,7 +1525,13 @@ export const PacketList: React.FC<PacketListProps> = ({
                       icon={History}
                       title="No packets yet"
                       actions={(
-                        <EmptyStateButton icon={History} primary onClick={previousCapture.onReopen}>
+                        <EmptyStateButton
+                          icon={History}
+                          primary
+                          onClick={previousCapture.onReopen}
+                          disabled={previousCapture.blockedBy != null}
+                          title={previousCapture.blockedBy ?? undefined}
+                        >
                           Reopen the last capture
                         </EmptyStateButton>
                       )}

@@ -251,12 +251,13 @@ async function importZip(file: File, maxFrames: number): Promise<ImportOutcome> 
 
 async function importCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch?: ImportBatchSink,
+  onProgress?: ImportProgress,
 ): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
     const { packets, totalFrames, stored, facts } = onBatch === undefined
       ? await readWholeCapture(file, maxFrames)
-      : await readStreamedCapture(file, maxFrames, residentBytes, onBatch);
+      : await readStreamedCapture(file, maxFrames, residentBytes, onBatch, onProgress);
 
     if (stored === null && totalFrames > packets.length) {
       // Only when there is nowhere to put the rest. With a sink the frames are
@@ -323,6 +324,7 @@ async function readWholeCapture(file: File, maxFrames: number): Promise<CaptureR
  */
 async function readStreamedCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch: ImportBatchSink,
+  onProgress?: ImportProgress,
 ): Promise<CaptureRead> {
   const tail: Packet[] = [];
   // Each tail row's estimate, parallel to `tail`, so dropping a row subtracts
@@ -354,7 +356,7 @@ async function readStreamedCapture(
       tail.splice(0, drop);
       sizes.splice(0, drop);
     }
-  }, { record: true });
+  }, { record: true, onProgress });
   return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
 }
 
@@ -363,6 +365,9 @@ async function readStreamedCapture(
  * records (ADR 0049) - which the store must be handed before the rows.
  */
 export type ImportBatchSink = (packets: Packet[], records: FrameRecordEntry[]) => void;
+
+/** How much of the file has been read, of its size; called as each window loads. */
+type ImportProgress = (readBytes: number, totalBytes: number) => void;
 
 export interface ImportOptions {
   /**
@@ -388,6 +393,11 @@ export interface ImportOptions {
    * two wins and one frame always stays. Ignored without `onBatch`.
    */
   residentBytes?: number;
+  /**
+   * With `onBatch`: bytes of the file read so far, of its size, called between
+   * the windows the capture is read in. Ignored without `onBatch`.
+   */
+  onProgress?: ImportProgress;
 }
 
 export async function importAnyFile(file: File, options: ImportOptions = {}): Promise<ImportOutcome> {
@@ -398,6 +408,7 @@ export async function importAnyFile(file: File, options: ImportOptions = {}): Pr
   if (CAPTURE_EXTENSIONS.includes(extension)) {
     return importCapture(
       file, maxFrames, options.residentBytes ?? Number.POSITIVE_INFINITY, options.onBatch,
+      options.onProgress,
     );
   }
   if (extension === '.json') return importJson(file);

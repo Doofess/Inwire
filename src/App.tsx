@@ -145,6 +145,7 @@ import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
 import type { CaptureSource } from './services/export/captureMeta';
 import type { CaptureFileFacts } from './services/captureFileFacts';
 import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
+import { getImportJob, IMPORT_RUNNING_REASON, IMPORT_RUNNING_START, useImportJob } from './services/importJob';
 import { FilterEngine } from './services/filterEngine';
 import { pushRecentFilter, recentFiltersStore } from './services/recentFilters';
 
@@ -779,6 +780,9 @@ export default function App() {
   lastCaptureRef.current = lastCapture;
   /** True while `reopenLastCapture` runs, from its first read to its last row. */
   const [reopening, setReopening] = useState(false);
+  // A file being imported, for the reasons shown at render. The handlers that
+  // must refuse one read `getImportJob()` instead, which is never a render old.
+  const importRunning = useImportJob().status === 'running';
   // Bumped by the welcome's "Open a capture file…"; the Export / Import panel
   // opens its file picker when it changes. Reset when the panel goes away, so a
   // stale count cannot open the picker the next time the panel is shown.
@@ -957,7 +961,10 @@ export default function App() {
   // reason, rather than by a refusal after the click.
   const startBlockedReason = agentBlocksStart(agentHealth)
     ?? (reopening ? 'Reopening the last capture - Start waits for it.' : null)
+    ?? (importRunning ? IMPORT_RUNNING_START : null)
     ?? filterBlocksStart(captureFilterVerdict) ?? ringProblem(captureOptions);
+  // What every other control that would change the capture says meanwhile.
+  const importBlockedReason = importRunning ? IMPORT_RUNNING_REASON : null;
   const startBlockedRef = useRef(startBlockedReason);
   startBlockedRef.current = startBlockedReason;
   const filterToCheck = effectiveFilter(captureOptions);
@@ -1062,6 +1069,10 @@ export default function App() {
     }
     if (restoringRef.current) {
       setNavNotice('Scheduled capture skipped: the last capture was being reopened.');
+      return false;
+    }
+    if (getImportJob().status === 'running') {
+      setNavNotice('Scheduled capture skipped: a file was being imported.');
       return false;
     }
     handleClearPackets();
@@ -1221,6 +1232,8 @@ export default function App() {
   const reopenLastCapture = async (): Promise<void> => {
     const meta = lastCaptureRef.current;
     if (meta === null || isCapturingRef.current || restoringRef.current) return;
+    // An import replaces the capture this would read, and re-opens the store.
+    if (getImportJob().status === 'running') return;
     restoringRef.current = true;
     setReopening(true);
     setLastCapture(null);
@@ -2537,6 +2550,7 @@ export default function App() {
    * capturing: that capture goes on, into the same directory.
    */
   const handleClearView = () => {
+    if (getImportJob().status === 'running') return;
     const offer = isCapturingRef.current ? null : offeredCapture(sessionMetaNow());
     handleClearPackets();
     if (offer !== null) {
@@ -2555,6 +2569,7 @@ export default function App() {
    * (docs/decisions/0012-stored-captures-persist.md).
    */
   const handleDiscardCapture = useCallback(async () => {
+    if (getImportJob().status === 'running') return;
     await cancelExportForChange('the capture was discarded');
     await clearSession();
     setSelectedPacket(null);
@@ -3442,6 +3457,7 @@ export default function App() {
               onClearPackets={handleClearView}
               captureStorage={captureStorage}
               onDiscardCapture={handleDiscardCapture}
+              importBlockedBy={importBlockedReason}
               filterPresetLibrary={filterPresetLibrary}
               onFilterPresetLibraryChange={handleFilterPresetLibraryChange}
             />
@@ -3495,7 +3511,7 @@ export default function App() {
                     gate={startGateResult}
                     agentProblem={agentBlocksStart(agentHealth)}
                     previousCapture={lastCaptureLabel === null ? null
-                      : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
+                      : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); }, blockedBy: importBlockedReason }}
                     onStart={handleStartCapture}
                     onClearPackets={handleClearPackets}
                     onOpenFile={() => { showSideBar('transfer'); setPickRequest((n) => n + 1); }}
@@ -3511,7 +3527,7 @@ export default function App() {
               >
                 <PacketList
                   previousCapture={lastCaptureLabel === null ? null
-                    : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); } }}
+                    : { label: lastCaptureLabel.replace(/^the capture from /, ''), onReopen: () => { void reopenLastCapture(); }, blockedBy: importBlockedReason }}
                   capturing={isCapturing}
                   onChooseAdapter={() => showSideBar('interfaces')}
                   onClearFilter={() => { setFilterText(''); applyFilter(''); }}

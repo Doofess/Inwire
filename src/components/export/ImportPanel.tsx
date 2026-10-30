@@ -8,6 +8,10 @@ import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
 import type { CaptureFileFacts } from '../../services/captureFileFacts';
+import {
+  beginImportJob, endImportJob, getImportJob, importJobProgress, useImportJob,
+} from '../../services/importJob';
+import { importProgressText } from '../../lib/importProgress';
 
 /**
  * The Import half of the Import/Export centre.
@@ -55,7 +59,11 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  // Whether an import is running is `importJob.ts`'s, not this panel's: the side
+  // bar can be closed and reopened mid-import, and a remounted panel must still
+  // refuse a second one and still show where the first has got to.
+  const job = useImportJob();
+  const busy = job.status === 'running';
   const [dragging, setDragging] = useState(false);
   // The import may not outgrow the buffer the app is set to hold.
   const [perf] = usePreferenceValue(performanceStore);
@@ -67,10 +75,11 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   }, [retryToken]);
 
   const handleFile = async (file: File | undefined) => {
-    if (!file || busy || blockedBy !== null) return;
+    // Read from the store, not from the render's copy: this closure can be old.
+    if (!file || getImportJob().status === 'running' || blockedBy !== null) return;
 
-    setBusy(true);
-    setStatus(`Reading ${file.name}...`);
+    beginImportJob(file.name, file.size);
+    setStatus(null);
     setNotes([]);
 
     try {
@@ -84,6 +93,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         maxFrames: framesForBudget(budget, AVERAGE_FRAME_BYTES),
         residentBytes: budget,
         onBatch: onImportBatch,
+        onProgress: importJobProgress,
       });
       if (outcome.ok === false) {
         setStatus(null);
@@ -102,7 +112,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         message: err instanceof Error ? err.message : 'This file could not be imported.',
       });
     } finally {
-      setBusy(false);
+      endImportJob();
     }
   };
 
@@ -176,7 +186,11 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         </p>
       </div>
 
-      {status && (
+      {job.status === 'running' ? (
+        <div className="text-muted-foreground font-medium" role="status">
+          {importProgressText(job.fileName, job.readBytes, job.totalBytes)}
+        </div>
+      ) : status && (
         <div className="text-emerald-500 flex items-start gap-1.5 font-medium">
           <Check className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{status}</span>
