@@ -99,6 +99,12 @@
 ; resources to catch a stale agent in a fresh installer.
 #define AppSource "..\release\win-unpacked"
 #define AgentSource "..\agent-rs\dist"
+; The `inwire` command-line launcher, built like the agent: `npm run
+; build:launcher` stamps a copy into launcher-rs\dist and signs it
+; (scripts/distribution/build-launcher.ps1). Installed at {app}\bin\inwire.exe,
+; the one directory this installer puts on the machine PATH (installer/path.iss).
+#define LauncherSource "..\launcher-rs\dist"
+#define LauncherExeName "inwire.exe"
 
 ; ## The two products this one replaces
 ;
@@ -134,6 +140,12 @@ PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 ; 64-bit only: the Electron payload is x64 and the agent links a 64-bit Npcap.
 ArchitecturesAllowed=x64compatible
+
+; The installer adds {app}\bin to the machine PATH (see [Code]); this makes Setup
+; broadcast WM_SETTINGCHANGE afterwards so a shell that is already open can
+; refresh its environment. A terminal that was open during the install still
+; needs to be reopened - most do not act on the broadcast.
+ChangesEnvironment=yes
 
 ; Restart Manager, rather than the `taskkill /F /IM Inwire.exe` this would
 ; otherwise need. It asks the running app to close and reports which processes
@@ -183,7 +195,7 @@ RestartApplications=no
 ; certificate configured, is exactly what an ordinary checkout contains. So
 ; under /DSIGN, before anything is compressed, the preprocessor runs
 ; scripts\sign\verify-payload.ps1 over what [Files] installs - every PE file
-; under AppSource, found by content, and the agent - and anything but its
+; under AppSource, found by content, the agent and the `inwire` launcher - and anything but its
 ; INWIRE-PAYLOAD-OK line is a compile error that names the files. Inwire.exe
 ; and its DLLs are signed by `npm run pack`, and the agent by
 ; `npm run build:agent` after it stamps it (stamping rewrites the bytes a
@@ -198,7 +210,8 @@ RestartApplications=no
   #define PayloadScript SourcePath + "..\scripts\sign\verify-payload.ps1"
   #define PayloadApp SourcePath + AppSource
   #define PayloadAgent SourcePath + AgentSource + "\" + AgentExeName
-  #define PayloadVerdict ExecAndGetFirstLine(GetEnv("SystemRoot") + "\System32\WindowsPowerShell\v1.0\powershell.exe", '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + PayloadScript + '" "' + PayloadApp + '" "' + PayloadAgent + '"', SourcePath)
+  #define PayloadLauncher SourcePath + LauncherSource + "\" + LauncherExeName
+  #define PayloadVerdict ExecAndGetFirstLine(GetEnv("SystemRoot") + "\System32\WindowsPowerShell\v1.0\powershell.exe", '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + PayloadScript + '" "' + PayloadApp + '" "' + PayloadAgent + '" "' + PayloadLauncher + '"', SourcePath)
   #if Pos("INWIRE-PAYLOAD-OK ", PayloadVerdict) != 1
     #expr Error("Refusing a signed installer around an unsigned payload - " + PayloadVerdict + " - run scripts\sign\verify-payload.ps1 for the detail.")
   #endif
@@ -255,6 +268,12 @@ Source: "{#AppSource}\*"; DestDir: "{app}"; \
 Source: "{#AgentSource}\{#AgentExeName}"; DestDir: "{app}\agent"; \
     Flags: ignoreversion
 
+; The `inwire` command, alone in {app}\bin so that directory - not the app's own,
+; which holds Inwire.exe and a hundred files that would then be runnable by name
+; from any prompt - is the only thing put on PATH. Named, not globbed.
+Source: "{#LauncherSource}\{#LauncherExeName}"; DestDir: "{app}\bin"; \
+    Flags: ignoreversion
+
 [Dirs]
 ; Config and log live here, present before anyone logs in - which a LocalSystem
 ; service needs. The installer only creates it: the agent sets the folder's
@@ -291,6 +310,10 @@ Type: files; Name: "{commonappdata}\Inwire\agent.log"
 Type: files; Name: "{commonappdata}\Inwire\agent.log.*"
 
 [Code]
+// The PATH string functions, kept in their own file so they can be tested alone
+// (scripts/distribution/path-tests.iss). Nothing in it touches the registry.
+#include "path.iss"
+
 // --- version comparison -------------------------------------------------------
 
 // Returns <0, 0 or >0. Written out rather than compared as strings, because
@@ -732,11 +755,145 @@ begin
     RegDeleteKeyIncludingSubkeys(HKLM, 'SYSTEM\CurrentControlSet\Services\EventLog\Application\{#ServiceName}');
 end;
 
+// --- the `inwire` command on the machine PATH --------------------------------
+
+// What is owned, and how it is recorded.
+//
+// This installer owns exactly one PATH segment, {app}\bin, and the proof that it
+// put it there is a value of its own: HKLM\Software\Inwire\LauncherPathEntry holds
+// the exact entry that was appended. Uninstall removes an entry only when that
+// value exists, so an `{app}\bin` somebody else put on PATH first is never taken
+// out by an uninstall that did not add it. The marker is written BEFORE PATH is,
+// so a failure between the two leaves a marker that removes nothing, never an
+// entry that nothing will remove.
+//
+// The value is read with RegQueryStringValue, which does not expand a
+// REG_EXPAND_SZ value (checked against the real runtime by path-tests.iss), so
+// the other entries' `%SystemRoot%` spellings come back as written, and it is
+// written back with RegWriteExpandStringValue so the type stays REG_EXPAND_SZ.
+// Only the machine PATH is touched; the user's own is not read or written.
+const
+  EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+  OwnedKey = 'Software\Inwire';
+  OwnedValue = 'LauncherPathEntry';
+
+procedure AddLauncherToPath;
+var
+  Owned, Raw, Base, Updated, Recorded, Other, LauncherExe: String;
+begin
+  Owned := ExpandConstant('{app}\bin');
+  LauncherExe := ExpandConstant('{app}\bin\{#LauncherExeName}');
+
+  Raw := '';
+  if not RegQueryStringValue(HKLM, EnvironmentKey, 'Path', Raw) then
+  begin
+    // Absent is an empty PATH; present but unreadable (not a string value) is
+    // not ours to overwrite.
+    if RegValueExists(HKLM, EnvironmentKey, 'Path') then
+    begin
+      Log('PATH: the machine Path value is not a string; leaving it alone');
+      Exit;
+    end;
+  end;
+
+  // An earlier install elsewhere left its entry and its marker: take that one
+  // out of the value this install builds on, since its directory goes with it.
+  Base := Raw;
+  Recorded := '';
+  if RegQueryStringValue(HKLM, OwnedKey, OwnedValue, Recorded) and (Recorded <> '')
+     and (PathNormalizeEntry(Recorded) <> PathNormalizeEntry(Owned)) then
+    Base := PathRemoveOwned(Raw, Recorded);
+
+  if PathHasOwned(Base, Owned) then
+  begin
+    Log('PATH: ' + Owned + ' is already on the machine PATH; nothing to add');
+    if Base <> Raw then
+    begin
+      if RegWriteExpandStringValue(HKLM, EnvironmentKey, 'Path', Base) then
+        RegDeleteValue(HKLM, OwnedKey, OwnedValue)
+      else
+        Log('PATH: could not drop the entry of the earlier install');
+    end;
+    Exit;
+  end;
+
+  // A different `inwire` is already on PATH (another tool, or a script of the
+  // owner's). Ours would go last, so typing `inwire` would still run THAT one
+  // while the installer claimed to have set the command up; replacing it, or
+  // putting ours first, is not an installer's decision. So PATH is left alone and
+  // the person is told where Inwire's own command is.
+  Other := PathFindOtherCommand(Base, Owned, 'inwire');
+  if Other <> '' then
+  begin
+    Log('PATH: not adding ' + Owned + ' - ' + Other + ' is already an inwire command on PATH');
+    SuppressibleMsgBox(
+      'Inwire did not add the "inwire" command to your PATH, because another ' +
+      '"inwire" is already on it:' + #13#10#13#10 + Other + #13#10#13#10 +
+      'Inwire''s own command is at:' + #13#10#13#10 + LauncherExe + #13#10#13#10 +
+      'Run it by that path, or add its folder to your PATH yourself.',
+      mbInformation, MB_OK, IDOK);
+    Exit;
+  end;
+
+  Updated := PathAppendOwned(Base, Owned);
+  if not RegWriteStringValue(HKLM, OwnedKey, OwnedValue, Owned) then
+  begin
+    Log('PATH: could not record the entry; not adding it');
+    Exit;
+  end;
+  if RegWriteExpandStringValue(HKLM, EnvironmentKey, 'Path', Updated) then
+    Log('PATH: added ' + Owned + ' to the machine PATH')
+  else
+  begin
+    Log('PATH: could not write the machine PATH');
+    RegDeleteValue(HKLM, OwnedKey, OwnedValue);
+    RegDeleteKeyIfEmpty(HKLM, OwnedKey);
+    SuppressibleMsgBox(
+      'Inwire could not add the "inwire" command to your PATH. It is at:' + #13#10#13#10 +
+      LauncherExe, mbInformation, MB_OK, IDOK);
+  end;
+end;
+
+// Takes out what AddLauncherToPath put there, and only that: nothing happens
+// without the marker, and only segments equal to the recorded entry go.
+procedure RemoveLauncherFromPath;
+var
+  Recorded, Raw, Updated: String;
+begin
+  Recorded := '';
+  if not RegQueryStringValue(HKLM, OwnedKey, OwnedValue, Recorded) or (Recorded = '') then
+    Exit;
+
+  if RegQueryStringValue(HKLM, EnvironmentKey, 'Path', Raw) then
+  begin
+    Updated := PathRemoveOwned(Raw, Recorded);
+    if Updated <> Raw then
+    begin
+      if not RegWriteExpandStringValue(HKLM, EnvironmentKey, 'Path', Updated) then
+      begin
+        // Keep the marker: it is the only record that the entry is ours.
+        Log('PATH: could not write the machine PATH; leaving ' + Recorded + ' and its marker');
+        Exit;
+      end;
+      Log('PATH: removed ' + Recorded + ' from the machine PATH');
+    end;
+  end;
+  RegDeleteValue(HKLM, OwnedKey, OwnedValue);
+  RegDeleteKeyIfEmpty(HKLM, OwnedKey);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
     RemovePythonAgentRegistrations;
     RegisterAgentService;
+    AddLauncherToPath;
   end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveLauncherFromPath;
 end;

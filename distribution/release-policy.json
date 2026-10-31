@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "descriptorUrl": "https://updates.inwire.app/release.json",
+  "allowedHosts": ["updates.inwire.app"],
+  "publisherCertificateSha256": [],
+  "desktopPackageId": "",
+  "endpointAvailable": false
+}

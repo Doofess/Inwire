@@ -10,12 +10,20 @@
     1. npm run build:agent   cargo build, stamp VERSIONINFO, THEN sign
                              (scripts/agent/build-rust.ps1 - stamping rewrites
                              the bytes a signature covers)
-    2. npm run pack          vite, electron-builder: fuses flipped in afterPack,
+       npm run build:launcher  the same for the `inwire` command
+                             (scripts/distribution/build-launcher.ps1)
+    2. npm run pack         vite, electron-builder: fuses flipped in afterPack,
                              THEN Inwire.exe and its DLLs signed (electron/sign.cjs)
     3. verify-payload.ps1    every PE file the installer will carry is signed
     4. iscc /DSIGN           setup.iss runs step 3 again itself, then signs the
                              uninstaller and Inwire-Setup.exe
     5. sign.ps1 -Verify      on installer\output\Inwire-Setup.exe
+    6. build-bootstrap.ps1   the standalone PowerShell bootstrap, with the
+                             release policy's pins compiled in, signed by
+                             Set-AuthenticodeSignature (sign.ps1 reads PE
+                             files only) and read back, into
+                             release-artifacts\bootstrap\install-inwire.ps1
+                             (scripts/distribution/build-bootstrap.ps1)
 
   INWIRE_REQUIRE_SIGNING=1 is set for all of it, in this process, so every
   child inherits it: sign.ps1 normally warns and leaves a file unsigned when no
@@ -93,10 +101,11 @@ $env:INWIRE_REQUIRE_SIGNING = '1'
 Push-Location $Root
 try {
   Step 'npm run build:agent' { & npm.cmd run build:agent }
+  Step 'npm run build:launcher' { & npm.cmd run build:launcher }
   Step 'npm run pack' { & npm.cmd run pack }
   Step 'verify-payload.ps1' {
     & $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $Here 'verify-payload.ps1') `
-      (Join-Path $Root 'release\win-unpacked') (Join-Path $Root 'agent-rs\dist')
+      (Join-Path $Root 'release\win-unpacked') (Join-Path $Root 'agent-rs\dist') (Join-Path $Root 'launcher-rs\dist')
   }
   # `$p` is literal here - single quotes - because it is Inno's placeholder for
   # the SignTool parameters in setup.iss, not a PowerShell variable.
@@ -106,6 +115,9 @@ try {
   $setup = Join-Path $Root 'installer\output\Inwire-Setup.exe'
   Step 'sign.ps1 -Verify Inwire-Setup.exe' {
     & $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $Here 'sign.ps1') -Verify $setup
+  }
+  Step 'build-bootstrap.ps1' {
+    & $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\distribution\build-bootstrap.ps1')
   }
   Say "done: $setup"
 } finally {

@@ -150,6 +150,17 @@ const lock = text('agent-rs/Cargo.lock');
 const lockVersion = /^name = "inwire-agent"\r?\nversion = "([^"]+)"$/m.exec(lock)?.[1] ?? null;
 check('agent-rs/Cargo.lock inwire-agent entry matches package.json', lockVersion, version);
 
+// The `inwire` command's crate, held the same way: its CARGO_PKG_VERSION is
+// what it compares against the app's ProductVersion, and the lock entry matters
+// because `build-launcher.ps1` builds `--locked`.
+const launcherCargo = text('launcher-rs/Cargo.toml');
+check('launcher-rs/Cargo.toml was read', launcherCargo.length > 0, true);
+check('launcher-rs/Cargo.toml version matches package.json (run `npm run sync:version`)',
+  /^version = "([^"]+)"$/m.exec(launcherCargo)?.[1] ?? null, version);
+const launcherLock = text('launcher-rs/Cargo.lock');
+check('launcher-rs/Cargo.lock inwire-launcher entry matches package.json',
+  /^name = "inwire-launcher"\r?\nversion = "([^"]+)"$/m.exec(launcherLock)?.[1] ?? null, version);
+
 console.log('\n--- and no second number beside it ---\n');
 
 // The deletion is the decision, so it is asserted rather than assumed. A

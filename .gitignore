@@ -67,6 +67,11 @@ agent-rs/dist/
 # out of target/ (CARGO_TARGET_DIR=agent-rs/target-fix).
 agent-rs/target-fix/
 
+# The `inwire` command's build output and its stamped, signed exe
+# (`npm run build:launcher` -> launcher-rs/dist/inwire.exe).
+launcher-rs/target/
+launcher-rs/dist/
+
 # Which code-signing certificate THIS machine signs with (scripts/sign/sign.ps1).
 # A thumbprint names a certificate in one account's store on one PC, so it is
 # configuration, not source - and the day a real certificate replaces the

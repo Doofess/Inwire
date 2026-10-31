@@ -73,6 +73,19 @@ const STAMPS: { file: string; pattern: RegExp; replacement: string }[] = [
     pattern: /^(name = "inwire-agent"\r?\nversion = )"[^"]*"$/m,
     replacement: `$1"${version}"`,
   },
+  {
+    // The installed `inwire` launcher compares this with the ProductVersion of
+    // the Inwire.exe beside it (exit 65 on a difference), and
+    // `build-launcher.ps1` stamps its VERSIONINFO from package.json.
+    file: 'launcher-rs/Cargo.toml',
+    pattern: /^version = "[^"]*"$/m,
+    replacement: `version = "${version}"`,
+  },
+  {
+    file: 'launcher-rs/Cargo.lock',
+    pattern: /^(name = "inwire-launcher"\r?\nversion = )"[^"]*"$/m,
+    replacement: `$1"${version}"`,
+  },
 ];
 
 let failed = false;
