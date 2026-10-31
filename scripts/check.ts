@@ -44,7 +44,10 @@ const NOT_TESTS: Record<string, string> = {
   'agent/stamp-agent.ts':
     'build step; WRITES agent-rs/dist/inwire-agent-windows.exe from cargo\'s output. '
     + 'Run by `npm run build:agent`; `scripts/agent/built-version.ts` is the half that asserts',
-  'electron/disk-drive.ts': 'drives a 180,000-frame capture to reach the disk path; ~2 minutes, run by hand',
+  'distribution/generate.ts':
+    'generator; WRITES a release.json from a final signed installer - run by the release, '
+    + '`scripts/distribution/contracts.ts` is the half that asserts',
+  'electron/disk-drive.ts':'drives a 180,000-frame capture to reach the disk path; ~2 minutes, run by hand',
   'agent/two-client-drive.ts':
     'two real connections to the installed agent, one capture on a real adapter: the second is refused '
     + 'the first\'s capture and leaving ends neither; needs the service, Npcap and traffic, run by hand',

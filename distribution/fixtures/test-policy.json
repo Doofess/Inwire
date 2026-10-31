@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "descriptorUrl": "https://download.example.invalid/release.json",
+  "allowedHosts": ["download.example.invalid"],
+  "publisherCertificateSha256": ["fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"],
+  "desktopPackageId": "Example.Inwire",
+  "endpointAvailable": false
+}

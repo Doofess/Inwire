@@ -195,6 +195,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | What retention takes out of the journal is in the archive exactly once and the totals do not move; a crash between the archive write and the unlink is finished on reopen | `scripts/monitoring/archive.ts`, `scripts/monitoring/retention.ts` |
 | Expired time answers `aggregate-only` with exact totals, and its tables and records say "Evidence expired" with the cause, never a gap or zeros | `scripts/monitoring/queries.ts`, `scripts/monitoring/sheet-source.ts`, `scripts/electron/monitoring-ui.ts` |
 | A `.iwmon` bundle carries the range's journal entries byte-for-byte and contiguous by id, the archived minutes of its expired parts, and a manifest that matches them; a change mid-export fails it and aborts the sink | `scripts/monitoring/bundle.ts` |
+| A release descriptor with any bad row is refused whole: HTTPS on an allowed host exactly (no suffix match, credentials, port or fragment), lowercase-normalised SHA-256, size within 512 MiB, one row per product, a Desktop row, no endpoint row while the endpoint is unavailable; `-Version` matches only exactly. The production policy shares the update feed host and holds no fixture host. The vectors are shared with the PowerShell bootstrap | `scripts/distribution/contracts.ts` |
 
 Scripts that build their own captures exist because the fixtures hold no ICMP
 error frame, no real HTTP and no readable certificate (both negotiate TLS 1.3):

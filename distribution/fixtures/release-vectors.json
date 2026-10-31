@@ -1,0 +1,1095 @@
+{
+  "policy": "test-policy.json",
+  "vectors": [
+    {
+      "name": "valid single Desktop row",
+      "valid": true,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid: zero version",
+      "valid": true,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "0.0.0",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid: 0.5.0",
+      "valid": true,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "0.5.0",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid: uppercase sha256 is accepted and normalised to lowercase",
+      "valid": true,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid: uppercase URL host is compared case-insensitively",
+      "valid": true,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://DOWNLOAD.EXAMPLE.INVALID/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid: sizeBytes exactly 512 MiB",
+      "valid": true,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 536870912,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid: sizeBytes 1",
+      "valid": true,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema 2",
+      "valid": false,
+      "descriptor": {
+        "schema": 2,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema as string",
+      "valid": false,
+      "descriptor": {
+        "schema": "1",
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "schema missing",
+      "valid": false,
+      "descriptor": {
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "artifacts missing",
+      "valid": false,
+      "descriptor": {
+        "schema": 1
+      }
+    },
+    {
+      "name": "artifacts is an object",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": {
+          "product": "Desktop",
+          "version": "1.2.3",
+          "architecture": "x64",
+          "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+          "sizeBytes": 1048576,
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      }
+    },
+    {
+      "name": "artifacts is a string",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": "nope"
+      }
+    },
+    {
+      "name": "empty artifacts",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": []
+      }
+    },
+    {
+      "name": "artifact row is null",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          null
+        ]
+      }
+    },
+    {
+      "name": "artifact row is a string",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          "Desktop"
+        ]
+      }
+    },
+    {
+      "name": "artifact row is an array",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          [
+            {
+              "product": "Desktop",
+              "version": "1.2.3",
+              "architecture": "x64",
+              "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+              "sizeBytes": 1048576,
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "a good row followed by a bad row rejects the whole document",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          {
+            "product": "EndpointAgent",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "zz"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sha256 missing",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576
+          }
+        ]
+      }
+    },
+    {
+      "name": "sha256 63 chars",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sha256 65 chars",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sha256 non-hex",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sha256 is a number",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": 12345
+          }
+        ]
+      }
+    },
+    {
+      "name": "sizeBytes 0",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 0,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sizeBytes negative",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": -1,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sizeBytes non-integer",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1.5,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sizeBytes as string",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": "1048576",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sizeBytes over 512 MiB",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 536870913,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sizeBytes missing",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sizeBytes null",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": null,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version \"1.2\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version \"01.2.3\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "01.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version \"1.2.3-beta\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3-beta",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version \"v1.2.3\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "v1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version \"1.2.3.4\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3.4",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version with six digits in a part",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "123456.0.0",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version as a number",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": 1.2,
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "version missing",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "product \"Server\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Server",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "product lowercase \"desktop\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "product missing",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "architecture \"arm64\"",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "arm64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "architecture missing",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "http URL",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "http://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL with user:pass@",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://user:pass@download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL with username only",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://user@download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown host",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://other.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "host suffix trick: evil-download.example.invalid",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://evil-download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "host suffix trick: download.example.invalid.evil.com",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid.evil.com/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "host with a trailing dot",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid./Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "explicit port :8443",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid:8443/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "explicit default port :443 (URL parsers disagree on whether it is there)",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid:443/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL with fragment",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe#frag",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL is not a URL",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "not a url",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL is relative",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL is a number",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": 42,
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "URL missing",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate Desktop rows, same version",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate Desktop rows, different versions",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          {
+            "product": "Desktop",
+            "version": "1.2.4",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Desktop row absent, only EndpointAgent",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "EndpointAgent",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EndpointAgent row while the policy has endpointAvailable false",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          {
+            "product": "EndpointAgent",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown extra key on an artifact",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "extra": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown extra top-level key",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ],
+        "generated": "2026-10-31"
+      }
+    },
+    {
+      "name": "descriptor is null",
+      "valid": false,
+      "descriptor": null
+    },
+    {
+      "name": "descriptor is an array",
+      "valid": false,
+      "descriptor": [
+        {
+          "schema": 1,
+          "artifacts": [
+            {
+              "product": "Desktop",
+              "version": "1.2.3",
+              "architecture": "x64",
+              "url": "https://download.example.invalid/Inwire-1.2.3-x64.exe",
+              "sizeBytes": 1048576,
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "descriptor is a string",
+      "valid": false,
+      "descriptor": "release"
+    },
+    {
+      "name": "descriptor is a number",
+      "valid": false,
+      "descriptor": 1
+    }
+  ]
+}
