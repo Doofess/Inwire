@@ -13,7 +13,9 @@
  *   - `eth.stream`, `ip.stream`, `ipv6.stream` and `udp.stream`, each the
  *     order in which a conversation was first seen (`ConversationIndex`);
  *   - `tcp.stream` and `tls.stream`, and which TCP connection is forgotten
- *     when more than 16,384 are open (`TcpOrder`).
+ *     when more than 16,384 are open (`TcpOrder`);
+ *   - which UDP flows have carried a QUIC long header, which connection ids
+ *     those named, and each connection's number (`QuicOrder`).
  *
  * They lived inside the trackers, which was right while one Worker saw every
  * frame in order. Dissection on several cores (ADR 0053 phase 3) splits
@@ -32,8 +34,7 @@
  *     numbers, a stream's packet number): whoever dissects the conversation
  *     owns those, because only its own frames move them;
  *   - first-use numbers on protocols that stay on the sequential lane:
- *     WireGuard's and DTLS's stream numbers and QUIC's connection number.
- *     Phase 3 shards TCP only;
+ *     WireGuard's and DTLS's stream numbers. Phase 3 shards TCP only;
  *   - the HTTP/1 body budget every connection shares, which ADR 0053 accepts
  *     splitting across shards rather than numbering.
  *
@@ -447,6 +448,286 @@ export function tcpConnectionKey(
 }
 
 /**
+ * How many QUIC flows are remembered, and how many connection ids each keeps.
+ *
+ * Both are per *connection*, not per frame, so no packet-buffer cap touches
+ * them (`scripts/perf/tracker-cost.ts`); a browsing session is thousands of
+ * short connections, which is the shape that fills them.
+ *
+ * Eviction is least-recently-used rather than oldest-first, which matters
+ * here: a QUIC connection can be idle for minutes and then resume, and the flow
+ * that has gone longest without a packet is the one whose loss costs least.
+ * What is lost is a flow's decryption keys and reassembly cursor - so a later
+ * packet on an evicted flow reads as an unrecognised one, which is what it
+ * looks like from the wire without the handshake anyway.
+ *
+ * The ids are capped oldest-first because `QuicOrder.match` scans the set for
+ * every short-header packet: an unbounded set is a growing per-packet cost as
+ * well as a growing one in memory. A peer may issue new connection IDs for the
+ * life of a connection - that is how QUIC migrates between addresses without
+ * being linkable.
+ */
+export const MAX_QUIC_FLOWS = 4096;
+export const MAX_QUIC_CONNECTION_IDS_PER_FLOW = 32;
+
+/**
+ * The key a QUIC flow is known by, for both of its directions.
+ *
+ * One function for the tracker and for whatever predicts its lookups ahead of
+ * the dissection, so the two can never disagree about which flow a datagram is.
+ */
+export function quicFlowKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
+  const a = `${srcIp}:${srcPort}`;
+  const b = `${dstIp}:${dstPort}`;
+  return a <= b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+/** What noting a long header answered: the connection's number, and the flows it made room by forgetting. */
+export interface QuicNoted { number: number; forgotten: readonly string[] }
+
+/**
+ * What a tracker asks of the QUIC order. `QuicOrder` below is the real one; a
+ * shard's stand-in answers with what the coordinator numbered for the frame.
+ */
+export interface QuicOrderApi {
+  isKnown(flow: string): boolean;
+  match(flow: string, bytes: Uint8Array, offset: number): string | undefined;
+  noteLongHeader(flow: string, connectionIds: readonly string[], emptyDcid: boolean): QuicNoted;
+  connectionForFlow(flow: string, connectionId: string | undefined): number | undefined;
+  connectionFor(connectionId: string | undefined): number | undefined;
+  seedNextConnection(next: number): void;
+  readonly evicted: number;
+  readonly size: number;
+  reset(): void;
+}
+
+/**
+ * The global half of QUIC: which flows have carried a long header and which
+ * connection ids they named (the flow registry, in least-recently-noted order),
+ * and the connection number each took.
+ *
+ * `QuicFlowTracker` keeps each flow's STATE - keys, reassembly, QPACK - and
+ * asks this at the points it used to consult its own maps; a flow forgotten
+ * past the cap is handed back to it to drop (`QuicNoted.forgotten`).
+ *
+ * Keys are `quicFlowKey`'s, the tracker's own.
+ */
+export class QuicOrder implements QuicOrderApi {
+  /**
+   * Connection IDs (hex) seen in long headers, keyed by normalized flow.
+   *
+   * This is the flow registry - a flow exists exactly when it has an entry
+   * here (`isKnown`) - and a Map iterates in insertion order, so it is the one
+   * map whose order can stand for the eviction order of all of them.
+   */
+  private readonly flows = new Map<string, Set<string>>();
+
+  /**
+   * Connection id -> the connection's index, and the next index to hand out.
+   *
+   * Keyed by connection id rather than by flow, which is the whole point. A
+   * QUIC connection is its set of connection ids, not its five-tuple: it can
+   * migrate to a new address and keep its ids, and two connections can share
+   * one five-tuple. Both happen here - `inwire`'s udp.stream 91 carries two
+   * connections, and a flow-keyed index calls them one.
+   *
+   * An index is never reused, for ADR 0014's reason: a number that comes back
+   * after an eviction points a saved filter at a different conversation.
+   */
+  private readonly connectionNumbers = new Map<string, number>();
+
+  private nextConnection = 0;
+
+  /**
+   * The connection most recently seen on a flow, which is the fallback when
+   * the ids cannot answer - and they often cannot.
+   *
+   * A client may choose a zero-length Source Connection ID, and then the
+   * server's first Initial echoes it as a zero-length Destination one and adds
+   * a Source id of its own. So the client's packets and the server's first
+   * reply share NO connection id at all, and only the five-tuple links them.
+   * `inwire` opens with exactly that: frames 16-19 carry DCID 2139ec74b2c31814
+   * with no SCID, frames 20-21 carry SCID 019c32... with no DCID, and the
+   * reference calls all six connection 0.
+   *
+   * The fallback is deliberately narrow - see `noteLongHeader` - so that a
+   * second connection on one flow still gets its own number.
+   *
+   * **Where this disagrees with the reference, and why it is kept.**
+   *
+   * `bulk` is exact, 86 frames of 86. `inwire` matches on 2,959 of 3,087, and
+   * every one of the 128 that differ is on udp.stream 91 - the one flow in
+   * either fixture carrying two QUIC connections.
+   *
+   * On that flow the reference contradicts itself. An orphan server Initial
+   * (frame 5174, zero-length DCID, SCID eb850cfa9d878bc7) arrives before any
+   * client Initial, so it starts connection 12 and binds that id to it. The
+   * real client Initial then opens connection 13. From there the reference
+   * splits ONE connection by direction: the client's packets, addressed to
+   * DCID eb85, resolve by id to 12, while the server's replies, which carry
+   * eb85 as their SCID and no DCID, fall back to the flow and get 13. Same
+   * connection, two numbers, decided by which way the packet is going.
+   *
+   * This build binds eb85 once and keeps it, so the whole conversation reads
+   * as one connection. That is a difference from the reference and not a defect
+   * to fix: reproducing it means reproducing the split.
+   */
+  private readonly flowConnection = new Map<string, number>();
+
+  private evictedCount = 0;
+
+  /**
+   * Records that this flow carried a long header, along with any non-empty
+   * connection IDs it advertised. Registering the flow at all is what makes
+   * subsequent short-header packets recognizable. Returns the connection's
+   * number, and the flows forgotten to stay inside the cap, never this one.
+   */
+  noteLongHeader(flow: string, connectionIds: readonly string[], emptyDcid: boolean): QuicNoted {
+    let ids = this.flows.get(flow);
+    if (!ids) ids = new Set<string>();
+    for (const id of connectionIds) {
+      if (id.length === 0) continue;
+      ids.add(id);
+      // Insertion-ordered, so the first key out is the id issued longest ago -
+      // and a peer that has issued 32 since is not still using it.
+      while (ids.size > MAX_QUIC_CONNECTION_IDS_PER_FLOW) {
+        const oldest = ids.values().next();
+        if (oldest.done) break;
+        ids.delete(oldest.value);
+      }
+    }
+    // Re-inserted rather than updated in place: a Map iterates in insertion
+    // order, so deleting and setting is what moves this flow to the back of
+    // the eviction queue.
+    this.flows.delete(flow);
+    this.flows.set(flow, ids);
+    let forgotten: string[] | undefined;
+    while (this.flows.size > MAX_QUIC_FLOWS) {
+      const oldest = this.flows.keys().next();
+      if (oldest.done) break;
+      // Read BEFORE the delete below, which is the whole of the bug this line
+      // fixes: the sweep of `connectionNumbers` used to read the registry after
+      // the first statement had already emptied it, so it iterated nothing,
+      // every time, while its own comment said it was clearing the ids.
+      // `connectionNumbers` is otherwise cleared only by `reset()`, which fires
+      // when the buffer is gone and never on an eviction, so it was the one map
+      // in this tracker with no working cap, on QUIC, which is most of a
+      // browsing capture.
+      const forgottenIds = this.flows.get(oldest.value);
+      this.flows.delete(oldest.value);
+      // The ids go, `nextConnection` does not: a forgotten connection's
+      // index is spent, and handing it out again would point a filter written
+      // against the old conversation at a new one.
+      for (const id of forgottenIds ?? []) this.connectionNumbers.delete(id);
+      this.flowConnection.delete(oldest.value);
+      this.evictedCount++;
+      (forgotten ??= []).push(oldest.value);
+    }
+
+    // Every id in one long header belongs to one connection - that is what a
+    // long header is for, naming both ends of it. So if any of them is already
+    // numbered the packet is that connection, and the rest of the ids join it;
+    // if none is, this is a connection nobody has seen and it gets the next
+    // number.
+    const known = connectionIds.map((id) => this.connectionNumbers.get(id)).filter((n) => n !== undefined);
+    // The lowest, so two ids that were numbered separately before they were
+    // seen together settle on the one issued first rather than on whichever
+    // the iteration happened to reach.
+    let number: number;
+    if (known.length > 0) {
+      number = Math.min(...known);
+    } else if (emptyDcid && this.flowConnection.has(flow)) {
+      // Answering: a zero-length Destination id means this packet is echoing
+      // a peer that chose not to be named, so the flow is the only link there
+      // is. Narrow on purpose - a packet that names a destination this build
+      // has never seen is a NEW connection, which is what keeps two
+      // connections sharing one five-tuple apart.
+      number = this.flowConnection.get(flow)!;
+    } else {
+      number = this.nextConnection++;
+    }
+    for (const id of connectionIds) {
+      if (id.length > 0) this.connectionNumbers.set(id, number);
+    }
+    this.flowConnection.set(flow, number);
+    return { number, forgotten: forgotten ?? NO_KEYS };
+  }
+
+  /**
+   * The connection for a short-header packet: by the id the resolver matched,
+   * and by the flow when it matched none. A short header carries no id length,
+   * so an id this build has not seen cannot even be measured - the flow is all
+   * that is left, and it is what the reference falls back to as well.
+   */
+  connectionForFlow(flow: string, connectionId: string | undefined): number | undefined {
+    const byId = connectionId === undefined ? undefined : this.connectionNumbers.get(connectionId);
+    return byId ?? this.flowConnection.get(flow);
+  }
+
+  /** The connection index for a connection id already seen, if there is one. */
+  connectionFor(connectionId: string | undefined): number | undefined {
+    return connectionId === undefined ? undefined : this.connectionNumbers.get(connectionId);
+  }
+
+  /** Whether a long header has been seen on this flow. */
+  isKnown(flow: string): boolean {
+    return this.flows.has(flow);
+  }
+
+  /**
+   * Returns the connection ID a short header carries, if the bytes right after
+   * its first byte match one this flow has already advertised. A zero-length
+   * connection ID - which one peer commonly chooses - matches nothing and
+   * correctly yields undefined, so the Info column simply omits it.
+   */
+  match(flow: string, bytes: Uint8Array, offset: number): string | undefined {
+    const ids = this.flows.get(flow);
+    if (!ids) return undefined;
+
+    for (const id of ids) {
+      const byteLength = id.length / 2;
+      if (offset + byteLength > bytes.length) continue;
+      let matches = true;
+      for (let i = 0; i < byteLength; i++) {
+        if (bytes[offset + i] !== parseInt(id.slice(i * 2, i * 2 + 2), 16)) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) return id;
+    }
+    return undefined;
+  }
+
+  /**
+   * Replays are told the index rather than made to recompute it: a bundle
+   * holds one connection, so a fresh order would call it 0. Mirrors
+   * `TcpOrder.seedNextStreamId`.
+   */
+  seedNextConnection(next: number): void {
+    if (next > this.nextConnection) this.nextConnection = next;
+  }
+
+  /** Flows forgotten to the cap. */
+  get evicted(): number {
+    return this.evictedCount;
+  }
+
+  /** Flows currently remembered. */
+  get size(): number {
+    return this.flows.size;
+  }
+
+  reset(): void {
+    this.flows.clear();
+    this.connectionNumbers.clear();
+    this.flowConnection.clear();
+    this.nextConnection = 0;
+    this.evictedCount = 0;
+  }
+}
+
+/**
  * A frame's two clocks: seconds since the capture's first frame, and since the
  * frame before it.
  *
@@ -528,7 +809,7 @@ export class FrameClock {
  *
  * Its parts are separate objects because each is asked through a different
  * tracker - the conversation indexes through `L3Tracker`, the TCP order
- * through `TcpStreamTracker` - and a tracker built without one makes its own,
+ * through `TcpStreamTracker`, the QUIC order through `QuicFlowTracker` - and a tracker built without one makes its own,
  * which is the same thing: no part reads another. The Worker builds one and
  * hands it to both, which is what phase 3's coordinator will hold.
  */
@@ -537,11 +818,12 @@ export class Sequencer {
   readonly conversations = new ConversationIndexes();
 
   /** `tcp` is given by the coordinator, which watches the lookups its own lane makes. */
-  constructor(readonly tcp: TcpOrder = new TcpOrder()) {}
+  constructor(readonly tcp: TcpOrder = new TcpOrder(), readonly quic: QuicOrder = new QuicOrder()) {}
 
   reset(): void {
     this.clock.reset();
     this.conversations.reset();
     this.tcp.reset();
+    this.quic.reset();
   }
 }

@@ -159,7 +159,7 @@ let interfaces: PipelineInterface[] = [];
 let sequencer = new Sequencer();
 let tcpTracker = new TcpStreamTracker(sequencer);
 let icmpTracker = new IcmpEchoTracker();
-let quicTracker = new QuicFlowTracker();
+let quicTracker = new QuicFlowTracker(sequencer);
 let dnsTracker = new DnsTracker();
 let l3Tracker = new L3Tracker(sequencer);
 
@@ -453,7 +453,7 @@ function laneZero(): { trackers: { tcp: TcpStreamTracker; icmp: IcmpEchoTracker;
   return {
     sequencer: fresh,
     trackers: {
-      tcp: new TcpStreamTracker(fresh), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(),
+      tcp: new TcpStreamTracker(fresh), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(fresh),
       dns: new DnsTracker(), l3: new L3Tracker(fresh),
     },
   };
@@ -699,7 +699,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   sequencer = new Sequencer();
   tcpTracker = new TcpStreamTracker(sequencer);
   icmpTracker = new IcmpEchoTracker();
-  quicTracker = new QuicFlowTracker();
+  quicTracker = new QuicFlowTracker(sequencer);
   dnsTracker = new DnsTracker();
   l3Tracker = new L3Tracker(sequencer);
   recorder = makeRecorder();

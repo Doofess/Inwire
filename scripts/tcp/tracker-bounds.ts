@@ -26,6 +26,7 @@
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
 import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
+import { Sequencer } from '../../src/services/dissect/sequencer';
 import { FlowAnnotationStore } from '../../src/services/flowAnnotations';
 
 let failures = 0;
@@ -185,13 +186,14 @@ const TCP_CAP = findTcpCap();
 // per short-header packet - so an unbounded set was a growing per-packet cost
 // as well.
 {
-  const tracker = new QuicFlowTracker();
+  const sequencer = new Sequencer();
+  const tracker = new QuicFlowTracker(sequencer);
   for (let i = 0; i < 500; i++) {
     tracker.noteLongHeader('10.0.0.1', 50000, '93.184.0.1', 443,
       [i.toString(16).padStart(16, '0')]);
   }
-  const ids = (tracker as unknown as { flowConnectionIds: Map<string, Set<string>> })
-    .flowConnectionIds;
+  // The ids are the order's now (QuicOrder.flows), not the tracker's.
+  const ids = (sequencer.quic as unknown as { flows: Map<string, Set<string>> }).flows;
   const only = [...ids.values()][0];
   checkTrue('a flow\'s connection ids are capped', only.size > 0 && only.size < 500);
   checkTrue('...keeping the most recently issued',
@@ -208,7 +210,7 @@ const TCP_CAP = findTcpCap();
   for (let i = 0; i < 6000; i++) {
     tracker.noteLongHeader('10.0.0.1', 50000 + i, '93.184.1.1', 443, ['aabbccdd']);
   }
-  const flows = sizeOf(tracker, 'flowConnectionIds');
+  const flows = tracker.flowCount;
   checkTrue('QUIC flows are capped', flows > 0 && flows < 6000);
   checkTrue('the earliest flow is forgotten',
     !tracker.isKnownFlow('10.0.0.1', 50000, '93.184.1.1', 443));

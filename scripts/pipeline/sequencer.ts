@@ -3,7 +3,7 @@
  *
  *   npx tsx scripts/pipeline/sequencer.ts [--burst some.pcapng]
  *
- * Four things, each the property phase 3 will lean on:
+ * Five things, each the property phase 3 will lean on:
  *
  *   1. **The header parse never sends a frame to the TCP lane that the
  *      dissection numbers differently.** Every frame of every real fixture is
@@ -22,6 +22,8 @@
  *      against a model of the rule written out here - least recently seen goes
  *      past 16,384, a returning connection is new, numbers are never reused.
  *   4. **The frame clock** keeps both forms' arithmetic.
+ *   5. **QUIC's flow registry** numbers connections and forgets flows as the
+ *      tracker did before it moved here: the same rules, asserted on the order.
  *
  * The real fixtures are untracked (test/fixtures/README.md); without them
  * (1) and (2) skip and (3) and (4) still run. `--burst` adds any capture to
@@ -35,7 +37,7 @@ import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
 import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
 import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
-import { FrameClock, MAX_TCP_CONNECTIONS, Sequencer, tcpConnectionKey } from '../../src/services/dissect/sequencer';
+import { FrameClock, MAX_QUIC_FLOWS, MAX_TCP_CONNECTIONS, Sequencer, quicFlowKey, tcpConnectionKey } from '../../src/services/dissect/sequencer';
 import { frameLane, isTcpFragment, type TcpFragmentLane } from '../../src/services/dissect/frameLane';
 import type { FrameSources } from '../../src/services/dissect/frameRecord';
 import type { Packet } from '../../src/types/packet';
@@ -43,6 +45,7 @@ import { FIXTURES } from './arrival';
 import { digestCapture, type Trackers } from './frameDigest';
 import { EVICTION_CONNECTIONS, evictionCapture } from './evictionCapture';
 import { fragmentCapture } from './fragmentCapture';
+import { quicCapture } from './quicCapture';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -167,7 +170,7 @@ async function headerParse(name: string, path: string): Promise<void> {
 function sharedTrackers(): Trackers {
   const sequencer = new Sequencer();
   return {
-    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(),
+    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer),
     dns: new DnsTracker(), l3: new L3Tracker(sequencer),
   };
 }
@@ -262,12 +265,70 @@ async function fragments(): Promise<void> {
   }
 }
 
+/** QUIC in every shape the router will have to tell apart (`quicCapture.ts`), dissected both ways. */
+async function quicShared(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-quic-'));
+  try {
+    const path = join(dir, 'quic.pcap');
+    writeFileSync(path, quicCapture());
+    await sharedAgrees('quic', path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// --- (5) QUIC's flow registry -------------------------------------------------
+
+/**
+ * The QUIC half of the Sequencer: which flows have carried a long header, which
+ * connection ids those named, and the connection number each took. The same
+ * rules `QuicFlowTracker` kept for itself, asserted directly on the order.
+ */
+function quicRegistry(): void {
+  const order = new Sequencer().quic;
+  const a = quicFlowKey('10.0.0.1', 50000, '10.0.0.2', 443);
+  check('quic: a first long header takes number 0, and the flow is known',
+    order.noteLongHeader(a, ['aa01'], false).number === 0 && order.isKnown(a));
+  check('quic: a zero-length DCID answers with the flow\'s connection',
+    order.noteLongHeader(a, ['bb02'], true).number === 0);
+  const c = quicFlowKey('10.0.0.3', 50000, '10.0.0.2', 443);
+  const d = quicFlowKey('10.0.0.4', 50000, '10.0.0.2', 443);
+  const numberedC = order.noteLongHeader(c, ['cc'], false).number;
+  const numberedD = order.noteLongHeader(d, ['dd'], false).number;
+  check('quic: ids numbered apart and then seen together settle on the lower',
+    numberedC === 1 && numberedD === 2 && order.noteLongHeader(c, ['dd', 'cc'], false).number === 1
+      && order.connectionFor('dd') === 1 && order.connectionFor('cc') === 1);
+  check('quic: a short header is matched by the flow\'s ids',
+    order.match(a, Uint8Array.from([0x40, 0xaa, 0x01, 7]), 1) === 'aa01');
+  const v = quicFlowKey('10.0.0.9', 1, '10.0.0.2', 443);
+  const vn = order.noteLongHeader(v, [], true);
+  check('quic: Version Negotiation registers its flow with no ids',
+    order.isKnown(v) && order.connectionForFlow(v, undefined) === vn.number);
+
+  // Eviction, on a fresh order: MAX_QUIC_FLOWS + 1 flows, one id each.
+  const o = new Sequencer().quic;
+  const idOf = (n: number): string => n.toString(16).padStart(8, '0');
+  const flowOf = (n: number): string => quicFlowKey('10.1.0.1', 1000 + n, '10.1.0.2', 443);
+  const first = flowOf(0);
+  o.noteLongHeader(first, [idOf(0)], false);
+  let last: ReturnType<typeof o.noteLongHeader> | undefined;
+  for (let i = 1; i <= MAX_QUIC_FLOWS; i++) last = o.noteLongHeader(flowOf(i), [idOf(i)], false);
+  check('quic: the 4,097th flow forgets the least recently noted one, and says so',
+    last !== undefined && last.forgotten.length === 1 && last.forgotten[0] === first && o.evicted === 1);
+  check('quic: a forgotten flow\'s ids no longer number',
+    o.connectionFor(idOf(0)) === undefined && !o.isKnown(first));
+  check('quic: a returning flow takes an unused number',
+    o.noteLongHeader(first, [idOf(0)], false).number === MAX_QUIC_FLOWS + 1);
+}
+
 async function main(): Promise<void> {
   for (const { name, path } of captures) await headerParse(name, path);
   await fragments();
   for (const { name, path } of captures) await sharedAgrees(name, path);
+  await quicShared();
   await eviction();
   clock();
+  quicRegistry();
 }
 
 main().then(() => {
