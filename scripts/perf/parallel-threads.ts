@@ -49,7 +49,7 @@ const route = (arg('--route') ?? 'connection') as ShardRoute;
 const inFlight = Number(arg('--in-flight') ?? 2);
 /** Frames handed to the coordinator at a time, as the Worker's flush does. */
 const DISPATCH = 2048;
-/** Frames in flight past which dispatch waits, as the Worker's `PARALLEL_BACKLOG`. */
+/** Frames in flight past which dispatch waits, as `PARALLEL_BACKLOG` (coordinator.ts) does for the Worker's flush. */
 const BACKLOG = Number(arg('--backlog') ?? 32_768);
 
 function trackers(sequencer: Sequencer) {

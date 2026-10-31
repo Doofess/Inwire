@@ -22,7 +22,7 @@ import { runInNewContext } from 'node:vm';
 import { ipv4, ethernet, tcpFrame, udp } from '../parity/synthetic';
 import { Sequencer } from '../../src/services/dissect/sequencer';
 import {
-  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, WatchedTcpOrder, laneZeroCost,
+  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, WatchedTcpOrder, flushTake, laneZeroCost,
   parallelRoom, parallelRoomAgain, type CoordFrame,
 } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
@@ -138,6 +138,42 @@ console.log('\n--- a flush that follows them, with the shard never answering ---
   deliver();
   check('once the shard answers, every frame merges', merged.length === handed, `${merged.length} of ${handed}`);
   check('...and the flush is asked back', parallelRoomAgain(coordinator));
+}
+
+console.log('\n--- Stop, with everything that waited released at once ---\n');
+{
+  // Past the bound, frames wait in the Worker's `released`, up to main's
+  // 256 MB credit. Stop used to hand all of them over in one call - one
+  // synchronous dissection of every lane-0 frame while the shard frame before
+  // them waited for an answer that call left no room to read.
+  const SLICE = 3000;
+  const stopped = { capturing: false, behind: false };
+  check('a stop without shards still releases everything', flushTake(250_000, SLICE, stopped, null) === 250_000);
+  check('a stop with shards takes a slice', flushTake(250_000, SLICE, stopped, { backlog: 0, laneZeroWaiting: 0 }) === SLICE);
+  check('...and nothing while lane 0 holds its limit',
+    flushTake(250_000, SLICE, stopped, { backlog: 0, laneZeroWaiting: LANE_ZERO_WAITING_BYTES }) === 0);
+  check('a stop is not held back by a slow store, as before',
+    flushTake(250_000, SLICE, { capturing: false, behind: true }, { backlog: 0, laneZeroWaiting: 0 }) === SLICE);
+  check('while capturing a slow store still holds the flush',
+    flushTake(250_000, SLICE, { capturing: true, behind: true }, { backlog: 0, laneZeroWaiting: 0 }) === 0);
+
+  // The drain as the Worker runs it: take what the flush allows, and when it
+  // allows nothing, let the shard answer.
+  const { coordinator, merged, deliver } = rig();
+  const total = 40_000;
+  let next = 1;
+  let peak = 0;
+  while (next <= total) {
+    const take = flushTake(total - next + 1, SLICE, stopped, coordinator);
+    if (take === 0) { deliver(); continue; }
+    coordinator.dispatch(Array.from({ length: take }, () => frameAt(next++)));
+    peak = Math.max(peak, coordinator.laneZeroWaiting);
+  }
+  deliver();
+  check('draining 40,000 waiting frames never holds more than the limit and one slice',
+    peak < LANE_ZERO_WAITING_BYTES + SLICE * laneZeroCost(frameAt(2).bytes.length), `peak ${(peak / 2 ** 20).toFixed(0)} MiB`);
+  check('...and every one of them merges, in order',
+    merged.length === total && merged.every((id, i) => id === i + 1), `${merged.length} of ${total}`);
 }
 
 console.log(failures === 0 ? '\nAll lane-zero bound checks passed.' : `\n${failures} lane-zero bound check(s) failed.`);

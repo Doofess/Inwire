@@ -620,6 +620,13 @@ not a leak.
   frames, within one slice of the limit, where it used to stop at 65,536. The
   estimate is 14.4 kB against the 14.0 kB a waiting result was measured to
   retain.
+- **Stop keeps both bounds** (`flushTake`). It used to hand every released
+  frame to the coordinator in one call, and with the bound in place that can
+  be up to main's 256 MB of frames: one synchronous dissection of every lane-0
+  frame among them, the same crash at Stop. A stopped flush now takes slices
+  as a capturing one does, but it is not held back by a slow store. The drain
+  answers once nothing is left released and the coordinator is idle. Without
+  shards a stop still releases everything at once, as before.
 
 **Measured after** (the same capture and build steps, `--follow-only`):
 

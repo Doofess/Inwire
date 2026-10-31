@@ -157,14 +157,35 @@ export const LANE_ZERO_WAITING_BYTES = 256 * 1024 * 1024;
  * the payload's hex, three characters a byte, which a frame with a long
  * undissected payload carries.
  */
-export function laneZeroCost(wireLength: number): number {
-  return 14 * 1024 + 4 * wireLength;
+export function laneZeroCost(capturedLength: number): number {
+  return 14 * 1024 + 4 * capturedLength;
 }
 
 /** How many of `want` frames the flush may hand the coordinator now. */
 export function parallelRoom(want: number, coordinator: Pick<Coordinator, 'backlog' | 'laneZeroWaiting'>): number {
   if (coordinator.laneZeroWaiting >= LANE_ZERO_WAITING_BYTES) return 0;
   return Math.max(0, Math.min(want, PARALLEL_BACKLOG - coordinator.backlog));
+}
+
+/**
+ * How many of the `waiting` released frames one flush dissects.
+ *
+ * Capturing, a slice, and none while the store or the window is behind
+ * (`behind`). Stopped, the store no longer holds it back: the stop path is
+ * waiting for its last rows. Without shards that is everything at once, as it
+ * always was. **With shards it is still a slice, inside both bounds**: frames
+ * past the lane-0 bound wait in `released`, up to main's credit, and handing
+ * them all over at Stop dissected every lane-0 frame in one synchronous call,
+ * with the shard frame before them unanswered - the same out-of-heap crash,
+ * moved to Stop. The drain takes slices until `released` is empty.
+ */
+export function flushTake(
+  waiting: number, slice: number, state: { capturing: boolean; behind: boolean },
+  coordinator: Pick<Coordinator, 'backlog' | 'laneZeroWaiting'> | null,
+): number {
+  if (state.capturing && state.behind) return 0;
+  if (coordinator === null) return state.capturing ? Math.min(waiting, slice) : waiting;
+  return parallelRoom(Math.min(waiting, slice), coordinator);
 }
 
 /**
