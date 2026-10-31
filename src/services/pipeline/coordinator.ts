@@ -37,7 +37,9 @@
  *     the header parse leaves sequential. It stays on lane 0 for good
  *     (`keyHome`), so its state is never split; the opposite case, a sharded
  *     connection that lane 0 later meets, is counted (`crossLane`) as the one
- *     way this build can differ from one core. A QUIC flow is the same
+ *     way this build can differ from one core. Lane 0 then holds a half of
+ *     that connection, forgotten with the shard's (`laneZeroMetConnections`).
+ *     A QUIC flow is the same
  *     (`quicHome`): one lane 0 meets first stays on lane 0, and a sharded
  *     flow's datagram that reaches lane 0 finds no keys there and is counted too.
  *
@@ -359,10 +361,12 @@ export class Coordinator {
    */
   private readonly quicHome = new Map<string, number>();
   /**
-   * Flows homed on a shard that lane 0 met too (`crossLane`): lane 0's tracker
-   * holds a half of each, which the forget sent to the shard would not reach.
+   * Connections and flows homed on a shard that lane 0 met too (`crossLane`):
+   * lane 0's tracker holds a half of each, which the forget sent to the shard
+   * would not reach. Two sets, as `keyHome` and `quicHome` are two maps.
    */
-  private readonly laneZeroMet = new Set<string>();
+  private readonly laneZeroMetConnections = new Set<string>();
+  private readonly laneZeroMetFlows = new Set<string>();
   private readonly datagramKey = new Map<string, string>();
   private readonly datagramShard = new Map<string, number>();
   /** Placeholder to real `tls.stream`, per shard lane. */
@@ -562,7 +566,8 @@ export class Coordinator {
     }
     this.keyHome.clear();
     this.quicHome.clear();
-    this.laneZeroMet.clear();
+    this.laneZeroMetConnections.clear();
+    this.laneZeroMetFlows.clear();
     this.datagramKey.clear();
     this.datagramShard.clear();
     this.tlsMaps = Array.from({ length: this.shards + 1 }, () => new Map());
@@ -824,7 +829,8 @@ export class Coordinator {
   private forgetQuicEverywhere(flow: string): void {
     const home = this.quicHome.get(flow);
     this.quicHome.delete(flow);
-    if (home === undefined || home === 0 || this.laneZeroMet.delete(flow)) this.lane0.trackers.quic.forget(flow);
+    const met = this.laneZeroMetFlows.delete(flow);
+    if (home === undefined || home === 0 || met) this.lane0.trackers.quic.forget(flow);
     if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].quicForget(flow);
   }
 
@@ -833,7 +839,7 @@ export class Coordinator {
     for (const gone of forgotten) {
       const home = this.quicHome.get(gone);
       this.quicHome.delete(gone);
-      this.laneZeroMet.delete(gone);
+      this.laneZeroMetFlows.delete(gone);
       // Lane 0's tracker forgets its own as part of this same call.
       if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].quicForget(gone);
     }
@@ -841,7 +847,7 @@ export class Coordinator {
     if (home === undefined) this.quicHome.set(flow, 0);
     else if (home !== 0) {
       this.crossLane += 1;
-      this.laneZeroMet.add(flow);
+      this.laneZeroMetFlows.add(flow);
     }
   }
 
@@ -881,8 +887,9 @@ export class Coordinator {
   private forgetEverywhere(key: string): void {
     const home = this.keyHome.get(key);
     this.keyHome.delete(key);
-    if (home === undefined || home === 0) this.lane0.trackers.tcp.forget(key);
-    else if (!this.dead.has(home - 1)) this.writers[home - 1].forget(key);
+    const met = this.laneZeroMetConnections.delete(key);
+    if (home === undefined || home === 0 || met) this.lane0.trackers.tcp.forget(key);
+    if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].forget(key);
   }
 
   /** A lookup lane 0's trackers made on the real order. */
@@ -890,12 +897,16 @@ export class Coordinator {
     for (const gone of forgotten) {
       const home = this.keyHome.get(gone);
       this.keyHome.delete(gone);
+      this.laneZeroMetConnections.delete(gone);
       // Lane 0's tracker forgets its own as part of this same lookup.
       if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].forget(gone);
     }
     const home = this.keyHome.get(key);
     if (home === undefined) this.keyHome.set(key, 0);
-    else if (home !== 0) this.crossLane += 1;
+    else if (home !== 0) {
+      this.crossLane += 1;
+      this.laneZeroMetConnections.add(key);
+    }
   }
 
   private settleBarrier(report: BarrierReport | undefined): void {

@@ -19,7 +19,8 @@
  */
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
-import { ipv4, ethernet, tcpFrame, udp } from '../parity/synthetic';
+import { Bytes, ipv4, ethernet, tcp, tcpFrame, udp } from '../parity/synthetic';
+import { MAX_TCP_CONNECTIONS } from '../../src/services/dissect/sequencer';
 import {
   Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, coordinatorSequencer, flushTake, laneZero, laneZeroCost,
   parallelRoom, parallelRoomAgain, type CoordFrame,
@@ -175,6 +176,35 @@ console.log('\n--- Stop, with everything that waited released at once ---\n');
     peak < LANE_ZERO_WAITING_BYTES + SLICE * laneZeroCost(frameAt(2).bytes.length), `peak ${(peak / 2 ** 20).toFixed(0)} MiB`);
   check('...and every one of them merges, in order',
     merged.length === total && merged.every((id, i) => id === i + 1), `${merged.length} of ${total}`);
+}
+
+{
+  // Asymmetric QinQ TCP: each client segment plain (the shard), each server segment double-tagged (lane 0,
+  // crossLane). The order forgets the oldest connections on the shard's lookups; lane 0's half must go with them.
+  const { coordinator, deliver } = rig();
+  const connections = MAX_TCP_CONNECTIONS + 1000;
+  const client = '192.0.2.1', server = '192.0.2.2';
+  let id = 1;
+  const frame = (bytes: Uint8Array): CoordFrame => ({
+    id: id++, bytes, tsUs: 1_000_000 + id, relativeTime: id / 1e6, timeDelta: 1e-6,
+    origLen: bytes.length, linktype: 1, facts: {},
+  });
+  for (let i = 0; i < connections; i++) {
+    const port = 20000 + i;
+    coordinator.dispatch([
+      frame(Uint8Array.from([...ethernet(0x0800).build(), ...ipv4(6, tcp(port, 443, 1, 1, new Uint8Array(8)), client, server)])),
+      frame(Uint8Array.from([
+        ...ethernet(0x88a8).build(), ...new Bytes().u16(0x0064, 0x8100, 0x00c8, 0x0800).build(),
+        ...ipv4(6, tcp(443, port, 1, 9, new Uint8Array(8)), server, client),
+      ])),
+    ]);
+    if (i % 512 === 511) deliver();
+  }
+  deliver();
+  const held = coordinator.lane0.trackers.tcp.connectionCount;
+  check('TCP: lane 0 forgets its half of a sharded connection the order forgets',
+    coordinator.crossLane >= connections && held <= MAX_TCP_CONNECTIONS,
+    `crossLane ${coordinator.crossLane}, lane 0 connections ${held}`);
 }
 
 {
