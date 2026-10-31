@@ -13,6 +13,9 @@
  *      every TCP lookup - must be exactly the ones read from its headers. A
  *      frame it leaves on the sequential lane is never wrong, only slower, so
  *      the share of TCP frames it reaches is printed rather than asserted.
+ *      The same holds for the QUIC lane: for each frame it reads onto it, the
+ *      QUIC tracker's questions to the order are exactly the ones `readQuicRoute`
+ *      read from the headers, against the order the earlier frames left.
  *   2. **Trackers sharing one Sequencer dissect byte for byte as trackers
  *      each holding their own** - what the Worker does now against what every
  *      older caller still does. A hash of every frame's columns, bag, tree,
@@ -38,7 +41,8 @@ import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
 import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
 import { FrameClock, MAX_QUIC_FLOWS, MAX_TCP_CONNECTIONS, Sequencer, quicFlowKey, tcpConnectionKey } from '../../src/services/dissect/sequencer';
-import { frameLane, isTcpFragment, type TcpFragmentLane } from '../../src/services/dissect/frameLane';
+import { frameLane, isTcpFragment, type QuicLane, type TcpFragmentLane } from '../../src/services/dissect/frameLane';
+import { readQuicRoute, type QuicRouted } from '../../src/services/dissect/quicRoute';
 import type { FrameSources } from '../../src/services/dissect/frameRecord';
 import type { Packet } from '../../src/types/packet';
 import { FIXTURES } from './arrival';
@@ -73,18 +77,23 @@ const TUPLE_CALLS = new Set([
 ]);
 const NUMBERING_L3 = new Set(['ethStream', 'ipStream', 'ipv6Stream', 'udpStream']);
 
-interface Call { group: 'tcp' | 'l3'; method: string; args: unknown[] }
+/** The QUIC tracker's questions to the QUIC order, which the router predicts (ADR 0053 phase 5). */
+const QUIC_CALLS = new Set(['isKnownFlow', 'matchConnectionId', 'noteLongHeader', 'connectionNumberForFlow']);
+
+interface Call { group: 'tcp' | 'l3' | 'quic'; method: string; args: unknown[]; result?: unknown }
 
 /** Wraps the sources a frame is dissected with so its numbering calls are logged. */
 function spying(log: Call[]): (sources: FrameSources) => FrameSources {
-  const wrap = <T extends object>(target: T, group: 'tcp' | 'l3', watch: (m: string) => boolean): T =>
+  const wrap = <T extends object>(target: T, group: Call['group'], watch: (m: string) => boolean): T =>
     new Proxy(target, {
       get(t, prop, receiver) {
         const value = Reflect.get(t, prop, receiver);
         if (typeof value !== 'function' || typeof prop !== 'string' || !watch(prop)) return value;
         return (...args: unknown[]) => {
-          log.push({ group, method: prop, args });
-          return (value as (...a: unknown[]) => unknown).apply(t, args);
+          const call: Call = { group, method: prop, args };
+          log.push(call);
+          call.result = (value as (...a: unknown[]) => unknown).apply(t, args);
+          return call.result;
         };
       },
     });
@@ -96,6 +105,7 @@ function spying(log: Call[]): (sources: FrameSources) => FrameSources {
         to: {
           ...sources,
           tcp: wrap(sources.tcp, 'tcp', () => true),
+          quic: wrap(sources.quic, 'quic', (m) => QUIC_CALLS.has(m)),
           l3: wrap(sources.l3, 'l3', (m) => NUMBERING_L3.has(m)),
         },
       };
@@ -143,41 +153,115 @@ function fragmentDisagreement(calls: Call[], packet: Packet, lane: TcpFragmentLa
   return keys.size > 1 ? `fragment ${packet.id}: looked up ${[...keys].join(' and ')}` : null;
 }
 
+/**
+ * What a frame on the QUIC lane must have asked the QUIC order, and nothing
+ * else: exactly what `readQuicRoute` read from its headers, against the order
+ * as the frames before it left it. Null when it did.
+ */
+function quicDisagreement(calls: Call[], packet: Packet, lane: QuicLane, route: QuicRouted | null): string | null {
+  const l3 = calls.filter((c) => c.group === 'l3').map((c) => c.method);
+  const want = ['ethStream', lane.family === 'ip' ? 'ipStream' : 'ipv6Stream', 'udpStream'];
+  if (l3.join('|') !== want.join('|')) return `frame ${packet.id}: L3 numbering ${JSON.stringify(l3)}, read ${JSON.stringify(want)}`;
+  const quic = calls.filter((c) => c.group === 'quic');
+  for (const c of quic) {
+    const [srcIp, srcPort, dstIp, dstPort] = c.args as [string, number, string, number];
+    const flow = quicFlowKey(srcIp, srcPort, dstIp, dstPort);
+    if (flow !== lane.flow) return `frame ${packet.id}: ${c.method} on ${flow}, read ${lane.flow}`;
+  }
+  const named = (method: string) => quic.filter((c) => c.method === method);
+  const known = named('isKnownFlow');
+  if (known.length !== 1) return `frame ${packet.id}: isKnownFlow asked ${known.length} times`;
+  const dissectedAsQuic = packet.frameProtocols?.includes('quic') === true;
+  if (dissectedAsQuic !== (route !== null)) return `frame ${packet.id}: dissected as QUIC ${dissectedAsQuic}, read ${route !== null}`;
+  if (route === null) {
+    return named('noteLongHeader').length + named('connectionNumberForFlow').length === 0
+      ? null : `frame ${packet.id}: read as unclaimed, but numbered`;
+  }
+  if (known[0].result !== route.known) return `frame ${packet.id}: flow known ${String(known[0].result)}, read ${route.known}`;
+  const matches = named('matchConnectionId');
+  if (route.walk.resolveAt < 0) {
+    if (matches.length !== 0) return `frame ${packet.id}: matched an id, read no short header`;
+  } else if (matches.length !== 1 || matches[0].args[5] !== route.walk.resolveAt || matches[0].result !== route.matched) {
+    return `frame ${packet.id}: matched ${JSON.stringify(matches.map((m) => [m.args[5], m.result]))}, read [${route.walk.resolveAt}, ${String(route.matched)}]`;
+  }
+  const notes = named('noteLongHeader');
+  const numbers = named('connectionNumberForFlow');
+  if (route.walk.long) {
+    if (notes.length !== 1 || numbers.length !== 0) return `frame ${packet.id}: long header noted ${notes.length} times, numbered ${numbers.length}`;
+    if (JSON.stringify(notes[0].args[4]) !== JSON.stringify(route.walk.connectionIds) || notes[0].args[5] !== route.walk.emptyDcid) {
+      return `frame ${packet.id}: noted ${JSON.stringify(notes[0].args.slice(4))}, read ${JSON.stringify([route.walk.connectionIds, route.walk.emptyDcid])}`;
+    }
+  } else if (notes.length !== 0 || numbers.length !== 1 || numbers[0].args[4] !== route.matched) {
+    return `frame ${packet.id}: short header noted ${notes.length}, numbered ${JSON.stringify(numbers.map((n) => n.args[4]))}, read ${String(route.matched)}`;
+  }
+  return null;
+}
+
 async function headerParse(name: string, path: string): Promise<void> {
   const log: Call[] = [];
   const spy = spying(log);
   let tcpFrames = 0;
   let onTcpLane = 0;
   let barriers = 0;
+  let quicFrames = 0;
+  let onQuicLane = 0;
+  let readOnQuicLane = 0;
   let wrong: string | null = null;
+  let quicWrong: string | null = null;
+  // The router reads each frame against the order as the frames before it left
+  // it, which is the Sequencer the dissection is about to ask.
+  let shared: SharedTrackers | undefined;
+  let ahead: { lane: QuicLane; route: QuicRouted | null } | undefined;
   await digestCapture(path, {
+    trackers: () => (shared = sharedTrackers()).trackers,
+    before: (bytes, linktype) => {
+      const lane = frameLane(bytes, linktype);
+      ahead = lane.lane === 'quic' ? { lane, route: readQuicRoute(bytes, lane, shared!.sequencer.quic) } : undefined;
+    },
     wrap: (sources) => { log.length = 0; return spy(sources); },
     observe: (packet, bytes, linktype) => {
       const lane = frameLane(bytes, linktype);
       if (lane.lane === 'tcp') onTcpLane++;
-      else if (lane.fragmentOf === 'tcp') barriers++;
+      else if (isTcpFragment(lane)) barriers++;
       if (packet.frameProtocols?.includes('tcp')) tcpFrames++;
       wrong ??= disagreement(log, packet, bytes, linktype);
+      if (packet.frameProtocols?.includes('quic')) quicFrames++;
+      if (ahead !== undefined) {
+        onQuicLane++;
+        if (ahead.route !== null) readOnQuicLane++;
+        quicWrong ??= quicDisagreement(log, packet, ahead.lane, ahead.route);
+      }
     },
   });
   check(`${name}: every frame read onto the TCP lane is numbered as its headers said`, wrong === null, wrong ?? '');
   console.log(`        ${onTcpLane.toLocaleString()} of ${tcpFrames.toLocaleString()} TCP frames on the TCP lane`
     + `${barriers > 0 ? `, ${barriers} fragment barrier(s)` : ''}`);
+  if (quicFrames > 0 || onQuicLane > 0) {
+    check(`${name}: every frame read onto the QUIC lane asks the QUIC order exactly what the walk read`,
+      quicWrong === null, quicWrong ?? '');
+    console.log(`        ${readOnQuicLane.toLocaleString()} of ${quicFrames.toLocaleString()} QUIC frames on the QUIC lane`
+      + ` (${(onQuicLane - readOnQuicLane).toLocaleString()} more read onto it and left to lane 0)`);
+  }
 }
 
 // --- (2) one Sequencer shared, or one each ---------------------------------
 
-function sharedTrackers(): Trackers {
+interface SharedTrackers { trackers: Trackers; sequencer: Sequencer }
+
+function sharedTrackers(): SharedTrackers {
   const sequencer = new Sequencer();
   return {
-    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer),
-    dns: new DnsTracker(), l3: new L3Tracker(sequencer),
+    sequencer,
+    trackers: {
+      tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer),
+      dns: new DnsTracker(), l3: new L3Tracker(sequencer),
+    },
   };
 }
 
 async function sharedAgrees(name: string, path: string): Promise<void> {
   const own = await digestCapture(path);
-  const shared = await digestCapture(path, { trackers: sharedTrackers });
+  const shared = await digestCapture(path, { trackers: () => sharedTrackers().trackers });
   const first = own.findIndex((h, i) => h !== shared[i]);
   check(`${name}: trackers sharing one Sequencer dissect all ${own.length.toLocaleString()} frames byte for byte`,
     first === -1 && own.length === shared.length, first === -1 ? '' : `frame ${first + 1} differs`);
@@ -194,7 +278,7 @@ async function eviction(): Promise<void> {
     const keys: string[] = [];
     let trackers: Trackers | undefined;
     await digestCapture(path, {
-      trackers: () => (trackers = sharedTrackers()),
+      trackers: () => (trackers = sharedTrackers().trackers),
       observe: (packet, bytes, linktype) => {
         const lane = frameLane(bytes, linktype);
         if (lane.lane !== 'tcp') return;
@@ -271,6 +355,7 @@ async function quicShared(): Promise<void> {
   try {
     const path = join(dir, 'quic.pcap');
     writeFileSync(path, quicCapture());
+    await headerParse('quic', path);
     await sharedAgrees('quic', path);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -23,6 +23,12 @@
  * to the TCP lane, the calls the dissection made to the cross-conversation
  * numbering must be exactly the ones read here.
  *
+ * **The QUIC lane** (ADR 0053 phase 5) is read the same way: a plain,
+ * unfragmented UDP datagram the dissector's QUIC branch takes (`udpBranch`),
+ * with at most one VLAN tag. That the branch is reached is decided here; what
+ * QUIC then claims and asks of its order is `quicRoute.ts`'s. The same
+ * `scripts/pipeline/sequencer.ts` lockstep holds both to the dissection.
+ *
  * **A fragment of a TCP datagram is a barrier.** Its ports are in the first
  * fragment only, and which connection it belongs to is known when the last one
  * reassembles it - so it cannot be numbered ahead. `fragmentOf` says so, and
@@ -32,7 +38,8 @@
  */
 import { formatIpv4Address, formatIpv6Address, formatMacAt } from '../addressFormat';
 import { LINKTYPE } from './types';
-import { tcpConnectionKey } from './sequencer';
+import { quicFlowKey, tcpConnectionKey } from './sequencer';
+import { udpBranch } from '../dissectors/udpBranch';
 
 /** A frame the Sequencer can number ahead of dissection: one plain TCP segment. */
 export interface TcpLane {
@@ -77,9 +84,68 @@ export interface TcpFragmentLane extends SequentialLane {
   key?: string;
 }
 
-export type FrameLane = TcpLane | SequentialLane | TcpFragmentLane;
+/**
+ * A UDP datagram the QUIC branch of the dissection takes (`udpBranch`): plain
+ * Ethernet (one VLAN tag at most), an unfragmented IPv4 or IPv6 datagram, and
+ * the whole UDP header kept. Whether QUIC then claims it is `readQuicRoute`'s.
+ */
+export interface QuicLane {
+  lane: 'quic';
+  srcMac: string;
+  dstMac: string;
+  family: 'ip' | 'ipv6';
+  src: string;
+  dst: string;
+  srcPort: number;
+  dstPort: number;
+  /** The flow, as `QuicFlowTracker` keys it (`quicFlowKey`). */
+  flow: string;
+  /** The unordered address pair, as `TcpLane.pair`. */
+  pair: string;
+  /** Where the UDP payload starts: the UDP header + 8. */
+  payloadStart: number;
+  /** Where the dissector reads it to: `min(bytes.length, payloadStart + max(0, udpLength - 8))`. */
+  payloadEnd: number;
+}
+
+export type FrameLane = TcpLane | QuicLane | SequentialLane | TcpFragmentLane;
 
 const SEQUENTIAL: SequentialLane = { lane: 'sequential' };
+
+/**
+ * The QUIC lane for an unfragmented UDP datagram, or sequential when the
+ * dissection will not reach its QUIC branch. `udp` is where the UDP header
+ * starts; the addresses are read only once a port says QUIC may be involved,
+ * because every UDP frame passes through here.
+ */
+function quicLane(bytes: Uint8Array, family: 'ip' | 'ipv6', l3: number, udp: number): FrameLane {
+  // The dissector needs the whole UDP header (`decodeTransportLayer`).
+  if (bytes.length < udp + 8) return SEQUENTIAL;
+  const srcPort = (bytes[udp] << 8) | bytes[udp + 1];
+  const dstPort = (bytes[udp + 2] << 8) | bytes[udp + 3];
+  // `udpBranch` answers 'quic' only for 443, so no other datagram needs its addresses read.
+  if (srcPort !== 443 && dstPort !== 443) return SEQUENTIAL;
+  const src = family === 'ip' ? formatIpv4Address(bytes, l3 + 12) : formatIpv6Address(bytes, l3 + 8);
+  const dst = family === 'ip' ? formatIpv4Address(bytes, l3 + 16) : formatIpv6Address(bytes, l3 + 24);
+  const udpLength = (bytes[udp + 4] << 8) | bytes[udp + 5];
+  const payloadStart = udp + 8;
+  const payloadEnd = Math.min(bytes.length, payloadStart + Math.max(0, udpLength - 8));
+  if (udpBranch(bytes, payloadStart, payloadEnd, srcPort, dstPort, dst) !== 'quic') return SEQUENTIAL;
+  return {
+    lane: 'quic',
+    srcMac: formatMacAt(bytes, 6),
+    dstMac: formatMacAt(bytes, 0),
+    family,
+    src,
+    dst,
+    srcPort,
+    dstPort,
+    flow: quicFlowKey(src, srcPort, dst, dstPort),
+    pair: src < dst ? `${src}|${dst}` : `${dst}|${src}`,
+    payloadStart,
+    payloadEnd,
+  };
+}
 
 function tcpFragment(
   bytes: Uint8Array, family: 'ip' | 'ipv6', src: string, dst: string, identification: number, tcpAt: number | null,
@@ -142,6 +208,7 @@ export function frameLane(bytes: Uint8Array, linktype: number): FrameLane {
         (bytes[l3 + 4] << 8) | bytes[l3 + 5], (flagsAndOffset & 0x1fff) === 0 ? l3 + headerLength : null,
       );
     }
+    if (protocol === 17) return quicLane(bytes, 'ip', l3, l3 + headerLength);
     if (protocol !== 6) return SEQUENTIAL;
     family = 'ip';
     src = formatIpv4Address(bytes, l3 + 12);
@@ -160,10 +227,11 @@ export function frameLane(bytes: Uint8Array, linktype: number): FrameLane {
         identification, offset === 0 ? l3 + 48 : null,
       );
     }
-    if (nextHeader !== 6) return SEQUENTIAL;
+    if (nextHeader !== 6 && nextHeader !== 17) return SEQUENTIAL;
     // A zero payload length with bytes after the header is a jumbogram, or a
     // malformed one; the network layer reads it apart (`isMalformedJumbo`).
     if (((bytes[l3 + 4] << 8) | bytes[l3 + 5]) === 0) return SEQUENTIAL;
+    if (nextHeader === 17) return quicLane(bytes, 'ipv6', l3, l3 + 40);
     family = 'ipv6';
     src = formatIpv6Address(bytes, l3 + 8);
     dst = formatIpv6Address(bytes, l3 + 24);

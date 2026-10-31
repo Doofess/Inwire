@@ -397,16 +397,24 @@ export interface QuicDissectorResult {
  * and must not be folded in here.
  */
 export function readVarint(bytes: Uint8Array, offset: number, end: number): { value: number; nextOffset: number } | null {
-  if (offset >= end) return null;
-  const prefix = bytes[offset] >> 6;
-  const length = 1 << prefix;
-  if (offset + length > end) return null;
+  const length = varintSize(bytes, offset, end);
+  return length === 0 ? null : { value: varintValue(bytes, offset, length), nextOffset: offset + length };
+}
 
+/** How many bytes the varint at `offset` takes, or 0 when it does not fit before `end`. */
+function varintSize(bytes: Uint8Array, offset: number, end: number): number {
+  if (offset >= end) return 0;
+  const length = 1 << (bytes[offset] >> 6);
+  return offset + length > end ? 0 : length;
+}
+
+/** The value of the `length`-byte varint at `offset` (`varintSize`'s answer). */
+function varintValue(bytes: Uint8Array, offset: number, length: number): number {
   let value = bytes[offset] & 0x3f;
   for (let i = 1; i < length; i++) {
     value = value * 256 + bytes[offset + i];
   }
-  return { value, nextOffset: offset + length };
+  return value;
 }
 
 /**
@@ -710,6 +718,102 @@ export function dissectQuicDatagram(
   return last
     ? { ...last, connectionIds, cryptoFragments, streamFragments, packets, isLongHeader: sawLongHeader }
     : null;
+}
+
+/** What `walkQuicDatagram` read of a datagram's headers. */
+export interface QuicWalk {
+  /** `dissectQuicDatagram` would return non-null. */
+  claimed: boolean;
+  /** Any packet read was a long header (Version Negotiation included). */
+  long: boolean;
+  /** The non-empty DCID/SCID hex of the long headers read, in order. */
+  connectionIds: string[];
+  /** A long header read had a zero-length DCID, or was Version Negotiation. */
+  emptyDcid: boolean;
+  /** The offset the resolver is asked at (the short candidate's first byte + 1), or -1. */
+  resolveAt: number;
+  /** Packets read. */
+  packets: number;
+}
+
+/**
+ * What `dissectQuicDatagram` will ask of the flow's state, read from the headers
+ * alone and changing nothing: the lane router's half of the dissection.
+ *
+ * The coordinator answers the QUIC order's questions in frame order and ships
+ * the answers with the frame, so what the dissection will ask - whether the
+ * datagram is claimed, which ids a long header names, where the resolver looks
+ * a short header's id up - has to be known before it runs. This is
+ * `dissectQuicDatagram` with the decryption, the frame summaries and every
+ * record left out, and `scripts/pipeline/quic-lane.ts` holds the two to each
+ * other on every shape of header it can build and 20,000 random ones.
+ *
+ * It runs once per QUIC frame on the coordinator, so it allocates only the
+ * result and, for a long header, the hex of its ids.
+ */
+export function walkQuicDatagram(bytes: Uint8Array, start: number, end: number): QuicWalk {
+  const connectionIds: string[] = [];
+  let long = false;
+  let emptyDcid = false;
+  let resolveAt = -1;
+  let packets = 0;
+  let offset = start;
+  // The same bound as the dissector: a datagram coalesces eight packets at most.
+  for (let seen = 0; seen < 8 && offset < end; seen++) {
+    const first = bytes[offset];
+    // Asked BEFORE the fixed bit is checked: the dissector looks the id up, then
+    // reads the packet, and a rejected short header has already been asked.
+    if ((first & 0x80) === 0) resolveAt = offset + 1;
+    if ((first & 0x40) === 0) break;
+    if ((first & 0x80) === 0) {
+      // A short header runs to the end of the datagram; nothing follows it.
+      packets++;
+      break;
+    }
+
+    if (offset + 6 > end) break;
+    const version = ((bytes[offset + 1] << 24) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 8) | bytes[offset + 4]) >>> 0;
+    if (version === 0) {
+      // Version Negotiation: no type, no Length, no ids, and it runs to the end.
+      packets++;
+      long = true;
+      emptyDcid = true;
+      break;
+    }
+
+    const dcidLen = bytes[offset + 5];
+    if (dcidLen > 20 || offset + 6 + dcidLen > end) break;
+    const scidLenOffset = offset + 6 + dcidLen;
+    if (scidLenOffset >= end) break;
+    const scidLen = bytes[scidLenOffset];
+    if (scidLen > 20 || scidLenOffset + 1 + scidLen > end) break;
+
+    let next = end;
+    const packetType = (version === 0x6b3343cf ? LONG_PACKET_TYPES_V2 : LONG_PACKET_TYPES_V1)[(first >> 4) & 0x03];
+    if (packetType !== 'Retry') {
+      let cursor = scidLenOffset + 1 + scidLen;
+      if (packetType === 'Initial') {
+        const tokenSize = varintSize(bytes, cursor, end);
+        if (tokenSize === 0) break;
+        cursor = cursor + tokenSize + varintValue(bytes, cursor, tokenSize);
+      }
+      const lengthSize = varintSize(bytes, cursor, end);
+      if (lengthSize !== 0) {
+        const candidate = cursor + lengthSize + varintValue(bytes, cursor, lengthSize);
+        if (candidate > cursor && candidate <= end) next = candidate;
+      }
+    }
+
+    packets++;
+    long = true;
+    if (dcidLen > 0) connectionIds.push(toHex(bytes.subarray(offset + 6, scidLenOffset)));
+    else emptyDcid = true;
+    if (scidLen > 0) connectionIds.push(toHex(bytes.subarray(scidLenOffset + 1, scidLenOffset + 1 + scidLen)));
+
+    if (next <= offset) break;
+    offset = next;
+  }
+  return { claimed: packets > 0, long, connectionIds, emptyDcid, resolveAt, packets };
 }
 
 /**

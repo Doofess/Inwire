@@ -52,8 +52,8 @@ function describe(packet: Packet): string {
 /**
  * One hash per frame, in order, for a capture dissected the way the app
  * dissects it as it arrives. `trackers` lets a caller hand in its own (a
- * spy, or trackers sharing one sequencer); `observe` sees every frame's
- * packet before it is dropped.
+ * spy, or trackers sharing one sequencer); `before` sees every frame's bytes
+ * ahead of its dissection and `observe` its packet after, before it is dropped.
  */
 export async function digestCapture(
   path: string,
@@ -61,6 +61,8 @@ export async function digestCapture(
     trackers?: () => Trackers;
     wrap?: (sources: FrameSources, frame: number) => FrameSources;
     observe?: (packet: Packet, bytes: Uint8Array, linktype: number) => void;
+    /** Sees a frame's bytes before it is dissected, with the trackers as the frames before it left them. */
+    before?: (bytes: Uint8Array, linktype: number) => void;
     limit?: number;
   } = {},
 ): Promise<string[]> {
@@ -88,6 +90,7 @@ export async function digestCapture(
       previous = frame.tsNanos;
       const id = out.length + 1;
       const own = frame.rawBytes.slice();
+      options.before?.(frame.rawBytes, frame.linktype);
       recorder.begin();
       const src = options.wrap ? options.wrap(recorder.sources, id) : recorder.sources;
       const decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
