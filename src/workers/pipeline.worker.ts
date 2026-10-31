@@ -57,7 +57,7 @@ import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
-import { Coordinator, WatchedTcpOrder, type Merged, type PackedRef } from '../services/pipeline/coordinator';
+import { Coordinator, WatchedTcpOrder, flushTake, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
 import { PackSender, PackedFlush } from '../services/pipeline/rowPack';
 import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
 import { mergeRowSide } from '../services/pipeline/rowSteps';
@@ -442,8 +442,6 @@ let nextShardDetail = 1;
  * lost to those shards.
  */
 let lastFlows: Extract<ToShard, { type: 'flows' }> | null = null;
-/** Frames in flight past which the flush stops handing the coordinator more. */
-const PARALLEL_BACKLOG = 65_536;
 /** Trees each shard keeps for the detail pane: lane 0 keeps its own `DETAIL_CACHE_FRAMES`. */
 const SHARD_CACHE_FRAMES = 2_000;
 /** When rows were last posted to the app, for `afterMerge`'s cadence. */
@@ -655,8 +653,8 @@ function afterMerge(): void {
   // app's main thread pays per message as well as per row. The flush timer
   // posts whatever this leaves.
   if (pendingPackets.length >= 4096 || performance.now() - lastPostedAt >= SLICE_MS) postFlushed();
-  if (released.length > releasedFrom && !flushSoon && !downstreamBehind()
-    && parallel !== null && parallel.coordinator.backlog < PARALLEL_BACKLOG / 2) {
+  if (released.length > releasedFrom && !flushSoon && (!capturing || !downstreamBehind())
+    && parallel !== null && parallelRoomAgain(parallel.coordinator)) {
     flushSoon = true;
     setTimeout(flush, 0);
   }
@@ -1007,16 +1005,17 @@ function flush(): void {
   // its budget, frames wait here - bounded, because main stops posting to a
   // Worker that has not answered for them - rather than in the store's inbound
   // queue, which nothing bounded and which a real burst grew to its 2 GB heap
-  // guard. A stopped capture releases everything regardless: the stop path is
+  // guard. A stopped capture is not held back by them: the stop path is
   // waiting for its last rows.
-  let take = 0;
-  if (!capturing) take = released.length - releasedFrom;
-  else if (!downstreamBehind()) {
-    take = Math.min(released.length - releasedFrom, Math.max(256, Math.floor((SLICE_MS * 1000) / usPerFrame)));
-    // With shards, what is in flight on them is the queue to bound: past it
-    // frames wait here, and each answer that brings it down asks for a flush.
-    if (parallel !== null) take = Math.max(0, Math.min(take, PARALLEL_BACKLOG - parallel.coordinator.backlog));
-  }
+  //
+  // With shards, what is in flight on them is the queue to bound, and what
+  // lane 0 has dissected ahead of them: past either, frames wait here, and
+  // each answer that brings it down asks for a flush. That holds through Stop
+  // as well (`flushTake`).
+  const take = flushTake(
+    released.length - releasedFrom, Math.max(256, Math.floor((SLICE_MS * 1000) / usPerFrame)),
+    { capturing, behind: downstreamBehind() }, parallel?.coordinator ?? null,
+  );
   const ready = released.slice(releasedFrom, releasedFrom + take);
   releasedFrom += take;
   if (releasedFrom === released.length) {
@@ -1029,7 +1028,8 @@ function flush(): void {
   // More waiting and the store not in the way: straight back for it, after
   // whatever messages queued behind this slice.
   // With shards full, it is their answers that come back for it (`afterMerge`).
-  if (releasedFrom < released.length && !downstreamBehind() && !flushSoon && !(parallel !== null && take === 0)) {
+  if (releasedFrom < released.length && (!capturing || !downstreamBehind()) && !flushSoon
+    && !(parallel !== null && take === 0)) {
     flushSoon = true;
     setTimeout(flush, 0);
   }
@@ -1648,14 +1648,26 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
         answerDrain(command.requestId);
         break;
       }
-      // With shards, the last frames are still on them: the answer waits
-      // until every one has been merged and posted.
+      // With shards, the last frames are still on them, and the flush hands
+      // over a slice at a time (`flushTake`): the answer waits until nothing
+      // is left released and every frame has been merged and posted.
       {
         const requestId = command.requestId;
-        parallel.coordinator.whenIdle(() => {
-          postFlushed();
-          answerDrain(requestId);
-        });
+        const whenDrained = (): void => {
+          if (parallel === null) {
+            answerDrain(requestId);
+            return;
+          }
+          parallel.coordinator.whenIdle(() => {
+            if (released.length > releasedFrom) {
+              setTimeout(() => { flush(); whenDrained(); }, 0);
+              return;
+            }
+            postFlushed();
+            answerDrain(requestId);
+          });
+        };
+        whenDrained();
       }
       break;
 

@@ -1,6 +1,6 @@
 # 0036 — The packet buffer sizes itself, and the renderer stands down before V8 aborts
 
-**Status:** accepted; **amended 2026-10-25** (the guard judges collection troughs, see the end). Extends `0025` ("the capture lives on disk") — the buffer
+**Status:** accepted; **amended 2026-10-25** (the guard judges collection troughs) and **2026-10-31** (the heap is shared with the Workers, recorded and not yet acted on); both at the end. Extends `0025` ("the capture lives on disk") — the buffer
 is a window onto that capture, which is why a full one loses nothing. Does not
 supersede `0028`; the capture store's own guard is unchanged and is the model
 this follows.
@@ -170,3 +170,27 @@ budget's live size at this rate, under the 3,018 MB warning line.
 
 **The store's guard is unchanged.** Its heap saws too, but in the same three
 runs it peaked at 147-230 MB against its 2,048 MB wall.
+
+## Amendment, 2026-10-31: the heap is not the page's alone
+
+**Recorded, not yet acted on.** This ADR, `BUDGET_HEAP_SHARE` and the comment
+on `LIVE_BACKLOG_BYTES` all treated the ~4 GB wall as the page's, with the
+pipeline Worker beside it on a wall of its own. It is not. The page, the
+pipeline Worker and its shard Workers run in one renderer process, and they
+draw from one ~4 GB of V8 heap. A crash in any of them takes the whole renderer.
+
+**Measured** (ADR 0053, phase 5): `ui-burst-drive.ts --follow-only` replayed a
+real capture that is half QUIC. At 40,000 frames a second the pipeline Worker's
+heap reached 2.3 GB, because its coordinator held lane-0 results waiting
+behind the shards. At 60,000 main logged `[renderer] gone: crashed (exit code
+-36861: out of JavaScript heap)`. Meanwhile the page's guard, which reads only
+the page's `performance.memory`, saw nothing near its line: the `auto` budget
+at that rate leaves troughs of 2.2-2.8 GB (the amendment above), and those plus
+the Worker's 2.3 GB are past the wall. The TCP burst at the same rates kept the
+Worker at 11-42 MB, which is why no earlier drive showed this.
+
+**What changed now:** the Worker's largest unbounded pool is bounded by
+estimated bytes (`LANE_ZERO_WAITING_BYTES`, 256 MB, in ADR 0053). **What did
+not:** the budget still takes half of the wall as if the Workers needed none.
+The guard still watches only the page. Sizing the three as one pool is a
+later decision, to be measured before it is made.

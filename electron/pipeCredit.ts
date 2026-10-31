@@ -43,9 +43,17 @@ import type { LiveBacklog } from '../src/services/agentLink';
  * 256 MB is about 230,000 frames at the 1.1 kB a frame averages - six
  * seconds of the 36,000 frame-a-second burst that prompted this, which is
  * long enough to ride out the 5-second swings that capture had without
- * shedding at all. It sits in the renderer's Worker, a V8 isolate with a
- * ~4 GB wall, beside a buffer budget of up to half that (ADR 0036): about a
- * sixteenth of the wall, so the backlog can never be what takes it down.
+ * shedding at all. It sits in the renderer's pipeline Worker.
+ *
+ * **That Worker has no wall of its own.** The page, the pipeline Worker and
+ * its shard Workers live in one renderer process and draw from one ~4 GB of
+ * V8 heap. The buffer budget beside it is up to half of that (ADR 0036), and
+ * whatever the Workers hold comes out of the rest. 256 MB is a sixteenth of
+ * the whole, but it is not the only thing in the Workers: at 60,000 QUIC
+ * frames a second the coordinator's waiting lane-0 results reached 2.3 GB
+ * and the renderer died out of heap (ADR 0053, phase 5). Those are bounded
+ * by `LANE_ZERO_WAITING_BYTES` now; re-budgeting the shared heap as one pool
+ * is still to do.
  */
 export const LIVE_BACKLOG_BYTES = 256 * 1024 * 1024;
 

@@ -23,6 +23,8 @@
  * The 4.7x it also happens to be is a measurement, printed by
  * `scripts/perf/profile.ts` and asserted nowhere (ADR 0041).
  */
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { hexColons, hexRun } from '../../src/services/dissect/hexBytes';
 
 let failures = 0;
@@ -82,6 +84,32 @@ for (let i = 0; i < 256; i++) longhand.push(i.toString(16).padStart(2, '0'));
 check('every byte 0x00..0xff renders as the longhand does',
   hexColons(all, 0, 256), longhand.join(':'));
 check('...and the run form too', hexRun(all, 0, 256), longhand.join(''));
+
+// **Kept, a long range must cost about its length.** Built by `+=` one byte
+// at a time, V8 keeps the result as a rope of ~one node per byte: a QUIC
+// tree's `quic.remaining_payload` measured 29.5 kB against 2.8 kB flat, and a
+// coordinator holding tens of thousands of trees ran the renderer out of heap
+// at 60,000 frames a second. 2,000 strings of 1,000 bytes are ~6 MB flat and
+// ~60 MB as ropes; the line is drawn far from both.
+{
+  setFlagsFromString('--expose-gc');
+  const gc = runInNewContext('gc') as () => void;
+  const payload = new Uint8Array(1000);
+  for (let i = 0; i < payload.length; i++) payload[i] = (i * 37) & 0xff;
+  gc();
+  const before = process.memoryUsage().heapUsed;
+  const kept: string[] = [];
+  for (let i = 0; i < 2000; i++) kept.push(hexColons(payload, 0, payload.length - (i & 7)));
+  gc();
+  const mb = (process.memoryUsage().heapUsed - before) / 1e6;
+  check(`2,000 kept 1,000-byte hexColons strings retain under 20 MB (${mb.toFixed(1)} MB)`, mb < 20, true);
+  const runs: string[] = [];
+  for (let i = 0; i < 2000; i++) runs.push(hexRun(payload, 0, payload.length - (i & 7)));
+  gc();
+  const runMb = (process.memoryUsage().heapUsed - before) / 1e6 - mb;
+  check(`...and 2,000 hexRun strings under 20 MB (${runMb.toFixed(1)} MB)`, runMb < 20, true);
+  if (kept[1].length + runs[1].length === 0) console.log('unreachable');
+}
 
 console.log(failures === 0
   ? '\nAll hex byte-range checks passed.'
