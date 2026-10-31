@@ -57,7 +57,7 @@ import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
-import { Coordinator, WatchedTcpOrder, flushTake, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
+import { Coordinator, coordinatorSequencer, flushTake, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
 import { PackSender, PackedFlush } from '../services/pipeline/rowPack';
 import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
 import { mergeRowSide } from '../services/pipeline/rowSteps';
@@ -447,9 +447,9 @@ const SHARD_CACHE_FRAMES = 2_000;
 /** When rows were last posted to the app, for `afterMerge`'s cadence. */
 let lastPostedAt = 0;
 
-/** Lane 0's trackers for a new capture, numbering through a watched TCP order. */
+/** Lane 0's trackers for a new capture, numbering through watched TCP and QUIC orders. */
 function laneZero(): { trackers: { tcp: TcpStreamTracker; icmp: IcmpEchoTracker; quic: QuicFlowTracker; dns: DnsTracker; l3: L3Tracker }; sequencer: Sequencer } {
-  const fresh = new Sequencer(new WatchedTcpOrder());
+  const fresh = coordinatorSequencer();
   return {
     sequencer: fresh,
     trackers: {

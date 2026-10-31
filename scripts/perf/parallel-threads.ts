@@ -30,7 +30,7 @@ import { L3Tracker } from '../../src/services/l3Tracker';
 import { FrameClock, Sequencer } from '../../src/services/dissect/sequencer';
 import { LIVE_ENV } from '../../src/services/dissect/dissectEnv';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
-import { Coordinator, WatchedTcpOrder, type CoordFrame, type ShardRoute } from '../../src/services/pipeline/coordinator';
+import { Coordinator, coordinatorSequencer, type CoordFrame, type ShardRoute } from '../../src/services/pipeline/coordinator';
 import { shardEnv } from '../../src/services/pipeline/shard';
 import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
 
@@ -54,7 +54,7 @@ const BACKLOG = Number(arg('--backlog') ?? 32_768);
 
 function trackers(sequencer: Sequencer) {
   return {
-    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(),
+    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer),
     dns: new DnsTracker(), l3: new L3Tracker(sequencer),
   };
 }
@@ -96,7 +96,7 @@ async function main(): Promise<void> {
     for (const worker of workers) worker.postMessage({ type: 'init', shards, cacheFrames: 2000 } satisfies ToShard);
     let merged = 0;
     let wake: (() => void) | null = null;
-    const sequencer = new Sequencer(new WatchedTcpOrder());
+    const sequencer = coordinatorSequencer();
     const coordinator = new Coordinator({
       shards, route, trackers: trackers(sequencer), sequencer, env: shardEnv(LIVE_ENV, shards),
       maxInFlight: inFlight,
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     let line = '';
     for (let pass = 0; pass < 2; pass++) {
       if (pass === 1) {
-        const fresh = new Sequencer(new WatchedTcpOrder());
+        const fresh = coordinatorSequencer();
         coordinator.reset({ trackers: trackers(fresh), sequencer: fresh });
         for (const worker of workers) worker.postMessage({ type: 'stats' });
         while (stats.length < shards) await new Promise<void>((resolve) => { wake = resolve; });

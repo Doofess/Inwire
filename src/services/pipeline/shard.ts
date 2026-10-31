@@ -1,11 +1,13 @@
 /**
- * A TCP shard: one core's share of the capture's TCP connections, dissected in
- * frame order with trackers of its own (ADR 0053 phase 3).
+ * A shard: one core's share of the capture's TCP connections and QUIC flows,
+ * dissected in frame order with trackers of its own (ADR 0053 phases 3 and 5).
  *
  * Everything numbered across connections arrives with each frame, already
  * decided by the coordinator, and is handed to these trackers through
  * `ShardSequencer` - so the dissector code is the single Worker's, unchanged,
- * and a frame's row, record and tree are what one core would have built.
+ * and a frame's row, record and tree are what one core would have built. For
+ * QUIC that is the answers to the order's questions (`OP_QUIC`) and the flows it
+ * forgot (`OP_QUIC_FORGET`), which this shard drops from its own tracker.
  * `scripts/pipeline/parallel.ts` holds that, frame for frame.
  *
  * Plain TypeScript with no Worker API in it: the nested Worker
@@ -31,7 +33,7 @@ import { FifoMap } from './fifoMap';
 import { packRows } from './rowPack';
 import { rowSide, shardRowSteps } from './rowSteps';
 import {
-  OP_FORGET, OP_FRAGMENT, OP_TCP, readOps,
+  OP_FORGET, OP_FRAGMENT, OP_QUIC, OP_QUIC_FORGET, OP_TCP, readOps,
   type FromShard, type ShardInterface, type ShardResult, type ToShard, type WireFrame,
 } from './shardProtocol';
 import type { Packet, ProtocolLayer } from '../../types/packet';
@@ -93,7 +95,7 @@ export class Shard {
     return new FrameDissector({
       tcp: new TcpStreamTracker(sequencer),
       icmp: new IcmpEchoTracker(),
-      quic: new QuicFlowTracker(),
+      quic: new QuicFlowTracker(sequencer),
       dns: new DnsTracker(),
       l3: new L3Tracker(sequencer),
     }, this.env, sequencer.tcp.tls);
@@ -180,14 +182,28 @@ export class Shard {
         this.dissector.trackers.tcp.forget(op.key!);
         continue;
       }
+      if (op.kind === OP_QUIC_FORGET) {
+        this.dissector.trackers.quic.forget(op.key!);
+        continue;
+      }
       const conversations = this.sequencer.conversations;
       conversations.eth.give(op.eth!.a, op.eth!.b, op.eth!.facts);
       conversations[op.family!].give(op.ip!.a, op.ip!.b, op.ip!.facts);
-      if (op.kind === OP_TCP) this.sequencer.tcp.numbered(op.key!, op.streamId!);
-      else this.sequencer.tcp.fragment(op.hint!);
+      if (op.kind === OP_TCP) {
+        this.sequencer.tcp.numbered(op.key!, op.streamId!);
+      } else if (op.kind === OP_FRAGMENT) {
+        this.sequencer.tcp.fragment(op.hint!);
+      } else if (op.kind === OP_QUIC) {
+        conversations.udp.give(op.udp!.a, op.udp!.b, op.udp!.facts);
+        this.sequencer.quic.numbered(op.quic!);
+      }
       const [result, packet] = this.dissect(op.frame!);
       const report = this.sequencer.tcp.done();
       if (op.kind === OP_FRAGMENT) result.barrier = report ?? { created: false, streamAsked: false };
+      // Called after every frame, which clears what a QUIC one was numbered
+      // with whether or not it dissected; the answer matters only for one.
+      const quicAsked = this.sequencer.quic.done();
+      if (op.kind === OP_QUIC && !quicAsked) result.quicUnasked = true;
       conversations.clear();
       if (packet !== undefined) {
         // The row is packed without its bytes, and they do not come back: the

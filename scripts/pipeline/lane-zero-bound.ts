@@ -20,9 +20,8 @@
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { ipv4, ethernet, tcpFrame, udp } from '../parity/synthetic';
-import { Sequencer } from '../../src/services/dissect/sequencer';
 import {
-  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, WatchedTcpOrder, flushTake, laneZeroCost,
+  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, coordinatorSequencer, flushTake, laneZeroCost,
   parallelRoom, parallelRoomAgain, type CoordFrame,
 } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
@@ -43,7 +42,7 @@ function rig() {
     toCoordinator.push(structuredClone(message, { transfer: transfer as ArrayBuffer[] }));
   }, { shards: 1, cacheFrames: 64, env: FIXED_ENV, withTrees: false });
   const merged: number[] = [];
-  const sequencer = new Sequencer(new WatchedTcpOrder());
+  const sequencer = coordinatorSequencer();
   const coordinator = new Coordinator({
     shards: 1, trackers: trackers(sequencer), sequencer, env: shardEnv(FIXED_ENV, 1),
     ifaceOf: () => undefined,
@@ -90,7 +89,8 @@ console.log('\n--- what is counted, and when it is let go ---\n');
 
   coordinator.dispatch([{ ...frameAt(1), id: 2001 }, frameAt(2002)]);
   check('a lane-0 result behind a new shard frame is counted again', coordinator.laneZeroWaiting > 0);
-  coordinator.reset({ trackers: trackers(new Sequencer(new WatchedTcpOrder())), sequencer: new Sequencer(new WatchedTcpOrder()) });
+  const fresh = coordinatorSequencer();
+  coordinator.reset({ trackers: trackers(fresh), sequencer: fresh });
   check('a reset forgets what was waiting', coordinator.laneZeroWaiting === 0, `${coordinator.laneZeroWaiting}`);
 }
 

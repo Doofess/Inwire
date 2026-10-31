@@ -29,7 +29,8 @@
  * Captures: the real fixtures (untracked, test/fixtures/README.md - skipped
  * when absent), a capture of 20,000 connections that makes the TCP order forget
  * (`evictionCapture.ts`), and one of TCP in IP fragments (`fragmentCapture.ts`),
- * which the coordinator cannot number from its headers. `--burst` adds any
+ * which the coordinator cannot number from its headers, and the QUIC datagram
+ * shapes the router and the order must agree on (`quicCapture.ts`). `--burst` adds any
  * capture - the 300,000-frame download ADR 0053 was measured on.
  *
  * In one process, so two things a real shard has of its own are shared here:
@@ -56,6 +57,7 @@ import type { Packet, ProtocolLayer } from '../../src/types/packet';
 import { FIXTURES, render } from './arrival';
 import { evictionCapture } from './evictionCapture';
 import { fragmentCapture } from './fragmentCapture';
+import { quicCapture } from './quicCapture';
 import { CONFIGS, FIXED_ENV, drive, load, trackers, type Capture, type Config, type Stats, type Table, type TableAt } from './virtualShards';
 
 let failures = 0;
@@ -123,6 +125,9 @@ function sequential(capture: Capture, table?: TableAt): string[] {
 interface Run extends Stats {
   digests: string[];
   merged: Merged[];
+  /** Frames whose protocol chain holds QUIC, and how many of them a shard dissected. */
+  quicFrames: number;
+  quicOnShards: number;
 }
 
 interface RunOptions {
@@ -144,6 +149,8 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
   // The Worker's own store: lane 0's rows are annotated at the merge, as `emitMerged` does.
   const annotations = new FlowAnnotationStore();
   let tableApplied = false;
+  let quicFrames = 0;
+  let quicOnShards = 0;
   // A shard row that stayed in its pack, rebuilt as the window would: decoded
   // once per pack, its bytes beside it, the merge's overlay over it.
   const decodedPacks = new Map<RowPack, Packet[]>();
@@ -172,6 +179,10 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       if (m.lane === 0 && m.packet !== undefined) annotatePacket(m.packet, annotations);
       const layers = m.lane === 0 ? m.packet?.layers : m.layers;
       const packet = m.packet ?? (m.packed !== undefined ? rebuilt(m) : undefined);
+      if (packet?.frameProtocols?.includes('quic')) {
+        quicFrames++;
+        if (m.lane !== 0) quicOnShards++;
+      }
       // A shard sends no bytes back: the row's are the coordinator's own copy of
       // the frame, and they must be the frame the capture holds.
       const sent = capture.inputs[m.id - 1].bytes;
@@ -183,7 +194,7 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       if (bytes && bytes.byteLength > 0 && !keep) structuredClone(bytes.buffer, { transfer: [bytes.buffer as ArrayBuffer] });
     },
   });
-  return { digests, merged, ...stats };
+  return { digests, merged, quicFrames, quicOnShards, ...stats };
 }
 
 function lineDiff(want: string, got: string | undefined): string {
@@ -260,10 +271,11 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
       const run = parallel(capture, config);
       const at = firstDiff(want, run.digests);
       check(`${capture.name}, ${config.label}: all ${want.length.toLocaleString()} frames as one core dissects them`,
-        at === -1 && run.crossLane === 0 && run.barrierMismatch === 0,
+        at === -1 && run.crossLane === 0 && run.barrierMismatch === 0 && run.quicMismatch === 0,
         at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], run.digests[at])}` : ''}`
-          : `crossLane ${run.crossLane}, barrierMismatch ${run.barrierMismatch}`);
+          : `crossLane ${run.crossLane}, barrierMismatch ${run.barrierMismatch}, quicMismatch ${run.quicMismatch}`);
       console.log(`        lanes ${run.lanes.join(' / ')}; ${run.ms.toFixed(0)} ms in one process (one core: ${oneCore.toFixed(0)} ms)`);
+      console.log(`        QUIC frames on shards: ${run.quicOnShards.toLocaleString()} of ${run.quicFrames.toLocaleString()}`);
       check(`${capture.name}, ${config.label}: a light run decodes only packs holding a needsRow row`,
         run.packsDecoded <= run.needsRowResults && (run.needsRowResults > 0 || run.packsDecoded === 0),
         `${run.packsDecoded} packs decoded, ${run.needsRowResults} results with needsRow`);
@@ -277,8 +289,9 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
       const decoded = parallel(capture, seven, { decodeRows: true });
       const at = firstDiff(want, decoded.digests);
       check(`${capture.name}, ${seven.label}: all ${want.length.toLocaleString()} frames as one core dissects them`,
-        at === -1 && decoded.crossLane === 0 && decoded.barrierMismatch === 0,
+        at === -1 && decoded.crossLane === 0 && decoded.barrierMismatch === 0 && decoded.quicMismatch === 0,
         at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], decoded.digests[at])}` : ''}` : '');
+      console.log(`        QUIC frames on shards: ${decoded.quicOnShards.toLocaleString()} of ${decoded.quicFrames.toLocaleString()}`);
       check(`${capture.name}, ${seven.label}: every pack the shards sent was decoded`,
         decoded.packsDecoded === decoded.packs, `${decoded.packsDecoded} of ${decoded.packs}`);
       await tableRuns(capture, want, true);
@@ -469,6 +482,7 @@ async function main(): Promise<void> {
   }
   captures.push(await load('eviction', evictionCapture()));
   captures.push(await load('fragments', fragmentCapture()));
+  captures.push(await load('quic', quicCapture()));
   const burstAt = process.argv.indexOf('--burst');
   const burst = burstAt > 0 ? process.argv[burstAt + 1] : undefined;
   if (burst !== undefined) captures.push(await load('burst', new Uint8Array(readFileSync(burst))));
