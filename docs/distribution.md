@@ -134,6 +134,16 @@ unsigned or downloaded scripts is the person's to configure.
 | `-Launch` | After a successful install, start Inwire through `<InstallLocation>\bin\inwire.exe`. |
 | `-Repair` | Install over an installed state that cannot be read, or the published version again over the same version. |
 
+**Execution policy.** Windows client editions default to `Restricted`, under
+which PowerShell runs no script file at all, signed or not; this machine's
+`LocalMachine` policy is `RemoteSigned`, which runs a downloaded script only
+when its signature is valid. The bootstrap does not work around either. On a
+`Restricted` machine a person can start one PowerShell with
+`powershell -ExecutionPolicy RemoteSigned -File .\install-inwire.ps1`, which
+changes nothing beyond that process and is overridden where Group Policy sets
+the policy; WinGet is the route that needs no script at all. Instructions
+must not tell anyone to use `Bypass` or to change the policy permanently.
+
 It prints a short summary and `exit`s with the contract code. The same result is
 available as an object from `Invoke-InwireInstall` (fields `State`, `InstallPath`,
 `InstalledVersion`, `Launched`, `LaunchMessage`, `ErrorCode`, `Message`,
