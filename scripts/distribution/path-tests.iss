@@ -173,6 +173,12 @@ begin
   Eq('expand: no variables', PathExpandEnv('C:\plain'), 'C:\plain');
 end;
 
+function ForwardSlashes(const S: String): String;
+begin
+  Result := S;
+  StringChangeEx(Result, '\', '/', True);
+end;
+
 procedure TestFind;
 var
   Root, Other, Mine, Empty: String;
@@ -194,6 +200,10 @@ begin
     PathFindOtherCommand(Empty + ';' + Mine, Mine, 'inwire'), '');
   Eq('find: our own directory in another spelling is skipped',
     PathFindOtherCommand('"' + Uppercase(Mine) + '\";' + Empty, Mine, 'inwire'), '');
+  Eq('find: our own directory through %TEMP% is skipped',
+    PathFindOtherCommand('%TEMP%\inwire-path-find-scratch\mine;' + Empty, Mine, 'inwire'), '');
+  Eq('find: our own directory with forward slashes is skipped',
+    PathFindOtherCommand(ForwardSlashes(Mine) + ';' + Empty, Mine, 'inwire'), '');
   Eq('find: found through quotes and a trailing backslash',
     PathFindOtherCommand('"' + Other + '\"', Mine, 'inwire'), Other + '\inwire.cmd');
   Eq('find: nothing there', PathFindOtherCommand(Empty + ';;C:\no-such-dir-xyz', Mine, 'inwire'), '');
@@ -203,6 +213,22 @@ begin
   SaveStringToFile(Other + '\inwire.ps1', 'x', False);
   Eq('find: a .ps1 counts', PathFindOtherCommand(Other, Mine, 'inwire'), Other + '\inwire.ps1');
   DelTree(Root, True, True, True);
+end;
+
+// An upgrade must not put back an entry the person took out by hand: the
+// marker says this installer added it once, so its absence now is a choice.
+procedure TestRemovedByHand;
+begin
+  Eq('removed by hand: marked as ours and gone from PATH',
+    B(PathOwnedRemovedByHand(Mixed, O, O)), 'true');
+  Eq('removed by hand: marker in another case or with a backslash still counts',
+    B(PathOwnedRemovedByHand(Mixed, O, Uppercase(O) + '\')), 'true');
+  Eq('removed by hand: still on PATH is not removed',
+    B(PathOwnedRemovedByHand(Mixed + ';' + O, O, O)), 'false');
+  Eq('removed by hand: no marker means never added (first install)',
+    B(PathOwnedRemovedByHand(Mixed, O, '')), 'false');
+  Eq('removed by hand: a marker for another directory is a moved install, not a removal',
+    B(PathOwnedRemovedByHand(Mixed, O, 'D:\Old\Inwire\bin')), 'false');
 end;
 
 // What the install step relies on: RegQueryStringValue hands back a
@@ -238,6 +264,7 @@ begin
   TestRemove;
   TestExpand;
   TestFind;
+  TestRemovedByHand;
   TestRegistry;
   Say('SUMMARY pass=' + IntToStr(Passes) + ' fail=' + IntToStr(Failures));
   Results := ExpandConstant('{param:RESULTS|}');

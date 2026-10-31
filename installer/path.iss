@@ -145,6 +145,18 @@ begin
   until Next > Length(Raw) + 1;
 end;
 
+// Whether an upgrade finds its own entry taken out by hand: the marker
+// (Recorded) says this installer added exactly Owned once, and Raw no longer
+// has it. That absence is the person's choice, so the install step leaves PATH
+// alone and keeps the marker. A marker for another directory is a moved
+// install, not a removal; no marker is a first install.
+function PathOwnedRemovedByHand(const Raw, Owned, Recorded: String): Boolean;
+begin
+  Result := (Trim(Recorded) <> '')
+    and (PathNormalizeEntry(Recorded) = PathNormalizeEntry(Owned))
+    and not PathHasOwned(Raw, Owned);
+end;
+
 // --- finding a different `inwire` already on PATH ---------------------------
 
 // %NAME% expanded from the environment of this process. For an existence test
@@ -211,6 +223,12 @@ begin
       if (Length(Dir) >= 2) and (Dir[1] = '"') and (Dir[Length(Dir)] = '"') then
         Dir := Trim(Copy(Dir, 2, Length(Dir) - 2));
       Dir := PathExpandEnv(Dir);
+      // Our own directory, spelled through a variable or with forward slashes,
+      // holds our own launcher, which is not "another inwire". An 8.3 short
+      // name or a junction is not recognised and is still reported.
+      StringChangeEx(Dir, '/', '\', True);
+      if PathNormalizeEntry(Dir) = Want then
+        Dir := '';
       if ((Length(Dir) >= 3) and (Dir[2] = ':')) or (Copy(Dir, 1, 2) = '\\') then
       begin
         for Ext := 0 to 4 do

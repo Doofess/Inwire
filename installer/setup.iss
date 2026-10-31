@@ -804,6 +804,15 @@ begin
      and (PathNormalizeEntry(Recorded) <> PathNormalizeEntry(Owned)) then
     Base := PathRemoveOwned(Raw, Recorded);
 
+  // This installer added the entry before and it is gone: the person took it
+  // out, and an upgrade does not put it back. The marker stays, so uninstall
+  // still removes the entry if they add the same one again by hand.
+  if PathOwnedRemovedByHand(Raw, Owned, Recorded) then
+  begin
+    Log('PATH: ' + Owned + ' was removed from the machine PATH since the last install; leaving it out');
+    Exit;
+  end;
+
   if PathHasOwned(Base, Owned) then
   begin
     Log('PATH: ' + Owned + ' is already on the machine PATH; nothing to add');
