@@ -55,6 +55,11 @@ import { settleTreeTls, type BarrierHint, type BarrierReport } from '../dissect/
 import { settleDeferredAnswers } from '../dissect/frameRecord';
 import type { DissectEnv } from '../dissect/dissectEnv';
 import { FrameDissector, type Dissected, type LaneTrackers } from './frameDissector';
+import { TcpStreamTracker } from '../tcpStreamTracker';
+import { IcmpEchoTracker } from '../icmpEchoTracker';
+import { QuicFlowTracker, quicLimits } from '../quicFlowTracker';
+import { DnsTracker } from '../dnsTracker';
+import { L3Tracker } from '../l3Tracker';
 import { OpWriter, type FromShard, type OpBatch, type ShardResult, type ToShard, type WireFrame } from './shardProtocol';
 import { unpackRows, type RowPack } from './rowPack';
 import { overlayMark, type OverlayMark, type RowOverlay } from './rowOverlay';
@@ -260,6 +265,22 @@ export function coordinatorSequencer(): Sequencer {
   return new Sequencer(new WatchedTcpOrder(), new WatchedQuicOrder());
 }
 
+/**
+ * Lane 0's trackers for a new capture, numbering through watched TCP and QUIC
+ * orders. Lane 0's QUIC keeps the whole budget, not a shard's share: QUIC that
+ * cannot reach the shards (QinQ, a fragment, a port other than 443) is all held here.
+ */
+export function laneZero(): { trackers: LaneTrackers; sequencer: Sequencer } {
+  const fresh = coordinatorSequencer();
+  return {
+    sequencer: fresh,
+    trackers: {
+      tcp: new TcpStreamTracker(fresh), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(fresh, quicLimits(1)),
+      dns: new DnsTracker(), l3: new L3Tracker(fresh),
+    },
+  };
+}
+
 interface Entry {
   lane: number;
   meta: unknown;
@@ -337,6 +358,11 @@ export class Coordinator {
    * long header it needs is ahead of it there.
    */
   private readonly quicHome = new Map<string, number>();
+  /**
+   * Flows homed on a shard that lane 0 met too (`crossLane`): lane 0's tracker
+   * holds a half of each, which the forget sent to the shard would not reach.
+   */
+  private readonly laneZeroMet = new Set<string>();
   private readonly datagramKey = new Map<string, string>();
   private readonly datagramShard = new Map<string, number>();
   /** Placeholder to real `tls.stream`, per shard lane. */
@@ -536,6 +562,7 @@ export class Coordinator {
     }
     this.keyHome.clear();
     this.quicHome.clear();
+    this.laneZeroMet.clear();
     this.datagramKey.clear();
     this.datagramShard.clear();
     this.tlsMaps = Array.from({ length: this.shards + 1 }, () => new Map());
@@ -797,8 +824,8 @@ export class Coordinator {
   private forgetQuicEverywhere(flow: string): void {
     const home = this.quicHome.get(flow);
     this.quicHome.delete(flow);
-    if (home === undefined || home === 0) this.lane0.trackers.quic.forget(flow);
-    else if (!this.dead.has(home - 1)) this.writers[home - 1].quicForget(flow);
+    if (home === undefined || home === 0 || this.laneZeroMet.delete(flow)) this.lane0.trackers.quic.forget(flow);
+    if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].quicForget(flow);
   }
 
   /** A long header or numbering lane 0's trackers made on the real QUIC order. */
@@ -806,12 +833,16 @@ export class Coordinator {
     for (const gone of forgotten) {
       const home = this.quicHome.get(gone);
       this.quicHome.delete(gone);
+      this.laneZeroMet.delete(gone);
       // Lane 0's tracker forgets its own as part of this same call.
       if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].quicForget(gone);
     }
     const home = this.quicHome.get(flow);
     if (home === undefined) this.quicHome.set(flow, 0);
-    else if (home !== 0) this.crossLane += 1;
+    else if (home !== 0) {
+      this.crossLane += 1;
+      this.laneZeroMet.add(flow);
+    }
   }
 
   private rememberDatagram(datagram: string, key: string): void {

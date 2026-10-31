@@ -157,8 +157,8 @@ export const MAX_STREAMS = 8192;
 export interface QuicLimits { maxStreams: number; maxPendingBytes: number }
 
 /**
- * Each shard's and lane 0's share of the stream and held-byte budgets; the
- * whole for `shards <= 1` (ADR 0053's accepted difference). `MAX_PENDING_STREAM_BYTES`
+ * Each shard's share of the stream and held-byte budgets; the whole for
+ * `shards <= 1`, and lane 0 always takes the whole (ADR 0053's accepted difference). `MAX_PENDING_STREAM_BYTES`
  * bounds one stream and is not split.
  */
 export function quicLimits(shards: number): QuicLimits {
@@ -176,7 +176,7 @@ export class QuicFlowTracker {
    */
   private readonly order: QuicOrderApi;
 
-  private readonly limits: QuicLimits;
+  readonly limits: QuicLimits;
   private evicted = 0;
 
   constructor(sequencer: { quic: QuicOrderApi } = { quic: new QuicOrder() }, limits: QuicLimits = quicLimits(1)) {
@@ -262,6 +262,11 @@ export class QuicFlowTracker {
    */
   public seedNextConnectionNumber(next: number): void {
     this.order.seedNextConnection(next);
+  }
+
+  /** Flows this tracker holds an Initial session for: the order bounds them only while every forget reaches this tracker. */
+  public get sessionFlows(): number {
+    return this.initialSessions.size;
   }
 
   /** Flows the order remembers. */

@@ -168,7 +168,9 @@ once, and it is recorded, so a revisit agrees with arrival. *As built, a frame
 records the room only up to one message's 1 MB, so its record is the single
 Worker's until a shard's share actually binds.* *Phase 5 added the second:*
 QUIC's 8,192 streams and 8 MB of held reassembly become limit/N for each
-shard and for lane 0 (`quicLimits`). A stream is forgotten only with its flow
+shard (`quicLimits`). Lane 0 keeps the whole (`laneZero`): QUIC that cannot
+reach a shard - in a tunnel, a fragment, under two tags, on another port - is
+all held there, so a share would bind on it first. A stream is forgotten only with its flow
 or at that cap, so it shows only when more than the share is *remembered* at
 once; `evictedStreams` counts it, and `parallel.ts` holds every fixture under
 the seven-shard share (the half-QUIC capture peaks at 662 streams against
@@ -702,7 +704,11 @@ dispatches, with no barrier:
 - **Lane 0's own QUIC goes through `WatchedQuicOrder`**, which gives
   `quicHome`, the `keyHome` of QUIC: a flow lane 0 met first stays there, and a
   sharded flow's datagram that only lane 0 can read (in a tunnel, a fragment or
-  under two VLAN tags) counts in `crossLane`, without that shard's keys.
+  under two VLAN tags) counts in `crossLane`, without that shard's keys. Lane
+  0 then holds a half of that flow too, so when the order forgets it the
+  coordinator forgets it on lane 0 as well as on its shard (`laneZeroMet`);
+  forgetting it only on the shard left lane 0 holding every asymmetric-QinQ
+  flow it had ever met.
 
 `scripts/pipeline/parallel.ts` holds every fixture and a synthetic QUIC capture
 (coalesced packets, Version Negotiation, Retry, v2, garbled headers, ports

@@ -21,11 +21,12 @@ import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { ipv4, ethernet, tcpFrame, udp } from '../parity/synthetic';
 import {
-  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, coordinatorSequencer, flushTake, laneZeroCost,
+  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, coordinatorSequencer, flushTake, laneZero, laneZeroCost,
   parallelRoom, parallelRoomAgain, type CoordFrame,
 } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
 import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
+import { quicLimits } from '../../src/services/quicFlowTracker';
 import { FIXED_ENV, trackers } from './virtualShards';
 
 let failures = 0;
@@ -174,6 +175,13 @@ console.log('\n--- Stop, with everything that waited released at once ---\n');
     peak < LANE_ZERO_WAITING_BYTES + SLICE * laneZeroCost(frameAt(2).bytes.length), `peak ${(peak / 2 ** 20).toFixed(0)} MiB`);
   check('...and every one of them merges, in order',
     merged.length === total && merged.every((id, i) => id === i + 1), `${merged.length} of ${total}`);
+}
+
+{
+  // QUIC that cannot reach the shards (QinQ, a fragment, another port) is all held on lane 0: it keeps the whole budget.
+  const { quic } = laneZero().trackers;
+  check('QUIC: lane 0 keeps the whole stream and held-byte budget whatever the shard count',
+    JSON.stringify(quic.limits) === JSON.stringify(quicLimits(1)), JSON.stringify(quic.limits));
 }
 
 console.log(failures === 0 ? '\nAll lane-zero bound checks passed.' : `\n${failures} lane-zero bound check(s) failed.`);

@@ -311,6 +311,24 @@ const EVICTING = MAX_QUIC_FLOWS; // the 4,097th flow's index
     `forgot ${r.forgot.length}, lane 0 frames ${r.coordinator.perLane[0]}`);
 }
 
+{
+  // Asymmetric QinQ: each client Initial plain (a shard), each server Initial double-tagged (lane 0, crossLane).
+  // The order forgets the oldest flows on the shard's dispatch; lane 0's half must be forgotten with them.
+  const r = rig(1, () => 0);
+  const frames: Uint8Array[] = [];
+  const flows = MAX_QUIC_FLOWS + 500;
+  for (let i = 0; i < flows; i++) {
+    frames.push(initialOf(i));
+    frames.push(quicFrame(SERVER, 443, host(i), 51000,
+      quicPayload('initial', { dcid: cid(100000 + i), scid: cid(300000 + i), payload: 16 }), { qinq: true }));
+  }
+  r.feed(frames);
+  r.deliver();
+  const held = r.coordinator.lane0.trackers.quic.sessionFlows;
+  check('cross: lane 0 forgets its half of a sharded flow the order forgets',
+    r.coordinator.crossLane === flows && held <= MAX_QUIC_FLOWS, `crossLane ${r.coordinator.crossLane}, lane 0 sessions ${held}`);
+}
+
 // A sharded flow reached on lane 0, and a lane-0 flow reached by plain frames.
 {
   const c = cid(31), s = cid(32);

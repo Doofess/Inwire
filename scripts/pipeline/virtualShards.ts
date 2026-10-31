@@ -51,9 +51,9 @@ export async function load(name: string, bytes: Uint8Array, keysPath?: string): 
   return { name, inputs, host, keys };
 }
 
-export function trackers(sequencer: Sequencer, shards = 1) {
+export function trackers(sequencer: Sequencer) {
   return {
-    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer, quicLimits(shards)),
+    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer, quicLimits(1)),
     dns: new DnsTracker(), l3: new L3Tracker(sequencer),
   };
 }
@@ -124,7 +124,7 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
     shards: config.shards,
     route: config.route,
     ...(config.assign ? { assign: config.assign() } : {}),
-    trackers: trackers(sequencer, config.shards),
+    trackers: trackers(sequencer),
     sequencer,
     env: shardEnv(FIXED_ENV, config.shards),
     ifaceOf: () => undefined,

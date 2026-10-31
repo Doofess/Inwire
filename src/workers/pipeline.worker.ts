@@ -36,7 +36,7 @@ import { clientFingerprints, learnOrLabelFingerprint } from '../services/dissect
 import { buildFallbackPacket } from '../services/sessionRestore';
 import { TcpStreamTracker } from '../services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../services/icmpEchoTracker';
-import { QuicFlowTracker, quicLimits } from '../services/quicFlowTracker';
+import { QuicFlowTracker } from '../services/quicFlowTracker';
 import { DnsTracker } from '../services/dnsTracker';
 import { Sequencer } from '../services/dissect/sequencer';
 import { L3Tracker } from '../services/l3Tracker';
@@ -57,7 +57,7 @@ import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
-import { Coordinator, coordinatorSequencer, flushTake, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
+import { Coordinator, flushTake, laneZero, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
 import { PackSender, PackedFlush } from '../services/pipeline/rowPack';
 import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
 import { mergeRowSide } from '../services/pipeline/rowSteps';
@@ -447,17 +447,6 @@ const SHARD_CACHE_FRAMES = 2_000;
 /** When rows were last posted to the app, for `afterMerge`'s cadence. */
 let lastPostedAt = 0;
 
-/** Lane 0's trackers for a new capture, numbering through watched TCP and QUIC orders. */
-function laneZero(shards: number): { trackers: { tcp: TcpStreamTracker; icmp: IcmpEchoTracker; quic: QuicFlowTracker; dns: DnsTracker; l3: L3Tracker }; sequencer: Sequencer } {
-  const fresh = coordinatorSequencer();
-  return {
-    sequencer: fresh,
-    trackers: {
-      tcp: new TcpStreamTracker(fresh), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(fresh, quicLimits(shards)),
-      dns: new DnsTracker(), l3: new L3Tracker(fresh),
-    },
-  };
-}
 
 function hostMessage(): ToShard {
   return {
@@ -492,7 +481,7 @@ function startParallel(shards: number): void {
   storeSender.reset();
   if (shards < 1) return;
   const workers: Worker[] = [];
-  const lane = laneZero(shards);
+  const lane = laneZero();
   const coordinator = new Coordinator({
     shards,
     route: 'connection',
@@ -679,7 +668,7 @@ function applyThreads(): boolean {
 function resetPipeline(startId: number, startUs?: number | null, lastUs?: number | null) {
   resetAt = { startId, startUs: startUs ?? null, lastUs: lastUs ?? null };
   // The setting is applied here, between captures.
-  if (!applyThreads() && parallel !== null) parallel.coordinator.reset(laneZero(parallel.workers.length));
+  if (!applyThreads() && parallel !== null) parallel.coordinator.reset(laneZero());
   // A clear while catching up: what the file still owed is from before the
   // clear, so it is not read, and the numbering starts again from the next
   // live frame rather than calling the cleared part a hole. The agent's
