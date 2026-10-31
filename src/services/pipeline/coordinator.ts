@@ -130,6 +130,51 @@ export interface CoordinatorOptions {
   withTrees?: boolean;
 }
 
+/** Frames in flight past which the Worker's flush stops handing the coordinator more. */
+export const PARALLEL_BACKLOG = 65_536;
+
+/**
+ * Estimated bytes of lane-0 results waiting to merge past which the flush
+ * stops too (`laneZeroWaiting`).
+ *
+ * **A frame count did not bound memory.** Lane 0 dissects as frames arrive
+ * and keeps each whole result - tree, field bag, record - until every shard
+ * frame before it has merged. QUIC is lane 0's, and with shards behind on TCP
+ * the measured drive held 33-38k lane-0 results of the 65,536 frames
+ * `PARALLEL_BACKLOG` allowed, at 41 kB each, and the renderer died out of heap
+ * at 60k frames a second (ADR 0053, phase 5). Past this the frames wait in the
+ * Worker undissected, at their wire size, which main's credit bounds and
+ * sheds with a count that catch-up reads back.
+ */
+export const LANE_ZERO_WAITING_BYTES = 256 * 1024 * 1024;
+
+/**
+ * What a lane-0 result is estimated to hold until it merges.
+ *
+ * Measured on the QUIC fixture once long hex was built flat: 15.5 kB a QUIC
+ * frame at 942 bytes on the wire, 16.3 kB for the rest at 292, 18 kB for TCP
+ * with its tree - a cost mostly per frame, not per byte. The per-byte term is
+ * the payload's hex, three characters a byte, which a frame with a long
+ * undissected payload carries.
+ */
+export function laneZeroCost(wireLength: number): number {
+  return 14 * 1024 + 4 * wireLength;
+}
+
+/** How many of `want` frames the flush may hand the coordinator now. */
+export function parallelRoom(want: number, coordinator: Pick<Coordinator, 'backlog' | 'laneZeroWaiting'>): number {
+  if (coordinator.laneZeroWaiting >= LANE_ZERO_WAITING_BYTES) return 0;
+  return Math.max(0, Math.min(want, PARALLEL_BACKLOG - coordinator.backlog));
+}
+
+/**
+ * Whether a merge brought the coordinator low enough to ask for another flush:
+ * half of both limits, so it is not asked for one frame at a time.
+ */
+export function parallelRoomAgain(coordinator: Pick<Coordinator, 'backlog' | 'laneZeroWaiting'>): boolean {
+  return coordinator.backlog < PARALLEL_BACKLOG / 2 && coordinator.laneZeroWaiting < LANE_ZERO_WAITING_BYTES / 2;
+}
+
 /** FNV-1a over a string: the default assignment. */
 export function hashShard(routeKey: string, shards: number): number {
   let h = 0x811c9dc5;
@@ -176,6 +221,8 @@ interface Entry {
   side?: RowSide;
   error?: string;
   tls?: number[];
+  /** A lane-0 result's `laneZeroCost`, counted in `laneZeroWaiting` until it merges. */
+  cost?: number;
 }
 
 /** How many datagrams' first fragments are remembered for their connection. */
@@ -226,6 +273,7 @@ export class Coordinator {
   /** Which shard lane holds a recent frame's tree, for `detail`. */
   private readonly treeLane: IdRing;
   private idleWaiters: (() => void)[] = [];
+  private waitingCost = 0;
 
   /**
    * Decode every shard pack on arrival. Off, a pack is decoded only when a
@@ -285,6 +333,11 @@ export class Coordinator {
   /** Frames dispatched, or waiting to be, that have not been merged. */
   get backlog(): number {
     return this.held.length - this.heldFrom + this.entries.size;
+  }
+
+  /** Estimated bytes of lane-0 results dissected and not yet merged (`LANE_ZERO_WAITING_BYTES`). */
+  get laneZeroWaiting(): number {
+    return this.waitingCost;
   }
 
   /** Hands frames over, in ascending contiguous id order. */
@@ -385,6 +438,7 @@ export class Coordinator {
     this.heldFrom = 0;
     this.barrier = null;
     this.entries.clear();
+    this.waitingCost = 0;
     this.nextEmit = null;
     for (let s = 0; s < this.shards; s++) {
       this.writers[s] = new OpWriter();
@@ -649,7 +703,7 @@ export class Coordinator {
 
   private dissectHere(frame: CoordFrame): void {
     const lane0 = this.lane0;
-    const entry: Entry = { lane: 0, meta: frame.meta, done: true };
+    const entry: Entry = { lane: 0, meta: frame.meta, done: true, cost: laneZeroCost(frame.bytes.length) };
     try {
       entry.d = lane0.dissect({
         id: frame.id, bytes: frame.bytes, tsUs: frame.tsUs, relativeTime: frame.relativeTime,
@@ -662,6 +716,7 @@ export class Coordinator {
     const tls = lane0.takeTls();
     if (tls.length > 0) entry.tls = tls;
     this.entries.set(frame.id, entry);
+    this.waitingCost += entry.cost!;
     this.drain();
   }
 
@@ -737,6 +792,7 @@ export class Coordinator {
       const entry = this.entries.get(id);
       if (entry === undefined || !entry.done) return;
       this.entries.delete(id);
+      if (entry.cost !== undefined) this.waitingCost -= entry.cost;
       this.nextEmit = id + 1;
       this.emit(id, entry);
     }

@@ -42,7 +42,10 @@ the store's own chunk codec, and reach the disk without being decoded and
 encoded again. On the burst at 60,000 frames a second the view now advances
 58,000-60,000 against 41,000, with nothing skipped. The gate as set was missed
 on two counts, recorded under **Phase 6, as built** with the owner's ruling.
-Phase 5 is still to come. The fixes
+Phase 5 is still to come, and **measuring for it found a crash first**: with
+QUIC on lane 0 and the shards behind, the coordinator's waiting results ran
+the renderer out of heap at 60,000 frames a second. A byte bound on them
+landed 2026-10-31 (see **Before phase 5: what lane 0 may hold**). The fixes
 that measured the problem landed the same day and are listed under **What came
 first**. Narrows **[0038](0038-the-worker-writes-the-bytes.md)**: the
 Worker still writes the bytes before it dissects, and now also stops when the
@@ -580,6 +583,57 @@ fixture and the burst, today's path against virtual shards at N = 1, 2 and 7
 and an adversarial assignment; every frame's summary, field bag, record bytes,
 patches and tree identical, then `revisit` over the parallel records. A
 `worker_threads` test covers the transport; `ui-burst-drive.ts` the live app.
+
+### Before phase 5: what lane 0 may hold
+
+**Found 2026-10-31**, measuring for phase 5. The burst is 99.97% TCP and cannot
+show what phase 5 is for, so `ui-burst-drive.ts --follow-only` replayed a real
+capture that is half QUIC (7,353 of 14,615 frames). At 20,000 frames a second
+it kept up. At 40,000 it fell behind (36,700 advanced, lag 46,000 -> 133,000),
+with the Worker's heap at 2.3 GB. At 60,000 main logged `[renderer] gone:
+crashed (exit code -36861: out of JavaScript heap)`. The burst on the same
+build kept up at 20,000, 40,000 and 59,000 with the Worker at 11-42 MB.
+
+**The cause was two things together.** `PARALLEL_BACKLOG` bounded the frames
+the coordinator held, 65,536, but not what they held. Lane 0 dissects a frame
+as it is handed over and keeps the whole result until every shard frame
+before it has merged: 33,000-38,000 lane-0 results were waiting. Each cost
+41 kB against 942 bytes on the wire, most of it `quic.remaining_payload`. Its
+hex was built one byte at a time with `+=`, and V8 kept the result as a rope
+of about one node per byte: 29.5 kB, against 2.8 kB flat. The heap after
+collection stayed flat over 97 passes at 15,000 frames a second, so this was
+not a leak.
+
+**Fixed both ways:**
+
+- `dissect/hexBytes.ts` writes a range past eight bytes as character codes
+  and decodes it once. The text is the same, and it costs about a tenth of the
+  retained heap and less time to build. A result now costs 14-18 kB whatever
+  its protocol (`scripts/dissect/hex-bytes.ts`).
+- `coordinator.ts` counts each waiting lane-0 result at `laneZeroCost` and
+  sums them as `laneZeroWaiting`. The Worker's flush (`parallelRoom`) stops
+  at `LANE_ZERO_WAITING_BYTES`, 256 MB, as it already stopped at
+  `PARALLEL_BACKLOG`. Past it, frames wait in the Worker at their wire size,
+  where main's credit bounds them and sheds whole batches with a count, and
+  catch-up reads them back. `scripts/pipeline/lane-zero-bound.ts` holds the
+  accounting. With the one shard never answering, the flush stops at 21,000
+  frames, within one slice of the limit, where it used to stop at 65,536. The
+  estimate is 14.4 kB against the 14.0 kB a waiting result was measured to
+  retain.
+
+**Measured after** (the same capture and build steps, `--follow-only`):
+
+| | Before | After |
+|---|---|---|
+| 20,000 f/s | kept up; Worker 160-375 MB | kept up (20,240 advanced); Worker 37-114 MB |
+| 40,000 f/s | 36,700 advanced, lag growing; Worker to 2.3 GB | kept up (40,350 advanced, lag 12,000-23,000); Worker 59-254 MB |
+| 60,000 f/s | renderer out of heap | 48,800 advanced, behind into catch-up; Worker 199-667 MB |
+| Skipped | - | 0; 3,475,792 sent and shown |
+
+The 60,000 run is now the throughput question phase 5 asks, not a crash.
+What the crash also showed is recorded in ADR 0036's amendment of the same
+day: the page and every Worker share one ~4 GB renderer heap, which nothing
+budgets as one pool yet.
 
 ## What came first
 

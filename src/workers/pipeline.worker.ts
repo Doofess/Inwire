@@ -57,7 +57,7 @@ import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
-import { Coordinator, WatchedTcpOrder, type Merged, type PackedRef } from '../services/pipeline/coordinator';
+import { Coordinator, WatchedTcpOrder, parallelRoom, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
 import { PackSender, PackedFlush } from '../services/pipeline/rowPack';
 import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
 import { mergeRowSide } from '../services/pipeline/rowSteps';
@@ -442,8 +442,6 @@ let nextShardDetail = 1;
  * lost to those shards.
  */
 let lastFlows: Extract<ToShard, { type: 'flows' }> | null = null;
-/** Frames in flight past which the flush stops handing the coordinator more. */
-const PARALLEL_BACKLOG = 65_536;
 /** Trees each shard keeps for the detail pane: lane 0 keeps its own `DETAIL_CACHE_FRAMES`. */
 const SHARD_CACHE_FRAMES = 2_000;
 /** When rows were last posted to the app, for `afterMerge`'s cadence. */
@@ -656,7 +654,7 @@ function afterMerge(): void {
   // posts whatever this leaves.
   if (pendingPackets.length >= 4096 || performance.now() - lastPostedAt >= SLICE_MS) postFlushed();
   if (released.length > releasedFrom && !flushSoon && !downstreamBehind()
-    && parallel !== null && parallel.coordinator.backlog < PARALLEL_BACKLOG / 2) {
+    && parallel !== null && parallelRoomAgain(parallel.coordinator)) {
     flushSoon = true;
     setTimeout(flush, 0);
   }
@@ -1013,9 +1011,10 @@ function flush(): void {
   if (!capturing) take = released.length - releasedFrom;
   else if (!downstreamBehind()) {
     take = Math.min(released.length - releasedFrom, Math.max(256, Math.floor((SLICE_MS * 1000) / usPerFrame)));
-    // With shards, what is in flight on them is the queue to bound: past it
-    // frames wait here, and each answer that brings it down asks for a flush.
-    if (parallel !== null) take = Math.max(0, Math.min(take, PARALLEL_BACKLOG - parallel.coordinator.backlog));
+    // With shards, what is in flight on them is the queue to bound, and what
+    // lane 0 has dissected ahead of them: past either, frames wait here, and
+    // each answer that brings it down asks for a flush.
+    if (parallel !== null) take = parallelRoom(take, parallel.coordinator);
   }
   const ready = released.slice(releasedFrom, releasedFrom + take);
   releasedFrom += take;
