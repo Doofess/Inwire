@@ -706,9 +706,10 @@ dispatches, with no barrier:
   sharded flow's datagram that only lane 0 can read (in a tunnel, a fragment or
   under two VLAN tags) counts in `crossLane`, without that shard's keys. Lane
   0 then holds a half of that flow too, so when the order forgets it the
-  coordinator forgets it on lane 0 as well as on its shard (`laneZeroMet`);
+  coordinator forgets it on lane 0 as well as on its shard (`laneZeroMetFlows`);
   forgetting it only on the shard left lane 0 holding every asymmetric-QinQ
-  flow it had ever met.
+  flow it had ever met. TCP had the same leak from phase 3 on, and the same
+  fix (`laneZeroMetConnections`, `scripts/pipeline/lane-zero-bound.ts`).
 
 `scripts/pipeline/parallel.ts` holds every fixture and a synthetic QUIC capture
 (coalesced packets, Version Negotiation, Retry, v2, garbled headers, ports
