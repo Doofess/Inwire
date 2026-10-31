@@ -141,7 +141,7 @@ const MAX_PENDING_STREAM_BYTES = 256 * 1024;
  * a site that loses packets could hold a quarter of a megabyte per stream with
  * no ceiling at all. This is the ceiling.
  */
-const MAX_TOTAL_PENDING_BYTES = 8 * 1024 * 1024;
+export const MAX_TOTAL_PENDING_BYTES = 8 * 1024 * 1024;
 
 /**
  * How many streams are held across all flows.
@@ -151,7 +151,20 @@ const MAX_TOTAL_PENDING_BYTES = 8 * 1024 * 1024;
  * The flow cap and the connection ids a flow keeps are the order's
  * (`MAX_QUIC_FLOWS`, `MAX_QUIC_CONNECTION_IDS_PER_FLOW` in `dissect/sequencer.ts`).
  */
-const MAX_STREAMS = 8192;
+export const MAX_STREAMS = 8192;
+
+/** The two budgets one tracker holds against: the whole, or one instance's share. */
+export interface QuicLimits { maxStreams: number; maxPendingBytes: number }
+
+/**
+ * Each shard's and lane 0's share of the stream and held-byte budgets; the
+ * whole for `shards <= 1` (ADR 0053's accepted difference). `MAX_PENDING_STREAM_BYTES`
+ * bounds one stream and is not split.
+ */
+export function quicLimits(shards: number): QuicLimits {
+  const n = Math.max(1, Math.floor(shards));
+  return { maxStreams: Math.floor(MAX_STREAMS / n), maxPendingBytes: Math.floor(MAX_TOTAL_PENDING_BYTES / n) };
+}
 
 export class QuicFlowTracker {
   /**
@@ -163,9 +176,20 @@ export class QuicFlowTracker {
    */
   private readonly order: QuicOrderApi;
 
-  constructor(sequencer: { quic: QuicOrderApi } = { quic: new QuicOrder() }) {
+  private readonly limits: QuicLimits;
+  private evicted = 0;
+
+  constructor(sequencer: { quic: QuicOrderApi } = { quic: new QuicOrder() }, limits: QuicLimits = quicLimits(1)) {
     this.order = sequencer.quic;
+    this.limits = limits;
   }
+
+  /** Streams dropped for the stream cap (not for a flow's eviction). */
+  public get evictedStreams(): number { return this.evicted; }
+  /** Streams remembered now, finished ones included. */
+  public get streamCount(): number { return this.streams.size; }
+  /** Out-of-order bytes held now, across every stream. */
+  public get pendingBytes(): number { return this.totalPendingBytes; }
 
   /** Initial keys and client identity, keyed by normalized flow. */
   private initialSessions = new Map<string, InitialSession>();
@@ -254,12 +278,13 @@ export class QuicFlowTracker {
    * removes streams, so it cannot push the total over.
    */
   private evictStreamsPastCap(): void {
-    while (this.streams.size > MAX_STREAMS) {
+    while (this.streams.size > this.limits.maxStreams) {
       const oldest = this.streams.keys().next();
       if (oldest.done) break;
       const assembly = this.streams.get(oldest.value);
       if (assembly) this.totalPendingBytes -= assembly.pendingBytes;
       this.streams.delete(oldest.value);
+      this.evicted++;
     }
   }
 
@@ -633,7 +658,7 @@ export class QuicFlowTracker {
             assembly.pending.set(fragment.offset, fragment.data);
           }
         } else if (assembly.pendingBytes + fragment.data.length <= MAX_PENDING_STREAM_BYTES
-          && this.totalPendingBytes + fragment.data.length <= MAX_TOTAL_PENDING_BYTES) {
+          && this.totalPendingBytes + fragment.data.length <= this.limits.maxPendingBytes) {
           assembly.pending.set(fragment.offset, fragment.data);
           assembly.pendingBytes += fragment.data.length;
           this.totalPendingBytes += fragment.data.length;

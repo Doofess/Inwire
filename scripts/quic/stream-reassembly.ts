@@ -20,7 +20,7 @@
  * The checks are black-box: the budget is private, so each one exhausts it and
  * then asserts that reassembly still works. A leak fails them.
  */
-import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
+import { QuicFlowTracker, quicLimits } from '../../src/services/quicFlowTracker';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -154,6 +154,29 @@ function dataLengths(out: ReturnType<typeof read>): number[] {
   const frame = dataFrame([1, 2, 3, 4]);
   check('the budget still bounds what is held, and the stream still works',
     dataLengths(read(t, [{ offset: 0, data: frame }])), [4]);
+}
+
+// --- 7. The limits are a per-instance share ------------------------------------------
+{
+  checkTrue('limits: one shard keeps the whole',
+    JSON.stringify(quicLimits(1)) === JSON.stringify({ maxStreams: 8192, maxPendingBytes: 8388608 }));
+  checkTrue('limits: zero shards (the single Worker) keeps the whole',
+    JSON.stringify(quicLimits(0)) === JSON.stringify(quicLimits(1)));
+  checkTrue('limits: seven shards each keep a seventh',
+    quicLimits(7).maxStreams === 1170 && quicLimits(7).maxPendingBytes === 1198372);
+
+  const open = (t: QuicFlowTracker, streamId: number, offset: number, data: Uint8Array) =>
+    t.readStreams(A.ip, A.port, B.ip, B.port, [{ streamId, offset, data, fin: false }]);
+
+  const t = new QuicFlowTracker(undefined, { maxStreams: 4, maxPendingBytes: 1024 });
+  for (let i = 0; i < 5; i++) open(t, i * 4, 0, dataFrame([1, 2, 3]));
+  checkTrue('limits: the fifth stream evicts the least recently used, and is counted',
+    t.streamCount === 4 && t.evictedStreams === 1);
+
+  const h = new QuicFlowTracker(undefined, { maxStreams: 4, maxPendingBytes: 1024 });
+  open(h, 0, 1000, new Uint8Array(600));
+  open(h, 4, 1000, new Uint8Array(600));
+  checkTrue('limits: held bytes stop at the share (only the first 600 are held)', h.pendingBytes === 600);
 }
 
 console.log();

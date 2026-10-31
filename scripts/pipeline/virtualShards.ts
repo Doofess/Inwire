@@ -13,7 +13,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
-import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
+import { QuicFlowTracker, quicLimits } from '../../src/services/quicFlowTracker';
 import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
 import { FrameClock, type Sequencer } from '../../src/services/dissect/sequencer';
@@ -51,9 +51,9 @@ export async function load(name: string, bytes: Uint8Array, keysPath?: string): 
   return { name, inputs, host, keys };
 }
 
-export function trackers(sequencer: Sequencer) {
+export function trackers(sequencer: Sequencer, shards = 1) {
   return {
-    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer),
+    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer, quicLimits(shards)),
     dns: new DnsTracker(), l3: new L3Tracker(sequencer),
   };
 }
@@ -124,7 +124,7 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
     shards: config.shards,
     route: config.route,
     ...(config.assign ? { assign: config.assign() } : {}),
-    trackers: trackers(sequencer),
+    trackers: trackers(sequencer, config.shards),
     sequencer,
     env: shardEnv(FIXED_ENV, config.shards),
     ifaceOf: () => undefined,

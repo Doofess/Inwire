@@ -44,6 +44,7 @@ import { Sequencer } from '../../src/services/dissect/sequencer';
 import { withDissectEnv } from '../../src/services/dissect/dissectEnv';
 import { FrameRevisit, RecordMiss, recordEntries } from '../../src/services/dissect/frameRecord';
 import { keyLog } from '../../src/services/tls/keyLog';
+import { QuicFlowTracker, quicLimits } from '../../src/services/quicFlowTracker';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
 import type { Merged } from '../../src/services/pipeline/coordinator';
 import { unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
@@ -120,6 +121,27 @@ function sequential(capture: Capture, table?: TableAt): string[] {
     structuredClone(bytes.buffer, { transfer: [bytes.buffer as ArrayBuffer] });
     return out;
   });
+}
+
+/**
+ * QUIC's demand on the single Worker's stream and held-byte budgets, sampled
+ * after every frame with the limits off, so a limit that bound cannot hide its
+ * own demand. A frame adds a few fragments at most, so sampling per frame sees
+ * the peak to within that.
+ */
+function quicPeak(capture: Capture): { streams: number; pending: number; evicted: number } {
+  const sequencer = new Sequencer();
+  const quic = new QuicFlowTracker(sequencer, { maxStreams: Infinity, maxPendingBytes: Infinity });
+  const dissector = new FrameDissector({ ...trackers(sequencer), quic }, FIXED_ENV, null);
+  dissector.host = capture.host ?? dissector.host;
+  let streams = 0;
+  let pending = 0;
+  for (const input of capture.inputs) {
+    try { dissector.dissect({ ...input, bytes: input.bytes.slice() }); } catch { /* counted by the equality checks */ }
+    streams = Math.max(streams, quic.streamCount);
+    pending = Math.max(pending, quic.pendingBytes);
+  }
+  return { streams, pending, evicted: quic.evictedStreams };
 }
 
 interface Run extends Stats {
@@ -267,6 +289,13 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
     const t0 = performance.now();
     const want = sequential(capture);
     const oneCore = performance.now() - t0;
+    if (capture.name !== 'burst') {
+      const peak = quicPeak(capture);
+      const share = quicLimits(7);
+      check(`${capture.name}: QUIC's peak (${peak.streams} streams, ${(peak.pending / 1048576).toFixed(2)} MB held) is under the 7-shard share, so equality at N=7 is not vacuous`,
+        peak.streams <= share.maxStreams && peak.pending <= share.maxPendingBytes && peak.evicted === 0,
+        `share is ${share.maxStreams} streams, ${share.maxPendingBytes} bytes`);
+    }
     for (const config of configs) {
       const run = parallel(capture, config);
       const at = firstDiff(want, run.digests);

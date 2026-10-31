@@ -20,7 +20,7 @@
  */
 import { TcpStreamTracker } from '../tcpStreamTracker';
 import { IcmpEchoTracker } from '../icmpEchoTracker';
-import { QuicFlowTracker } from '../quicFlowTracker';
+import { QuicFlowTracker, quicLimits } from '../quicFlowTracker';
 import { DnsTracker } from '../dnsTracker';
 import { L3Tracker } from '../l3Tracker';
 import { LIVE_ENV, MAX_TOTAL_BODY_BYTES, type DissectEnv } from '../dissect/dissectEnv';
@@ -95,7 +95,7 @@ export class Shard {
     return new FrameDissector({
       tcp: new TcpStreamTracker(sequencer),
       icmp: new IcmpEchoTracker(),
-      quic: new QuicFlowTracker(sequencer),
+      quic: new QuicFlowTracker(sequencer, quicLimits(this.options.shards)),
       dns: new DnsTracker(),
       l3: new L3Tracker(sequencer),
     }, this.env, sequencer.tcp.tls);
