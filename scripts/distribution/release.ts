@@ -238,3 +238,17 @@ export function publicBlockers(policy: ReleasePolicy): string[] {
   }
   return blockers;
 }
+
+/**
+ * What stands between this policy and WinGet manifests: everything a public
+ * release needs (the manifest names an installer the same way the descriptor
+ * does, and a package without the publisher pin would be one nobody can check),
+ * plus the package ID, which is empty until the owner has one to submit under.
+ */
+export function wingetBlockers(policy: ReleasePolicy): string[] {
+  const blockers = publicBlockers(policy);
+  if (policy.desktopPackageId === '') {
+    blockers.push('there is no WinGet package ID (desktopPackageId is empty), so no manifest can name a package');
+  }
+  return blockers;
+}

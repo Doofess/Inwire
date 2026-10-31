@@ -14,17 +14,19 @@
  * serves both the update feed and the descriptor, no fixture host leaks in as a
  * fallback, and the endpoint agent is not offered.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_UPDATE_FEED_URL } from '../../electron/updateCenter/manifest';
+import { DEFAULT_UPDATE_FEED_URL, parseManifest } from '../../electron/updateCenter/manifest';
 import {
-  chooseArtifact, isReleaseVersion, publicBlockers, readPolicy, readRelease,
+  chooseArtifact, isReleaseVersion, publicBlockers, readPolicy, readRelease, wingetBlockers,
   type ReleaseDescriptor, type ReleasePolicy,
 } from './release';
-import { describeInstaller, generateRelease } from './generate';
+import { describeInstaller, generateAll, generateRelease } from './generate';
+import { DESKTOP_PRODUCT_CODE, yamlString } from './winget';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const readJson = (rel: string): unknown => JSON.parse(readFileSync(path.join(root, rel), 'utf8'));
@@ -138,6 +140,17 @@ async function main(): Promise<void> {
   check('fixture policy with a pin has no pin blocker',
     !publicBlockers(fixturePolicy).some((b) => b.includes('no publisher signing certificate')));
 
+  // ---- WinGet blockers ----
+  const wb = wingetBlockers(production);
+  check('winget blockers: production names the missing package id', wb.some((b) => b.includes('package ID')), wb.join(' | '));
+  check('winget blockers: production includes every public blocker (pin)',
+    publicBlockers(production).every((b) => wb.includes(b)));
+  check('winget blockers: a fixture policy with id and pin has none', wingetBlockers(fixturePolicy).length === 0);
+  check('winget blockers: an empty id alone blocks',
+    wingetBlockers({ ...fixturePolicy, desktopPackageId: '' }).length === 1);
+  check('winget blockers: an empty pin alone blocks',
+    wingetBlockers({ ...fixturePolicy, publisherCertificateSha256: [] }).length === 1);
+
   // ---- the generator's core ----
   const dir = mkdtempSync(path.join(tmpdir(), 'inwire-distribution-'));
   try {
@@ -186,6 +199,137 @@ async function main(): Promise<void> {
     const pinless = await generateRelease({ installer: big, version: '1.2.3', url: 'https://updates.inwire.app/x.exe', policy: production });
     check('generateRelease: production policy surfaces its blockers while it has no pin',
       pinless.ok && (pinless.blockers.length > 0) === (production.publisherCertificateSha256.length === 0));
+
+    // ---- one inventory, every projection ----
+    const feedUrl = 'https://download.example.invalid/manifest.json';
+    const all = await generateAll({
+      installer: big, version: '1.2.3', url, policy: fixturePolicy, winget: true, fixture: true,
+    });
+    check('generateAll: fixture policy produces every projection', all.ok && all.winget !== null);
+    if (all.ok && all.winget !== null) {
+      const rel = JSON.parse(all.releaseText).artifacts[0];
+      const feed = parseManifest(all.feedText, feedUrl);
+      check('feed projection: parseManifest accepts it on the feed host', feed !== null);
+      const row = feed?.components.inwire;
+      check('feed projection: the inwire row is the only component, kind inwire-installer',
+        row !== undefined && Object.keys(feed?.components ?? {}).join() === 'inwire' && row.kind === 'inwire-installer');
+      check('feed projection: minAppVersion defaults to the version', row?.minAppVersion === '1.2.3');
+      check('release and feed agree on version, url, size and sha256',
+        row !== undefined && row.version === rel.version && row.url === rel.url
+        && row.size === rel.sizeBytes && row.sha256 === rel.sha256
+        && row.size === bytes.length && row.sha256 === bigInfo.sha256);
+
+      const names = all.winget.files.map((f) => f.name).sort();
+      check('winget: three files named for the package',
+        names.join() === ['Example.Inwire.installer.yaml', 'Example.Inwire.locale.en-US.yaml', 'Example.Inwire.yaml'].join(), names.join());
+      check('winget: directory is <id>/<version>', all.winget.dir === 'Example.Inwire/1.2.3', all.winget.dir);
+      const get = (suffix: string): string => all.winget?.files.find((f) => f.name.endsWith(suffix))?.text ?? '';
+      const installer = get('.installer.yaml');
+      const versionFile = get('Example.Inwire.yaml');
+      const locale = get('.locale.en-US.yaml');
+      const hasLine = (text: string, line: string): boolean => text.split('\n').includes(line);
+
+      const iss = readFileSync(path.join(root, 'installer', 'setup.iss'), 'utf8');
+      const appId = /^AppId=(.+)$/m.exec(iss)?.[1] ?? '';
+      // Inno reads `{{` as an escaped brace and keeps a lone `}`; the key is that, plus _is1.
+      const productCode = `${appId.replace('{{', '{')}_is1`;
+      check('setup.iss AppId was found', /^\{\{[0-9A-F-]{36}\}\}$/.test(appId), appId);
+      check('DESKTOP_PRODUCT_CODE is the key setup.iss registers', DESKTOP_PRODUCT_CODE === productCode, DESKTOP_PRODUCT_CODE);
+      check('installer manifest names that ProductCode exactly, at both levels',
+        hasLine(installer, `ProductCode: ${yamlString(productCode)}`)
+        && hasLine(installer, `  - ProductCode: ${yamlString(productCode)}`)
+        && hasLine(installer, `    DisplayVersion: "1.2.3"`));
+      check('winget agrees with release.json on url, sha256, version',
+        hasLine(installer, `    InstallerUrl: ${yamlString(rel.url)}`)
+        && installer.includes(`InstallerSha256: "${bigInfo.sha256.toUpperCase()}"`)
+        && hasLine(installer, 'PackageVersion: "1.2.3"') && hasLine(versionFile, 'PackageVersion: "1.2.3"')
+        && hasLine(locale, 'PackageVersion: "1.2.3"'));
+      check('winget: identifier on every file', [installer, versionFile, locale].every((t) => hasLine(t, 'PackageIdentifier: "Example.Inwire"')));
+      check('winget: manifest types and one schema version',
+        hasLine(versionFile, 'ManifestType: "version"') && hasLine(installer, 'ManifestType: "installer"')
+        && hasLine(locale, 'ManifestType: "defaultLocale"')
+        && [installer, versionFile, locale].every((t) => hasLine(t, 'ManifestVersion: "1.12.0"')));
+      check('winget: inno, machine scope, x64, elevatesSelf, upgrade over, command inwire',
+        hasLine(installer, 'InstallerType: "inno"') && hasLine(installer, 'Scope: "machine"')
+        && hasLine(installer, '  - Architecture: "x64"') && hasLine(installer, 'ElevationRequirement: "elevatesSelf"')
+        && hasLine(installer, 'UpgradeBehavior: "install"') && hasLine(installer, '  - "inwire"'));
+      check('winget: extra switches go in Custom and repeat none of WinGet\'s Inno defaults',
+        hasLine(installer, '  Custom: "/RESTARTEXITCODE=3010 /NOFORCECLOSEAPPLICATIONS"')
+        && !/VERYSILENT|SUPPRESSMSGBOXES|\/SP-|NORESTART"|\/S"/.test(installer));
+      const codes = [...installer.matchAll(/InstallerReturnCode: (\d+)\n\s+ReturnResponse: "(\w+)"/g)]
+        .map((m) => `${m[1]}=${m[2]}`).sort().join();
+      check('winget: return codes map exactly 2,5 cancelled, 8 and 3010 reboot',
+        codes === '2=cancelledByUser,3010=rebootRequiredToFinish,5=cancelledByUser,8=rebootRequiredForInstall', codes);
+      check('winget: locale file is MIT, publisher Inwire, does not claim WinGet launches the app',
+        hasLine(locale, 'License: "MIT"') && hasLine(locale, 'Publisher: "Inwire"') && !/launch/i.test(locale));
+      check('winget: no source file URL leaked a placeholder', ![installer, versionFile, locale].some((t) => /TODO|placeholder/i.test(t)));
+    }
+
+    // ---- production policy: no package ID and no pin, so no WinGet output ----
+    const prodAll = await generateAll({
+      installer: big, version: '1.2.3', url: 'https://updates.inwire.app/x.exe', policy: production, winget: true,
+    });
+    check('generateAll: production policy refuses WinGet output (exit 3)', !prodAll.ok && prodAll.code === 3);
+    const prodFixtureFlag = await generateAll({
+      installer: big, version: '1.2.3', url: 'https://updates.inwire.app/x.exe', policy: production, winget: true, fixture: true,
+    });
+    check('generateAll: the fixture flag cannot unlock the production policy', !prodFixtureFlag.ok);
+    const prodNoWinget = await generateAll({
+      installer: big, version: '1.2.3', url: 'https://updates.inwire.app/x.exe', policy: production, winget: false,
+    });
+    check('generateAll: production without WinGet still yields release and feed',
+      prodNoWinget.ok && prodNoWinget.winget === null
+      && parseManifest(prodNoWinget.feedText, DEFAULT_UPDATE_FEED_URL)?.components.inwire?.sha256 === bigInfo.sha256);
+    const noId = { ...fixturePolicy, desktopPackageId: '' };
+    check('generateAll: fixture flag with an empty package id still refuses',
+      !(await generateAll({ installer: big, version: '1.2.3', url, policy: noId, winget: true, fixture: true })).ok);
+    const badMin = await generateAll({ installer: big, version: '1.2.3', url, policy: fixturePolicy, winget: false, minAppVersion: 'soon' });
+    check('generateAll: refuses a bad --min-app-version', !badMin.ok);
+
+    // ---- the command line writes nothing when it refuses ----
+    const generateScript = path.join(root, 'scripts', 'distribution', 'generate.ts');
+    const run = (extra: string[]): { status: number | null; stderr: string } => {
+      const r = spawnSync(process.execPath, ['--import', 'tsx', generateScript,
+        '--installer', big, '--version', '1.2.3', '--url', url, ...extra], { cwd: root, encoding: 'utf8' });
+      return { status: r.status, stderr: r.stderr };
+    };
+    const prodOut = path.join(dir, 'prod-winget');
+    const prodUrl = 'https://updates.inwire.app/x.exe';
+    const prodRun = spawnSync(process.execPath, ['--import', 'tsx', generateScript,
+      '--installer', big, '--version', '1.2.3', '--url', prodUrl, '--out', path.join(dir, 'prod-release.json'),
+      '--winget-out', prodOut], { cwd: root, encoding: 'utf8' });
+    check('cli: production policy + --winget-out exits 3 and writes no WinGet directory',
+      prodRun.status === 3 && !existsSync(prodOut), `status ${prodRun.status}`);
+    check('cli: and writes no release.json either (all or nothing)', !existsSync(path.join(dir, 'prod-release.json')));
+    const prodFixtureRun = spawnSync(process.execPath, ['--import', 'tsx', generateScript,
+      '--installer', big, '--version', '1.2.3', '--url', prodUrl, '--out', path.join(dir, 'prod2.json'),
+      '--winget-out', prodOut, '--fixture'], { cwd: root, encoding: 'utf8' });
+    check('cli: --fixture with the production policy is refused and writes nothing',
+      prodFixtureRun.status !== 0 && !existsSync(prodOut), `status ${prodFixtureRun.status}`);
+    const fixtureOut = path.join(dir, 'fixture-winget');
+    const okRun = run(['--policy', path.join(root, 'distribution', 'fixtures', 'test-policy.json'),
+      '--out', path.join(dir, 'release.json'), '--feed-out', path.join(dir, 'update-feed.json'),
+      '--winget-out', fixtureOut, '--fixture']);
+    check('cli: fixture policy + --fixture writes all projections', okRun.status === 0
+      && existsSync(path.join(dir, 'release.json')) && existsSync(path.join(dir, 'update-feed.json'))
+      && existsSync(path.join(fixtureOut, 'Example.Inwire', '1.2.3', 'Example.Inwire.installer.yaml')), okRun.stderr.slice(0, 200));
+    const copied = path.join(dir, 'copy-policy.json');
+    copyFileSync(path.join(root, 'distribution', 'fixtures', 'test-policy.json'), copied);
+    const outsideRun = run(['--policy', copied, '--out', path.join(dir, 'o.json'),
+      '--winget-out', path.join(dir, 'outside-winget'), '--fixture']);
+    check('cli: --fixture refuses a policy that is not under distribution/fixtures',
+      outsideRun.status !== 0 && !existsSync(path.join(dir, 'outside-winget')), `status ${outsideRun.status}`);
+
+    // ---- YAML scalars: always a double-quoted, JSON-compatible string ----
+    const tricky = ['a: b', 'x # y', '"quoted"', "it's", '- leading dash', '', ' padded ', 'tab\there', 'line\nbreak',
+      'back\\slash', 'Ünïcödé ✓ 日本語', '{{brace}}', '*alias', '!tag', '@at', '`tick', 'null', 'yes', '0123', '%percent', '&anchor', '| pipe', '> fold'];
+    for (const s of tricky) {
+      const y = yamlString(s);
+      let back: unknown;
+      try { back = JSON.parse(y); } catch { back = undefined; }
+      check(`yamlString round-trips ${JSON.stringify(s)}`,
+        y.startsWith('"') && y.endsWith('"') && !y.includes('\n') && back === s, y);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -87,6 +87,46 @@ npx tsx scripts/distribution/generate.ts --installer installer\output\Inwire-Set
 `--require-public` fails while any public input is missing. Without it the
 same blockers print as warnings, which is how a local build is checked.
 
+## Projections
+
+One run of `scripts/distribution/generate.ts` measures the final signed installer once (size and SHA-256) and writes every projection from that measurement. Each is validated before any is written, and a refusal writes nothing.
+
+| Output | Flag | Feeds | Validated by |
+|---|---|---|---|
+| `release.json` | `--out` | PowerShell bootstrap, Git Bash bridge | `readRelease` |
+| `update-feed.json` | `--feed-out` (default beside `--out`) | Update Center, served as `manifest.json` on the feed host | the app's own `parseManifest` |
+| WinGet manifests | `--winget-out <dir>` | WinGet, via the community repository | `winget validate` (by hand) |
+
+The feed document is complete (`schema`, `generated`, an `inwire` row of kind `inwire-installer`). `--min-app-version` sets its `minAppVersion` and defaults to the release version. The feed URL is `manifest.json` beside the policy's descriptor URL, which is how our download is pinned to the feed host.
+
+```powershell
+npx tsx scripts/distribution/generate.ts --installer installer\output\Inwire-Setup.exe `
+  --version 0.5.0 --url https://updates.inwire.app/<path>/Inwire-Setup.exe `
+  --out release-artifacts\release.json --winget-out release-artifacts\winget --require-public
+```
+
+Exit codes: 0 written, 2 refused (bad arguments, invalid result), 3 blocked. WinGet output is blocked (exit 3, even without `--require-public`) while `wingetBlockers` is non-empty: no `desktopPackageId`, or no publisher pin. `--fixture` is for the tests: it needs a `--policy` under `distribution/fixtures/` and a policy whose hosts are all `.invalid`, so the production policy cannot satisfy it.
+
+## WinGet
+
+Manifests are schema 1.12.0 (the version Microsoft Learn shows as current; the installed client validates it), as three files: version, default locale (en-US) and installer, under `<dir>/<package-id>/<version>/`. None is committed (`distribution/winget/README.md`), and a locally valid manifest is not a live package.
+
+The installer manifest says: `InstallerType: inno`, `Scope: machine`, `x64`, `ElevationRequirement: elevatesSelf` (the installer is `PrivilegesRequired=admin`, so Windows raises the UAC prompt; WinGet does not elevate it), `UpgradeBehavior: install`, `Commands: [inwire]`, and `ProductCode` and `AppsAndFeaturesEntries` set to the registered uninstall key `{F384C012-C351-40DE-B9E9-62AC2B6ED001}}_is1`.
+
+Switches. WinGet already passes `/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` (`/SILENT` for progress). The manifest adds only what WinGet does not, in `InstallerSwitches.Custom`: `/RESTARTEXITCODE=3010 /NOFORCECLOSEAPPLICATIONS`. Not in `Silent`, which would replace the defaults and repeat `/NORESTART`.
+
+Return codes (nothing else nonzero counts as success):
+
+| Code | ReturnResponse |
+|---|---|
+| 2, 5 | `cancelledByUser` |
+| 8 | `rebootRequiredForInstall` |
+| 3010 | `rebootRequiredToFinish` |
+
+PATH. The installer puts `{app}\bin\inwire.exe` on the machine PATH, but a terminal that was already open keeps its old PATH: open a new one before running `inwire`. WinGet does not launch the app and the manifest does not claim it does.
+
+Npcap stays separate. WinGet installs Inwire only; the driver is installed from the Update Center, where Npcap's own wizard and licence are shown (ADR 0032).
+
 ## Trust
 
 The bootstrap installs only an installer whose Authenticode status is `Valid`
