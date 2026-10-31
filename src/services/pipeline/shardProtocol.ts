@@ -18,7 +18,7 @@
  * a copy, and the row comes back as a pack without them (`ShardResult`).
  */
 import type { ConversationFacts } from '../dissect/sequencer';
-import type { BarrierHint, BarrierReport } from '../dissect/shardNumbering';
+import type { BarrierHint, BarrierReport, QuicNumbering } from '../dissect/shardNumbering';
 import type { InfoPatch } from '../dissect/types';
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { RowPack } from './rowPack';
@@ -54,6 +54,10 @@ export interface Numbered {
 export const OP_TCP = 0;
 export const OP_FRAGMENT = 1;
 export const OP_FORGET = 2;
+/** A UDP datagram the QUIC branch takes, with the answers its dissection will ask of the QUIC order. */
+export const OP_QUIC = 3;
+/** The QUIC order forgot this flow (`KEY`). */
+export const OP_QUIC_FORGET = 4;
 
 // The slots of one op, in `OpBatch.nums`.
 const KIND = 0;
@@ -69,9 +73,9 @@ const NANOS = 8;
 const FAMILY = 9;
 const ETH = 10; // index, pnum, sinceFirst, sincePrev
 const IP = 14; // the same four
-/** `tcp.stream` for a segment; the next one, for a fragment. */
+/** `tcp.stream` for a segment; the next one, for a fragment; a QUIC datagram's connection number (NaN: none). */
 const STREAM = 18;
-/** The connection's string; for a fragment, the one creating a connection would forget (-1: none). */
+/** The connection's string; for a fragment, the one creating a connection would forget (-1: none); a QUIC op's flow. */
 const KEY = 19;
 const ETH_A = 20;
 const ETH_B = 21;
@@ -79,7 +83,17 @@ const IP_A = 22;
 const IP_B = 23;
 /** The frames skipped just before this one; -1: none (a hole is always at least 1). */
 const HOLE = 24;
-const SLOTS = 25;
+// A QUIC op only: the UDP conversation's answer, and what the datagram will ask of the order.
+const UDP = 25; // index, pnum, sinceFirst, sincePrev
+const UDP_A = 29;
+const UDP_B = 30;
+const KNOWN = 31;
+/** Where the resolver looks a short header's id up; -1: nowhere. */
+const MATCH_AT = 32;
+/** The id it will match, interned; -1: none. */
+const MATCH_ID = 33;
+const LONG = 34;
+const SLOTS = 35;
 
 /** A batch of ops for one shard, as it travels. */
 export interface OpBatch {
@@ -182,11 +196,38 @@ export class OpWriter {
     this.nums[at + KEY] = hint.forgets === null ? -1 : this.intern(hint.forgets);
   }
 
+  /**
+   * A datagram QUIC takes: numbered as far as the QUIC order goes, so the
+   * shard's dissection finds the answers it will ask for where it asks.
+   */
+  quic(
+    frame: WireFrame, family: 'ip' | 'ipv6', eth: Numbered, ip: Numbered, udp: Numbered, q: QuicNumbering,
+  ): void {
+    const at = this.frame(OP_QUIC, frame, family, eth, ip);
+    const nums = this.nums;
+    writeFacts(nums, at + UDP, udp.facts);
+    nums[at + UDP_A] = this.intern(udp.a);
+    nums[at + UDP_B] = this.intern(udp.b);
+    nums[at + KEY] = this.intern(q.flow);
+    nums[at + STREAM] = q.number ?? Number.NaN;
+    nums[at + KNOWN] = q.known ? 1 : 0;
+    nums[at + MATCH_AT] = q.resolveAt;
+    nums[at + MATCH_ID] = q.matched === undefined ? -1 : this.intern(q.matched);
+    nums[at + LONG] = q.long ? 1 : 0;
+  }
+
   /** The coordinator's order forgot this connection. */
   forget(key: string): void {
     const at = this.slot();
     this.nums[at + KIND] = OP_FORGET;
     this.nums[at + KEY] = this.intern(key);
+  }
+
+  /** The coordinator's QUIC order forgot this flow. */
+  quicForget(flow: string): void {
+    const at = this.slot();
+    this.nums[at + KIND] = OP_QUIC_FORGET;
+    this.nums[at + KEY] = this.intern(flow);
   }
 
   get empty(): boolean {
@@ -230,6 +271,9 @@ export interface ReadOp {
   ip?: Numbered;
   streamId?: number;
   hint?: BarrierHint;
+  /** A QUIC op's `udp.stream` answer, and the answers its dissection will ask of the QUIC order. */
+  udp?: Numbered;
+  quic?: QuicNumbering;
 }
 
 /** Every op of a batch, in order. */
@@ -238,7 +282,7 @@ export function* readOps(batch: OpBatch): Generator<ReadOp> {
   let frame = 0;
   for (let at = 0; at < nums.length; at += SLOTS) {
     const kind = nums[at + KIND];
-    if (kind === OP_FORGET) {
+    if (kind === OP_FORGET || kind === OP_QUIC_FORGET) {
       yield { kind, key: strings[nums[at + KEY]] };
       continue;
     }
@@ -265,6 +309,19 @@ export function* readOps(batch: OpBatch): Generator<ReadOp> {
     const family = nums[at + FAMILY] === 0 ? 'ip' : 'ipv6';
     if (kind === OP_TCP) {
       yield { kind, key: strings[nums[at + KEY]], frame: wire, family, eth, ip, streamId: nums[at + STREAM] };
+    } else if (kind === OP_QUIC) {
+      const flow = strings[nums[at + KEY]];
+      const number = nums[at + STREAM];
+      const matchId = nums[at + MATCH_ID];
+      const udp: Numbered = { a: strings[nums[at + UDP_A]], b: strings[nums[at + UDP_B]], facts: readFacts(nums, at + UDP) };
+      yield {
+        kind, key: flow, frame: wire, family, eth, ip, udp,
+        quic: {
+          flow, known: nums[at + KNOWN] === 1, resolveAt: nums[at + MATCH_AT],
+          matched: matchId < 0 ? undefined : strings[matchId], long: nums[at + LONG] === 1,
+          number: Number.isNaN(number) ? undefined : number,
+        },
+      };
     } else {
       const forgets = nums[at + KEY];
       yield {
@@ -340,6 +397,8 @@ export interface ShardResult {
   error?: string;
   /** A fragment's report: what it did to the TCP order. */
   barrier?: BarrierReport;
+  /** A QUIC datagram whose number the coordinator gave was never asked for: its dissection did something else. */
+  quicUnasked?: true;
   /** Its tree as dissected - only for the equality test (`withTrees`). */
   layers?: ProtocolLayer[];
 }

@@ -93,7 +93,7 @@ function sizeOf(value: unknown): { kind: string; entries: number } | null {
 
 /**
  * One level down as well as the top: several of these are a map whose values
- * are themselves collections (`flowConnectionIds` is Map<string, Set>, `parts`
+ * are themselves collections (the QUIC order's `flows` is Map<string, Set>, `parts`
  * is Map<string, FragmentPart[]>, `lives` is Map<string, SocketLife[]>), and
  * the nested total is the half that grows without a bound of its own.
  */
@@ -306,6 +306,9 @@ function reportCensus(t: Required<Pick<Trackers, 'tcp' | 'quic' | 'l3' | 'dns' |
   const rows: CensusRow[] = [
     ...census('tcp', t.tcp),
     ...census('quic', t.quic),
+    // The flow registry and connection numbers are the Sequencer's now (QuicOrder),
+    // not fields of the tracker, so they are counted from the order itself.
+    ...census('quic.order', (t.quic as unknown as { order: object }).order),
     ...census('l3', t.l3),
     ...census('dns', t.dns),
     ...census('icmp', t.icmp),
@@ -325,7 +328,7 @@ function conversationsIn(t: Required<Trackers>): number {
     return value instanceof Map ? value.size : 0;
   };
   return size(t.tcp, 'connections')
-    + size(t.quic, 'flowConnectionIds')
+    + t.quic.flowCount
     + size(t.icmp, 'pendingRequests');
 }
 

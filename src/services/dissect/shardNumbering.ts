@@ -17,7 +17,8 @@
  */
 import {
   DeferredTlsNumbers, NO_KEYS,
-  type ConversationFacts, type ConversationIndexApi, type ConversationIndexesApi, type TcpOrderApi,
+  type ConversationFacts, type ConversationIndexApi, type ConversationIndexesApi, type QuicNoted, type QuicOrderApi,
+  type TcpOrderApi,
 } from './sequencer';
 import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 
@@ -225,8 +226,113 @@ export function settleTreeTls(layers: readonly ProtocolLayer[], resolve: (placeh
   for (const layer of layers) walk(layer.fields);
 }
 
-/** A shard's Sequencer: the two parts its trackers ask. */
+/**
+ * What the coordinator answered, ahead of dissection, of the questions one
+ * datagram's dissection puts to the QUIC order (`quicRoute.ts` reads them).
+ */
+export interface QuicNumbering {
+  flow: string;
+  /** `isKnown(flow)` as the order stood before this datagram. */
+  known: boolean;
+  /** The offset the resolver asks at, or -1 when it does not ask. */
+  resolveAt: number;
+  /** What `match` answers there. */
+  matched: string | undefined;
+  /** `noteLongHeader` is asked; otherwise `connectionForFlow`. */
+  long: boolean;
+  /** The connection's number, as the order gave it. */
+  number: number | undefined;
+}
+
+/**
+ * The QUIC order as a shard sees it: it holds nothing, and answers the frame
+ * being dissected with what the coordinator numbered for it (`numbered`).
+ *
+ * The flow registry, the ids and the numbers are the coordinator's, in frame
+ * order; a shard keeps only its flows' state, in `QuicFlowTracker`, and drops
+ * it when told (`OP_QUIC_FORGET`). So a question the coordinator did not
+ * answer - another flow, another offset, a number of the other kind, anything
+ * outside a numbered frame - is a bug and throws `ShardMiss`, as the TCP order's
+ * does; and a number it gave that the dissection never asked for is reported by
+ * `done` for the coordinator to count.
+ */
+export class ShardQuicOrder implements QuicOrderApi {
+  private q: QuicNumbering | null = null;
+  private matchAsked = false;
+  private numberAsked = false;
+
+  /** Before a QUIC-lane frame. */
+  numbered(q: QuicNumbering): void {
+    this.q = q;
+    this.matchAsked = false;
+    this.numberAsked = false;
+  }
+
+  /** After the frame: false when the number the coordinator gave was never asked. */
+  done(): boolean {
+    const asked = this.numberAsked;
+    this.q = null;
+    return asked;
+  }
+
+  private frame(flow: string, what: string): QuicNumbering {
+    const q = this.q;
+    if (q === null) throw new ShardMiss(`${what} on ${flow}, outside a numbered frame`);
+    if (flow !== q.flow) throw new ShardMiss(`${what} on ${flow}, numbered for ${q.flow}`);
+    return q;
+  }
+
+  isKnown(flow: string): boolean {
+    return this.frame(flow, 'isKnown').known;
+  }
+
+  match(flow: string, _bytes: Uint8Array, offset: number): string | undefined {
+    const q = this.frame(flow, 'match');
+    if (offset !== q.resolveAt) throw new ShardMiss(`match at ${offset} on ${flow}, numbered for ${q.resolveAt}`);
+    if (this.matchAsked) throw new ShardMiss(`a second match on ${flow}`);
+    this.matchAsked = true;
+    return q.matched;
+  }
+
+  noteLongHeader(flow: string, _connectionIds: readonly string[], _emptyDcid: boolean): QuicNoted {
+    const q = this.frame(flow, 'noteLongHeader');
+    if (!q.long) throw new ShardMiss(`a long header noted on ${flow}, numbered for a short one`);
+    if (this.numberAsked) throw new ShardMiss(`a second number asked on ${flow}`);
+    this.numberAsked = true;
+    // What the order forgot to stay inside its cap was forgotten ahead of the
+    // frame, by `OP_QUIC_FORGET`: nothing is left for the tracker to drop here.
+    return { number: q.number!, forgotten: NO_KEYS };
+  }
+
+  connectionForFlow(flow: string, _connectionId: string | undefined): number | undefined {
+    const q = this.frame(flow, 'connectionForFlow');
+    if (q.long) throw new ShardMiss(`a short header's number asked on ${flow}, numbered for a long one`);
+    if (this.numberAsked) throw new ShardMiss(`a second number asked on ${flow}`);
+    this.numberAsked = true;
+    return q.number;
+  }
+
+  connectionFor(_connectionId: string | undefined): number | undefined {
+    throw new ShardMiss('connectionFor is asked of a replay, never of arrival');
+  }
+
+  seedNextConnection(): void {
+    throw new ShardMiss('a shard is never seeded');
+  }
+
+  get evicted(): number { return 0; }
+  get size(): number { return 0; }
+
+  reset(): void {
+    this.q = null;
+    this.matchAsked = false;
+    this.numberAsked = false;
+  }
+}
+
+/** A shard's Sequencer: the parts its trackers ask. */
 export class ShardSequencer {
   readonly conversations = new ShardConversations();
   readonly tcp = new ShardTcpOrder();
+  readonly quic = new ShardQuicOrder();
 }

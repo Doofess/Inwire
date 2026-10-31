@@ -42,10 +42,15 @@ the store's own chunk codec, and reach the disk without being decoded and
 encoded again. On the burst at 60,000 frames a second the view now advances
 58,000-60,000 against 41,000, with nothing skipped. The gate as set was missed
 on two counts, recorded under **Phase 6, as built** with the owner's ruling.
-Phase 5 is still to come, and **measuring for it found a crash first**: with
-QUIC on lane 0 and the shards behind, the coordinator's waiting results ran
-the renderer out of heap at 60,000 frames a second. A byte bound on them
-landed 2026-10-31 (see **Before phase 5: what lane 0 may hold**). The fixes
+**Measuring for phase 5 found a crash first**: with QUIC on lane 0 and the
+shards behind, the coordinator's waiting results ran the renderer out of heap
+at 60,000 frames a second. A byte bound on them landed 2026-10-31 (see
+**Before phase 5: what lane 0 may hold**). **Phase 5 landed 2026-10-31 for
+QUIC**: datagrams on port 443 that QUIC claims are dissected on the shards,
+routed by flow and numbered at dispatch. On a real capture that is half QUIC,
+replayed at 60,000 frames a second, the view advances 56,900-61,100 a second
+against 48,700, with no catch-up and nothing skipped; SDP and the rest of UDP
+stay on lane 0 (see **Phase 5, as built**). The fixes
 that measured the problem landed the same day and are listed under **What came
 first**. Narrows **[0038](0038-the-worker-writes-the-bytes.md)**: the
 Worker still writes the bytes before it dissects, and now also stops when the
@@ -153,13 +158,23 @@ becomes a coordinator and spawns N shard Workers:
 the store's `utilityProcess` that §10 named. Every shard parses hostile bytes;
 a renderer Worker has no Node and no filesystem and the store's process has
 both. The hop the `utilityProcess` would save is 5 us a frame, and a transfer
-between Workers costs nothing. Each Worker is also its own heap.
+between Workers costs nothing. Each Worker is its own isolate but not its own
+heap wall: the page and every Worker draw on the renderer's one ~4 GB (ADR
+0036, amended 2026-10-31).
 
-**One accepted difference:** HTTP/1's shared 32 MB body budget becomes 32/N per
+**Two accepted differences.** HTTP/1's shared 32 MB body budget becomes 32/N per
 shard. It only shows when more than 32 MB of bodies are being collected at
 once, and it is recorded, so a revisit agrees with arrival. *As built, a frame
 records the room only up to one message's 1 MB, so its record is the single
-Worker's until a shard's share actually binds.* Two more, both counted rather
+Worker's until a shard's share actually binds.* *Phase 5 added the second:*
+QUIC's 8,192 streams and 8 MB of held reassembly become limit/N for each
+shard (`quicLimits`). Lane 0 keeps the whole (`laneZero`): QUIC that cannot
+reach a shard - in a tunnel, a fragment, under two tags, on another port - is
+all held there, so a share would bind on it first. A stream is forgotten only with its flow
+or at that cap, so it shows only when more than the share is *remembered* at
+once; `evictedStreams` counts it, and `parallel.ts` holds every fixture under
+the seven-shard share (the half-QUIC capture peaks at 662 streams against
+1,170, with nothing held). Two more, both counted rather
 than silent: a sharded connection that lane 0 later meets (`crossLane`), and
 an out-of-order fragment whose first fragment is more than 4,096 frames behind
 it, which can reassemble on a different shard from its connection's.
@@ -390,7 +405,9 @@ to an uninterrupted run, frame for frame and, dissected, hash for hash.
   true of a ring file deleted before it was read.
 
 5. **QUIC and UDP sharding** - the CID-to-connection map into the Sequencer,
-   QUIC sharded by server; SDP handed out in frame order.
+   QUIC sharded by server; SDP handed out in frame order. *Landed for QUIC,
+   routed by flow rather than by server; SDP and the rest of UDP stay on lane
+   0* - see **Phase 5, as built**.
 6. **Shards post rows straight to the store and renderer**, merged by a
    watermark - only if a profile asks, above ~120,000 frames a second.
    *Landed as packed rows through the coordinator, at 60,000* - see below.
@@ -642,6 +659,93 @@ What the crash also showed is recorded in ADR 0036's amendment of the same
 day: the page and every Worker share one ~4 GB renderer heap, which nothing
 budgets as one pool yet.
 
+### Phase 5, as built
+
+**Landed 2026-10-31, for QUIC only.** A UDP datagram to or from port 443 that
+QUIC claims - a long header, or a short header on a flow the coordinator
+already knows - is dissected on a shard. Every other UDP datagram stays on
+lane 0: DNS and mDNS (answers cross five-tuples), SIP, SDP and unclaimed UDP
+(SDP sets up RTP), DTLS and WireGuard (counters across the capture),
+fragments, tunnels, a datagram with the fixed bit clear, and anything QUIC
+would not claim.
+
+**Routed by flow, not by server** as the line above had it. A flow is the
+unordered `ip:port|ip:port` key `QuicFlowTracker` already used, so every
+datagram of a flow reaches one shard and the coordinator can number it as it
+dispatches, with no barrier:
+
+- **The registry moved into the Sequencer** as `QuicOrder`: the 4,096-flow LRU,
+  32 connection ids a flow, the connection numbers and the fallback by flow.
+  The tracker asks it, as `TcpStreamTracker` asks `TcpOrder`, and its public
+  methods did not change, so record method ids did not either. The single
+  Worker numbers through the same `QuicOrder`, and every fixture hashed the
+  same before and after each step (`scripts/pipeline/digest-print.ts`).
+- **The coordinator predicts what a dissection will ask, read-only.**
+  `udpBranch` is `dissectUdpTransport`'s choice of branch as one function, used
+  by both; `walkQuicDatagram`, beside `dissectQuic`, reads the cleartext
+  headers the dissection reads (header form, version, DCID and SCID up to 20
+  bytes, the Initial token, Length, up to eight coalesced packets) and where it
+  will ask for a short header's connection id; `readQuicRoute` turns them into
+  the questions. `scripts/pipeline/quic-lane.ts` holds the walk to
+  `dissectQuicDatagram` on about 29,000 crafted, mutated and random datagrams,
+  and `scripts/pipeline/sequencer.ts` holds every QUIC frame of every fixture
+  to asking exactly what the walk read.
+- **A shard replays the answers** (`OP_QUIC`: known flow, matched id,
+  connection number). `ShardQuicOrder` answers only those, once, and anything
+  else is a `ShardMiss`; a number given and never asked is counted
+  (`quicMismatch`).
+- **A flow the LRU forgets is forgotten where it lives**: `OP_QUIC_FORGET` to
+  the shard that holds it, ahead of that shard's next frame - also when the
+  frame that evicted it goes to the same shard. The single Worker forgets
+  inside `noteLongHeader`, after decryption and the CRYPTO fragments and
+  before `readStreams`, and only `readStreams` reads state across flows, so
+  forgetting a moment earlier reads the same. A lane-0 flow is forgotten at
+  once, since lane 0 dissects as it is handed a frame.
+- **Lane 0's own QUIC goes through `WatchedQuicOrder`**, which gives
+  `quicHome`, the `keyHome` of QUIC: a flow lane 0 met first stays there, and a
+  sharded flow's datagram that only lane 0 can read (in a tunnel, a fragment or
+  under two VLAN tags) counts in `crossLane`, without that shard's keys. Lane
+  0 then holds a half of that flow too, so when the order forgets it the
+  coordinator forgets it on lane 0 as well as on its shard (`laneZeroMet`);
+  forgetting it only on the shard left lane 0 holding every asymmetric-QinQ
+  flow it had ever met.
+
+`scripts/pipeline/parallel.ts` holds every fixture and a synthetic QUIC capture
+(coalesced packets, Version Negotiation, Retry, v2, garbled headers, ports
+paired with 53/5353/1900/4789, a two-tag long header, and 4,200 flows that
+evict) frame for frame to the single Worker at every arrangement;
+`scripts/pipeline/quic-shards.ts` holds the races, homes and forgets one at a
+time. At seven shards all 7,353 QUIC frames of the half-QUIC capture are
+dissected on shards. The second accepted difference, the stream and
+reassembly share, is under **Where the pool lives**.
+
+**Measured** with `ui-burst-drive.ts --follow-only` on the half-QUIC capture
+(14,615 frames, 7,353 QUIC), six shards. A game was running on the machine
+throughout; both builds were measured under it.
+
+| 60,000 f/s offered | Before (890c0d9) | After |
+|---|---|---|
+| Advanced | 48,600-48,800 a second, behind into catch-up | 56,900 / 57,200 / 61,100 of 59,600 / 59,400 / 60,600 sent (95.5%, 96.3%, 101%) |
+| Lag | growing | flat at 86,000-115,000 in two runs, falling to 24,000 in the third |
+| Skipped | 0 | 0; no catch-up |
+| Worker heap | 199-667 MB | 147-277 MB |
+| Coordinator idle (profiled) | 4.9% | 18.5% |
+| `dissectHere`, inclusive | 56.7% | 17.5%; `routeQuic` 9.2% |
+| Shards idle (profiled) | 66-91% | 15%, 16%, 49%, 55%, 58%, 62% |
+
+The profiled run, which costs every thread something, advanced 56,000 of
+62,700 (89%). Its two busy shards are the skew the design expected: the
+capture's largest QUIC flow is 49% of its QUIC frames, a quarter of all of
+them, and one flow is one shard. The next limit is that shard, not the
+coordinator.
+
+The TCP burst at 60,000, under the same load: this build 43,100-49,800
+advanced, 890c0d9 35,500-49,800, nothing skipped by either. The two are the
+same spread; the 58,000-60,000 of **Phase 6, as built** was an idle machine
+and was not re-measured on one. The live drive (`live-revisit-drive.ts`,
+through the installed agent) passes, opening a QUIC frame of a later
+connection rebuilt from its record.
+
 ## What came first
 
 Measured before any of the above, because the rule in CLAUDE.md §7 is that no
@@ -679,7 +783,9 @@ Above about 20,000 frames a second the Worker is the limit - 97% busy at
 - The live view can be behind live. That is the honest state of a machine
   receiving more than it can dissect, and it is now said rather than hidden in
   a queue that ends in a heap guard.
-- N isolates, N heap walls; `rendererHeapGuard` is per isolate.
+- N isolates, one heap wall: the page and every Worker share the renderer's
+  ~4 GB, and `rendererHeapGuard` reads only its own isolate (ADR 0036,
+  amended 2026-10-31).
 - The Sequencer must decide new TCP connections and evictions exactly as the
   tracker does. One shared key function, and the equality test on `bulk`,
   whose 30 streams each open with one SYN.

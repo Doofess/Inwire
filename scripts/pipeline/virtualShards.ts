@@ -13,12 +13,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
-import { QuicFlowTracker } from '../../src/services/quicFlowTracker';
+import { QuicFlowTracker, quicLimits } from '../../src/services/quicFlowTracker';
 import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
-import { Sequencer, FrameClock } from '../../src/services/dissect/sequencer';
+import { FrameClock, type Sequencer } from '../../src/services/dissect/sequencer';
 import { LIVE_ENV, type DissectEnv } from '../../src/services/dissect/dissectEnv';
-import { Coordinator, WatchedTcpOrder, type CoordFrame, type Merged, type ShardRoute } from '../../src/services/pipeline/coordinator';
+import { Coordinator, coordinatorSequencer, type CoordFrame, type Merged, type ShardRoute } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
 import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
 import type { FlowAnnotationStore } from '../../src/services/flowAnnotations';
@@ -53,7 +53,7 @@ export async function load(name: string, bytes: Uint8Array, keysPath?: string): 
 
 export function trackers(sequencer: Sequencer) {
   return {
-    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(),
+    tcp: new TcpStreamTracker(sequencer), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(sequencer, quicLimits(1)),
     dns: new DnsTracker(), l3: new L3Tracker(sequencer),
   };
 }
@@ -83,6 +83,7 @@ export interface Stats {
   lanes: number[];
   crossLane: number;
   barrierMismatch: number;
+  quicMismatch: number;
   ms: number;
   /** Packs the coordinator decoded, packs the shards sent, and results whose side said `needsRow`. */
   packsDecoded: number;
@@ -118,7 +119,7 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
     coordInbox.push({ shard: s, message: structuredClone(message, { transfer: transfer as ArrayBuffer[] }) });
   }, { shards: config.shards, cacheFrames: 64, env: FIXED_ENV, withTrees: options.withTrees ?? true }));
 
-  const sequencer = new Sequencer(new WatchedTcpOrder());
+  const sequencer = coordinatorSequencer();
   const coordinator = new Coordinator({
     shards: config.shards,
     route: config.route,
@@ -190,7 +191,7 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
   if (!idle) throw new Error(`${config.label}: the coordinator never went idle (backlog ${coordinator.backlog})`);
   return {
     lanes: [...coordinator.perLane], crossLane: coordinator.crossLane,
-    barrierMismatch: coordinator.barrierMismatch, ms: performance.now() - t0,
+    barrierMismatch: coordinator.barrierMismatch, quicMismatch: coordinator.quicMismatch, ms: performance.now() - t0,
     packsDecoded: coordinator.packsDecoded, packs, needsRowResults,
   };
 }

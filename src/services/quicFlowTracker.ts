@@ -25,6 +25,7 @@ import { keyLog } from './tls/keyLog';
 import { QpackTable } from './dissectors/qpack';
 import type { HeaderField } from './dissectors/hpack';
 import { dissectHttp3Stream, freshHttp3Stream, type Http3Frame, type Http3Stream } from './dissectors/http3';
+import { QuicOrder, quicFlowKey, type QuicOrderApi } from './dissect/sequencer';
 
 interface InitialSession {
   keys: InitialKeys;
@@ -140,94 +141,56 @@ const MAX_PENDING_STREAM_BYTES = 256 * 1024;
  * a site that loses packets could hold a quarter of a megabyte per stream with
  * no ceiling at all. This is the ceiling.
  */
-const MAX_TOTAL_PENDING_BYTES = 8 * 1024 * 1024;
+export const MAX_TOTAL_PENDING_BYTES = 8 * 1024 * 1024;
 
 /**
- * How many flows keep state, and how many streams across all of them.
+ * How many streams are held across all flows.
  *
- * Both are per *connection*, not per frame, so no packet-buffer cap touches
- * them: `trimToCap` drops frames and leaves every one of these behind
- * (`scripts/perf/tracker-cost.ts`). A browsing session is thousands of short
- * connections, which is the shape that fills them.
- *
- * Eviction is least-recently-used rather than oldest-first, which matters here:
- * a QUIC connection can be idle for minutes and then resume, and the flow that
- * has gone longest without a packet is the one whose loss costs least. What is
- * lost is a flow's decryption keys and reassembly cursor - so a later packet on
- * an evicted flow reads as an unrecognised one, which is what it looks like
- * from the wire without the handshake anyway.
+ * Per *connection*, not per frame, so no packet-buffer cap touches it:
+ * `trimToCap` drops frames and leaves it behind (`scripts/perf/tracker-cost.ts`).
+ * The flow cap and the connection ids a flow keeps are the order's
+ * (`MAX_QUIC_FLOWS`, `MAX_QUIC_CONNECTION_IDS_PER_FLOW` in `dissect/sequencer.ts`).
  */
-const MAX_FLOWS = 4096;
-const MAX_STREAMS = 8192;
+export const MAX_STREAMS = 8192;
+
+/** The two budgets one tracker holds against: the whole, or one instance's share. */
+export interface QuicLimits { maxStreams: number; maxPendingBytes: number }
 
 /**
- * Connection IDs remembered per flow.
- *
- * A peer may issue new connection IDs for the life of a connection - that is
- * how QUIC migrates between addresses without being linkable - and every one
- * was kept for ever. Capped, and oldest-first, because `matchConnectionId`
- * scans this set for every short-header packet: an unbounded set is a growing
- * per-packet cost as well as a growing one in memory.
+ * Each shard's share of the stream and held-byte budgets; the whole for
+ * `shards <= 1`, and lane 0 always takes the whole (ADR 0053's accepted difference). `MAX_PENDING_STREAM_BYTES`
+ * bounds one stream and is not split.
  */
-const MAX_CONNECTION_IDS_PER_FLOW = 32;
+export function quicLimits(shards: number): QuicLimits {
+  const n = Math.max(1, Math.floor(shards));
+  return { maxStreams: Math.floor(MAX_STREAMS / n), maxPendingBytes: Math.floor(MAX_TOTAL_PENDING_BYTES / n) };
+}
 
 export class QuicFlowTracker {
-  /** Connection IDs (hex) seen in long headers, keyed by normalized flow. */
-  private flowConnectionIds = new Map<string, Set<string>>();
-
   /**
-   * Connection id -> the connection's index, and the next index to hand out.
-   *
-   * Keyed by connection id rather than by flow, which is the whole point. A
-   * QUIC connection is its set of connection ids, not its five-tuple: it can
-   * migrate to a new address and keep its ids, and two connections can share
-   * one five-tuple. Both happen here - `inwire`'s udp.stream 91 carries two
-   * connections, and a flow-keyed index calls them one.
-   *
-   * An index is never reused, for ADR 0014's reason: a number that comes back
-   * after an eviction points a saved filter at a different conversation.
+   * The flow registry and the connection numbers, which depend on the order of
+   * frames from every flow and so live in the `Sequencer` (ADR 0053): which
+   * flows are remembered, their connection ids, and each connection's number.
+   * This tracker keeps each flow's state and drops it when the order forgets
+   * the flow (`forget`).
    */
-  private connectionNumbers = new Map<string, number>();
+  private readonly order: QuicOrderApi;
 
-  private nextConnectionNumber = 0;
+  readonly limits: QuicLimits;
+  private evicted = 0;
 
-  /**
-   * The connection most recently seen on a flow, which is the fallback when
-   * the ids cannot answer - and they often cannot.
-   *
-   * A client may choose a zero-length Source Connection ID, and then the
-   * server's first Initial echoes it as a zero-length Destination one and adds
-   * a Source id of its own. So the client's packets and the server's first
-   * reply share NO connection id at all, and only the five-tuple links them.
-   * `inwire` opens with exactly that: frames 16-19 carry DCID 2139ec74b2c31814
-   * with no SCID, frames 20-21 carry SCID 019c32... with no DCID, and the
-   * reference calls all six connection 0.
-   *
-   * The fallback is deliberately narrow - see `noteLongHeader` - so that a
-   * second connection on one flow still gets its own number.
-   */
-  private flowConnection = new Map<string, number>();
+  constructor(sequencer: { quic: QuicOrderApi } = { quic: new QuicOrder() }, limits: QuicLimits = quicLimits(1)) {
+    this.order = sequencer.quic;
+    this.limits = limits;
+  }
 
-  /**
-   * **Where this disagrees with the reference, and why it is kept.**
-   *
-   * `bulk` is exact, 86 frames of 86. `inwire` matches on 2,959 of 3,087, and
-   * every one of the 128 that differ is on udp.stream 91 - the one flow in
-   * either fixture carrying two QUIC connections.
-   *
-   * On that flow the reference contradicts itself. An orphan server Initial
-   * (frame 5174, zero-length DCID, SCID eb850cfa9d878bc7) arrives before any
-   * client Initial, so it starts connection 12 and binds that id to it. The
-   * real client Initial then opens connection 13. From there the reference
-   * splits ONE connection by direction: the client's packets, addressed to
-   * DCID eb85, resolve by id to 12, while the server's replies, which carry
-   * eb85 as their SCID and no DCID, fall back to the flow and get 13. Same
-   * connection, two numbers, decided by which way the packet is going.
-   *
-   * This build binds eb85 once and keeps it, so the whole conversation reads
-   * as one connection. That is a difference from the reference and not a defect
-   * to fix: reproducing it means reproducing the split.
-   */
+  /** Streams dropped for the stream cap (not for a flow's eviction). */
+  public get evictedStreams(): number { return this.evicted; }
+  /** Streams remembered now, finished ones included. */
+  public get streamCount(): number { return this.streams.size; }
+  /** Out-of-order bytes held now, across every stream. */
+  public get pendingBytes(): number { return this.totalPendingBytes; }
+
   /** Initial keys and client identity, keyed by normalized flow. */
   private initialSessions = new Map<string, InitialSession>();
   /** Highest packet number decrypted per sending direction. */
@@ -256,15 +219,15 @@ export class QuicFlowTracker {
 
   /** Order-independent key, so both directions of a flow share their state. */
   private flowKey(srcIp: string, srcPort: number, dstIp: string, dstPort: number): string {
-    const a = `${srcIp}:${srcPort}`;
-    const b = `${dstIp}:${dstPort}`;
-    return a <= b ? `${a}|${b}` : `${b}|${a}`;
+    return quicFlowKey(srcIp, srcPort, dstIp, dstPort);
   }
 
   /**
    * Records that this flow carried a long header, along with any non-empty
    * connection IDs it advertised. Registering the flow at all is what makes
-   * subsequent short-header packets recognizable.
+   * subsequent short-header packets recognizable. The order keeps the
+   * registry and numbers the connection (`QuicOrder.noteLongHeader`); this
+   * drops the state of each flow that made room for it.
    */
   public noteLongHeader(
     srcIp: string, srcPort: number, dstIp: string, dstPort: number,
@@ -272,75 +235,24 @@ export class QuicFlowTracker {
     /** True when the long header's Destination Connection ID is zero length. */
     emptyDcid = false,
   ): number | undefined {
-    const key = this.flowKey(srcIp, srcPort, dstIp, dstPort);
-    const flowConnectionKey = key;
-    let ids = this.flowConnectionIds.get(key);
-    if (!ids) ids = new Set<string>();
-    for (const id of connectionIds) {
-      if (id.length === 0) continue;
-      ids.add(id);
-      // Insertion-ordered, so the first key out is the id issued longest ago -
-      // and a peer that has issued 32 since is not still using it.
-      while (ids.size > MAX_CONNECTION_IDS_PER_FLOW) {
-        const oldest = ids.values().next();
-        if (oldest.done) break;
-        ids.delete(oldest.value);
-      }
-    }
-    // Re-inserted rather than updated in place: a Map iterates in insertion
-    // order, so deleting and setting is what moves this flow to the back of
-    // the eviction queue. `flowConnectionIds` is the flow registry - a flow
-    // exists exactly when it has an entry here (`isKnownFlow`) - so it is the
-    // one map whose order can stand for all of them.
-    this.flowConnectionIds.delete(key);
-    this.flowConnectionIds.set(key, ids);
-    this.evictFlowsPastCap();
-
-    // Every id in one long header belongs to one connection - that is what a
-    // long header is for, naming both ends of it. So if any of them is already
-    // numbered the packet is that connection, and the rest of the ids join it;
-    // if none is, this is a connection nobody has seen and it gets the next
-    // number.
-    const known = connectionIds.map((id) => this.connectionNumbers.get(id)).filter((n) => n !== undefined);
-    // The lowest, so two ids that were numbered separately before they were
-    // seen together settle on the one issued first rather than on whichever
-    // the iteration happened to reach.
-    let number: number;
-    if (known.length > 0) {
-      number = Math.min(...known);
-    } else if (emptyDcid && this.flowConnection.has(flowConnectionKey)) {
-      // Answering: a zero-length Destination id means this packet is echoing
-      // a peer that chose not to be named, so the flow is the only link there
-      // is. Narrow on purpose - a packet that names a destination this build
-      // has never seen is a NEW connection, which is what keeps two
-      // connections sharing one five-tuple apart.
-      number = this.flowConnection.get(flowConnectionKey)!;
-    } else {
-      number = this.nextConnectionNumber++;
-    }
-    for (const id of connectionIds) {
-      if (id.length > 0) this.connectionNumbers.set(id, number);
-    }
-    this.flowConnection.set(flowConnectionKey, number);
-    return number;
+    const noted = this.order.noteLongHeader(this.flowKey(srcIp, srcPort, dstIp, dstPort), connectionIds, emptyDcid);
+    for (const gone of noted.forgotten) this.forget(gone);
+    return noted.number;
   }
 
   /**
    * The connection for a short-header packet: by the id the resolver matched,
-   * and by the flow when it matched none. A short header carries no id length,
-   * so an id this build has not seen cannot even be measured - the flow is all
-   * that is left, and it is what the reference falls back to as well.
+   * and by the flow when it matched none (`QuicOrder.connectionForFlow`).
    */
   public connectionNumberForFlow(
     srcIp: string, srcPort: number, dstIp: string, dstPort: number, connectionId: string | undefined
   ): number | undefined {
-    const byId = connectionId === undefined ? undefined : this.connectionNumbers.get(connectionId);
-    return byId ?? this.flowConnection.get(this.flowKey(srcIp, srcPort, dstIp, dstPort));
+    return this.order.connectionForFlow(this.flowKey(srcIp, srcPort, dstIp, dstPort), connectionId);
   }
 
   /** The connection index for a connection id already seen, if there is one. */
   public connectionNumberFor(connectionId: string | undefined): number | undefined {
-    return connectionId === undefined ? undefined : this.connectionNumbers.get(connectionId);
+    return this.order.connectionFor(connectionId);
   }
 
   /**
@@ -349,47 +261,49 @@ export class QuicFlowTracker {
    * `TcpStreamTracker.seedNextStreamId`.
    */
   public seedNextConnectionNumber(next: number): void {
-    if (next > this.nextConnectionNumber) this.nextConnectionNumber = next;
+    this.order.seedNextConnection(next);
+  }
+
+  /** Flows this tracker holds an Initial session for: the order bounds them only while every forget reaches this tracker. */
+  public get sessionFlows(): number {
+    return this.initialSessions.size;
+  }
+
+  /** Flows the order remembers. */
+  public get flowCount(): number {
+    return this.order.size;
   }
 
   /**
-   * Forgets every flow past the cap, least-recently-seen first.
+   * Bounds the streams across every flow, least-recently-used first.
    *
-   * The seven maps are keyed three different ways - by flow, by flow and
-   * sender, and by flow, sender and stream id - so forgetting one flow means
-   * scanning the direction-keyed ones for its prefix. That is O(entries) per
-   * eviction, which is why this only runs when the cap is actually exceeded
-   * rather than on every packet.
+   * A flow can open many streams, so their total is bounded separately: one
+   * busy HTTP/3 connection can exceed this while the flow count is fine. Only
+   * called where a stream is added (`readStreams`) - a flow's eviction only
+   * removes streams, so it cannot push the total over.
    */
-  private evictFlowsPastCap(): void {
-    while (this.flowConnectionIds.size > MAX_FLOWS) {
-      const oldest = this.flowConnectionIds.keys().next();
-      if (oldest.done) break;
-      this.forgetFlow(oldest.value);
-    }
-    // A flow can open many streams, so their total is bounded separately: one
-    // busy HTTP/3 connection can exceed this while the flow count is fine.
-    while (this.streams.size > MAX_STREAMS) {
+  private evictStreamsPastCap(): void {
+    while (this.streams.size > this.limits.maxStreams) {
       const oldest = this.streams.keys().next();
       if (oldest.done) break;
       const assembly = this.streams.get(oldest.value);
       if (assembly) this.totalPendingBytes -= assembly.pendingBytes;
       this.streams.delete(oldest.value);
+      this.evicted++;
     }
   }
 
-  /** Drops everything held for one flow, across every map that keys by it. */
-  private forgetFlow(flowKey: string): void {
-    // Read BEFORE the delete below, which is the whole of the bug this line
-    // fixes: the sweep of `connectionNumbers` at the end of this method used to
-    // read `flowConnectionIds.get(flowKey)` - a map the first statement had
-    // already emptied - so it iterated nothing, every time, while its own
-    // comment said it was clearing the ids. `connectionNumbers` is otherwise
-    // cleared only by `reset()`, which fires when the buffer is gone and never
-    // on an eviction, so it was the one map in this tracker with no working
-    // cap, on QUIC, which is most of a browsing capture.
-    const forgottenIds = this.flowConnectionIds.get(flowKey);
-    this.flowConnectionIds.delete(flowKey);
+  /**
+   * Drops everything this tracker holds for one flow, across every map that
+   * keys by it - the registry half is the order's and is already gone.
+   *
+   * The maps are keyed three different ways - by flow, by flow and sender, and
+   * by flow, sender and stream id - so forgetting one flow means scanning the
+   * direction-keyed ones for its prefix. That is O(entries) per eviction,
+   * which is why this only runs when the cap is actually exceeded rather than
+   * on every packet.
+   */
+  public forget(flowKey: string): void {
     this.initialSessions.delete(flowKey);
     this.flowSni.delete(flowKey);
     this.sessions.delete(flowKey);
@@ -405,11 +319,6 @@ export class QuicFlowTracker {
     for (const key of this.qpackTables.keys()) {
       if (key.startsWith(prefix)) this.qpackTables.delete(key);
     }
-    // The ids go, `nextConnectionNumber` does not: a forgotten connection's
-    // index is spent, and handing it out again would point a filter written
-    // against the old conversation at a new one.
-    for (const id of forgottenIds ?? []) this.connectionNumbers.delete(id);
-    this.flowConnection.delete(flowKey);
     for (const [key, assembly] of this.streams) {
       if (!key.startsWith(prefix)) continue;
       this.totalPendingBytes -= assembly.pendingBytes;
@@ -418,35 +327,19 @@ export class QuicFlowTracker {
   }
 
   public isKnownFlow(srcIp: string, srcPort: number, dstIp: string, dstPort: number): boolean {
-    return this.flowConnectionIds.has(this.flowKey(srcIp, srcPort, dstIp, dstPort));
+    return this.order.isKnown(this.flowKey(srcIp, srcPort, dstIp, dstPort));
   }
 
   /**
    * Returns the connection ID a short header carries, if the bytes right after
-   * its first byte match one this flow has already advertised. A zero-length
-   * connection ID - which one peer commonly chooses - matches nothing and
-   * correctly yields undefined, so the Info column simply omits it.
+   * its first byte match one this flow has already advertised (the order holds
+   * the ids; see `QuicOrder.match`).
    */
   public matchConnectionId(
     srcIp: string, srcPort: number, dstIp: string, dstPort: number,
     bytes: Uint8Array, offset: number
   ): string | undefined {
-    const ids = this.flowConnectionIds.get(this.flowKey(srcIp, srcPort, dstIp, dstPort));
-    if (!ids) return undefined;
-
-    for (const id of ids) {
-      const byteLength = id.length / 2;
-      if (offset + byteLength > bytes.length) continue;
-      let matches = true;
-      for (let i = 0; i < byteLength; i++) {
-        if (bytes[offset + i] !== parseInt(id.slice(i * 2, i * 2 + 2), 16)) {
-          matches = false;
-          break;
-        }
-      }
-      if (matches) return id;
-    }
-    return undefined;
+    return this.order.match(this.flowKey(srcIp, srcPort, dstIp, dstPort), bytes, offset);
   }
 
   /**
@@ -746,7 +639,7 @@ export class QuicFlowTracker {
       if (assembly === undefined) {
         assembly = { http3: freshHttp3Stream(bidirectional), nextOffset: 0, pending: new Map(), pendingBytes: 0 };
         this.streams.set(key, assembly);
-        this.evictFlowsPastCap();
+        this.evictStreamsPastCap();
       } else {
         // Touched, so the eviction queue orders by last use rather than by
         // when the stream was opened: a long-lived control stream is the one
@@ -770,7 +663,7 @@ export class QuicFlowTracker {
             assembly.pending.set(fragment.offset, fragment.data);
           }
         } else if (assembly.pendingBytes + fragment.data.length <= MAX_PENDING_STREAM_BYTES
-          && this.totalPendingBytes + fragment.data.length <= MAX_TOTAL_PENDING_BYTES) {
+          && this.totalPendingBytes + fragment.data.length <= this.limits.maxPendingBytes) {
           assembly.pending.set(fragment.offset, fragment.data);
           assembly.pendingBytes += fragment.data.length;
           this.totalPendingBytes += fragment.data.length;
@@ -832,7 +725,6 @@ export class QuicFlowTracker {
 
   public reset(): void {
     this.totalPendingBytes = 0;
-    this.flowConnectionIds.clear();
     this.initialSessions.clear();
     this.largestPacketNumber.clear();
     this.cryptoStreams.clear();
@@ -840,9 +732,7 @@ export class QuicFlowTracker {
     this.sessions.clear();
     this.streams.clear();
     this.qpackTables.clear();
-    this.connectionNumbers.clear();
-    this.flowConnection.clear();
-    this.nextConnectionNumber = 0;
+    this.order.reset();
   }
 }
 

@@ -29,7 +29,8 @@
  * Captures: the real fixtures (untracked, test/fixtures/README.md - skipped
  * when absent), a capture of 20,000 connections that makes the TCP order forget
  * (`evictionCapture.ts`), and one of TCP in IP fragments (`fragmentCapture.ts`),
- * which the coordinator cannot number from its headers. `--burst` adds any
+ * which the coordinator cannot number from its headers, and the QUIC datagram
+ * shapes the router and the order must agree on (`quicCapture.ts`). `--burst` adds any
  * capture - the 300,000-frame download ADR 0053 was measured on.
  *
  * In one process, so two things a real shard has of its own are shared here:
@@ -43,6 +44,7 @@ import { Sequencer } from '../../src/services/dissect/sequencer';
 import { withDissectEnv } from '../../src/services/dissect/dissectEnv';
 import { FrameRevisit, RecordMiss, recordEntries } from '../../src/services/dissect/frameRecord';
 import { keyLog } from '../../src/services/tls/keyLog';
+import { QuicFlowTracker, quicLimits } from '../../src/services/quicFlowTracker';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
 import type { Merged } from '../../src/services/pipeline/coordinator';
 import { unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
@@ -56,6 +58,7 @@ import type { Packet, ProtocolLayer } from '../../src/types/packet';
 import { FIXTURES, render } from './arrival';
 import { evictionCapture } from './evictionCapture';
 import { fragmentCapture } from './fragmentCapture';
+import { quicCapture } from './quicCapture';
 import { CONFIGS, FIXED_ENV, drive, load, trackers, type Capture, type Config, type Stats, type Table, type TableAt } from './virtualShards';
 
 let failures = 0;
@@ -120,9 +123,33 @@ function sequential(capture: Capture, table?: TableAt): string[] {
   });
 }
 
+/**
+ * QUIC's demand on the single Worker's stream and held-byte budgets, sampled
+ * after every frame with the limits off, so a limit that bound cannot hide its
+ * own demand. A frame adds a few fragments at most, so sampling per frame sees
+ * the peak to within that.
+ */
+function quicPeak(capture: Capture): { streams: number; pending: number; evicted: number } {
+  const sequencer = new Sequencer();
+  const quic = new QuicFlowTracker(sequencer, { maxStreams: Infinity, maxPendingBytes: Infinity });
+  const dissector = new FrameDissector({ ...trackers(sequencer), quic }, FIXED_ENV, null);
+  dissector.host = capture.host ?? dissector.host;
+  let streams = 0;
+  let pending = 0;
+  for (const input of capture.inputs) {
+    try { dissector.dissect({ ...input, bytes: input.bytes.slice() }); } catch { /* counted by the equality checks */ }
+    streams = Math.max(streams, quic.streamCount);
+    pending = Math.max(pending, quic.pendingBytes);
+  }
+  return { streams, pending, evicted: quic.evictedStreams };
+}
+
 interface Run extends Stats {
   digests: string[];
   merged: Merged[];
+  /** Frames whose protocol chain holds QUIC, and how many of them a shard dissected. */
+  quicFrames: number;
+  quicOnShards: number;
 }
 
 interface RunOptions {
@@ -144,6 +171,8 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
   // The Worker's own store: lane 0's rows are annotated at the merge, as `emitMerged` does.
   const annotations = new FlowAnnotationStore();
   let tableApplied = false;
+  let quicFrames = 0;
+  let quicOnShards = 0;
   // A shard row that stayed in its pack, rebuilt as the window would: decoded
   // once per pack, its bytes beside it, the merge's overlay over it.
   const decodedPacks = new Map<RowPack, Packet[]>();
@@ -172,6 +201,10 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       if (m.lane === 0 && m.packet !== undefined) annotatePacket(m.packet, annotations);
       const layers = m.lane === 0 ? m.packet?.layers : m.layers;
       const packet = m.packet ?? (m.packed !== undefined ? rebuilt(m) : undefined);
+      if (packet?.frameProtocols?.includes('quic')) {
+        quicFrames++;
+        if (m.lane !== 0) quicOnShards++;
+      }
       // A shard sends no bytes back: the row's are the coordinator's own copy of
       // the frame, and they must be the frame the capture holds.
       const sent = capture.inputs[m.id - 1].bytes;
@@ -183,7 +216,7 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       if (bytes && bytes.byteLength > 0 && !keep) structuredClone(bytes.buffer, { transfer: [bytes.buffer as ArrayBuffer] });
     },
   });
-  return { digests, merged, ...stats };
+  return { digests, merged, quicFrames, quicOnShards, ...stats };
 }
 
 function lineDiff(want: string, got: string | undefined): string {
@@ -256,14 +289,22 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
     const t0 = performance.now();
     const want = sequential(capture);
     const oneCore = performance.now() - t0;
+    if (capture.name !== 'burst') {
+      const peak = quicPeak(capture);
+      const share = quicLimits(7);
+      check(`${capture.name}: QUIC's peak (${peak.streams} streams, ${(peak.pending / 1048576).toFixed(2)} MB held) is under the 7-shard share, so equality at N=7 is not vacuous`,
+        peak.streams <= share.maxStreams && peak.pending <= share.maxPendingBytes && peak.evicted === 0,
+        `share is ${share.maxStreams} streams, ${share.maxPendingBytes} bytes`);
+    }
     for (const config of configs) {
       const run = parallel(capture, config);
       const at = firstDiff(want, run.digests);
       check(`${capture.name}, ${config.label}: all ${want.length.toLocaleString()} frames as one core dissects them`,
-        at === -1 && run.crossLane === 0 && run.barrierMismatch === 0,
+        at === -1 && run.crossLane === 0 && run.barrierMismatch === 0 && run.quicMismatch === 0,
         at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], run.digests[at])}` : ''}`
-          : `crossLane ${run.crossLane}, barrierMismatch ${run.barrierMismatch}`);
+          : `crossLane ${run.crossLane}, barrierMismatch ${run.barrierMismatch}, quicMismatch ${run.quicMismatch}`);
       console.log(`        lanes ${run.lanes.join(' / ')}; ${run.ms.toFixed(0)} ms in one process (one core: ${oneCore.toFixed(0)} ms)`);
+      console.log(`        QUIC frames on shards: ${run.quicOnShards.toLocaleString()} of ${run.quicFrames.toLocaleString()}`);
       check(`${capture.name}, ${config.label}: a light run decodes only packs holding a needsRow row`,
         run.packsDecoded <= run.needsRowResults && (run.needsRowResults > 0 || run.packsDecoded === 0),
         `${run.packsDecoded} packs decoded, ${run.needsRowResults} results with needsRow`);
@@ -277,8 +318,9 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
       const decoded = parallel(capture, seven, { decodeRows: true });
       const at = firstDiff(want, decoded.digests);
       check(`${capture.name}, ${seven.label}: all ${want.length.toLocaleString()} frames as one core dissects them`,
-        at === -1 && decoded.crossLane === 0 && decoded.barrierMismatch === 0,
+        at === -1 && decoded.crossLane === 0 && decoded.barrierMismatch === 0 && decoded.quicMismatch === 0,
         at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], decoded.digests[at])}` : ''}` : '');
+      console.log(`        QUIC frames on shards: ${decoded.quicOnShards.toLocaleString()} of ${decoded.quicFrames.toLocaleString()}`);
       check(`${capture.name}, ${seven.label}: every pack the shards sent was decoded`,
         decoded.packsDecoded === decoded.packs, `${decoded.packsDecoded} of ${decoded.packs}`);
       await tableRuns(capture, want, true);
@@ -469,6 +511,7 @@ async function main(): Promise<void> {
   }
   captures.push(await load('eviction', evictionCapture()));
   captures.push(await load('fragments', fragmentCapture()));
+  captures.push(await load('quic', quicCapture()));
   const burstAt = process.argv.indexOf('--burst');
   const burst = burstAt > 0 ? process.argv[burstAt + 1] : undefined;
   if (burst !== undefined) captures.push(await load('burst', new Uint8Array(readFileSync(burst))));

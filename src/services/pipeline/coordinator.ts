@@ -1,18 +1,22 @@
 /**
- * Dissection on several cores: the coordinator (ADR 0053 phase 3).
+ * Dissection on several cores: the coordinator (ADR 0053 phases 3 and 5).
  *
  * The live capture's frames arrive in order on one Worker. This splits them:
  *
  *   - a plain TCP segment goes to a **shard**, chosen by its connection's
  *     routing key, which keeps every frame of one connection on one shard -
  *     that connection's state never has to be shared;
+ *   - a plain UDP datagram that QUIC takes goes to a shard too, by its QUIC
+ *     flow, with the answers its dissection will ask of the QUIC order shipped
+ *     beside it (`routeQuic`, `quicRoute.ts`);
  *   - everything else is dissected **here**, on lane 0, by exactly the code
  *     the single Worker runs, with the real trackers.
  *
  * What makes the shards' output the single Worker's, frame for frame, is that
  * nothing a shard dissects is numbered by the shard. Everything counted across
- * conversations - `eth.stream`, `ip.stream`, `tcp.stream` and which
- * connection is forgotten past the cap - lives in the one `Sequencer` here,
+ * conversations - `eth.stream`, `ip.stream`, `udp.stream`, `tcp.stream`, which
+ * connection is forgotten past the cap, and QUIC's flow registry, connection
+ * numbers and forgotten flows - lives in the one `Sequencer` here,
  * and is numbered for every frame in frame order as it is dispatched; a shard
  * receives the numbers with the frame (`ShardSequencer`). Lane 0's own frames
  * number through the same Sequencer as they are dissected, which is also in
@@ -33,7 +37,9 @@
  *     the header parse leaves sequential. It stays on lane 0 for good
  *     (`keyHome`), so its state is never split; the opposite case, a sharded
  *     connection that lane 0 later meets, is counted (`crossLane`) as the one
- *     way this build can differ from one core.
+ *     way this build can differ from one core. A QUIC flow is the same
+ *     (`quicHome`): one lane 0 meets first stays on lane 0, and a sharded
+ *     flow's datagram that reaches lane 0 finds no keys there and is counted too.
  *
  * Output is merged back into strict frame order before anything sees it, so
  * the records, patches and rows downstream are in the order they always were.
@@ -42,12 +48,18 @@
  * which is a nested Worker in the app and a function call in the equality
  * test (`scripts/pipeline/parallel.ts`).
  */
-import { TcpOrder, DeferredTlsNumbers, type Sequencer } from '../dissect/sequencer';
-import { frameLane, isTcpFragment, type TcpFragmentLane, type TcpLane } from '../dissect/frameLane';
+import { NO_KEYS, QuicOrder, Sequencer, TcpOrder, DeferredTlsNumbers, type QuicNoted } from '../dissect/sequencer';
+import { frameLane, isTcpFragment, type QuicLane, type TcpFragmentLane, type TcpLane } from '../dissect/frameLane';
+import { readQuicRoute } from '../dissect/quicRoute';
 import { settleTreeTls, type BarrierHint, type BarrierReport } from '../dissect/shardNumbering';
 import { settleDeferredAnswers } from '../dissect/frameRecord';
 import type { DissectEnv } from '../dissect/dissectEnv';
 import { FrameDissector, type Dissected, type LaneTrackers } from './frameDissector';
+import { TcpStreamTracker } from '../tcpStreamTracker';
+import { IcmpEchoTracker } from '../icmpEchoTracker';
+import { QuicFlowTracker, quicLimits } from '../quicFlowTracker';
+import { DnsTracker } from '../dnsTracker';
+import { L3Tracker } from '../l3Tracker';
 import { OpWriter, type FromShard, type OpBatch, type ShardResult, type ToShard, type WireFrame } from './shardProtocol';
 import { unpackRows, type RowPack } from './rowPack';
 import { overlayMark, type OverlayMark, type RowOverlay } from './rowOverlay';
@@ -115,7 +127,10 @@ export interface CoordinatorOptions {
   route?: ShardRoute;
   /** Which shard a routing key goes to; a hash unless a test says otherwise. */
   assign?: (routeKey: string, shards: number) => number;
-  /** Lane 0's trackers: the real ones, sharing `sequencer`, whose `tcp` must be a `WatchedTcpOrder`. */
+  /**
+   * Lane 0's trackers: the real ones, sharing `sequencer`, whose `tcp` must be a
+   * `WatchedTcpOrder` and `quic` a `WatchedQuicOrder` (`coordinatorSequencer`).
+   */
   trackers: LaneTrackers;
   sequencer: Sequencer;
   /** The environment lane 0 dissects in; the live one when absent. */
@@ -222,6 +237,50 @@ export class WatchedTcpOrder extends TcpOrder {
   }
 }
 
+/**
+ * The real QUIC order, watched, as `WatchedTcpOrder` is: the long headers and
+ * numberings lane 0's own trackers make are where the coordinator learns which
+ * flows live on lane 0, which are met on a lane that does not hold them, and
+ * which flows a lane-0 long header forgot that a shard holds.
+ */
+export class WatchedQuicOrder extends QuicOrder {
+  /** Set by the coordinator; null while it numbers a shard's datagram itself. */
+  watcher: ((flow: string, forgotten: readonly string[]) => void) | null = null;
+
+  override noteLongHeader(flow: string, connectionIds: readonly string[], emptyDcid: boolean): QuicNoted {
+    const noted = super.noteLongHeader(flow, connectionIds, emptyDcid);
+    this.watcher?.(flow, noted.forgotten);
+    return noted;
+  }
+
+  override connectionForFlow(flow: string, connectionId: string | undefined): number | undefined {
+    const number = super.connectionForFlow(flow, connectionId);
+    this.watcher?.(flow, NO_KEYS);
+    return number;
+  }
+}
+
+/** The Sequencer the coordinator numbers through: both its orders watched. */
+export function coordinatorSequencer(): Sequencer {
+  return new Sequencer(new WatchedTcpOrder(), new WatchedQuicOrder());
+}
+
+/**
+ * Lane 0's trackers for a new capture, numbering through watched TCP and QUIC
+ * orders. Lane 0's QUIC keeps the whole budget, not a shard's share: QUIC that
+ * cannot reach the shards (QinQ, a fragment, a port other than 443) is all held here.
+ */
+export function laneZero(): { trackers: LaneTrackers; sequencer: Sequencer } {
+  const fresh = coordinatorSequencer();
+  return {
+    sequencer: fresh,
+    trackers: {
+      tcp: new TcpStreamTracker(fresh), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(fresh, quicLimits(1)),
+      dns: new DnsTracker(), l3: new L3Tracker(fresh),
+    },
+  };
+}
+
 interface Entry {
   lane: number;
   meta: unknown;
@@ -261,6 +320,7 @@ export class Coordinator {
   private nextTurn = 0;
   private readonly maxInFlight: number;
   private order: WatchedTcpOrder;
+  private quicOrder: WatchedQuicOrder;
   private sequencer: Sequencer;
   private readonly lane0Tls: DeferredTlsNumbers;
   /** Lane 0's dissection: the single Worker's, frame for frame. Its `host` is the caller's to set. */
@@ -284,6 +344,25 @@ export class Coordinator {
   private readonly dead = new Set<number>();
   /** Which lane holds each connection: 0, or a shard's lane (shard + 1). */
   private readonly keyHome = new Map<string, number>();
+  /**
+   * Which lane holds each QUIC flow, as `keyHome` does for connections: 0, or a
+   * shard's lane. A map of its own, because a TCP key and a QUIC flow can be the
+   * same string.
+   *
+   * **`quicOrder.isKnown(f)` holds exactly when `quicHome.has(f)`**, outside a
+   * dead shard (whose flows are re-homed to lane 0 with their state gone): a
+   * flow enters the order through a long header, which is numbered either here
+   * for a shard (`routeQuic`) or by lane 0's own tracker (`laneZeroQuic`), and
+   * leaves it only through a `forgotten` list, both of which clear the home.
+   * That is what lets a short header be sent to its flow's shard knowing the
+   * long header it needs is ahead of it there.
+   */
+  private readonly quicHome = new Map<string, number>();
+  /**
+   * Flows homed on a shard that lane 0 met too (`crossLane`): lane 0's tracker
+   * holds a half of each, which the forget sent to the shard would not reach.
+   */
+  private readonly laneZeroMet = new Set<string>();
   private readonly datagramKey = new Map<string, string>();
   private readonly datagramShard = new Map<string, number>();
   /** Placeholder to real `tls.stream`, per shard lane. */
@@ -308,6 +387,8 @@ export class Coordinator {
   crossLane = 0;
   /** Barrier reports that disagreed with what the coordinator's order said. */
   barrierMismatch = 0;
+  /** Results whose QUIC number was never asked: the shard's dissection did not do what `readQuicRoute` said. */
+  quicMismatch = 0;
   /** Frames dissected on each lane, lane 0 first. */
   readonly perLane: number[];
 
@@ -318,7 +399,7 @@ export class Coordinator {
     this.recent = new Array(options.shards).fill(0);
     this.maxInFlight = options.maxInFlight ?? 2;
     this.lane0Tls = new DeferredTlsNumbers();
-    [this.sequencer, this.order, this.lane0] = this.adopt(options.trackers, options.sequencer);
+    [this.sequencer, this.order, this.quicOrder, this.lane0] = this.adopt(options.trackers, options.sequencer);
     this.writers = Array.from({ length: this.shards }, () => new OpWriter());
     this.ready = Array.from({ length: this.shards }, () => []);
     this.inFlight = new Array(this.shards).fill(0);
@@ -331,14 +412,19 @@ export class Coordinator {
   }
 
   /** Lane 0's trackers and the Sequencer they share, hooked up. */
-  private adopt(trackers: LaneTrackers, sequencer: Sequencer): [Sequencer, WatchedTcpOrder, FrameDissector] {
+  private adopt(
+    trackers: LaneTrackers, sequencer: Sequencer,
+  ): [Sequencer, WatchedTcpOrder, WatchedQuicOrder, FrameDissector] {
     const order = sequencer.tcp;
     if (!(order instanceof WatchedTcpOrder)) throw new Error('coordinator: the sequencer needs a WatchedTcpOrder');
+    const quicOrder = sequencer.quic;
+    if (!(quicOrder instanceof WatchedQuicOrder)) throw new Error('coordinator: the sequencer needs a WatchedQuicOrder');
     order.deferredTls = this.lane0Tls;
     order.watcher = (key, forgotten) => this.laneZeroLookup(key, forgotten);
+    quicOrder.watcher = (flow, forgotten) => this.laneZeroQuic(flow, forgotten);
     const lane0 = new FrameDissector(trackers, this.options.env, this.lane0Tls);
     lane0.host = this.lane0?.host ?? lane0.host;
-    return [sequencer, order, lane0];
+    return [sequencer, order, quicOrder, lane0];
   }
 
   /** The Sequencer lane 0 numbers through, whose clock the caller reads. */
@@ -407,6 +493,7 @@ export class Coordinator {
         }
       }
       entry.done = true;
+      if (result.quicUnasked) this.quicMismatch += 1;
       if (this.barrier !== null && this.barrier.id === result.id) {
         this.settleBarrier(result.barrier);
         barrierCleared = true;
@@ -424,6 +511,8 @@ export class Coordinator {
     this.dead.add(shard);
     const lane = shard + 1;
     for (const [key, home] of this.keyHome) if (home === lane) this.keyHome.set(key, 0);
+    // Its flows' state is gone with it: they start again on lane 0, without keys.
+    for (const [flow, home] of this.quicHome) if (home === lane) this.quicHome.set(flow, 0);
     this.writers[shard] = new OpWriter();
     this.ready[shard] = [];
     this.inFlight[shard] = 0;
@@ -454,7 +543,7 @@ export class Coordinator {
   reset(lane0: { trackers: LaneTrackers; sequencer: Sequencer }): void {
     this.epoch += 1;
     this.lane0Tls.reset();
-    [this.sequencer, this.order, this.lane0] = this.adopt(lane0.trackers, lane0.sequencer);
+    [this.sequencer, this.order, this.quicOrder, this.lane0] = this.adopt(lane0.trackers, lane0.sequencer);
     this.held = [];
     this.heldFrom = 0;
     this.barrier = null;
@@ -472,6 +561,8 @@ export class Coordinator {
       if (!this.dead.has(s)) this.options.send(s, { type: 'reset', epoch: this.epoch }, []);
     }
     this.keyHome.clear();
+    this.quicHome.clear();
+    this.laneZeroMet.clear();
     this.datagramKey.clear();
     this.datagramShard.clear();
     this.tlsMaps = Array.from({ length: this.shards + 1 }, () => new Map());
@@ -480,6 +571,7 @@ export class Coordinator {
     this.lane0Tls.reset();
     this.crossLane = 0;
     this.barrierMismatch = 0;
+    this.quicMismatch = 0;
     this.perLane.fill(0);
     this.checkIdle();
   }
@@ -558,6 +650,7 @@ export class Coordinator {
       if (this.nextEmit === null) this.nextEmit = frame.id;
       const lane = frameLane(frame.bytes, frame.linktype);
       if (lane.lane === 'tcp') this.routeSegment(frame, lane);
+      else if (lane.lane === 'quic') this.routeQuic(frame, lane);
       else if (isTcpFragment(lane)) this.routeFragment(frame, lane);
       else this.dissectHere(frame);
     }
@@ -654,6 +747,102 @@ export class Coordinator {
     this.queued(shard);
     this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes });
     this.barrier = { id: frame.id, shard, hint };
+  }
+
+  /**
+   * A UDP datagram QUIC takes (`QuicLane`): to the shard holding its flow, with
+   * the answers its dissection will ask of the QUIC order.
+   *
+   * Everything the dissection asks is answered here, in frame order, and shipped
+   * with the frame: whether the flow had a long header before (`known`), which
+   * id the resolver matches, and the connection's number. A short header
+   * dispatched behind its long header, still queued on the same shard, is
+   * therefore known and matched as the single Worker would have found it.
+   *
+   * **A forget goes to whichever lane holds the flow, and ahead of the frame
+   * that caused it - the frame's own shard included.** The single Worker forgets
+   * inside `noteLongHeader`, which `udpTransport` calls after the datagram is
+   * decrypted and its CRYPTO fragments are added, and before `readStreams`; of
+   * those only `readStreams` reads state across flows (`streams`,
+   * `totalPendingBytes`), and the forgotten flow is never this datagram's own.
+   * So a shard that forgets before it dissects, rather than inside, leaves the
+   * dissection reading the same things (`scripts/pipeline/quic-shards.ts`).
+   */
+  private routeQuic(frame: CoordFrame, lane: QuicLane): void {
+    const home = this.quicHome.get(lane.flow);
+    // A flow lane 0 met first stays there, its state in one place.
+    if (home === 0) {
+      this.dissectHere(frame);
+      return;
+    }
+    // What the dissection will ask, read without changing the order. Null:
+    // QUIC will not claim it, so it is plain UDP, which lane 0 dissects and
+    // asks the real order for itself.
+    const route = readQuicRoute(frame.bytes, lane, this.quicOrder);
+    if (route === null) {
+      this.dissectHere(frame);
+      return;
+    }
+    const shard = home !== undefined ? home - 1 : this.shardFor(this.route === 'pair' ? lane.pair : lane.flow);
+    if (shard === null || shard < 0) {
+      this.dissectHere(frame);
+      return;
+    }
+    // The coordinator's own numbering, on behalf of the shard: not lane 0's
+    // lookup, so it is not watched.
+    const order = this.quicOrder;
+    const watcher = order.watcher;
+    order.watcher = null;
+    let number: number | undefined;
+    try {
+      if (route.walk.long) {
+        const noted = order.noteLongHeader(lane.flow, route.walk.connectionIds, route.walk.emptyDcid);
+        for (const gone of noted.forgotten) this.forgetQuicEverywhere(gone);
+        number = noted.number;
+      } else {
+        number = order.connectionForFlow(lane.flow, route.matched);
+      }
+    } finally {
+      order.watcher = watcher;
+    }
+    if (!this.quicHome.has(lane.flow)) this.quicHome.set(lane.flow, shard + 1);
+    const conversations = this.sequencer.conversations;
+    const eth = conversations.eth.observe(lane.srcMac, lane.dstMac, frame.tsUs);
+    const ip = conversations[lane.family].observe(lane.src, lane.dst, frame.tsUs);
+    const udpA = `${lane.src}:${lane.srcPort}`;
+    const udpB = `${lane.dst}:${lane.dstPort}`;
+    const udp = conversations.udp.observe(udpA, udpB, frame.tsUs);
+    this.writers[shard].quic(frame, lane.family,
+      { a: lane.srcMac, b: lane.dstMac, facts: eth }, { a: lane.src, b: lane.dst, facts: ip },
+      { a: udpA, b: udpB, facts: udp },
+      { flow: lane.flow, known: route.known, resolveAt: route.walk.resolveAt, matched: route.matched, long: route.walk.long, number });
+    this.queued(shard);
+    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes });
+  }
+
+  /** A flow the QUIC order forgot: dropped from the lane that holds it, ahead of whatever is queued next. */
+  private forgetQuicEverywhere(flow: string): void {
+    const home = this.quicHome.get(flow);
+    this.quicHome.delete(flow);
+    if (home === undefined || home === 0 || this.laneZeroMet.delete(flow)) this.lane0.trackers.quic.forget(flow);
+    if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].quicForget(flow);
+  }
+
+  /** A long header or numbering lane 0's trackers made on the real QUIC order. */
+  private laneZeroQuic(flow: string, forgotten: readonly string[]): void {
+    for (const gone of forgotten) {
+      const home = this.quicHome.get(gone);
+      this.quicHome.delete(gone);
+      this.laneZeroMet.delete(gone);
+      // Lane 0's tracker forgets its own as part of this same call.
+      if (home !== undefined && home !== 0 && !this.dead.has(home - 1)) this.writers[home - 1].quicForget(gone);
+    }
+    const home = this.quicHome.get(flow);
+    if (home === undefined) this.quicHome.set(flow, 0);
+    else if (home !== 0) {
+      this.crossLane += 1;
+      this.laneZeroMet.add(flow);
+    }
   }
 
   private rememberDatagram(datagram: string, key: string): void {

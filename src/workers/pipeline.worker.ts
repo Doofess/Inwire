@@ -57,7 +57,7 @@ import type {
   FromPipeline, PipelineInterface, ToPipeline,
 } from '../services/pipeline/protocol';
 import type { Packet, ProtocolLayer } from '../types/packet';
-import { Coordinator, WatchedTcpOrder, flushTake, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
+import { Coordinator, flushTake, laneZero, parallelRoomAgain, type Merged, type PackedRef } from '../services/pipeline/coordinator';
 import { PackSender, PackedFlush } from '../services/pipeline/rowPack';
 import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
 import { mergeRowSide } from '../services/pipeline/rowSteps';
@@ -159,7 +159,7 @@ let interfaces: PipelineInterface[] = [];
 let sequencer = new Sequencer();
 let tcpTracker = new TcpStreamTracker(sequencer);
 let icmpTracker = new IcmpEchoTracker();
-let quicTracker = new QuicFlowTracker();
+let quicTracker = new QuicFlowTracker(sequencer);
 let dnsTracker = new DnsTracker();
 let l3Tracker = new L3Tracker(sequencer);
 
@@ -447,17 +447,6 @@ const SHARD_CACHE_FRAMES = 2_000;
 /** When rows were last posted to the app, for `afterMerge`'s cadence. */
 let lastPostedAt = 0;
 
-/** Lane 0's trackers for a new capture, numbering through a watched TCP order. */
-function laneZero(): { trackers: { tcp: TcpStreamTracker; icmp: IcmpEchoTracker; quic: QuicFlowTracker; dns: DnsTracker; l3: L3Tracker }; sequencer: Sequencer } {
-  const fresh = new Sequencer(new WatchedTcpOrder());
-  return {
-    sequencer: fresh,
-    trackers: {
-      tcp: new TcpStreamTracker(fresh), icmp: new IcmpEchoTracker(), quic: new QuicFlowTracker(),
-      dns: new DnsTracker(), l3: new L3Tracker(fresh),
-    },
-  };
-}
 
 function hostMessage(): ToShard {
   return {
@@ -699,7 +688,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   sequencer = new Sequencer();
   tcpTracker = new TcpStreamTracker(sequencer);
   icmpTracker = new IcmpEchoTracker();
-  quicTracker = new QuicFlowTracker();
+  quicTracker = new QuicFlowTracker(sequencer);
   dnsTracker = new DnsTracker();
   l3Tracker = new L3Tracker(sequencer);
   recorder = makeRecorder();

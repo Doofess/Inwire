@@ -20,7 +20,7 @@ import { wireGuardFacts } from './wireguard';
 import { dissectXml } from './xml';
 import { dissectEsp, dissectIsakmp } from './isakmp';
 import { dissectDtls, freshDtlsConversation, looksLikeDtls } from './dtls';
-import { dissectLdap, freshLdapConversation, looksLikeLdap } from './ldap';
+import { dissectLdap, freshLdapConversation } from './ldap';
 import { dissectEnv } from '../dissect/dissectEnv';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
@@ -34,9 +34,10 @@ import { buildQuicTlsLayer } from './tls';
 import { dissectNtp, dissectStun } from './udpApps';
 import { dataLayer } from './mediaType';
 import { findUdpPort } from './dispatch';
-import { dissectCflow, isCflowPort } from './cflow';
-import { VXLAN_HEADER_LENGTH, isVxlanPort, readVxlanHeader } from './vxlan';
-import { dissectTzsp, isTzspPort, TZSP_ENCAP_ETHERNET, TZSP_ENCAP_RAW_IP } from './tzsp';
+import { udpBranch } from './udpBranch';
+import { dissectCflow } from './cflow';
+import { VXLAN_HEADER_LENGTH, readVxlanHeader } from './vxlan';
+import { dissectTzsp, TZSP_ENCAP_ETHERNET, TZSP_ENCAP_RAW_IP } from './tzsp';
 import { MemoryTemplateStore } from '../flow/flowExport';
 import { dissectRtp, looksLikeRtp, rtpHeader } from './rtp';
 import { sdpOfSip } from './sdp';
@@ -101,16 +102,19 @@ export function dissectUdpTransport(
   // wire-format decode, everything else gets the literal-prefix scan.
   const udpPayloadStart = transportOffset + 8;
   const isQuic = srcPort === 443 || dstPort === 443;
-  const isSsdp = srcPort === 1900 || dstPort === 1900;
   const isDhcp = (srcPort === 67 || srcPort === 68) && (dstPort === 67 || dstPort === 68);
-  const isDhcpv6 = (srcPort === 546 || srcPort === 547) && (dstPort === 546 || dstPort === 547);
-  // Which leaf protocol claims these ports, if any. Resolved once here rather
-  // than as a branch per protocol - the table is in `dissectors/udpDispatch.ts`.
-  const subdissector = findUdpPort(srcPort, dstPort, dstIp);
 
   // The UDP header's Length field counts the 8-byte header itself, but
   // The reference analyzer's "Len=" - like TCP's - reports payload only.
   const udpPayloadLen = Math.max(0, udpLen - 8);
+
+  // Which subdissector takes the datagram: the precedence is `udpBranch.ts`'s,
+  // shared with the lane router that predicts this decision from the headers.
+  const branch = udpBranch(rawBytes, udpPayloadStart, Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen),
+    srcPort, dstPort, dstIp);
+  // Which leaf protocol claims these ports, if any. Resolved once here rather
+  // than as a branch per protocol - the table is in `dissectors/udpDispatch.ts`.
+  const subdissector = branch === 'port' ? findUdpPort(srcPort, dstPort, dstIp) : null;
   // The datagram the capture did not keep all of - a snaplen. A dissector is
   // given what was kept; this is how the row says why it may be short.
   const payloadCut = udpPayloadStart + udpPayloadLen > rawBytes.length && udpLen >= 8;
@@ -129,7 +133,7 @@ export function dissectUdpTransport(
   const protocolTokens: string[] = [];
   let embeddedFrame: TransportResult['embeddedFrame'];
 
-  if (isDhcp || isDhcpv6) {
+  if (branch === 'dhcp') {
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
     const dhcp = isDhcp
       ? dissectDhcp(rawBytes, udpPayloadStart, payloadEnd)
@@ -140,7 +144,7 @@ export function dissectUdpTransport(
       extraLayers.push(dhcp.layer);
       Object.assign(dhcpFields, dhcp.fields);
     }
-  } else if (isVxlanPort(srcPort, dstPort) && readVxlanHeader(rawBytes, udpPayloadStart, Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen)) !== null) {
+  } else if (branch === 'vxlan') {
     // An overlay's Ethernet frame, drawn after the UDP layer that carried it,
     // as the reference draws it; the frame itself is the network layer's
     // (`decodeMirroredEthernet`), which owns the columns it decides.
@@ -154,7 +158,7 @@ export function dissectUdpTransport(
     protocolTokens.push('vxlan');
     Object.assign(appFields, vxlan.fields);
     embeddedFrame = { offset: udpPayloadStart + VXLAN_HEADER_LENGTH, end: payloadEnd, kind: 'ethernet' };
-  } else if (isTzspPort(srcPort, dstPort)) {
+  } else if (branch === 'tzsp') {
     // A router's mirrored packet. The header is read here; the frame inside
     // is dissected through by the network layer, which owns the columns it
     // decides (`decodeEmbeddedFrame`).
@@ -176,7 +180,7 @@ export function dissectUdpTransport(
         extraLayers.push(dataLayer(rawBytes.subarray(frame.offset, frame.end)));
       }
     }
-  } else if (isCflowPort(srcPort, dstPort)) {
+  } else if (branch === 'cflow') {
     // NetFlow and IPFIX: a record per flow from a router to its collector.
     // Templates and sequence numbers are the exporter's, kept by the L3
     // tracker under both ends of the datagram - the reference's keying.
@@ -197,7 +201,7 @@ export function dissectUdpTransport(
       protocolTokens.push('cflow');
       Object.assign(appFields, cflow.fields);
     }
-  } else if (subdissector !== null) {
+  } else if (branch === 'port' && subdissector !== null) {
     // Every leaf UDP protocol - one label, one Info line, one tree layer and
     // a bag of fields - goes through `dissectors/udpDispatch.ts` rather than
     // through a branch of its own here. See that module for why.
@@ -210,7 +214,7 @@ export function dissectUdpTransport(
       protocolTokens.push(read.token ?? subdissector.token);
       Object.assign(appFields, read.fields);
     }
-  } else if (srcPort === 500 || dstPort === 500) {
+  } else if (branch === 'ike') {
     // IKE, unencapsulated.
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
     const ike = dissectIsakmp(rawBytes, udpPayloadStart, payloadEnd);
@@ -221,7 +225,7 @@ export function dissectUdpTransport(
       protocolTokens.push('isakmp');
       Object.assign(appFields, ike.fields);
     }
-  } else if (srcPort === 4500 || dstPort === 4500) {
+  } else if (branch === 'natt') {
     // NAT traversal (RFC 3948): one port for IKE and ESP behind a NAT, told
     // apart by four zero bytes - the non-ESP marker - in front of IKE, and a
     // lone 0xFF that keeps the NAT's mapping alive.
@@ -264,8 +268,7 @@ export function dissectUdpTransport(
         Object.assign(appFields, esp.fields);
       }
     }
-  } else if ((srcPort === 389 || dstPort === 389) && looksLikeLdap(rawBytes, udpPayloadStart,
-    Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen))) {
+  } else if (branch === 'cldap') {
     // CLDAP (RFC 1798, MS-ADTS 6.3.3): LDAP in one datagram, which is how a
     // Windows machine finds a domain controller - a search for `Netlogon`
     // answered with the controller's name, site and roles. The reference
@@ -286,7 +289,7 @@ export function dissectUdpTransport(
       protocolTokens.push('cldap');
       Object.assign(appFields, ldap.fields);
     }
-  } else if (srcPort === 3702 || dstPort === 3702) {
+  } else if (branch === 'wsd') {
     // WS-Discovery: SOAP over UDP, which the reference hands to its XML
     // dissector. The column says so - `UDP/XML` - and Info stays the
     // datagram's own, with no URL lifted out of the document.
@@ -297,7 +300,7 @@ export function dissectUdpTransport(
       extraLayers.push(dissectXml(rawBytes, udpPayloadStart, payloadEnd));
       protocolTokens.push('xml');
     }
-  } else if (nbnsPort) {
+  } else if (branch === 'nbns') {
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
     const nbns = dissectNbns(rawBytes, udpPayloadStart, payloadEnd);
     if (nbns) {
@@ -308,7 +311,7 @@ export function dissectUdpTransport(
       Object.assign(dnsFields, nbns.fields);
       if (nbns.resolved.length > 0) resolvedNames = nbns.resolved;
     }
-  } else if (dnsPortLabel) {
+  } else if (branch === 'dns' && dnsPortLabel) {
     const multicast = dnsPortLabel === 'MDNS';
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
     const parsed = parseDnsMessage(rawBytes, udpPayloadStart, payloadEnd);
@@ -346,7 +349,7 @@ export function dissectUdpTransport(
         if (dns.resolved.length > 0) resolvedNames = dns.resolved;
       }
     }
-  } else if (isSsdp) {
+  } else if (branch === 'ssdp') {
     const payloadEnd = Math.min(rawBytes.length, udpPayloadStart + udpPayloadLen);
     const ssdp = dissectSsdp(rawBytes, udpPayloadStart, payloadEnd);
     if (ssdp) {
@@ -365,7 +368,7 @@ export function dissectUdpTransport(
         ? `${START_LINE_DECODER.decode(rawBytes.subarray(udpPayloadStart, udpPayloadStart + lineEnd)).replace(/\r$/, '')} `
         : '';
     }
-  } else if (isQuic) {
+  } else if (branch === 'quic') {
     // A short header is only identifiable as QUIC in the context of a
     // handshake already seen on this flow, so packets that precede one stay
     // plain UDP - which is what the reference analyzer reports for them too.

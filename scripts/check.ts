@@ -37,6 +37,7 @@ const NOT_TESTS: Record<string, string> = {
     'helper; the one way a script starts the app, in the background (INWIRE_BACKGROUND_WINDOW); '
     + 'every script that launches Electron imports it',
   'parity/treeOracle.ts': 'helper; every script that imports it is run instead',
+  'pipeline/digest-print.ts': 'measurement; prints one hash per capture so two builds can be compared, needs the fixtures',
   'agent/sync-version.ts':
     'generator; WRITES local-agent/agent_version.py, agent-rs/Cargo.toml and Cargo.lock '
     + 'from package.json. A check suite that rewrites its own inputs cannot fail - '
