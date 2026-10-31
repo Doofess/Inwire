@@ -1,0 +1,30 @@
+[package]
+name = "inwire-launcher"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+
+# The version IS the product version, like agent-rs/Cargo.toml: `npm run
+# sync:version` rewrites it (and this crate's entry in Cargo.lock) from
+# package.json, and `scripts/agent/version.ts` fails on drift. The launcher
+# compares it against the ProductVersion of the Inwire.exe beside it, so a
+# launcher and an app from different installs refuse to pair (exit 65).
+
+# The installed command is `inwire.exe`; the package keeps the longer name so a
+# `cargo` listing never reads as the app.
+[[bin]]
+name = "inwire"
+path = "src/main.rs"
+
+# No dependencies, on purpose: the launcher is a handful of Win32 calls
+# declared by hand in src/platform.rs, and a crate would be code to audit in
+# the one binary that sits on the machine PATH.
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

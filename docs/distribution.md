@@ -47,6 +47,66 @@ A future endpoint product needs its own AppId, service, executable basename
 and directory, none of them above. It does not exist; `-Product EndpointAgent`
 answers "unavailable".
 
+## The `inwire` command
+
+A console launcher, `inwire.exe`, is installed beside the app and put on the machine PATH, so `inwire` in any terminal opens Inwire (or brings the running window forward) and returns.
+
+### Layout
+
+    <install dir>\Inwire.exe            the app (GUI subsystem)
+    <install dir>\bin\inwire.exe        the launcher (console subsystem, 0.3 MB, no dependencies)
+    <install dir>\agent\...             the capture agent
+
+`bin` holds the launcher and nothing else, so it is the only directory on PATH: putting the install directory there would make every file in it runnable by name from any prompt. The launcher is built from `launcher-rs/` by `npm run build:launcher` (cargo, then VERSIONINFO stamped by `scripts/distribution/stamp-launcher.ts`, then signed by `scripts/sign/sign.ps1`, in that order, as the agent is), is a payload file of the signed-installer check, and carries the product version (`npm run sync:version`, held by `scripts/agent/version.ts`).
+
+### What it accepts
+
+| invocation | result |
+|---|---|
+| `inwire` | start Inwire detached and return; if it is already running the app's own single-instance handler focuses the existing window (`app.requestSingleInstanceLock` and `second-instance` in `electron/main.ts`, which restores a minimised window and focuses it) |
+| `inwire --version` | prints `inwire <version>` |
+| `inwire --help` | prints the usage |
+| anything else | usage on stderr, exit 64 |
+
+"Anything else" is exact: `-h`, `/?`, `--Help`, `--help --version`, an extra argument, a non-UTF-8 argument. Nothing is forwarded to the app. `--help` and `--version` read nothing from disk and call nothing else.
+
+The app is found from the launcher's own path only: `<launcher>\..\..\Inwire.exe`, and the launcher must be in a folder named `bin` (case-insensitive). Neither the current directory nor PATH is consulted, so a planted `Inwire.exe` in either is never run. It is started by absolute path, with no arguments, from the app's folder, with no console and the launcher's standard handles not inherited, so `inwire | more` or a script capturing its output ends when the launcher does.
+
+### Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | printed help or version, or started Inwire |
+| 64 | usage error |
+| 65 | the `Inwire.exe` beside it reports a different product version (or none); `x.y.z` against ProductVersion, tolerating a trailing `.0` only. A launcher and an app from different installs refuse to pair. |
+| 66 | payload missing: no `Inwire.exe` at the expected place, or the launcher is not at `<app>\bin\inwire.exe` |
+| 71 | the launch failed (the OS error is shown), or whether the terminal is elevated could not be determined |
+| 77 | the terminal is elevated; nothing is started |
+
+### Elevated terminals
+
+Inwire does not run as an administrator (the dissector must not parse hostile bytes with that token), so from an elevated prompt `inwire` prints that and to open a normal terminal, and exits 77 without starting anything. If elevation cannot be read from the process token it refuses with 71 rather than guess.
+
+### The PATH entry
+
+The installer owns exactly one segment of the **machine** PATH: `{app}\bin`.
+
+- **Adding.** After the files and the service are in place it reads `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\Path` as its raw, unexpanded text (`RegQueryStringValue` returns a `REG_EXPAND_SZ` value without expanding it; `scripts/distribution/path-tests.iss` checks this against the real Inno runtime, it is not taken from the documentation), appends `;{app}\bin` and writes it back with `RegWriteExpandStringValue`, so the type stays `REG_EXPAND_SZ`. Every other entry keeps its exact text, order, case, quoting and empty segments (`%SystemRoot%\system32` is not expanded). The match for "already there" ignores case, surrounding quotes and a trailing backslash, and is for comparison only. Re-installing and upgrading are idempotent.
+- **A different `inwire`.** Before adding, every other absolute PATH entry (environment variables expanded for this check only) is searched for `inwire.exe`, `.com`, `.bat`, `.cmd` or `.ps1`. If one exists the installer does not touch PATH, logs it, and shows a message naming that file and the absolute path of Inwire's own launcher. The user's own PATH is not read.
+- **Ownership.** The exact entry added is recorded in `HKLM\Software\Inwire\LauncherPathEntry`, written before PATH is. An install into a different folder first removes the entry the earlier install recorded.
+- **Uninstalling.** Only if that value exists, segments equal to it are removed (all other text is left byte-identical), PATH is written back, and the value and its key are deleted. An `{app}\bin` that was already on PATH before Inwire was installed has no marker and is never removed. One cosmetic exception to "returns what it started from": a PATH that ended in `;` loses that trailing empty segment when our entry, appended after it, is removed.
+- **New terminals.** `ChangesEnvironment=yes` makes Setup broadcast `WM_SETTINGCHANGE`, which Explorer, and so every terminal opened afterwards, picks up. A terminal that was already open does not change its PATH; open a new one. (VS Code's terminals and some shells ignore the broadcast until restarted.)
+
+### Why an executable and not a script shim
+
+- A `.ps1` shim is refused outright under the default Restricted/AllSigned policies (measured: it fails under `-ExecutionPolicy Restricted`; the exe prints `inwire <version>`).
+- A `.cmd` shim works only from a shell: a caller that starts a process without one (Node's `spawnSync('inwire')`, Python's `subprocess` without `shell=True`) gets `ENOENT` for it and the exe's version for the exe, measured with Node 26 on this machine. It also runs the install path through `cmd`'s quoting, where `&`, `%` and `^` in a folder name are hazards.
+- The launcher is not slower: median of 20 runs of `inwire --version` was 18.1 ms against 22.7 ms for `cmd /c` on a one-line `.cmd` that echoes a version. It is 338,944 bytes (stamped, with the app icon).
+
+### Tested with
+
+`scripts/distribution/launcher-tests.ps1` (needs `npm run build:launcher`; the PATH tests need Inno Setup 6 or 7). It runs `installer/path.iss` under Inno (60 table cases), then drives the built exe in a `...\Inwïre & co\bin\inwire.exe` layout against compiled stand-ins for `Inwire.exe` (a matching version, a matching version with a `.0` fourth group, a mismatched one, a planted one in the current directory and on PATH) under Windows PowerShell 5.1.26100 and PowerShell 7.6.9, then `powershell -ExecutionPolicy Restricted -Command "& '<path>' --version"` and Git Bash 5.3.15. The 77 case runs only from an elevated prompt and is otherwise printed as SKIP.
+
 ## Release files
 
 | File | Role |

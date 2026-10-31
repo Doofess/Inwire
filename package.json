@@ -35,6 +35,7 @@
     "start:app": "npm run build && node electron/start.cjs",
     "pack": "npm run build && electron-builder --dir",
     "build:agent": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/agent/build-rust.ps1",
+    "build:launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/distribution/build-launcher.ps1",
     "dist:signed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign/build-signed.ps1",
     "lint": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "sync:version": "tsx scripts/agent/sync-version.ts",

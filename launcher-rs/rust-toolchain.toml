@@ -1,0 +1,5 @@
+# Channel only, never the host: see agent-rs/rust-toolchain.toml for why. Build
+# with `npm run build:launcher` (scripts/distribution/build-launcher.ps1), or
+# `cargo +stable-x86_64-pc-windows-gnu build --release --locked`.
+[toolchain]
+channel = "stable"

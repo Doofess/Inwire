@@ -40,7 +40,7 @@
   compile error.
 
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sign\verify-payload.ps1 release\win-unpacked agent-rs\dist\inwire-agent-windows.exe
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sign\verify-payload.ps1 release\win-unpacked agent-rs\dist\inwire-agent-windows.exe launcher-rs\dist\inwire.exe
 #>
 [CmdletBinding()]
 param(
