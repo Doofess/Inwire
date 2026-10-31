@@ -107,6 +107,156 @@ The installer owns exactly one segment of the **machine** PATH: `{app}\bin`.
 
 `scripts/distribution/launcher-tests.ps1` (needs `npm run build:launcher`; the PATH tests need Inno Setup 6 or 7). It runs `installer/path.iss` under Inno (60 table cases), then drives the built exe in a `...\Inwïre & co\bin\inwire.exe` layout against compiled stand-ins for `Inwire.exe` (a matching version, a matching version with a `.0` fourth group, a mismatched one, a planted one in the current directory and on PATH) under Windows PowerShell 5.1.26100 and PowerShell 7.6.9, then `powershell -ExecutionPolicy Restricted -Command "& '<path>' --version"` and Git Bash 5.3.15. The 77 case runs only from an elevated prompt and is otherwise printed as SKIP.
 
+## The PowerShell bootstrap
+
+`install-inwire.ps1` downloads the signed desktop installer, verifies it and
+runs it. It is built (`scripts/distribution/build-bootstrap.ps1`) into one
+standalone script, `release-artifacts/bootstrap/install-inwire.ps1`: the core
+logic (`distribution/Install-Inwire.Core.psm1`) is inlined, the policy is
+embedded as a literal, and nothing is imported or read at runtime. Windows
+PowerShell 5.1 and PowerShell 7 both run it. It never changes the execution
+policy and never evaluates text as code; a machine whose policy blocks
+unsigned or downloaded scripts is the person's to configure.
+
+> Not live: see [Release status](#release-status). Built today, a bootstrap
+> has no pinned publisher and exits 10.
+
+### Usage
+
+```powershell
+.\install-inwire.ps1 [-Product Desktop|EndpointAgent] [-Version 1.2.3] [-Launch] [-Repair]
+```
+
+| Switch | Meaning |
+|---|---|
+| `-Product` | `Desktop` (default). `EndpointAgent` does not exist yet and answers exit 20 before anything else. |
+| `-Version` | Must be `x.y.z` and exactly the version the descriptor publishes (one row per product). Another value is exit 11 naming the published version. An older value than what is installed is exit 10. |
+| `-Launch` | After a successful install, start Inwire through `<InstallLocation>\bin\inwire.exe`. |
+| `-Repair` | Install over an installed state that cannot be read, or the published version again over the same version. |
+
+It prints a short summary and `exit`s with the contract code. The same result is
+available as an object from `Invoke-InwireInstall` (fields `State`, `InstallPath`,
+`InstalledVersion`, `Launched`, `LaunchMessage`, `ErrorCode`, `Message`,
+`ExitCode`, `DiagnosticPath`), which is what the tests drive.
+
+### Exit codes
+
+| Code | State | Meaning |
+|---|---|---|
+| 0 | Installed, AlreadyInstalled | Installed and read back, or the same or a newer version is already there (nothing downloaded). |
+| 2 | Cancelled | The UAC prompt was declined, or the installer reported it was cancelled (Inno codes 2 and 5). |
+| 10 | Unavailable, Failed | Not Windows, not x64, no pinned publisher in this build, a malformed `-Version`, or a refused downgrade. |
+| 11 | Failed | The descriptor or the download could not be fetched, or the descriptor is invalid, or the version is not published. |
+| 12 | Failed | The download is not the declared size or SHA-256, or the signature is not `Valid` and pinned. Setup was not run. |
+| 13 | Failed | Setup failed, timed out, reported a code this bootstrap does not map, exited 0 but the registry does not read back the published version, or the installed state was unreadable without `-Repair`. |
+| 14 | Installed | Installed, but `-Launch` could not start Inwire (including: this PowerShell is elevated). |
+| 20 | Unavailable | `-Product EndpointAgent`, which does not exist yet. |
+| 3010 | RebootRequired | Installed and read back; Windows must restart. Not launched. |
+
+The installer's own code is kept in `ErrorCode` (`12345` stays `12345`). A raw
+non-zero code is never read as success.
+
+### What it verifies, in order
+
+Each step's failure stops before the next one.
+
+1. The platform: Windows and x64. arm64 is refused (x64 under emulation is untested, so it is not claimed).
+2. `-Product EndpointAgent` while the policy says it is unavailable: exit 20, no other call.
+3. The policy pins at least one publisher certificate; `-Version` has the `x.y.z` shape.
+4. The installed state, from the uninstall key, HKLM 64-bit view (`}}_is1`, the double brace is real). Versions are compared **numerically**, group by group, never as text.
+5. The release descriptor from `descriptorUrl`, parsed strictly (it must be a JSON object; unknown keys, a bad row or a second row for a product reject the whole document). The rules mirror `scripts/distribution/release.ts`; `distribution/fixtures/release-vectors.json` is run by both and must agree.
+6. No downgrade. The same version installs again only with `-Repair`.
+7. A fresh private working folder under the user's temp, with fixed names `Inwire-Setup.exe` and `setup.log`.
+8. The download (below), checked for size and SHA-256 as it streams.
+9. The publisher: Authenticode status `Valid` **and** the SHA-256 of the signer certificate's DER bytes in the pinned list. A valid signature by anyone else is exit 12.
+10. Only then elevation and setup.
+11. The installer's code is mapped; the registry is read back (`Installed` and exactly the published version) before anything is called a success.
+
+The size, hash and publisher checks all happen before UAC is asked for. Nothing
+is trusted from the descriptor beyond what the embedded policy allows: the
+hosts and the pins are in the signed script, not in the downloaded file.
+
+### Download, proxy, timeouts and limits
+
+- One `HttpClient`, the system proxy with the user's default credentials, certificate validation untouched, TLS 1.2 added to what is already enabled.
+- Redirects (301, 302, 303, 307, 308) are followed by hand, at most five. Every URL, the first and each `Location`, must pass the descriptor's rule: `https`, the host equal to an allowed host (no suffix match), no credentials, no port (even `:443`) and no fragment. An https-to-http redirect is refused. A relative `Location` is resolved against the current URL.
+- A missing `Content-Length`, or one different from the declared size, is refused. The body is counted as it arrives and reading stops the moment it passes the declared size. The declared size is at most 512 MiB.
+- The SHA-256 is computed incrementally while the file is written to a `.partial` file, which becomes `Inwire-Setup.exe` only after both checks pass.
+- Timeouts: the whole download 15 minutes, the descriptor 30 seconds with a 1 MiB cap, setup 30 minutes.
+- Retries: at most two more attempts, only for faults that can pass (a 5xx answer, a timeout, a network or I/O error), each into a fresh partial file. A 4xx answer, a rule violation, or a size or hash mismatch is never retried.
+- No proxy credentials or full exception objects are logged; failures carry one line of text.
+
+### Elevation and launch
+
+- Not elevated: the bootstrap starts `System32\WindowsPowerShell\v1.0\powershell.exe` with `-Verb RunAs` and a **constant** command line, `-NoProfile -NonInteractive -EncodedCommand <base64 of a fixed script>`. The installer and log paths reach that script in environment variables (`INWIRE_BOOT_INSTALLER`, `INWIRE_BOOT_LOG`), as `electron/updateCenter/elevate.ts` does, so no path is ever quoted into a privileged command. The script checks the file names, runs the installer with exactly `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010 /NOFORCECLOSEAPPLICATIONS "/LOG=<log>"`, waits, and exits with the installer's code (70001 for its own faults).
+- Already elevated: the installer is run directly with the same switches.
+- A declined UAC prompt (a `Win32Exception` with code 1223, found in the exception chain, never by message text) is exit 2 with a UAC message, distinct from the installer's own cancel.
+- On the 30-minute timeout nothing is stopped: exit 13, `ErrorCode` `Timeout`, the message says setup may still be running, and the working folder is kept.
+- `-Launch` runs only when the install succeeded (or the same or a newer version was already present) and only from a normal shell. From an elevated shell the install completes, `Launched` is false, the message says to run `inwire` from a normal terminal, and the exit code is 14. It starts the absolute path `<InstallLocation>\bin\inwire.exe` read from the uninstall key, never `Path` and never the current directory. After a 3010 it does not launch and says to restart first.
+- The working folder is removed on success, cancel and any failure before setup ran (so an installer that failed verification does not sit in temp); it is kept after a setup failure or timeout and named in `DiagnosticPath`.
+
+### `-Repair`
+
+Without `-Repair`, an installed state that cannot be read (the key exists but
+the version does not parse, or the registry is unreadable) is exit 13 with a
+message to rerun with `-Repair`: the bootstrap will not guess what it is
+installing over. With `-Repair` it proceeds as for an absent install. For an
+Inwire that reads fine, `-Repair` reinstalls the published version over the same
+one.
+
+### Tests
+
+`scripts/distribution/bootstrap-tests.ps1` runs under both editions
+(`powershell -NoProfile -File ...`, `pwsh -NoProfile -File ...`), and
+`scripts/distribution/powershell-tests.ts` runs it inside `npm run check` on
+Windows (it prints SKIP elsewhere). The state machine is tested against a
+recording fake platform, the downloader against a fake transport, and the pin
+comparison against an in-memory certificate. The bundle section signs a
+throwaway copy with this PC's certificate when there is one and confirms that
+changing one character of an embedded pin makes the signature read
+`HashMismatch`.
+
+### Still blocked, and not verified
+
+- A public signing certificate (so a bootstrap can carry a pin), a reachable `updates.inwire.app`, and a WinGet package ID. Until the first, a built bootstrap exits 10.
+- Not exercised by any test: a real UAC prompt, the elevated `-EncodedCommand` wrapper running a real installer (including that the environment variables reach the elevated PowerShell and that `ExitCode` is readable from a non-elevated parent), and a real proxy. They are the production adapters' only untested lines; run them once by hand against a signed release before publishing instructions.
+- The script's timestamp is the countersignature `Set-AuthenticodeSignature` adds. A production build with this PC's certificate on 2026-10-31 came back timestamped and `Valid`; the tests themselves make no network call.
+- A same-user process could swap the downloaded file between the check and the elevated run (the working folder is private to the user, the same trust boundary as the Update Center's download).
+
+## The Git Bash bridge
+
+`distribution/install-inwire.sh` runs the bootstrap you already downloaded and
+verified, from Git Bash on Windows. It installs the Windows desktop app; it is
+not a Linux or macOS installer.
+
+```bash
+bash install-inwire.sh [--product Desktop|EndpointAgent] [--version X.Y.Z] [--launch] [--repair] [--bootstrap PATH]
+```
+
+- The bootstrap is `install-inwire.ps1` beside the script unless `--bootstrap`
+  names it.
+- Product and version are checked before PowerShell runs (10 on a bad value),
+  because `powershell -File` binds a value starting with `-` as a parameter:
+  `--version -Launch` would otherwise launch. Arguments travel as an array;
+  nothing is evaluated.
+- PowerShell is `$SYSTEMROOT\System32\WindowsPowerShell\v1.0\powershell.exe`,
+  never `PATH`, `pwsh` or the current directory. No `-ExecutionPolicy` flag is
+  passed, so a machine whose policy refuses the bootstrap refuses it here too.
+- Inno's slash switches stay inside PowerShell, where MSYS cannot rewrite them;
+  the bridge also sets `MSYS_NO_PATHCONV=1` for the call.
+- Linux, macOS and WSL are refused with 10 before anything runs. WSL stays
+  unadvertised until interop, the UAC prompt and the install location are
+  tested from it.
+- Exit codes are the bootstrap's, and 64 for a usage error. Reboot-required,
+  3010, reaches Bash as **194** (3010 mod 256, a POSIX limit); the bridge says
+  to restart.
+- There is no `curl | bash` form, and none is documented.
+
+Tested with `bash scripts/distribution/bash-tests.sh` under Git Bash 5.3.15
+(a fake PowerShell under a temporary `SYSTEMROOT`), and against the real
+Windows PowerShell 5.1 with the source bootstrap, which exits 10 (no pin) and
+20 (`--product EndpointAgent`) through the bridge unchanged.
+
 ## Release files
 
 | File | Role |

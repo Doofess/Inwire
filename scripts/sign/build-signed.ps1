@@ -18,6 +18,12 @@
     4. iscc /DSIGN           setup.iss runs step 3 again itself, then signs the
                              uninstaller and Inwire-Setup.exe
     5. sign.ps1 -Verify      on installer\output\Inwire-Setup.exe
+    6. build-bootstrap.ps1   the standalone PowerShell bootstrap, with the
+                             release policy's pins compiled in, signed by
+                             Set-AuthenticodeSignature (sign.ps1 reads PE
+                             files only) and read back, into
+                             release-artifacts\bootstrap\install-inwire.ps1
+                             (scripts/distribution/build-bootstrap.ps1)
 
   INWIRE_REQUIRE_SIGNING=1 is set for all of it, in this process, so every
   child inherits it: sign.ps1 normally warns and leaves a file unsigned when no
@@ -109,6 +115,9 @@ try {
   $setup = Join-Path $Root 'installer\output\Inwire-Setup.exe'
   Step 'sign.ps1 -Verify Inwire-Setup.exe' {
     & $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $Here 'sign.ps1') -Verify $setup
+  }
+  Step 'build-bootstrap.ps1' {
+    & $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\distribution\build-bootstrap.ps1')
   }
   Say "done: $setup"
 } finally {
