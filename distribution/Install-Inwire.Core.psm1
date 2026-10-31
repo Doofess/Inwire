@@ -584,22 +584,52 @@ function Get-InwireInstallerArguments {
 # (electron/updateCenter/elevate.ts keeps the same rule). It checks the file
 # names, never reads a missing exit code as success, and uses a code of its own
 # (70001) for its own faults.
+#
+# The file is the one thing a same-user process could swap between the
+# bootstrap's publisher check and this script, so the script proves the bytes
+# itself and runs only those: it opens the installer with read-only sharing
+# (writers, deletes and renames are refused until the handle is closed; an
+# earlier writer still holding the file makes the open fail), hashes that
+# stream against the descriptor's SHA-256 (INWIRE_BOOT_SHA256), requires a
+# Valid Authenticode signature whose signer certificate's SHA-256 is one of the
+# pins (INWIRE_BOOT_PINS, ';' or ',' separated), and starts it while the handle
+# is still held. Any value that is missing or not 64 hex characters is 70001.
 $script:InwireElevatedScript = (@(
   '$ErrorActionPreference = "Stop"',
+  '$fs = $null',
   'try {',
   '  $exe = $env:INWIRE_BOOT_INSTALLER',
   '  $log = $env:INWIRE_BOOT_LOG',
-  '  if (-not $exe -or -not $log) { exit 70001 }',
+  '  $want = $env:INWIRE_BOOT_SHA256',
+  '  $pinText = $env:INWIRE_BOOT_PINS',
+  '  if (-not $exe -or -not $log -or -not $want -or -not $pinText) { exit 70001 }',
   '  if ([IO.Path]::GetFileName($exe) -cne "Inwire-Setup.exe") { exit 70001 }',
   '  if ([IO.Path]::GetFileName($log) -cne "setup.log") { exit 70001 }',
   '  if ($log.Contains([string][char]34)) { exit 70001 }',
+  '  if ($want -cnotmatch "^[0-9a-fA-F]{64}\z") { exit 70001 }',
+  '  $pins = @($pinText -split "[,;]")',
+  '  foreach ($pin in $pins) { if ($pin -cnotmatch "^[0-9a-fA-F]{64}\z") { exit 70001 } }',
   '  if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 70001 }',
+  '  $fs = [IO.File]::Open($exe, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)',
+  '  $sha = [Security.Cryptography.SHA256]::Create()',
+  '  try { $hex = (($sha.ComputeHash($fs) | ForEach-Object { $_.ToString("x2") }) -join "") } finally { $sha.Dispose() }',
+  '  if ($hex -cne $want.ToLowerInvariant()) { exit 70001 }',
+  '  $sig = Get-AuthenticodeSignature -LiteralPath $exe',
+  '  if ([string]$sig.Status -cne "Valid") { exit 70001 }',
+  '  if ($null -eq $sig.SignerCertificate) { exit 70001 }',
+  '  $sha = [Security.Cryptography.SHA256]::Create()',
+  '  try { $signer = (($sha.ComputeHash($sig.SignerCertificate.RawData) | ForEach-Object { $_.ToString("x2") }) -join "") } finally { $sha.Dispose() }',
+  '  $trusted = $false',
+  '  foreach ($pin in $pins) { if ($pin.ToLowerInvariant() -ceq $signer) { $trusted = $true } }',
+  '  if (-not $trusted) { exit 70001 }',
   ('  $argv = ''' + $script:InwireInstallerSwitches + ' "/LOG='' + $log + ''"'''),
   '  $p = Start-Process -FilePath $exe -ArgumentList $argv -Wait -PassThru',
   '  if ($null -eq $p.ExitCode) { exit 70001 }',
   '  exit $p.ExitCode',
   '} catch {',
   '  exit 70001',
+  '} finally {',
+  '  if ($null -ne $fs) { $fs.Dispose() }',
   '}'
 ) -join "`n")
 
@@ -625,24 +655,98 @@ function Test-InwireUacDeclined {
   return $false
 }
 
-function Invoke-InwireProductionRunInstaller {
-  param([string]$InstallerPath, [string]$LogPath, [bool]$Elevated)
+# A strict 64-hex check for a hash or a pin (\z, not $, so a trailing newline fails).
+function Test-InwireHex64 {
+  param($Value)
+  return ($Value -is [string] -and $Value -cmatch '^[0-9a-fA-F]{64}\z')
+}
+
+# The already-elevated path. Same rule as the elevated script: open the installer
+# with read-only sharing (nobody can write, delete or rename it while the handle
+# is held), prove under that handle that it is the SHA-256 the descriptor
+# declared and that its signature is Valid and by a pinned signer, then start it
+# while still holding the handle and keep it until setup exits (or the wait
+# gives up). Returns the RunInstaller result shape; a refusal is Started = false.
+function Invoke-InwireLockedRun {
+  param([string]$InstallerPath, [string]$LogPath, [string]$Sha256, $Pins)
   $result = @{ Started = $false; ExitCode = $null; Declined = $false; TimedOut = $false; Reason = '' }
-  $argv = Get-InwireInstallerArguments $LogPath
+  $pinList = @($Pins)
+  if (-not (Test-InwireHex64 $Sha256)) { $result.Reason = 'The expected SHA-256 of the installer is missing or malformed.'; return $result }
+  if ($pinList.Count -lt 1) { $result.Reason = 'No publisher certificate pin was given.'; return $result }
+  foreach ($pin in $pinList) {
+    if (-not (Test-InwireHex64 $pin)) { $result.Reason = 'A publisher certificate pin is malformed.'; return $result }
+  }
+  $normalPins = [string[]]@($pinList | ForEach-Object { ([string]$_).ToLowerInvariant() })
+  $fs = $null
+  try {
+    $argv = Get-InwireInstallerArguments $LogPath
+    try {
+      $fs = [System.IO.File]::Open($InstallerPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    } catch {
+      $result.Reason = 'The installer could not be locked for reading: ' + (Get-InwireErrorText $_)
+      return $result
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hex = (($sha.ComputeHash($fs) | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally {
+      $sha.Dispose()
+    }
+    if ($hex -cne $Sha256.ToLowerInvariant()) {
+      $result.Reason = 'The installer on disk is not the file that was downloaded and checked.'
+      return $result
+    }
+    $sig = Get-AuthenticodeSignature -LiteralPath $InstallerPath
+    $ver = Test-InwireSignature $sig $normalPins
+    if ($ver.Ok -ne $true) { $result.Reason = [string]$ver.Reason; return $result }
+    $proc = $null
+    try {
+      $proc = Start-Process -FilePath $InstallerPath -ArgumentList $argv -PassThru -WindowStyle Hidden
+    } catch {
+      $result.Reason = 'Windows could not start setup: ' + (Get-InwireErrorText $_)
+      return $result
+    }
+    if ($null -eq $proc) { $result.Reason = 'Windows did not return a process for setup.'; return $result }
+    $result.Started = $true
+    try { $null = $proc.Handle } catch { }
+    if (-not $proc.WaitForExit($script:InwireInstallTimeoutMs)) {
+      $result.TimedOut = $true
+      return $result
+    }
+    $result.ExitCode = $proc.ExitCode
+    return $result
+  } catch {
+    $result.Reason = 'Setup could not be run: ' + (Get-InwireErrorText $_)
+    return $result
+  } finally {
+    if ($null -ne $fs) { $fs.Dispose() }
+  }
+}
+
+function Invoke-InwireProductionRunInstaller {
+  param([string]$InstallerPath, [string]$LogPath, [bool]$Elevated, [string]$Sha256 = '', $Pins = @())
+  $result = @{ Started = $false; ExitCode = $null; Declined = $false; TimedOut = $false; Reason = '' }
+  if ($Elevated) { return (Invoke-InwireLockedRun $InstallerPath $LogPath $Sha256 $Pins) }
+  [void](Get-InwireInstallerArguments $LogPath)
+  $pinList = @($Pins)
+  if (-not (Test-InwireHex64 $Sha256) -or $pinList.Count -lt 1) {
+    $result.Reason = 'The expected SHA-256 or the publisher pins are missing.'
+    return $result
+  }
   $proc = $null
   try {
-    if ($Elevated) {
-      $proc = Start-Process -FilePath $InstallerPath -ArgumentList $argv -PassThru -WindowStyle Hidden
-    } else {
-      $cmd = Get-InwireElevationCommand
-      $env:INWIRE_BOOT_INSTALLER = $InstallerPath
-      $env:INWIRE_BOOT_LOG = $LogPath
-      try {
-        $proc = Start-Process -FilePath $cmd.FilePath -ArgumentList $cmd.ArgumentList -Verb RunAs -PassThru -WindowStyle Hidden
-      } finally {
-        Remove-Item Env:\INWIRE_BOOT_INSTALLER -ErrorAction SilentlyContinue
-        Remove-Item Env:\INWIRE_BOOT_LOG -ErrorAction SilentlyContinue
-      }
+    $cmd = Get-InwireElevationCommand
+    $env:INWIRE_BOOT_INSTALLER = $InstallerPath
+    $env:INWIRE_BOOT_LOG = $LogPath
+    $env:INWIRE_BOOT_SHA256 = $Sha256
+    $env:INWIRE_BOOT_PINS = (($pinList | ForEach-Object { [string]$_ }) -join ';')
+    try {
+      $proc = Start-Process -FilePath $cmd.FilePath -ArgumentList $cmd.ArgumentList -Verb RunAs -PassThru -WindowStyle Hidden
+    } finally {
+      Remove-Item Env:\INWIRE_BOOT_INSTALLER -ErrorAction SilentlyContinue
+      Remove-Item Env:\INWIRE_BOOT_LOG -ErrorAction SilentlyContinue
+      Remove-Item Env:\INWIRE_BOOT_SHA256 -ErrorAction SilentlyContinue
+      Remove-Item Env:\INWIRE_BOOT_PINS -ErrorAction SilentlyContinue
     }
   } catch {
     if (Test-InwireUacDeclined $_.Exception) {
@@ -805,7 +909,7 @@ function New-InwireProductionPlatform {
     GetRelease = { param($Url) Get-InwireProductionRelease ([string]$Url) }
     Download = { param($Url, $DestPath, $SizeBytes, $Sha256) Invoke-InwireProductionDownload ([string]$Url) ([string]$DestPath) ([long]$SizeBytes) ([string]$Sha256) }
     VerifyPublisher = { param($Path, $Pins) Invoke-InwireProductionVerify ([string]$Path) $Pins }
-    RunInstaller = { param($Path, $LogPath, $Elevated) Invoke-InwireProductionRunInstaller ([string]$Path) ([string]$LogPath) ([bool]$Elevated) }
+    RunInstaller = { param($Path, $LogPath, $Elevated, $Sha256, $Pins) Invoke-InwireProductionRunInstaller ([string]$Path) ([string]$LogPath) ([bool]$Elevated) ([string]$Sha256) $Pins }
     LaunchDesktop = { param($LauncherPath) Invoke-InwireProductionLaunch ([string]$LauncherPath) }
     NewWorkDir = { New-InwireProductionWorkDir }
     RemoveWorkDir = { param($Path) Remove-InwireProductionWorkDir ([string]$Path) }
@@ -998,14 +1102,14 @@ function Invoke-InwireSteps {
       $ver = @{ Ok = $false; Reason = (Get-InwireErrorText $_) }
     }
     if ((Get-InwireField $ver 'Ok') -ne $true) {
-      return (Res 'Failed' 12 ('The publisher of the installer could not be verified:' + [string](Get-InwireField $ver 'Reason')) 'Publisher')
+      return (Res 'Failed' 12 ('The publisher of the installer could not be verified: ' + [string](Get-InwireField $ver 'Reason')) 'Publisher')
     }
 
     # 10. Run setup, elevating only if this PowerShell is not already.
     $St.Elevated = [bool](Invoke-InwireCall $Platform 'IsElevated')
     $run = $null
     try {
-      $run = Invoke-InwireCall $Platform 'RunInstaller' @($installer, $log, $St.Elevated)
+      $run = Invoke-InwireCall $Platform 'RunInstaller' @($installer, $log, $St.Elevated, [string]$row.Sha256, $Policy.PublisherCertificateSha256)
     } catch {
       $St.Keep = $true
       return (Res 'Failed' 13 ('Setup could not be run: ' + (Get-InwireErrorText $_)) 'RunInstaller')
@@ -1015,7 +1119,7 @@ function Invoke-InwireSteps {
     }
     if ((Get-InwireField $run 'TimedOut') -eq $true) {
       $St.Keep = $true
-      return (Res 'Failed' 13 ('Setup did not finish within 30 minutes. It may still be running; nothing was stopped. The setup log and the downloaded installer are kept in' + $work + '.') 'Timeout')
+      return (Res 'Failed' 13 ('Setup did not finish within 30 minutes. It may still be running; nothing was stopped. The setup log and the downloaded installer are kept in ' + $work + '.') 'Timeout')
     }
     if ((Get-InwireField $run 'Started') -ne $true) {
       $St.Keep = $true

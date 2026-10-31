@@ -1090,6 +1090,193 @@
       "name": "descriptor is a number",
       "valid": false,
       "descriptor": 1
+    },
+    {
+      "name": "invalid URL: no slashes after the scheme",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https:download.example.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: three slashes after the scheme",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https:///download.example.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: empty userinfo",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://@download.example.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: leading space",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": " https://download.example.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: trailing newline",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid/a.exe\n",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: tab inside the host",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.exa\tmple.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: percent-encoded dot in the host",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download%2Eexample.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: fullwidth letter in the host",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://ｄownload.example.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: ideographic full stop in the host",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download。example.invalid/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: backslash before an at sign",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https://download.example.invalid\\@evil.example/a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid URL: backslashes for slashes",
+      "valid": false,
+      "descriptor": {
+        "schema": 1,
+        "artifacts": [
+          {
+            "product": "Desktop",
+            "version": "1.2.3",
+            "architecture": "x64",
+            "url": "https:\\\\download.example.invalid\\a.exe",
+            "sizeBytes": 1048576,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ]
+      }
     }
   ]
 }

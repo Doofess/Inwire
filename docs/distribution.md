@@ -137,7 +137,13 @@ unsigned or downloaded scripts is the person's to configure.
 **Execution policy.** Windows client editions default to `Restricted`, under
 which PowerShell runs no script file at all, signed or not; this machine's
 `LocalMachine` policy is `RemoteSigned`, which runs a downloaded script only
-when its signature is valid. The bootstrap does not work around either. On a
+when its signature is valid. A script saved from a browser carries the mark of
+the web, so the first run also asks "Do you want to run software from this
+untrusted publisher?": the answer to give is `[R] Run once`. `[A] Always run`
+puts the publisher's certificate in the user's Trusted Publishers store, a
+permanent trust change instructions must not ask for. The bootstrap is never
+run with `-NonInteractive`, which would turn that question into a refusal.
+The bootstrap does not work around either policy. On a
 `Restricted` machine a person can start one PowerShell with
 `powershell -ExecutionPolicy RemoteSigned -File .\install-inwire.ps1`, which
 changes nothing beyond that process and is overridden where Group Policy sets
@@ -198,8 +204,8 @@ hosts and the pins are in the signed script, not in the downloaded file.
 
 ### Elevation and launch
 
-- Not elevated: the bootstrap starts `System32\WindowsPowerShell\v1.0\powershell.exe` with `-Verb RunAs` and a **constant** command line, `-NoProfile -NonInteractive -EncodedCommand <base64 of a fixed script>`. The installer and log paths reach that script in environment variables (`INWIRE_BOOT_INSTALLER`, `INWIRE_BOOT_LOG`), as `electron/updateCenter/elevate.ts` does, so no path is ever quoted into a privileged command. The script checks the file names, runs the installer with exactly `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010 /NOFORCECLOSEAPPLICATIONS "/LOG=<log>"`, waits, and exits with the installer's code (70001 for its own faults).
-- Already elevated: the installer is run directly with the same switches.
+- Not elevated: the bootstrap starts `System32\WindowsPowerShell\v1.0\powershell.exe` with `-Verb RunAs` and a **constant** command line, `-NoProfile -NonInteractive -EncodedCommand <base64 of a fixed script>`. The installer and log paths, the descriptor's SHA-256 and the publisher pins reach that script in environment variables (`INWIRE_BOOT_INSTALLER`, `INWIRE_BOOT_LOG`, `INWIRE_BOOT_SHA256`, `INWIRE_BOOT_PINS`), as `electron/updateCenter/elevate.ts` does, so no value is ever quoted into a privileged command; the bootstrap removes them right after the process starts. The script checks the file names, then opens `Inwire-Setup.exe` with read-only sharing, which refuses writers, deletes and renames while the handle is held. Under that handle it hashes the file against the SHA-256 and requires a `Valid` signature by a pinned signer, so a file swapped after the bootstrap's own checks is refused, not run. Still holding the handle, it runs the installer with exactly `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010 /NOFORCECLOSEAPPLICATIONS "/LOG=<log>"`, waits, and exits with the installer's code (70001 for its own faults).
+- Already elevated: the installer is run directly with the same switches, behind the same lock, hash and pin checks (`Invoke-InwireLockedRun`).
 - A declined UAC prompt (a `Win32Exception` with code 1223, found in the exception chain, never by message text) is exit 2 with a UAC message, distinct from the installer's own cancel.
 - On the 30-minute timeout nothing is stopped: exit 13, `ErrorCode` `Timeout`, the message says setup may still be running, and the working folder is kept.
 - `-Launch` runs only when the install succeeded (or the same or a newer version was already present) and only from a normal shell. From an elevated shell the install completes, `Launched` is false, the message says to run `inwire` from a normal terminal, and the exit code is 14. It starts the absolute path `<InstallLocation>\bin\inwire.exe` read from the uninstall key, never `Path` and never the current directory. After a 3010 it does not launch and says to restart first.
@@ -231,7 +237,7 @@ changing one character of an embedded pin makes the signature read
 - A public signing certificate (so a bootstrap can carry a pin), a reachable `updates.inwire.app`, and a WinGet package ID. Until the first, a built bootstrap exits 10.
 - Not exercised by any test: a real UAC prompt, the elevated `-EncodedCommand` wrapper running a real installer (including that the environment variables reach the elevated PowerShell and that `ExitCode` is readable from a non-elevated parent), and a real proxy. They are the production adapters' only untested lines; run them once by hand against a signed release before publishing instructions.
 - The script's timestamp is the countersignature `Set-AuthenticodeSignature` adds. A production build with this PC's certificate on 2026-10-31 came back timestamped and `Valid`; the tests themselves make no network call.
-- A same-user process could swap the downloaded file between the check and the elevated run (the working folder is private to the user, the same trust boundary as the Update Center's download).
+- The swap between the bootstrap's checks and the elevated run is closed by the lock above; tests prove the refusals and that a held read-share handle still lets Windows execute the file, but not that Inno's own loader reopens `Inwire-Setup.exe` compatibly under the lock. That is part of the real-installer run above. The UAC prompt still names Windows PowerShell, not Inwire's publisher.
 
 ## The Git Bash bridge
 
@@ -252,6 +258,9 @@ bash install-inwire.sh [--product Desktop|EndpointAgent] [--version X.Y.Z] [--la
 - PowerShell is `$SYSTEMROOT\System32\WindowsPowerShell\v1.0\powershell.exe`,
   never `PATH`, `pwsh` or the current directory. No `-ExecutionPolicy` flag is
   passed, so a machine whose policy refuses the bootstrap refuses it here too.
+  Nor is `-NonInteractive`: a browser-downloaded bootstrap asks once about its
+  untrusted publisher (see [Execution policy](#usage)), and the person answers
+  `Run once` in the Git Bash window.
 - Inno's slash switches stay inside PowerShell, where MSYS cannot rewrite them;
   the bridge also sets `MSYS_NO_PATHCONV=1` for the call.
 - Linux, macOS and WSL are refused with 10 before anything runs. WSL stays

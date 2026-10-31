@@ -134,9 +134,9 @@ function New-World {
   }.GetNewClosure()
   $p.VerifyPublisher = { param($path, $pins) $w.Calls.Add('VerifyPublisher'); $c.Verify }.GetNewClosure()
   $p.RunInstaller = {
-    param($path, $log, $elevated)
+    param($path, $log, $elevated, $sha256, $pins)
     $w.Calls.Add('RunInstaller')
-    $w.LastRun = @{ Path = $path; Log = $log; Elevated = $elevated }
+    $w.LastRun = @{ Path = $path; Log = $log; Elevated = $elevated; Sha256 = $sha256; Pins = $pins }
     $c.Run
   }.GetNewClosure()
   $p.LaunchDesktop = { param($path) $w.Calls.Add('LaunchDesktop'); $w.LastLaunch = $path; $c.Launch }.GetNewClosure()
@@ -217,6 +217,7 @@ Invoke-Section 'happy path' {
   Test-That 'happy: the descriptor is fetched from the policy URL' ($w.ReleaseUrl -ceq $script:TestPolicy.DescriptorUrl)
   Test-That 'happy: the download is the descriptor row, to the fixed name' ($w.LastDownload.Url -ceq 'https://download.example.invalid/Inwire-1.2.3-x64.exe' -and $w.LastDownload.Dest -ceq 'C:\fake\work\Inwire-Setup.exe' -and $w.LastDownload.Size -eq 1048576 -and $w.LastDownload.Sha -ceq $script:Sha)
   Test-That 'happy: setup runs from that file with the fixed log name, not elevated yet' ($w.LastRun.Path -ceq 'C:\fake\work\Inwire-Setup.exe' -and $w.LastRun.Log -ceq 'C:\fake\work\setup.log' -and $w.LastRun.Elevated -eq $false)
+  Test-That 'happy: RunInstaller carries the declared sha256 and the policy pins, so the runner can re-verify under a lock' ($w.LastRun.Sha256 -ceq $script:Sha -and (@($w.LastRun.Pins) -join ',') -ceq (@($script:TestPolicy.PublisherCertificateSha256) -join ',') -and @($w.LastRun.Pins).Count -ge 1) ([string]$w.LastRun.Sha256)
   Test-That 'happy: the work folder is removed' ($w.Removed -ceq 'C:\fake\work')
   Test-That 'happy: the result carries the install path and version' ($r.InstalledVersion -ceq '1.2.3' -and $r.InstallPath -ceq 'C:\Program Files\Inwire\')
   Test-That 'happy: no launch was asked for' ($r.Launched -eq $false -and $r.ErrorCode -ceq '')
@@ -710,6 +711,11 @@ Invoke-Section 'elevation seam' {
   $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b64))
   Test-That 'elevation: the script reads the installer and log from the environment' ($script -match 'INWIRE_BOOT_INSTALLER' -and $script -match 'INWIRE_BOOT_LOG')
   Test-That 'elevation: the script carries the exact installer switches' ($script.Contains('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010 /NOFORCECLOSEAPPLICATIONS'))
+  Test-That 'elevation: the script reads the expected hash and the pins from the environment' ($script -match 'INWIRE_BOOT_SHA256' -and $script -match 'INWIRE_BOOT_PINS')
+  $iOpen = $script.IndexOf('FileShare]::Read)')
+  $iStart = $script.IndexOf('Start-Process')
+  Test-That 'elevation: the script opens the installer with read-only sharing before it starts it' ($iOpen -ge 0 -and $iStart -gt $iOpen)
+  Test-That 'elevation: the script disposes the handle in a finally' ($script -match 'finally \{[^}]*Dispose')
   Test-That 'elevation: the script never exits success on a missing exit code' ($script -match 'ExitCode\) \{ exit 70001')
   Test-That 'elevation: no path appears in the command line' ($a.ArgumentList -notmatch 'Inwire-Setup' -and $script -notmatch 'C:\\')
   Test-That 'installer arguments: exactly the documented switches and a quoted log' ((Get-InwireInstallerArguments 'C:\a b\setup.log') -ceq '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010 /NOFORCECLOSEAPPLICATIONS "/LOG=C:\a b\setup.log"')
@@ -742,6 +748,139 @@ Invoke-Section 'elevation seam' {
   Test-That 'production platform: GetInstalled reads the registry without throwing' (@('Absent', 'Installed', 'Unknown') -ccontains $inst.State)
   $inst = & $plat.GetInstalled 'EndpointAgent'
   Test-That 'production platform: there is no installed probe for another product' ($inst.State -ceq 'Unknown')
+}
+
+# ==========================================================================
+# The constant elevated script and the already-elevated direct path both run
+# only bytes proven, under a read lock, to be the verified bytes. The stand-in
+# is a copy of a Microsoft-signed system exe named Inwire-Setup.exe that does
+# nothing harmful with the setup switches (whoami exits 1 on an unknown
+# switch), so exit 1 means "the stand-in ran" and 70001 means "the script
+# refused". Nothing here is elevated.
+Invoke-Section 'locked run' {
+  $dir = Join-Path ([IO.Path]::GetTempPath()) ('inwire-bootstrap-lock-' + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $dir | Out-Null
+  try {
+    $exe = Join-Path $dir 'Inwire-Setup.exe'
+    $log = Join-Path $dir 'setup.log'
+    Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\whoami.exe') -Destination $exe
+    $sig = Get-AuthenticodeSignature -LiteralPath $exe
+    if ([string]$sig.Status -cne 'Valid' -or $null -eq $sig.SignerCertificate) {
+      Skip-That 'locked run' ('the stand-in is not validly signed here: ' + $sig.Status)
+      return
+    }
+    $h = [System.Security.Cryptography.SHA256]::Create()
+    $pin = (($h.ComputeHash($sig.SignerCertificate.RawData) | ForEach-Object { $_.ToString('x2') }) -join '')
+    $stream = [IO.File]::OpenRead($exe)
+    try { $sha = (($h.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '') } finally { $stream.Dispose() }
+    $h.Dispose()
+    $wrongPin = ('0' * 63) + '1'
+    $wrongSha = ('0' * 63) + '1'
+
+    $cmd = Get-InwireElevationCommand
+    $b64 = ($cmd.ArgumentList -split ' ')[-1]
+    function Invoke-ElevatedScript {
+      param($Exe, $Log, $Sha, $Pins)
+      $names = @('INWIRE_BOOT_INSTALLER', 'INWIRE_BOOT_LOG', 'INWIRE_BOOT_SHA256', 'INWIRE_BOOT_PINS')
+      $vals = @($Exe, $Log, $Sha, $Pins)
+      for ($i = 0; $i -lt 4; $i++) { if ($null -ne $vals[$i]) { [Environment]::SetEnvironmentVariable($names[$i], [string]$vals[$i], 'Process') } }
+      $saved = $ErrorActionPreference
+      $ErrorActionPreference = 'Continue'
+      try {
+        & $cmd.FilePath -NoProfile -NonInteractive -EncodedCommand $b64 2>&1 | Out-Null
+        return $LASTEXITCODE
+      } finally {
+        $ErrorActionPreference = $saved
+        foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $null, 'Process') }
+      }
+    }
+
+    # The stand-in really runs under the script, and its own code comes back.
+    $code = Invoke-ElevatedScript $exe $log $sha $pin
+    Test-That 'locked run (script): the right hash and the right pin run the file and its exit code propagates' ($code -eq 1) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $sha.ToUpperInvariant() ($wrongPin + ';' + $pin.ToUpperInvariant())
+    Test-That 'locked run (script): hex case is ignored and a semicolon list with one good pin runs' ($code -eq 1) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $sha ($wrongPin + ',' + $pin)
+    Test-That 'locked run (script): a comma list with one good pin runs' ($code -eq 1) ('exit ' + $code)
+
+    # Refusals: 70001, and the stand-in did not run (it would have been 1).
+    $code = Invoke-ElevatedScript $exe $log $null $pin
+    Test-That 'locked run (script): a missing hash is refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log 'abc' $pin
+    Test-That 'locked run (script): a short hash is refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log ($sha.Substring(0, 63) + 'g') $pin
+    Test-That 'locked run (script): a non-hex hash is refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $wrongSha $pin
+    Test-That 'locked run (script): a hash that does not match the file is refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $sha $null
+    Test-That 'locked run (script): missing pins are refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $sha 'xyz'
+    Test-That 'locked run (script): a malformed pin is refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $sha ($pin + ';zz')
+    Test-That 'locked run (script): one malformed pin among good ones is refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $sha ($pin + ';')
+    Test-That 'locked run (script): an empty pin entry is refused' ($code -eq 70001) ('exit ' + $code)
+    $code = Invoke-ElevatedScript $exe $log $sha $wrongPin
+    Test-That 'locked run (script): a pin list without the file''s signer is refused although the signature is Valid' ($code -eq 70001) ('exit ' + $code)
+
+    # A swapped file: the bytes are not the verified bytes.
+    $swapDir = Join-Path $dir 'swapped'
+    New-Item -ItemType Directory -Path $swapDir | Out-Null
+    $swapped = Join-Path $swapDir 'Inwire-Setup.exe'
+    Copy-Item -LiteralPath $exe -Destination $swapped
+    $fs = [IO.File]::Open($swapped, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+    $fs.WriteByte(0); $fs.Dispose()
+    $code = Invoke-ElevatedScript $swapped (Join-Path $swapDir 'setup.log') $sha $pin
+    Test-That 'locked run (script): a file changed after the hash was declared is refused' ($code -eq 70001) ('exit ' + $code)
+
+    # An earlier writer still holding a write handle: the locked open fails.
+    $writer = [IO.File]::Open($exe, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+    try {
+      $code = Invoke-ElevatedScript $exe $log $sha $pin
+      Test-That 'locked run (script): a file another process still has open for writing is refused' ($code -eq 70001) ('exit ' + $code)
+      $r = Invoke-InwireProductionRunInstaller $exe $log $true $sha ([string[]]@($pin))
+      Test-That 'locked run (direct): a file another process still has open for writing is refused' ($r.Started -eq $false -and $null -eq $r.ExitCode) ($r.Reason)
+    } finally { $writer.Dispose() }
+
+    # The names the script already checked still hold.
+    $other = Join-Path $dir 'Other.exe'
+    Copy-Item -LiteralPath $exe -Destination $other
+    $code = Invoke-ElevatedScript $other $log $sha $pin
+    Test-That 'locked run (script): another file name is still refused' ($code -eq 70001) ('exit ' + $code)
+
+    # The lock itself: read sharing denies writers, deletes and renames, and
+    # still lets the image be executed. This is the exact open the code uses.
+    $held = [IO.File]::Open($exe, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+      $wOk = $true
+      try { $w2 = [IO.File]::Open($exe, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite); $w2.Dispose() } catch { $wOk = $false }
+      Test-That 'lock: while the verified handle is held, opening the file for write fails' (-not $wOk)
+      $dOk = $true
+      try { [IO.File]::Delete($exe) } catch { $dOk = $false }
+      Test-That 'lock: while the verified handle is held, the file cannot be deleted' ((-not $dOk) -and (Test-Path -LiteralPath $exe))
+      $mOk = $true
+      try { [IO.File]::Move($exe, ($exe + '.moved')) } catch { $mOk = $false }
+      Test-That 'lock: while the verified handle is held, the file cannot be renamed' ((-not $mOk) -and (Test-Path -LiteralPath $exe))
+      $p = Start-Process -FilePath $exe -ArgumentList '/VERYSILENT' -Wait -PassThru -WindowStyle Hidden
+      Test-That 'lock: a read-shared handle does not stop the image from being executed' ($p.ExitCode -eq 1) ('exit ' + $p.ExitCode)
+    } finally { $held.Dispose() }
+
+    # The already-elevated direct path: same refusals, same pass.
+    $r = Invoke-InwireProductionRunInstaller $exe $log $true $sha ([string[]]@($pin))
+    Test-That 'locked run (direct): the right hash and pin run the file and its exit code comes back' ($r.Started -eq $true -and $r.ExitCode -eq 1 -and $r.TimedOut -eq $false) ([string]$r.Reason)
+    $r = Invoke-InwireProductionRunInstaller $exe $log $true $wrongSha ([string[]]@($pin))
+    Test-That 'locked run (direct): a hash that does not match is refused and nothing starts' ($r.Started -eq $false -and $null -eq $r.ExitCode -and $r.Reason -ne '')
+    $r = Invoke-InwireProductionRunInstaller $exe $log $true $sha ([string[]]@($wrongPin))
+    Test-That 'locked run (direct): a pin list without the file''s signer is refused and nothing starts' ($r.Started -eq $false -and $null -eq $r.ExitCode -and $r.Reason -ne '')
+    $r = Invoke-InwireProductionRunInstaller $exe $log $true $sha ([string[]]@())
+    Test-That 'locked run (direct): no pins is refused' ($r.Started -eq $false -and $null -eq $r.ExitCode)
+    $r = Invoke-InwireProductionRunInstaller $exe $log $true 'abc' ([string[]]@($pin))
+    Test-That 'locked run (direct): a malformed hash is refused' ($r.Started -eq $false -and $null -eq $r.ExitCode)
+    $r = Invoke-InwireProductionRunInstaller $swapped (Join-Path $swapDir 'setup.log') $true $sha ([string[]]@($pin))
+    Test-That 'locked run (direct): a file changed after the hash was declared is refused' ($r.Started -eq $false -and $null -eq $r.ExitCode)
+  } finally {
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
 
 # ==========================================================================

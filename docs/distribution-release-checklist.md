@@ -81,6 +81,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows-drive.ps1 `
 - [ ] Run `no-npcap` once with Npcap installed and once without.
 - [ ] Attach the result file (JSON lines: scenario, outcome, details, timestamp) to the release record, with the Windows build and the bootstrap and installer SHA-256.
 - [ ] Any FAIL blocks the release. Fix the cause; do not edit the result file.
+- [ ] By hand, because the drive's copy has no mark of the web: download the bootstrap **in a browser** on the clean PC, then run it once from PowerShell (`powershell -ExecutionPolicy RemoteSigned -File .\install-inwire.ps1`) and once from Git Bash (`bash install-inwire.sh`). Each must ask about the untrusted publisher; answer `[R] Run once` and confirm the install proceeds. Never answer `[A] Always run` here: it adds the certificate to Trusted Publishers and the next run would no longer prove anything.
 
 ## Record
 

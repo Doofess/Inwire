@@ -27,6 +27,12 @@
 # policy the machine has: this script never passes -ExecutionPolicy, because
 # a bypass here would be the one place Inwire overrode the owner's policy.
 #
+# Not -NonInteractive. A bootstrap downloaded in a browser carries the mark
+# of the web, and RemoteSigned then asks once whether to run software from a
+# publisher the person has not trusted ("Run once" is the answer the docs
+# give). -NonInteractive turns that question into a refusal for every
+# first-time user.
+#
 # ## Exit codes
 #
 # The bootstrap's own (docs/distribution.md), except that 3010, reboot
@@ -115,7 +121,7 @@ powershell="$(cygpath -u "$SYSTEMROOT")/System32/WindowsPowerShell/v1.0/powershe
 [ -f "$bootstrap" ] || die 10 "the bootstrap was not found at $bootstrap (download it, verify it, and pass --bootstrap)"
 bootstrap_win=$(cygpath -w "$bootstrap")
 
-args=(-NoProfile -NonInteractive -File "$bootstrap_win" -Product "$product")
+args=(-NoProfile -File "$bootstrap_win" -Product "$product")
 [ -n "$version" ] && args+=(-Version "$version")
 [ "$launch" = 1 ] && args+=(-Launch)
 [ "$repair" = 1 ] && args+=(-Repair)

@@ -81,21 +81,21 @@ if bash -n "$bridge" 2>/dev/null; then pass 'bash -n accepts the bridge'; else f
 
 win_plain=$(cygpath -w "$plain_dir/install-inwire.ps1")
 run --bootstrap "$plain_dir/install-inwire.ps1" --product Desktop --version 1.2.3 --launch
-if [ "$code" = 0 ] && called && expect_argv -NoProfile -NonInteractive -File "$win_plain" -Product Desktop -Version 1.2.3 -Launch; then
+if [ "$code" = 0 ] && called && expect_argv -NoProfile -File "$win_plain" -Product Desktop -Version 1.2.3 -Launch; then
   pass 'product, version and launch arrive as separate arguments, the path as a Windows path'
 else
   fail "argv for a plain call (exit $code): $(tr '\n' '|' < "$FAKE_LOG" 2>/dev/null)"
 fi
 
 run --bootstrap "$plain_dir/install-inwire.ps1"
-if [ "$code" = 0 ] && expect_argv -NoProfile -NonInteractive -File "$win_plain" -Product Desktop; then
+if [ "$code" = 0 ] && expect_argv -NoProfile -File "$win_plain" -Product Desktop; then
   pass 'the default product is Desktop and nothing launches unless asked'
 else
   fail "default argv (exit $code): $(tr '\n' '|' < "$FAKE_LOG" 2>/dev/null)"
 fi
 
 run --bootstrap "$plain_dir/install-inwire.ps1" --product EndpointAgent --repair
-if [ "$code" = 0 ] && expect_argv -NoProfile -NonInteractive -File "$win_plain" -Product EndpointAgent -Repair; then
+if [ "$code" = 0 ] && expect_argv -NoProfile -File "$win_plain" -Product EndpointAgent -Repair; then
   pass 'EndpointAgent and --repair pass through for the bootstrap to answer'
 else
   fail "endpoint argv (exit $code): $(tr '\n' '|' < "$FAKE_LOG" 2>/dev/null)"
@@ -103,7 +103,7 @@ fi
 
 win_hostile=$(cygpath -w "$hostile_dir/install-inwire.ps1")
 run --bootstrap "$hostile_dir/install-inwire.ps1" --version 0.5.0
-if [ "$code" = 0 ] && expect_argv -NoProfile -NonInteractive -File "$win_hostile" -Product Desktop -Version 0.5.0; then
+if [ "$code" = 0 ] && expect_argv -NoProfile -File "$win_hostile" -Product Desktop -Version 0.5.0; then
   pass 'a path of spaces, Unicode, ;, &, $(), backticks and a leading hyphen is one argument'
 else
   fail "hostile path argv (exit $code): $(tr '\n' '|' < "$FAKE_LOG" 2>/dev/null)"

@@ -96,6 +96,14 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
  */
 function isAllowedUrl(value: unknown, allowedHosts: readonly string[]): boolean {
   if (typeof value !== 'string') return false;
+  // The raw text first. WHATWG parsing forgives what .NET's `[Uri]` refuses -
+  // surrounding whitespace, a missing or extra `//`, an empty `@`, backslashes,
+  // a percent-encoded or fullwidth host - so a URL the generator wrote would
+  // fail every bootstrap. Printable ASCII, no backslash, and the authority as
+  // written must already be the allowed host.
+  if (!/^[\x21-\x5b\x5d-\x7e]+$/.test(value)) return false;
+  const authority = /^https:\/\/([^/?#@:]+)(?:[/?#]|$)/i.exec(value);
+  if (!authority || !allowedHosts.includes(authority[1].toLowerCase())) return false;
   let url: URL;
   try {
     url = new URL(value);
