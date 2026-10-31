@@ -172,9 +172,11 @@ shard (`quicLimits`). Lane 0 keeps the whole (`laneZero`): QUIC that cannot
 reach a shard - in a tunnel, a fragment, under two tags, on another port - is
 all held there, so a share would bind on it first. A stream is forgotten only with its flow
 or at that cap, so it shows only when more than the share is *remembered* at
-once; `evictedStreams` counts it, and `parallel.ts` holds every fixture under
-the seven-shard share (the half-QUIC capture peaks at 662 streams against
-1,170, with nothing held). Two more, both counted rather
+once; `evictedStreams` counts it, and `parallel.ts` holds each shard of every
+run under its share, with none evicted, up to the 16 threads the setting
+offers. The half-QUIC capture peaks at 662 streams on one core and nothing
+held; with 16 shards, the busiest one holds 172 streams against a share of 512.
+Two more, both counted rather
 than silent: a sharded connection that lane 0 later meets (`crossLane`), and
 an out-of-order fragment whose first fragment is more than 4,096 frames behind
 it, which can reassemble on a different shard from its connection's.
@@ -746,6 +748,15 @@ same spread; the 58,000-60,000 of **Phase 6, as built** was an idle machine
 and was not re-measured on one. The live drive (`live-revisit-drive.ts`,
 through the installed agent) passes, opening a QUIC frame of a later
 connection rebuilt from its record.
+
+Two costs phase 5 added were measured afterwards and left alone. Every op in
+a shard batch grew from 25 slots to 35 for QUIC's fields. TCP ops cost the same
+per op at either size (`OpWriter` writing, sealing and cloning 384-op batches:
+597 and 617 ns at 35 slots, 671 ns at 25), because copying the frame's bytes
+dominates. `findUdpPort` runs twice for a datagram on a dispatch port, once in
+`udpBranch` and again for the entry, but it is 0.07% of a dissection profile
+(`scripts/perf/profile.ts`, `inwire` fixture) and too small to sample on the
+half-QUIC one.
 
 ## What came first
 

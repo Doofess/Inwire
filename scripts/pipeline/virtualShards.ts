@@ -13,13 +13,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
-import { QuicFlowTracker, quicLimits } from '../../src/services/quicFlowTracker';
+import { QuicFlowTracker, quicLimits, type QuicLimits } from '../../src/services/quicFlowTracker';
 import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
 import { FrameClock, type Sequencer } from '../../src/services/dissect/sequencer';
 import { LIVE_ENV, type DissectEnv } from '../../src/services/dissect/dissectEnv';
 import { Coordinator, coordinatorSequencer, type CoordFrame, type Merged, type ShardRoute } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
+import type { FrameDissector } from '../../src/services/pipeline/frameDissector';
+import { THREAD_CHOICES } from '../../src/services/pipeline/threads';
 import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
 import type { FlowAnnotationStore } from '../../src/services/flowAnnotations';
 import type { HostIdentity } from '../../src/services/direction';
@@ -89,6 +91,12 @@ export interface Stats {
   packsDecoded: number;
   packs: number;
   needsRowResults: number;
+  /**
+   * The most QUIC any one shard held at once, what the shards evicted, and the
+   * share each shard is given (`quicLimits(shards)`). A run whose shards never
+   * reached their share is one the split budget did not change.
+   */
+  quicShard: { streams: number; pending: number; evicted: number; share: QuicLimits };
 }
 
 export interface DriveOptions {
@@ -143,6 +151,8 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
     });
   }
 
+  const quicShard = { streams: 0, pending: 0, share: quicLimits(config.shards) };
+  const evicted = new Array<number>(config.shards).fill(0);
   const step = (): boolean => {
     const ready: number[] = [];
     for (let s = 0; s < config.shards; s++) if (shardInbox[s].length > 0) ready.push(s);
@@ -157,6 +167,10 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
       coordinator.receive(shard, message);
     } else {
       shards[pick].handle(shardInbox[pick].shift()!.message);
+      const quic = quicOf(shards[pick]);
+      quicShard.streams = Math.max(quicShard.streams, quic.streamCount);
+      quicShard.pending = Math.max(quicShard.pending, quic.pendingBytes);
+      evicted[pick] = quic.evictedStreams;
     }
     return true;
   };
@@ -193,7 +207,19 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
     lanes: [...coordinator.perLane], crossLane: coordinator.crossLane,
     barrierMismatch: coordinator.barrierMismatch, quicMismatch: coordinator.quicMismatch, ms: performance.now() - t0,
     packsDecoded: coordinator.packsDecoded, packs, needsRowResults,
+    quicShard: { ...quicShard, evicted: evicted.reduce((a, b) => a + b, 0) },
   };
+}
+
+/**
+ * A shard's QUIC tracker. The shard keeps its dissector private and nothing in
+ * production reads it, so this reaches it by name and throws if a rename moves
+ * it, rather than adding a getter only this script would call.
+ */
+function quicOf(shard: Shard): QuicFlowTracker {
+  const quic = (shard as unknown as { dissector?: FrameDissector }).dissector?.trackers.quic;
+  if (!(quic instanceof QuicFlowTracker)) throw new Error('Shard no longer holds its dissector as `dissector`; update quicOf');
+  return quic;
 }
 
 /** Every new connection to the next shard in turn. */
@@ -218,6 +244,8 @@ export function lopsided(): (key: string, shards: number) => number {
   };
 }
 
+const MOST_THREADS = THREAD_CHOICES[THREAD_CHOICES.length - 1];
+
 export const CONFIGS: Config[] = [
   { label: 'N=1 by pair', shards: 1, route: 'pair' },
   { label: 'N=2 by pair', shards: 2, route: 'pair' },
@@ -226,4 +254,6 @@ export const CONFIGS: Config[] = [
   { label: 'N=7 by connection', shards: 7, route: 'connection' },
   { label: 'N=7, each connection to the next shard', shards: 7, route: 'connection', assign: scatter },
   { label: 'N=2, all but the first connection on one shard', shards: 2, route: 'connection', assign: lopsided },
+  // The most the setting offers, where each shard's QUIC share is smallest.
+  { label: `N=${MOST_THREADS} by connection`, shards: MOST_THREADS, route: 'connection' },
 ];

@@ -40,12 +40,12 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
-import { Sequencer } from '../../src/services/dissect/sequencer';
+import { Sequencer, quicFlowKey } from '../../src/services/dissect/sequencer';
 import { withDissectEnv } from '../../src/services/dissect/dissectEnv';
 import { FrameRevisit, RecordMiss, recordEntries } from '../../src/services/dissect/frameRecord';
 import { keyLog } from '../../src/services/tls/keyLog';
-import { QuicFlowTracker, quicLimits } from '../../src/services/quicFlowTracker';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
+import { frameLane } from '../../src/services/dissect/frameLane';
 import type { Merged } from '../../src/services/pipeline/coordinator';
 import { unpackRows, type RowPack } from '../../src/services/pipeline/rowPack';
 import { applyOverlay } from '../../src/services/pipeline/rowOverlay';
@@ -123,33 +123,14 @@ function sequential(capture: Capture, table?: TableAt): string[] {
   });
 }
 
-/**
- * QUIC's demand on the single Worker's stream and held-byte budgets, sampled
- * after every frame with the limits off, so a limit that bound cannot hide its
- * own demand. A frame adds a few fragments at most, so sampling per frame sees
- * the peak to within that.
- */
-function quicPeak(capture: Capture): { streams: number; pending: number; evicted: number } {
-  const sequencer = new Sequencer();
-  const quic = new QuicFlowTracker(sequencer, { maxStreams: Infinity, maxPendingBytes: Infinity });
-  const dissector = new FrameDissector({ ...trackers(sequencer), quic }, FIXED_ENV, null);
-  dissector.host = capture.host ?? dissector.host;
-  let streams = 0;
-  let pending = 0;
-  for (const input of capture.inputs) {
-    try { dissector.dissect({ ...input, bytes: input.bytes.slice() }); } catch { /* counted by the equality checks */ }
-    streams = Math.max(streams, quic.streamCount);
-    pending = Math.max(pending, quic.pendingBytes);
-  }
-  return { streams, pending, evicted: quic.evictedStreams };
-}
-
 interface Run extends Stats {
   digests: string[];
   merged: Merged[];
   /** Frames whose protocol chain holds QUIC, and how many of them a shard dissected. */
   quicFrames: number;
   quicOnShards: number;
+  /** QUIC frames dissected on lane 0 although the router gave them a QUIC lane and lane 0 had not homed their flow. */
+  quicStrayed: number;
 }
 
 interface RunOptions {
@@ -173,6 +154,8 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
   let tableApplied = false;
   let quicFrames = 0;
   let quicOnShards = 0;
+  let quicStrayed = 0;
+  const homeFlows = new Set<string>();
   // A shard row that stayed in its pack, rebuilt as the window would: decoded
   // once per pack, its bytes beside it, the merge's overlay over it.
   const decodedPacks = new Map<RowPack, Packet[]>();
@@ -203,7 +186,13 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       const packet = m.packet ?? (m.packed !== undefined ? rebuilt(m) : undefined);
       if (packet?.frameProtocols?.includes('quic')) {
         quicFrames++;
+        // A flow lane 0 met first on a frame it keeps (QinQ) is homed there, and
+        // its later frames follow it; any other QUIC-laned frame belongs on a shard.
+        const input = capture.inputs[m.id - 1];
+        const flow = quicFlowKey(packet.source, packet.sourcePort ?? 0, packet.destination, packet.destPort ?? 0);
         if (m.lane !== 0) quicOnShards++;
+        else if (frameLane(input.bytes, input.linktype).lane !== 'quic') homeFlows.add(flow);
+        else if (!homeFlows.has(flow)) quicStrayed++;
       }
       // A shard sends no bytes back: the row's are the coordinator's own copy of
       // the frame, and they must be the frame the capture holds.
@@ -216,7 +205,7 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       if (bytes && bytes.byteLength > 0 && !keep) structuredClone(bytes.buffer, { transfer: [bytes.buffer as ArrayBuffer] });
     },
   });
-  return { digests, merged, quicFrames, quicOnShards, ...stats };
+  return { digests, merged, quicFrames, quicOnShards, quicStrayed, ...stats };
 }
 
 function lineDiff(want: string, got: string | undefined): string {
@@ -282,6 +271,30 @@ async function tableRuns(capture: Capture, want: string[], withClear: boolean): 
     clearedAt !== -1 ? `frame ${clearedAt + 1} was annotated` : 'the table annotated no row, so the clear proved nothing');
 }
 
+/**
+ * What one run says about QUIC on the shards: every QUIC frame the router gave
+ * a QUIC lane was dissected on a shard, unless lane 0 homed its flow by meeting
+ * it first on a frame it keeps (QinQ); and no shard reached
+ * its split budget. A shard that did would evict what one core keeps, so
+ * equality there would hold only by luck; one that never came near it shows
+ * nothing about the split. The share is smallest at the most threads the
+ * setting offers, which is why that count is among the configs.
+ */
+function quicChecks(capture: Capture, config: Config, run: Run): void {
+  const home = run.quicFrames - run.quicOnShards;
+  check(`${capture.name}, ${config.label}: every QUIC frame with a QUIC lane was dissected on a shard`,
+    run.quicStrayed === 0 && (run.quicFrames === 0 || run.quicOnShards > 0),
+    `${run.quicStrayed} on lane 0 despite their lane; ${run.quicOnShards} of ${run.quicFrames} on shards`);
+  console.log(`        QUIC frames on shards: ${run.quicOnShards.toLocaleString()} of ${run.quicFrames.toLocaleString()}`
+    + (home > 0 ? ` (${home} the router keeps on lane 0)` : ''));
+  if (run.quicFrames === 0) return;
+  const { streams, pending, evicted, share } = run.quicShard;
+  check(`${capture.name}, ${config.label}: QUIC's peak on one shard (${streams} streams, ${(pending / 1024).toFixed(1)} kB held)`
+    + ` is under each shard's share, so the split budget never bound`,
+    evicted === 0 && streams < share.maxStreams && pending < share.maxPendingBytes,
+    `share is ${share.maxStreams} streams, ${share.maxPendingBytes} bytes; ${evicted} evicted`);
+}
+
 async function equality(capture: Capture, configs: Config[]): Promise<void> {
   keyLog.clear();
   if (capture.keys !== null) keyLog.add(capture.keys);
@@ -289,13 +302,6 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
     const t0 = performance.now();
     const want = sequential(capture);
     const oneCore = performance.now() - t0;
-    if (capture.name !== 'burst') {
-      const peak = quicPeak(capture);
-      const share = quicLimits(7);
-      check(`${capture.name}: QUIC's peak (${peak.streams} streams, ${(peak.pending / 1048576).toFixed(2)} MB held) is under the 7-shard share, so equality at N=7 is not vacuous`,
-        peak.streams <= share.maxStreams && peak.pending <= share.maxPendingBytes && peak.evicted === 0,
-        `share is ${share.maxStreams} streams, ${share.maxPendingBytes} bytes`);
-    }
     for (const config of configs) {
       const run = parallel(capture, config);
       const at = firstDiff(want, run.digests);
@@ -304,7 +310,7 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
         at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], run.digests[at])}` : ''}`
           : `crossLane ${run.crossLane}, barrierMismatch ${run.barrierMismatch}, quicMismatch ${run.quicMismatch}`);
       console.log(`        lanes ${run.lanes.join(' / ')}; ${run.ms.toFixed(0)} ms in one process (one core: ${oneCore.toFixed(0)} ms)`);
-      console.log(`        QUIC frames on shards: ${run.quicOnShards.toLocaleString()} of ${run.quicFrames.toLocaleString()}`);
+      quicChecks(capture, config, run);
       check(`${capture.name}, ${config.label}: a light run decodes only packs holding a needsRow row`,
         run.packsDecoded <= run.needsRowResults && (run.needsRowResults > 0 || run.packsDecoded === 0),
         `${run.packsDecoded} packs decoded, ${run.needsRowResults} results with needsRow`);
@@ -320,7 +326,7 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
       check(`${capture.name}, ${seven.label}: all ${want.length.toLocaleString()} frames as one core dissects them`,
         at === -1 && decoded.crossLane === 0 && decoded.barrierMismatch === 0 && decoded.quicMismatch === 0,
         at !== -1 ? `frame ${at + 1} differs${VERBOSE ? `: ${lineDiff(want[at], decoded.digests[at])}` : ''}` : '');
-      console.log(`        QUIC frames on shards: ${decoded.quicOnShards.toLocaleString()} of ${decoded.quicFrames.toLocaleString()}`);
+      quicChecks(capture, seven, decoded);
       check(`${capture.name}, ${seven.label}: every pack the shards sent was decoded`,
         decoded.packsDecoded === decoded.packs, `${decoded.packsDecoded} of ${decoded.packs}`);
       await tableRuns(capture, want, true);
