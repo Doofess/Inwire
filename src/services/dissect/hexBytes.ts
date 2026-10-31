@@ -31,11 +31,14 @@
  * | `toString(16).padStart(2, '0')`, colon appended separately | 45.6-48.7 ms |
  * | `HEX[b]` table, colon appended separately | 17.8-20.0 ms |
  * | `parts[] .join(':')` | 27.3 ms |
- * | **`SEPARATED[b]`** | **8.5-10.9 ms** |
+ * | `SEPARATED[b]` | 8.5-10.9 ms |
+ * | **char codes into a scratch buffer, decoded once** | **4.7-6.6 ms** |
  *
  * The `join` row is there because it is the obvious answer and it is the second
  * worst: an array of 1,460 one-element-per-byte strings costs more than the
- * rope V8 builds out of `+=`.
+ * rope V8 builds out of `+=`. The last row is what a long range does now (see
+ * `FLAT_FROM`), measured later and on another day than the rows above it, so
+ * compare it with the `SEPARATED` row it was timed beside: 7.1-10.2 ms.
  *
  * ## What is deliberately NOT here
  *
@@ -53,6 +56,47 @@ const HEX: readonly string[] = Array.from(
 
 /** `:00`..`:ff`. The separator carried with the byte - see the header. */
 const SEPARATED: readonly string[] = HEX.map((hex) => `:${hex}`);
+
+/**
+ * Past this many bytes the string is written as character codes and decoded
+ * once, so it is born flat.
+ *
+ * The `+=` rope above is cheap to build and expensive to KEEP: V8 holds one
+ * rope node per byte until something reads the string through, and a tree
+ * only stores it. A QUIC tree's
+ * `quic.remaining_payload` measured 29.5 kB as a rope and 2.8 kB flat, and a
+ * coordinator holding tens of thousands of such trees ran the renderer out of
+ * heap (ADR 0053, phase 5). `scripts/dissect/hex-bytes.ts` holds what a kept
+ * string costs. Below the line a rope is a handful of nodes, and short
+ * strings are what most fields are.
+ */
+const FLAT_FROM = 8;
+
+/** The two ASCII codes of each byte's hex, at `2b` and `2b + 1`. */
+const HEX_CODES = new Uint8Array(512);
+for (let b = 0; b < 256; b++) {
+  HEX_CODES[2 * b] = HEX[b].charCodeAt(0);
+  HEX_CODES[2 * b + 1] = HEX[b].charCodeAt(1);
+}
+const COLON = 0x3a;
+// A TextDecoder reads "latin1" as windows-1252. Every code written here is
+// ASCII, where the two agree.
+const LATIN1 = new TextDecoder('latin1');
+let scratch = new Uint8Array(4096);
+
+function flatHex(bytes: Uint8Array, start: number, stop: number, colons: boolean): string {
+  const step = colons ? 3 : 2;
+  const length = (stop - start) * step - (colons ? 1 : 0);
+  if (scratch.length < length) scratch = new Uint8Array(Math.max(length, scratch.length * 2));
+  let at = 0;
+  for (let i = start; i < stop; i++) {
+    if (colons && i > start) scratch[at++] = COLON;
+    const code = 2 * bytes[i];
+    scratch[at++] = HEX_CODES[code];
+    scratch[at++] = HEX_CODES[code + 1];
+  }
+  return LATIN1.decode(scratch.subarray(0, length));
+}
 
 /**
  * Lowercase hex over `[from, to)`, colon-separated - the reference's `show`
@@ -78,6 +122,7 @@ export function hexColons(bytes: Uint8Array, from: number, to: number): string {
   const start = Math.max(0, Math.min(from, bytes.length));
   const stop = Math.max(start, Math.min(to, bytes.length));
   if (stop === start) return '';
+  if (stop - start > FLAT_FROM) return flatHex(bytes, start, stop, true);
   let out = HEX[bytes[start]];
   for (let i = start + 1; i < stop; i++) out += SEPARATED[bytes[i]];
   return out;
@@ -92,6 +137,7 @@ export function hexColons(bytes: Uint8Array, from: number, to: number): string {
 export function hexRun(bytes: Uint8Array, from: number, to: number): string {
   const start = Math.max(0, Math.min(from, bytes.length));
   const stop = Math.max(start, Math.min(to, bytes.length));
+  if (stop - start > FLAT_FROM) return flatHex(bytes, start, stop, false);
   let out = '';
   for (let i = start; i < stop; i++) out += HEX[bytes[i]];
   return out;
