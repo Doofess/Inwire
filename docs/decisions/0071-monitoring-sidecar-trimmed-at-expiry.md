@@ -31,17 +31,17 @@ of a segment boundary, and kind 1 records only its last entry.
 
 ### Minutes are sealed at every segment start
 
-- The evidence for the **first entry of a segment** says so. `EvidenceRef`
-  gains `segmentStart: true`, set by the journal's page reader and by the live
-  feed when the utility has just rolled a segment.
+- The evidence for the **first entry of a segment** already says so: every
+  `Evidence` carries `segmentFirstId` (ADR 0066), and the first entry is the
+  one whose `ref.entryId` equals it. That is the test the Worker already uses to
+  queue a role-1 checkpoint (`workerHost.ts`). The live feed reads its evidence
+  back through the journal's page reader, so live and replay see the same flag.
+  No field is added.
 - Before feeding such an entry, the aggregator seals every open minute
   (`seal(Infinity)`, as at a stop). No fragment then holds entries from two
   segments, and an expiry, which only ever takes whole segments, never cuts
   through one. A minute that spans a segment start has two fragments, and every
   reader already sums a minute's fragments (0062's straddling minute).
-- This also makes the per-minute identity count of
-  [0070](0070-monitoring-identities-evict-least-recent.md) exact on replay:
-  checkpoints and expiry cuts are at segment starts, where no minute is open.
 
 ### The sidecar's format 2
 
@@ -70,11 +70,22 @@ in the utility, which owns the file:
    - a watermark (kind 2) whose through entry is after the cut.
    Everything else describes expired entries, which the archive now holds. The
    bytes are copied as they are, without being inflated or re-encoded.
-3. It copies in slices of at most 4 MiB and yields between them, so the
-   utility keeps serving the socket. The Worker's appends during the copy go
-   to the old file as usual. The last slice, which is whatever was appended
-   meanwhile, is copied, synced and renamed over `rollups.iwmr` in one turn,
-   and the store's handle and index switch to the new file.
+3. It runs synchronously, inside the expiry step, as the rest of an expiry
+   already does: `expireStep` blocks the utility for the replay of a whole
+   segment (about 7 s for 256 MiB of v9). Copying a sidecar that is a fraction
+   of that size adds little to that turn, and because no append can land
+   between the copy and the rename, nothing has to be reconciled. The new file
+   is synced, the old handle closed, the partial renamed over `rollups.iwmr`,
+   and the store's handle and index switch to the new file. The volume gains
+   this one capability (create a partial beside the sidecar, then commit or
+   abandon it). Neither `BlockFile` nor the segment directory can rename today.
+   If the measurement below shows the copy taking longer than the segment's
+   replay, slicing it is a follow-up, not a change to this format.
+
+   *Amended before implementation, 2026-11-01:* the draft accepted that day
+   copied in yielding 4 MiB slices, with appends landing during the copy. Once
+   it was clear that the expiry around it already blocks for a segment's
+   replay, the synchronous copy replaced that as the simpler equivalent.
 
 `runExpiry`'s order is unchanged up to the journal's `expired` boundary. The
 final step trims instead of resetting:
@@ -92,9 +103,14 @@ final step trims instead of resetting:
   the new file is empty with base = cut. The Worker's post is refused, and the
   retry rebuilds from the cut, as today.
 
-`resetIfStale`'s test becomes: the sidecar is stale if its trimmed-through is
-before the newest `expired` boundary's through entry **and** its watermark is
-before that boundary's own entry.
+`resetIfStale`'s test (`archive.ts`), and the Worker host's own test at
+connect (`settleSidecar` in `workerHost.ts`), become: the sidecar is stale if
+its trimmed-through is before the newest `expired` boundary's through entry
+**and** its watermark is before that boundary's own entry. Today the Worker's
+test compares only the watermark with the boundary's entry. A trimmed sidecar's
+watermark is always behind that boundary, which is appended last, so without
+this change the Worker would wipe every trimmed sidecar at its next connect.
+The watermark the store reports therefore carries trimmed-through.
 
 ### Equality
 

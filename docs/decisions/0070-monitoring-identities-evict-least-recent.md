@@ -47,8 +47,10 @@ checkpoint's sort order.
   together. If it speaks again it is new: its data sets wait for templates, as
   after any restart, and the sheet's counters say so.
 - A v5 identity has no decode state. Evicting it costs only its health row.
-- The rule is the same for all three kinds (owner's ruling 3). They share the
-  16 places, as they share them today.
+- The rule is the same for all three kinds (owner's ruling 3). The decoder's
+  16 places hold v9/IPFIX scopes, the only identities with decode state. The
+  health rows' 16 places are shared by all three kinds, as today, and are
+  recycled by health's own record of when each row was last heard (below).
 
 ### A row while held (owner's ruling 2)
 
@@ -65,18 +67,27 @@ valid datagram is counted** in its identity's row and its exporter's totals.
   unsupported datagrams in its own row (`addUnsupported`, as today), and in
   health as `engineLimitRejected`. This document calls that case
   *identity churn*. This keeps `MAX_APPEND_BYTES` and the held-back minutes where they
-  are against an identity rotating faster than once a minute. The count belongs
-  to the aggregator's open minute. [0071](0071-monitoring-sidecar-trimmed-at-expiry.md)
-  seals every minute at a segment start, where every replay begins, so a
-  rebuild counts it exactly as the live run did.
+  are against an identity rotating faster than once a minute.
+- **The per-minute count is a decode decision.** `DecodeState` keeps, per
+  exporter, the receipt minute and the identities seen in it. It starts a new
+  set when the minute changes, at the first entry of a segment, and at `stop`,
+  `suspend` and `interrupted` boundaries. Every checkpoint (role 1 at a segment
+  start, role 2 at a stop, an archive cut at a segment's end) lies at a reset,
+  so the checkpoint does not carry the set, and every path (live, rebuild,
+  expiry replay, raw query) decides the same datagrams as churn. The step
+  returns such a datagram as `unsupported`. The rollups, the raw scan and
+  health then only read the decision.
 
 ### Health
 
-A health row is live state, so it is recycled with its identity. The new
-identity takes the row's place, and the exporter's `identitiesReplaced`
+A health row is live state. When a 17th identity of an exporter is heard, the
+row heard least recently (by the entry id of its last valid datagram) gives
+up its place to the new identity, and the exporter's `identitiesReplaced`
 counter goes up by one. `engineLimitRejected` stays in the snapshot, counting
 identity-churn datagrams, so older readers keep their meaning. The sheet's
-Exporter block shows "Identities replaced: n" when n > 0, with one sentence:
+source status (`SourceStatus.tsx`) lists "Identities replaced" beside the
+other counters when n > 0, and "Past the engine limit" there becomes "Too many
+identities in one minute". Its explanation is one sentence:
 the exporter took a new Source ID or Observation Domain, the oldest one's
 templates were dropped, and its History is kept.
 
