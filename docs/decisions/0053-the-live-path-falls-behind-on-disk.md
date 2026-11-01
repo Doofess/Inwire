@@ -744,8 +744,13 @@ coordinator.
 
 The TCP burst at 60,000, under the same load: this build 43,100-49,800
 advanced, 890c0d9 35,500-49,800, nothing skipped by either. The two are the
-same spread; the 58,000-60,000 of **Phase 6, as built** was an idle machine
-and was not re-measured on one. The live drive (`live-revisit-drive.ts`,
+same spread; the 58,000-60,000 of **Phase 6, as built** was an idle machine.
+Re-measured on an idle machine on 2026-11-01 (fc27a80, `burst300k`, six
+shards, 1 GB buffer, following): 48,200, 57,900 and 54,100 advanced of
+56,900, 57,500 and 56,200 sent; the lag flat in the second and third runs and
+growing into catch-up in the first; 0 skipped. Phase 6's gate was 58,400,
+42,100 and 58,600, flat in two of three: the same shape, so phase 5 cost TCP
+nothing. The live drive (`live-revisit-drive.ts`,
 through the installed agent) passes, opening a QUIC frame of a later
 connection rebuilt from its record.
 
