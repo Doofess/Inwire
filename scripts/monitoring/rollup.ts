@@ -916,6 +916,32 @@ test('equality after an expiry: the retained journal is answered the same from r
   assert.ok(asked > 100 && rollupMinutes > 0, 'the property was asked of rollups, not only of raw reads');
 });
 
+test('seal: a minute spanning a segment start is two fragments, and the answer still equals the raw scan', async () => {
+  const LIMIT = 32 * 1024 * 1024; // 1 MiB segments
+  const rig = new Rig(0xa0, LIMIT);
+  // One minute, 2,000 datagrams of about a kilobyte: the roll to the second segment lands inside it.
+  const items: EvidenceInput[] = [start(m(0, 100), S1)];
+  for (let i = 0; i < 2000; i++) {
+    const flows = Array.from({ length: 20 }, (_, j) => ({ src: `10.${i % 5}.${j}.1`, dst: `172.16.${j % 4}.1`, octets: 50 + j, packets: 1 }));
+    items.push(dgram(m(0, 200 + i * 20), flows));
+  }
+  items.push(stop(m(0, 55_000), S1));
+  for (let at = 0; at < items.length; at += 100) rig.append(items.slice(at, at + 100));
+  const segs = rig.journal.segments();
+  assert.ok(segs.length >= 2, `the journal rolled (${segs.length} segments)`);
+  const cut = segs[1].firstEntryId;
+  const host = await rollUp(rig);
+  host.host.handle({ type: 'shutdown', requestId: 9200 });
+  await host.host.settled();
+  const frags = rig.store.readMinutes(SRC, m(0), m(1), 1 << 30);
+  assert.equal(frags.length, 2, 'one fragment on each side of the segment start');
+  assert.ok(frags[0].throughEntryId < cut, 'the first fragment is closed before the segment starts');
+  assert.ok(frags[1].throughEntryId >= cut, 'the second begins at the segment start');
+  const { fast, raw } = await askBoth(rig, spec(m(0), m(1), 1));
+  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
+  assert.ok(fast.answeredFrom.rollupMinutes > 0, 'the fast answer came from the rollups');
+});
+
 
 // --- v9 and IPFIX: the same property over a journal whose records need templates ---------------------------------
 

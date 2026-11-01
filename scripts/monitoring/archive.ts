@@ -303,8 +303,15 @@ function world(jdir?: MemorySegmentDirectory): World {
     { generation: rig.generation, throughEntryId: rig.through, policyVersion: 2 },
     0,
   );
+  // A minute that spans a segment start is two fragments in the cache (ADR 0071); the world's minute is their sum.
+  const parts = new Map<string, MinuteRollup[]>();
+  for (const r of rolled) {
+    const k = keyOf(r.rollup.sourceKey, r.rollup.minuteMs);
+    const list = parts.get(k);
+    if (list === undefined) parts.set(k, [r.rollup]); else list.push(r.rollup);
+  }
   const before = new Map<string, MinuteRollup>();
-  for (const r of rolled) before.set(keyOf(r.rollup.sourceKey, r.rollup.minuteMs), r.rollup);
+  for (const [k, list] of parts) before.set(k, merge(list, list[0].sourceKey, list[0].minuteMs));
   const plan = planExpiry(segs, DEFAULT_RETENTION, NOW, 0, LIMIT, segs[1].lastReceivedMs + 1);
   assert.ok(plan !== null);
   assert.equal(plan.segments.length, 2);

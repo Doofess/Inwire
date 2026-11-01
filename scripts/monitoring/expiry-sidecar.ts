@@ -27,7 +27,6 @@ const MiB = 1 << 20;
 const POLICY: RetentionPolicy = { keepRawDays: null, atLimit: 'expire-oldest' };
 const V9 = sourceKeyFor('v9', EXPORTER, 1);
 const RECORDS = 2000;
-const HEADER_ONLY = 64;
 
 /** A Rig whose journal counts the sidecar and the archive against its limit, as the collector's journal does. */
 class LimitRig extends Rig {
@@ -80,7 +79,7 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) await waitTick();
 }
 
-test('expiry during a v9 run: the sidecar stays the header, the first post is refused as "does not continue", and the retry rebuilds it exactly', async () => {
+test('expiry during a v9 run: the first post after it is refused as "does not continue", and the retry rebuilds the sidecar exactly', async () => {
   const rig = new LimitRig(0xa0, 16 * MiB);
   const host = new HostRig(rig.runtime);
   const posts: { watermark: number; after: number; minutes: number; room: number; refusal: string | null }[] = [];
@@ -120,24 +119,25 @@ test('expiry during a v9 run: the sidecar stays the header, the first post is re
 
   const firstRetained = rig.journal.snapshot().firstEntryId;
   assert.ok(expiries >= 2 && firstRetained > 1, `segments expired (${expiries}), the journal starts at entry ${firstRetained}`);
-  assert.equal(rig.store.size(), HEADER_ONLY, 'the sidecar is the header alone while the run is live: the minute is still open, so nothing was posted');
-  assert.equal(posts.length, 0, 'and no post was even attempted');
+  // Minutes seal at every segment start (ADR 0071), so the one long minute posts a fragment per segment while the run
+  // is live. The first post after an expiry continues from the Worker's old watermark, and the sidecar's was reset.
+  assert.ok(posts.length > 0, 'fragments were posted while the run was live');
+  const refusals = posts.filter((p) => p.refusal !== null);
+  assert.ok(refusals.length >= 1, 'an expiry made a live post a refusal');
+  for (const refused of refusals) {
+    const reason = refused.refusal ?? '';
+    assert.match(reason, /^a batch after entry \d+ does not continue the sidecar, which continues from entry \d+$/, reason);
+    const from = Number(/continues from entry (\d+)/.exec(reason)?.[1]);
+    assert.ok(from > 0 && from <= firstRetained - 1, 'the sidecar continues from where the journal began at the expiry');
+    assert.ok(refused.room > MiB, `not the storage limit: the limit leaves ${refused.room} bytes, the batch is a few hundred`);
+  }
+  assert.ok(host.phases().includes('rebuilding'), 'the Worker announced rebuilding, with the retry on a timer');
+  const message = host.posts.filter((p) => p.type === 'rebuild' && (p as { message?: string }).message !== undefined).map((p) => (p as { message: string }).message).at(-1);
+  assert.match(message ?? '', /^The rollups are paused: the sidecar refused to grow \(a batch after entry \d+ does not continue the sidecar/);
 
-  // Stop seals the minute: the first post. It continues from the Worker's old base and the sidecar's was reset.
+  // Stop, then the retry fires: the sidecar is reset to the journal's start and the retained journal is replayed.
   rig.runtime.publishLive(rig.add(stop(now + 1000, S1, 'user')));
   await settle();
-  assert.equal(posts.length, 1);
-  const refused = posts[0];
-  const reason = refused.refusal ?? '';
-  assert.match(reason, /^a batch after entry 0 does not continue the sidecar, which continues from entry \d+$/, reason);
-  assert.equal(Number(/continues from entry (\d+)/.exec(reason)?.[1]), firstRetained - 1, 'the sidecar continues from where the journal now begins');
-  assert.ok(refused.room > 2 * MiB, `not the storage limit: the limit leaves ${refused.room} bytes, the batch is a few hundred`);
-  assert.equal(rig.store.size(), HEADER_ONLY, 'the refusal wrote nothing; this is what a drive that quits now finds');
-  assert.equal(host.phases().at(-1), 'rebuilding', 'the Worker announces rebuilding, with the retry on a timer');
-  const message = host.posts.filter((p) => p.type === 'rebuild' && (p as { message?: string }).message !== undefined).map((p) => (p as { message: string }).message).at(-1);
-  assert.match(message ?? '', /^The rollups are paused: the sidecar refused to grow \(a batch after entry 0 does not continue the sidecar/);
-
-  // The retry fires: the sidecar is reset to the journal's start, the retained journal is replayed and the minute posted.
   host.tick();
   await host.host.settled();
   await settle();

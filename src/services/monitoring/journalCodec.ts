@@ -89,6 +89,8 @@ export interface FileHeaderFields {
   /** Overridable so a test can write the header of a file from the future. */
   formatVersion?: number;
   policyVersion?: number;
+  /** A sidecar's: the last entry id of the expiry it was trimmed for (0 if never), at offset 40. The other files write zeros. */
+  trimmedThroughEntryId?: number;
 }
 
 export function encodeFileHeader(framing: Framing, fields: FileHeaderFields): Uint8Array {
@@ -101,12 +103,13 @@ export function encodeFileHeader(framing: Framing, fields: FileHeaderFields): Ui
   v.setUint32(12, FILE_HEADER_BYTES, true);
   out.set(fields.generation, 16);
   v.setBigUint64(32, BigInt(fields.createdMs), true);
+  v.setBigUint64(40, BigInt(fields.trimmedThroughEntryId ?? 0), true);
   v.setUint32(60, crc32(out.subarray(0, 60)), true);
   return out;
 }
 
 export type FileHeaderResult =
-  | { ok: true; formatVersion: number; policyVersion: number; generation: Uint8Array; createdMs: number }
+  | { ok: true; formatVersion: number; policyVersion: number; generation: Uint8Array; createdMs: number; trimmedThroughEntryId: number }
   | { ok: false; reason: string };
 
 /**
@@ -124,12 +127,15 @@ export function decodeFileHeader(framing: Framing, bytes: Uint8Array): FileHeade
   if (v.getUint32(60, true) !== crc32(bytes.subarray(0, 60))) return { ok: false, reason: 'the header checksum does not match' };
   const created = v.getBigUint64(32, true);
   if (created > BigInt(Number.MAX_SAFE_INTEGER)) return { ok: false, reason: 'the creation time is out of range' };
+  const trimmed = v.getBigUint64(40, true);
+  if (trimmed > BigInt(Number.MAX_SAFE_INTEGER)) return { ok: false, reason: 'the trimmed-through entry is out of range' };
   return {
     ok: true,
     formatVersion: v.getUint16(8, true),
     policyVersion: v.getUint16(10, true),
     generation: bytes.slice(16, 16 + GENERATION_BYTES),
     createdMs: Number(created),
+    trimmedThroughEntryId: Number(trimmed),
   };
 }
 

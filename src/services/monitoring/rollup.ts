@@ -516,6 +516,9 @@ export function feedEntry(
   const step = state.step(e);
   if (id <= agg.fedThrough) return null;
   if (step === null) throw new Error(`entry ${id} is already in the decode state but not in the aggregator`);
+  // The first entry of a segment starts afresh: no fragment holds entries of two segments, so an expiry (which
+  // takes whole segments) never cuts through one and the sidecar can be trimmed at any segment start (ADR 0071).
+  if (e.segmentFirstId === id) agg.seal(Infinity);
   agg.enterPolicy(e.policy);
   if (e.kind === 'boundary') {
     agg.fed(id);
