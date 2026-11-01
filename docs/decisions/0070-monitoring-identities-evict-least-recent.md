@@ -77,6 +77,13 @@ valid datagram is counted** in its identity's row and its exporter's totals.
   expiry replay, raw query) decides the same datagrams as churn. The step
   returns such a datagram as `unsupported`. The rollups, the raw scan and
   health then only read the decision.
+  *(2026-11-01, after review: the set is replaced only by a **later** minute, not
+  by any different one. A receipt clock that steps back and forth, B then A then
+  B, would otherwise start a fresh set at each change and give minute B sixteen
+  new identities per re-entry, past the bound this section exists to keep. A
+  datagram stamped earlier than the held minute counts against the newest set
+  held. The held minute still depends only on the entries since the last reset,
+  so every path decides the same datagrams.)*
 
 ### Health
 

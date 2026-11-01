@@ -1456,6 +1456,31 @@ async function main(): Promise<void> {
     assert.equal(port.pushed.length, (await rig.entries()).length);
   });
 
+  await test('live: after the journal rolls to a new segment the first entry of it, and only it, says so (ADR 0071)', async () => {
+    const rig = new Rig();
+    const port = new FakePort();
+    port.autoAck = true;
+    await rig.listen(CFG, port);
+    for (let i = 0; i < 60; i++) rig.socket.emit(bytes(LIMITS.maxPayloadBytes, i & 0xff));
+    rig.drain();
+    await settle();
+    const firsts = rig.volume.journal.list().map((n) => Number(/^journal-(\d+)\.iwmj$/.exec(n)![1]));
+    assert.ok(firsts.length >= 2, `the journal rolled (${firsts.length} segments)`);
+    const pushed = port.pushed;
+    assert.deepEqual(pushed.map((e) => e.ref.entryId), (await rig.entries()).map((e) => e.ref.entryId), 'the feed carried the whole journal');
+    for (const first of firsts.slice(1)) {
+      const at = pushed.findIndex((e) => e.ref.entryId === first);
+      assert.ok(at > 0, `entry ${first}, the first of a new segment, was pushed`);
+      assert.equal(pushed[at].segmentFirstId, first, `entry ${first} carries its segment's first id`);
+      assert.notEqual(pushed[at - 1].segmentFirstId, pushed[at - 1].ref.entryId, 'and the entry before it is not the first of anything');
+    }
+    for (const e of pushed) {
+      const mine = Math.max(...firsts.filter((f) => f <= e.ref.entryId));
+      assert.equal(e.segmentFirstId, mine, `entry ${e.ref.entryId} names the segment it was written to`);
+      assert.equal(e.segmentFirstId === e.ref.entryId, firsts.includes(e.ref.entryId), `only a segment's first entry (${e.ref.entryId}) is marked`);
+    }
+  });
+
   await test('live: the cursor resumes after a re-attach at the journal end, and the old port\'s acks give the new one no credit', async () => {
     const rig = new Rig();
     const a = await rig.listen();

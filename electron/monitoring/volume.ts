@@ -88,30 +88,55 @@ export class NodeSegmentDirectory implements SegmentDirectory {
  * The sidecar's handle, which outlives a trim (ADR 0071). Windows will not rename a file over one that is open,
  * so the file under it is closed for the rename and reopened after; the object a `RollupStore` holds stays the
  * same, and a rename that fails leaves it on the old file, which is as it was.
+ *
+ * A reopen can fail too (a sharing violation, a scanner holding the new file). After a rename that succeeded that
+ * must not undo the replace: `inner` stays null, and the next call of any method opens the file again, so the new
+ * file is what it reads. A reopen that fails there throws that call's own I/O error and the call after tries again.
  */
-class SidecarFile implements BlockFile {
-  private inner: NodeBlockFile;
+export class SidecarFile implements BlockFile {
+  private inner: BlockFile | null;
+  private closed = false;
 
-  constructor(readonly path: string) {
+  constructor(readonly path: string, private readonly reopen: (path: string) => BlockFile = (p) => new NodeBlockFile(p)) {
     this.inner = NodeBlockFile.open(path);
   }
 
-  read(offset: number, into: Uint8Array): number { return this.inner.read(offset, into); }
-  write(offset: number, from: Uint8Array): void { this.inner.write(offset, from); }
-  truncate(length: number): void { this.inner.truncate(length); }
-  flush(): void { this.inner.flush(); }
-  size(): number { return this.inner.size(); }
-  close(): void { this.inner.close(); }
+  read(offset: number, into: Uint8Array): number { return this.file().read(offset, into); }
+  write(offset: number, from: Uint8Array): void { this.file().write(offset, from); }
+  truncate(length: number): void { this.file().truncate(length); }
+  flush(): void { this.file().flush(); }
+  size(): number { return this.file().size(); }
+  close(): void {
+    this.closed = true;
+    const file = this.inner;
+    this.inner = null;
+    file?.close();
+  }
 
-  /** Makes `partial` (complete, flushed and closed) the sidecar. On a throw the sidecar is the file it was. */
+  /** Makes `partial` (complete, flushed and closed) the sidecar. On a throw before the rename it is the file it was. */
   replaceWith(partial: string): void {
-    this.inner.close();
+    const old = this.file();
+    this.inner = null;
+    old.close();
     try {
       renameSync(partial, this.path);
-    } finally {
-      // The new file after a rename, the old one after a failure.
-      this.inner = new NodeBlockFile(this.path);
+    } catch (error) {
+      // The old file is still the sidecar; if it will not open now, the next call tries again.
+      this.tryReopen();
+      throw error;
     }
+    // The rename is done and the new file is the sidecar, whatever the reopen does.
+    this.tryReopen();
+  }
+
+  private file(): BlockFile {
+    if (this.closed) throw new Error(`SidecarFile: ${this.path} is closed`);
+    this.inner ??= this.reopen(this.path);
+    return this.inner;
+  }
+
+  private tryReopen(): void {
+    try { this.inner = this.reopen(this.path); } catch { this.inner = null; }
   }
 }
 
@@ -209,15 +234,21 @@ export interface CollectorFolderView {
   close(): void;
 }
 
+/** What a script may replace to make the disk fail where a real one rarely does. Production passes nothing. */
+export interface VolumeSeams {
+  /** How the sidecar is opened again after a trim's rename; `NodeBlockFile` by default. */
+  reopenSidecar?: (path: string) => BlockFile;
+}
+
 /** Opens (creating, with the directory) the segment folder, the rollup cache and the archive under `root`. */
-export function openMonitoringVolume(root: string): MonitoringVolume {
+export function openMonitoringVolume(root: string, seams: VolumeSeams = {}): MonitoringVolume {
   const segments = new NodeSegmentDirectory(root);
   const opened: BlockFile[] = [];
   const rollupsPath = path.join(root, ROLLUP_FILE);
   let rollups: SidecarFile;
   let archive: BlockFile;
   try {
-    rollups = new SidecarFile(rollupsPath);
+    rollups = new SidecarFile(rollupsPath, seams.reopenSidecar);
     opened.push(rollups);
     archive = NodeBlockFile.open(path.join(root, ARCHIVE_NAME));
   } catch (e) {

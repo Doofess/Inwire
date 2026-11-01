@@ -19,6 +19,7 @@
  */
 import assert from 'node:assert/strict';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
+import { IdentityMinuteGuard } from '../../src/services/monitoring/identityGuard';
 import { MinuteAccumulator, MinuteAggregator, byAddress, minuteOf, sortByAddresses } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { runExpiry } from '../../src/services/monitoring/archive';
@@ -249,6 +250,21 @@ test('guard: a Source ID per datagram gives 16 rows a minute and the rest churn'
     assert.deepEqual(withoutProvenance(churned.fast), withoutProvenance(churned.raw));
     assert.equal(churned.raw.matchingRecords, 0, 'a churned identity has no row');
   }
+});
+
+test('guard: a receipt clock stepping back does not reopen the minute\'s sixteen', async () => {
+  const guard = new IdentityMinuteGuard();
+  const key = (n: number): string => sourceKey(EXPORTER, 0, n);
+  for (let n = 0; n < LIMITS.enginesPerExporter; n++) assert.equal(guard.admit(EXPORTER, key(n), m(5, 1000 + n)), true, `identity ${n} of minute B`);
+  assert.equal(guard.admit(EXPORTER, key(16), m(4, 1000)), false, 'a 17th key at a minute-A time counts against the held, newest set');
+  assert.equal(guard.admit(EXPORTER, key(17), m(5, 2000)), false, 'and the 18th, back in minute B, is not given a fresh sixteen');
+  assert.equal(guard.admit(EXPORTER, key(0), m(4, 2000)), true, 'a held identity still counts, whichever minute its datagram is stamped');
+  assert.equal(guard.admit(EXPORTER, key(18), m(6, 0)), true, 'a later minute does start a new set');
+  assert.equal(guard.admit(EXPORTER, key(0), m(5, 3000)), true, 'and the one after it counts against that set');
+  const other = new IdentityMinuteGuard();
+  other.admit(EXPORTER, key(0), m(5, 0));
+  other.reset();
+  for (let n = 0; n < LIMITS.enginesPerExporter; n++) assert.equal(other.admit(EXPORTER, key(100 + n), m(4, n)), true, 'a reset forgets the held minute');
 });
 
 test('guard: rows while held: an identity that returns after eviction continues its row', async () => {

@@ -13,8 +13,9 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import { Collector, type UdpSocket } from '../../electron/monitoring/collector';
-import { openMonitoringFolder, openMonitoringVolume } from '../../electron/monitoring/volume';
+import { SidecarFile, openMonitoringFolder, openMonitoringVolume } from '../../electron/monitoring/volume';
 import type { ByteSink } from '../../src/lib/saveSink';
 import { ArchiveStore } from '../../src/services/monitoring/archive';
 import { BundleError, bundleStream, exportBundle, type BundleClient } from '../../src/services/monitoring/bundle';
@@ -769,6 +770,75 @@ async function main(): Promise<void> {
       assert.deepEqual([...readFileSync(path.join(dir, 'rollups.iwmr'))], [7, 8, 5], 'the handle appends to the new file');
       assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith('.partial')), []);
     } finally { volume.close(); }
+  });
+
+  /** An opener that fails its first `failures` calls with a sharing violation, then opens the file as production does. */
+  const flakyOpener = (failures: number): { open: (p: string) => NodeBlockFile; calls: () => number; thrown: () => number } => {
+    let calls = 0;
+    let thrown = 0;
+    return {
+      open(p) {
+        calls++;
+        if (thrown < failures) { thrown++; throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); }
+        return new NodeBlockFile(p);
+      },
+      calls: () => calls,
+      thrown: () => thrown,
+    };
+  };
+
+  await test('replaceRollups: a reopen that fails after the rename is retried on the next access, and the new file is the one read', async (dir) => {
+    const flaky = flakyOpener(1);
+    const volume = openMonitoringVolume(dir, { reopenSidecar: flaky.open });
+    try {
+      const handle = volume.rollups;
+      handle.write(0, new Uint8Array([1, 2, 3, 4]));
+      handle.flush();
+      let same: unknown;
+      assert.doesNotThrow(() => { same = volume.replaceRollups((fresh) => { fresh.write(0, new Uint8Array([7, 8])); }); }, 'the new file is in place, so the trim succeeded');
+      assert.equal(flaky.thrown(), 1, 'the reopen after the rename did fail');
+      assert.equal(same, handle);
+      assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith('.partial')), [], 'the partial is gone');
+      assert.deepEqual([...readFileSync(path.join(dir, 'rollups.iwmr'))], [7, 8]);
+      assert.equal(handle.size(), 2, 'the next access reopens, and sees the new file');
+      const back = new Uint8Array(2);
+      assert.equal(handle.read(0, back), 2);
+      assert.deepEqual([...back], [7, 8]);
+      handle.write(2, new Uint8Array([5]));
+      handle.flush();
+      assert.deepEqual([...readFileSync(path.join(dir, 'rollups.iwmr'))], [7, 8, 5], 'and appends to it');
+      // A second trim after the recovery works as ever: nothing is wedged.
+      volume.replaceRollups((fresh) => { fresh.write(0, new Uint8Array([6])); });
+      assert.equal(handle.size(), 1);
+    } finally { volume.close(); }
+  });
+
+  await test('replaceRollups: a lazy reopen that also fails throws that call\'s error, and a later call tries again', async (dir) => {
+    const flaky = flakyOpener(2);
+    const volume = openMonitoringVolume(dir, { reopenSidecar: flaky.open });
+    try {
+      const handle = volume.rollups;
+      handle.write(0, new Uint8Array([1]));
+      handle.flush();
+      volume.replaceRollups((fresh) => { fresh.write(0, new Uint8Array([7, 8])); });
+      assert.throws(() => handle.size(), /EBUSY/, 'this access could not reopen, and says so');
+      assert.equal(handle.size(), 2, 'the next one does');
+      assert.equal(flaky.calls(), 3);
+    } finally { volume.close(); }
+  });
+
+  await test('replaceRollups: a rename that fails still leaves the old file open and in use', async (dir) => {
+    const flaky = flakyOpener(0);
+    const handle = new SidecarFile(path.join(dir, 'rollups.iwmr'), flaky.open);
+    try {
+      handle.write(0, new Uint8Array([1, 2, 3]));
+      handle.flush();
+      assert.throws(() => handle.replaceWith(path.join(dir, 'no-such.partial')), /ENOENT/);
+      assert.equal(handle.size(), 3);
+      handle.write(3, new Uint8Array([4]));
+      handle.flush();
+      assert.deepEqual([...readFileSync(path.join(dir, 'rollups.iwmr'))], [1, 2, 3, 4]);
+    } finally { handle.close(); }
   });
 
   console.log(`\n${passes} passed, ${failures} failed`);
