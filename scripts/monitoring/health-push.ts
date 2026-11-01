@@ -12,8 +12,9 @@
 import assert from 'node:assert/strict';
 import { initialSourceHealth } from '../../src/services/monitoring/sourceHealth';
 import { LIMITS, type Evidence } from '../../src/services/monitoring/types';
+import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
 import { sourceKey } from '../../src/services/monitoring/v5';
-import { EXPORTER } from './fixtures';
+import { COLLECTOR, EXPORTER, v9Sample } from './fixtures';
 import {
   BASE, HostRig, MIN, Rig, S2, SRC, SRC1, dgram, junk, rollUp, runAll, start, stop, test, unreadVersion,
 } from './queryRig';
@@ -210,6 +211,28 @@ test('health: a 17th engine, heard in a later minute, takes the place of the lea
   assert.ok(!health.engines.some((e) => e.engineId === 0), 'the engine heard least recently went');
   assert.ok(health.engines.some((e) => e.engineId === LIMITS.enginesPerExporter));
   assert.ok(post.sources.includes(sourceKey(EXPORTER, 0, LIMITS.enginesPerExporter)), 'and it is a source with History');
+});
+
+test('exporters: a rotating v9 Source ID leaves at most the bound of cards, and an evicted identity has none (ADR 0070)', async () => {
+  const { rig, h } = await live();
+  const ids = LIMITS.enginesPerExporter + 4;
+  for (let i = 1; i <= ids; i++) {
+    const receivedMs = m(i);
+    const header = { uptime: 1_000_000 + i * 60_000, secs: Math.floor(receivedMs / 1000), sequence: i, sourceId: i };
+    const bytes = v9Sample(header, [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 100, packets: 2 }], null);
+    await push(rig, h, { kind: 'datagram', receivedMs, localIPv4: COLLECTOR, localPort: 2055, remoteIPv4: EXPORTER, remotePort: 40_000, bytes });
+    h.tick();
+  }
+  const posts = h.healthPosts();
+  for (const p of posts) assert.ok(p.exporters.length <= LIMITS.enginesPerExporter, `${p.exporters.length} cards in one push`);
+  const last = posts.at(-1)!;
+  assert.equal(last.exporters.length, LIMITS.enginesPerExporter, 'the sixteen held identities have a card each');
+  const keys = last.exporters.map((x) => x.sourceKey);
+  for (let i = 1; i <= ids - LIMITS.enginesPerExporter; i++) {
+    assert.ok(!keys.includes(sourceKeyFor('v9', EXPORTER, i)), `Source ID ${i} was evicted and has no card`);
+    assert.ok(last.sources.includes(sourceKeyFor('v9', EXPORTER, i)), `Source ID ${i} is still a source with History`);
+  }
+  assert.ok(keys.includes(sourceKeyFor('v9', EXPORTER, ids)), 'the newest identity has its card');
 });
 
 test('health: a 17th engine in one minute is identity churn: counted, given no row', async () => {

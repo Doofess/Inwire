@@ -748,13 +748,19 @@ export class MonitoringWorkerHost {
     this.options.post({ type: 'health', health: this.health, sources, exporters });
   }
 
-  /** The live state of every known v9 or IPFIX source; none while the decode state is a rebuild's or a failed host's. */
+  /**
+   * The live state of every v9 or IPFIX source the decoder holds now; none while the decode state is a rebuild's or a
+   * failed host's. Not every source ever heard (`knownSources`, History's list): an identity the exporter's bound
+   * evicted has no template in force and no state, and a card for it would read as a live source stuck waiting (ADR 0070).
+   */
   private exporterSnapshots(): ExporterSnapshot[] {
     if (this.phase !== 'live') return [];
     const state = this.decodeState;
     const inventory = state.store.inventory();
+    const held = new Set<string>();
+    for (const s of state.store.exportScopes()) held.add(sourceKeyFor(s.protocol, s.exporter, s.domain));
     const out: ExporterSnapshot[] = [];
-    for (const key of [...this.knownSources].sort()) {
+    for (const key of [...held].sort()) {
       const parsed = parseSourceKey(key);
       if (parsed === null || parsed.protocol === 'v5') continue;
       out.push({

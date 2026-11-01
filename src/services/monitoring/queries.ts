@@ -42,7 +42,7 @@ import { CorruptRollupError, RuntimeUnavailableError, type ArchiveSource, type E
 import {
   LIMITS, SAMPLING_MIXED, isReadablePolicy, type BoundaryEvidence, type ConversationTotals, type DatagramEvidence, type EndpointTotals, type Evidence,
   type EvidenceRef, type ExpiryCause, type HistoryBucket, type HistoryReply, type HistoryResult, type HistoryTable, type MinuteRollup,
-  type QueryFocus, type QuerySpec, type RangeSampling, type SegmentSource, type Snapshot,
+  type QueryFocus, type QuerySpec, type RangeSampling, type RollupWatermark, type SegmentSource, type Snapshot,
 } from './types';
 import { exporterKey, exporterOf, isEngineSourceKey } from './v5';
 import { parseSourceKey } from './sourceKeys';
@@ -596,7 +596,7 @@ class Query {
     const boundaries = await (this.options.boundaries ?? new BoundaryCache()).upTo(this.reader, this.snapshot, this.firstEntryId);
     this.horizon = expiredHorizon(boundaries);
     this.cuts = boundaries.flatMap((b) => (b.action === 'expired' && b.expired ? [{ fromMs: b.expired.fromMs, throughMs: b.expired.throughMs, reason: b.reason, receivedMs: b.receivedMs }] : []));
-    if (mark !== null) this.checkCacheAgainstExpiry(mark.throughEntryId, boundaries);
+    if (mark !== null) this.checkCacheAgainstExpiry(mark, boundaries);
     this.refuseFocusedOverExpired();
     await this.tick();
 
@@ -625,16 +625,26 @@ class Query {
   }
 
   /**
-   * A cache is valid only at or past the entry id of the newest `expired` boundary the journal retains:
+   * A cache is valid only at or past the entry id of the newest `expired` boundary the journal retains
+   * (or when it was trimmed for that boundary, ADR 0071):
    * an expiry resets the cache after that boundary, so one still below it is the world from before the
    * expiry, whose minutes are in the archive as well and would be counted twice. It is then not read
    * at all: the query runs as it would over an empty cache (the archive for what expired, the journal
    * from its first retained entry for the rest). One that stops short of the journal's start with no
    * boundary to explain it is not trusted at all.
    */
-  private checkCacheAgainstExpiry(watermark: number, boundaries: BoundaryEvidence[]): void {
+  private checkCacheAgainstExpiry(mark: RollupWatermark, boundaries: BoundaryEvidence[]): void {
+    const watermark = mark.throughEntryId;
     let expiredAt = 0;
-    for (const b of boundaries) if (b.action === 'expired') expiredAt = Math.max(expiredAt, b.ref.entryId);
+    let newestThrough = 0;
+    for (const b of boundaries) {
+      if (b.action !== 'expired' || b.ref.entryId < expiredAt) continue;
+      expiredAt = b.ref.entryId;
+      newestThrough = b.expired?.throughEntryId ?? 0;
+    }
+    // A cache trimmed for that boundary is the world after the cut, whatever its watermark: the Worker's next post
+    // continues it (ADR 0071), as `resetIfStale` and `settleSidecar` judge it.
+    if (expiredAt > 0 && (mark.trimmedThroughEntryId ?? 0) >= newestThrough && watermark >= this.firstEntryId - 1) return;
     if (watermark >= expiredAt && watermark >= this.firstEntryId - 1) return;
     if (expiredAt === 0) {
       throw new RollupUnusable(`the rollups end at entry ${watermark}, and the journal begins at ${this.firstEntryId}`);

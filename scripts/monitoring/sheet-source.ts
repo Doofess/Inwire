@@ -220,7 +220,7 @@ test('the source status reads its identity counters from monitoringCopy', () => 
   assert.equal(IDENTITIES_REPLACED_LABEL, 'Identities replaced');
   assert.equal(
     IDENTITIES_REPLACED_NOTE,
-    'The exporter took a new Source ID or Observation Domain, so the least recently heard one was dropped with its templates; its History is kept.',
+    'A new Source ID, Observation Domain or engine took the place of the one heard least recently; a NetFlow v9 or IPFIX one is dropped with its templates. Its History is kept.',
   );
 });
 

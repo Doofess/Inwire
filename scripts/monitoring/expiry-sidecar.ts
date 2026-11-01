@@ -29,7 +29,7 @@ import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
 import { type Evidence } from '../../src/services/monitoring/types';
 import { COLLECTOR, EXPORTER, v9DataOnly, v9Sample, type SampleFlow } from './fixtures';
 import {
-  BASE, HostRig, MIN, NOW, Rig, S1, SRC, askBoth, deflate, dgram, inflate, rollUp, runAll, spec, start, stop, test, waitTick, withoutProvenance,
+  BASE, HostRig, askOk, MIN, NOW, Rig, S1, SRC, askBoth, deflate, dgram, inflate, rollUp, runAll, spec, start, stop, test, waitTick, withoutProvenance,
 } from './queryRig';
 
 const MiB = 1 << 20;
@@ -316,6 +316,32 @@ for (const [label, build, key] of [
     assert.ok(trims >= 3, `${trims} expiries`);
   });
 }
+
+test('trim: History answers from the trimmed rollups right after an expiry, intake stopped', async () => {
+  const rig = await v9Journal();
+  await rollUp(rig);
+  const { cut, cutMs, result } = expireFirst(rig);
+  assert.equal(result, 'done');
+  assert.equal(rig.store.trimmedThrough(), cut, 'trimmed to the cut');
+  // No Worker post since the trim: the sidecar's watermark is behind the `expired` boundary's own entry.
+  assert.ok((rig.store.watermark()?.throughEntryId ?? 0) < rig.journal.snapshot().throughEntryId, 'the boundary is past the watermark');
+  const retainedFrom = Math.ceil((cutMs + 1) / MIN) * MIN;
+  // A stale cache is not read and the journal is scanned in its place, and that scan also counts as rollup minutes
+  // (a tail minute is folded as one), so `answeredFrom` cannot tell them apart; the sidecar's minutes the query reads can.
+  let fromSidecar = 0;
+  const inner = rig.runtime.readMinutes.bind(rig.runtime);
+  rig.runtime.readMinutes = async (key, fromMinuteMs, toMinuteMs, maxBytes) => {
+    const rows = await inner(key, fromMinuteMs, toMinuteMs, maxBytes);
+    fromSidecar += rows.length;
+    return rows;
+  };
+  const toMs = BASE + 5_000 * MIN;
+  const fast = await askOk(rig, spec(retainedFrom, toMs, 24, { sourceKey: V9 }));
+  assert.ok(fast.answeredFrom.rollupMinutes > 0, `rollup minutes answered (${JSON.stringify(fast.answeredFrom)})`);
+  assert.ok(fromSidecar > 0, 'the trimmed sidecar\'s minutes were read: the cache was trusted, not set aside for a rescan');
+  const raw = await askOk(rig, spec(retainedFrom, toMs, 24, { sourceKey: V9 }), { forceRaw: true });
+  sameAnswer(withoutProvenance(fast), withoutProvenance(raw), 'the trimmed rollups answer as the raw scan does');
+});
 
 test('trim: a crash before the rename leaves the old file, and reopen resets it', async () => {
   const rig = await v9Journal();

@@ -222,7 +222,7 @@ export function notInterpretedText(elements: { pen: number | null; ie: number }[
 export const IDENTITY_CHURN_LABEL = 'Too many identities in one minute';
 export const IDENTITIES_REPLACED_LABEL = 'Identities replaced';
 /** Shown under the counters while any identity was replaced. */
-export const IDENTITIES_REPLACED_NOTE = 'The exporter took a new Source ID or Observation Domain, so the least recently heard one was dropped with its templates; its History is kept.';
+export const IDENTITIES_REPLACED_NOTE = 'A new Source ID, Observation Domain or engine took the place of the one heard least recently; a NetFlow v9 or IPFIX one is dropped with its templates. Its History is kept.';
 
 /** The word an estimate carries wherever it is shown, so it is never read as a reported figure. */
 export const ESTIMATE_LABEL = 'estimate';
