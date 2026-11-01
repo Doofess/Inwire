@@ -6,6 +6,10 @@
  * is admitted at most `LIMITS.enginesPerExporter` distinct identities (source keys); a datagram of one
  * more is churn, and every reader counts it as unsupported.
  *
+ * The held set is replaced only by a later minute; a datagram stamped earlier than the held minute (the receipt
+ * clock stepped back) counts against the newest set. Which set is held depends only on the entries since the last
+ * reset, so every reader holds the same one.
+ *
  * Reset at a segment's first entry and at a stop, a suspend and an interrupted boundary, so every
  * checkpoint lies at a reset and the set is never checkpointed: live, rebuild and replay agree.
  * Pure: no `node:*`, no Electron.
@@ -23,7 +27,9 @@ export class IdentityMinuteGuard {
   admit(exporter: string, sourceKey: string, receivedMs: number): boolean {
     const minuteMs = Math.floor(receivedMs / MINUTE_MS) * MINUTE_MS;
     let h = this.held.get(exporter);
-    if (h === undefined || h.minuteMs !== minuteMs) {
+    // Only a later minute replaces the set. A clock that steps back (B, A, B) must not hand minute B sixteen new
+    // identities at every re-entry: the earlier datagram counts against the newest set held.
+    if (h === undefined || minuteMs > h.minuteMs) {
       h = { minuteMs, keys: new Set() };
       this.held.set(exporter, h);
     }

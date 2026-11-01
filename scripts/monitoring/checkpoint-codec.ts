@@ -226,6 +226,26 @@ test('checkpoint-vector: a flipped byte, a truncation, a bad magic, format or po
   assert.equal(decodeCheckpoint(new Uint8Array(LIMITS.checkpointBytes + 1)), null, 'over the bound');
 });
 
+test('checkpoint-v2: a last heard after the through id is refused', () => {
+  const good = vector2();
+  const through = 4096;
+  const scopeAt = 32; // the header is 32 bytes; the one scope's last heard is its 36th byte on
+  const resealed = (patch: (v: DataView) => void): Uint8Array => {
+    const out = good.slice();
+    patch(new DataView(out.buffer));
+    new DataView(out.buffer).setUint32(out.length - 4, crc32(out.subarray(0, out.length - 4)), true);
+    return out;
+  };
+  const view = new DataView(good.buffer);
+  assert.equal(Number(view.getBigUint64(16, true)), through, 'the through id is where this test thinks it is');
+  assert.equal(Number(view.getBigUint64(scopeAt + 36, true)), through, 'and so is the scope\'s last heard');
+  assert.notEqual(decodeCheckpoint(resealed(() => undefined)), null, 'the resealing itself is sound');
+  assert.notEqual(decodeCheckpoint(resealed((v) => v.setBigUint64(scopeAt + 36, BigInt(through - 1), true))), null, 'heard before the through id');
+  assert.notEqual(decodeCheckpoint(resealed((v) => v.setBigUint64(scopeAt + 36, 0n, true))), null, '0 is a scope that only began a datagram');
+  assert.equal(decodeCheckpoint(resealed((v) => v.setBigUint64(scopeAt + 36, BigInt(through + 1), true))), null, 'heard after the checkpoint');
+  assert.equal(decodeCheckpoint(resealed((v) => v.setBigUint64(16, BigInt(through - 1), true))), null, 'the same, from the other side');
+});
+
 test('checkpoint-vector: no input makes decodeCheckpoint throw', () => {
   let seed = 0x1ee7;
   const rnd = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32;
@@ -243,19 +263,19 @@ test('checkpoint-vector: no input makes decodeCheckpoint throw', () => {
 test('checkpoint-gap-bits: gapEnded() sets scope and template bit 2, the next datagram clears the scope\'s, restore keeps them', () => {
   const { store, state } = vectorState();
   const flags = (b: Uint8Array) => ({ scope: b[33], template: b[32 + 44 + 2] });
-  assert.deepEqual(flags(encodeCheckpoint(store, state, 1, 1)), { scope: 2, template: 1 }, 'bit 1 (IE 160 known) and bit 0 (options)');
+  assert.deepEqual(flags(encodeCheckpoint(store, state, 4096, 1)), { scope: 2, template: 1 }, 'bit 1 (IE 160 known) and bit 0 (options)');
   store.gapEnded();
   state.gapEnded();
-  const after = encodeCheckpoint(store, state, 1, 1);
+  const after = encodeCheckpoint(store, state, 4096, 1);
   assert.deepEqual(flags(after), { scope: 2 | 4, template: 1 | 4 });
   const restored = decodeCheckpoint(after)!;
-  assert.deepEqual(flags(encodeCheckpoint(restored.store, restored.state, 1, 1)), { scope: 6, template: 5 }, 'restore preserves them');
+  assert.deepEqual(flags(encodeCheckpoint(restored.store, restored.state, 4096, 1)), { scope: 6, template: 5 }, 'restore preserves them');
   assert.equal(restored.store.lookup(SCOPE, 256)!.previousSession, true);
   // The scope's next datagram spends the scope's bit; a template's bit goes at its own receipt.
   restored.store.beginDatagram(SCOPE, T + 601_000, null);
-  assert.deepEqual(flags(encodeCheckpoint(restored.store, restored.state, 1, 1)), { scope: 2, template: 5 });
+  assert.deepEqual(flags(encodeCheckpoint(restored.store, restored.state, 4096, 1)), { scope: 2, template: 5 });
   restored.store.define(SCOPE, 256, { scopeCount: 1, fields: [[143, 4], [305, 4], [306, 4], [304, 2]].map(([type, length]) => ({ type, length })) }, 9, T + 601_000);
-  assert.deepEqual(flags(encodeCheckpoint(restored.store, restored.state, 1, 1)), { scope: 2, template: 1 });
+  assert.deepEqual(flags(encodeCheckpoint(restored.store, restored.state, 4096, 1)), { scope: 2, template: 1 });
 });
 
 test('checkpoint-order: scopes sort by protocol, then domain (a domain has one port), whatever order they arrived in', () => {

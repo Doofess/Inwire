@@ -198,6 +198,8 @@ function read(bytes: Uint8Array): { store: CollectorTemplateStore; state: Export
     const templateCount = r.u16();
     expect(r.u16() === 0, 'reserved');
     const lastHeardEntryId = format === 2 ? r.u64() : throughEntryId;
+    // 0 is a scope that began a datagram without admitting one; nothing the encoder writes is heard after its own checkpoint.
+    expect(lastHeardEntryId <= throughEntryId, 'last heard after the checkpoint');
     expect((flags & 1) !== 0 || uptime === 0, 'uptime without its flag');
     expect((flags & 2) !== 0 || init === 0, 'systemInitTime without its flag');
     expect(templateCount <= LIMITS.templatesPerScope, 'templates per scope');
