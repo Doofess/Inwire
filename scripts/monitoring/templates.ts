@@ -15,7 +15,7 @@
  * message m + k.
  */
 import assert from 'node:assert/strict';
-import { CollectorTemplateStore, type TemplateScope } from '../../src/services/monitoring/templates';
+import { CollectorTemplateStore, type ScopeSnapshot, type TemplateScope } from '../../src/services/monitoring/templates';
 import type { FlowTemplate } from '../../src/services/flow/flowExport';
 import { LIMITS } from '../../src/services/monitoring/types';
 
@@ -363,18 +363,74 @@ test('gap flags: gapEnded() sets scope and template flags, the next datagram cle
   assert.equal(s.lookup(a, 256)!.previousSession, true, 'the template flag clears at its own receipt, not the scope\'s');
 });
 
-test('bounds: an exporter opens at most enginesPerExporter scopes; one it holds, and another exporter, stay open', () => {
+/** One datagram of the scope heard at `entryId`: admitted, then counted. Returns what admission evicted. */
+const hear = (s: CollectorTemplateStore, scope: TemplateScope, entryId: number): string | null => {
+  const evicted = s.admit(scope, entryId);
+  begin(s, scope, T0);
+  return evicted;
+};
+const N16 = LIMITS.enginesPerExporter;
+
+test('bounds: an exporter holds at most enginesPerExporter scopes; one it holds, and another exporter, evict nothing', () => {
   const s = new CollectorTemplateStore();
-  for (let d = 0; d < LIMITS.enginesPerExporter; d++) {
-    assert.equal(s.canOpen(ipfix(d, 50_000)), true, `scope ${d + 1}`);
-    begin(s, ipfix(d, 50_000), T0);
+  for (let d = 0; d < N16; d++) assert.equal(hear(s, ipfix(d, 50_000), d + 1), null, `scope ${d + 1}`);
+  assert.equal(s.exportScopes().length, N16);
+  assert.equal(s.admit(ipfix(3, 50_000), 100), null, 'a scope it holds');
+  assert.equal(s.exportScopes().find((x) => x.domain === 3)!.lastHeardEntryId, 100, 'is heard again');
+  assert.equal(s.admit(ipfix(5, 50_001), 101), null, 'the same scope from another source port replaces it, and evicts nothing');
+  begin(s, ipfix(5, 50_001), T0);
+  assert.equal(s.exportScopes().find((x) => x.domain === 5)!.lastHeardEntryId, 101, 'the replacement keeps being heard at the entry that replaced it');
+  const other: TemplateScope = { ...v9(0), exporter: '192.0.2.2' };
+  assert.equal(hear(s, other, 102), null, 'another exporter has its own 16');
+  assert.equal(s.exportScopes().length, N16 + 1);
+});
+
+test('evict: the 17th identity drops the least recently heard scope with its templates, whatever its protocol', () => {
+  const s = new CollectorTemplateStore();
+  for (let d = 0; d < N16; d++) {
+    assert.equal(hear(s, ipfix(d, 50_000), d + 1), null);
+    s.define(ipfix(d, 50_000), 300, flowTemplate(8, 12), d + 1, T0);
   }
-  assert.equal(s.canOpen(ipfix(LIMITS.enginesPerExporter, 50_000)), false, 'a 17th IPFIX domain');
-  assert.equal(s.canOpen(v9(0)), false, 'and a v9 Source ID: the 16 belong to the exporter, not to a protocol');
-  assert.equal(s.canOpen(ipfix(3, 50_000)), true, 'a scope it holds');
-  assert.equal(s.canOpen(ipfix(3, 50_001)), true, 'the same scope from another source port replaces it');
-  assert.equal(s.canOpen({ ...v9(0), exporter: '192.0.2.2' }), true, 'another exporter has its own 16');
-  assert.equal(s.exportScopes().length, LIMITS.enginesPerExporter);
+  assert.equal(hear(s, ipfix(0, 50_000), 20), null, 'domain 0 is heard again at entry 20');
+  const gone = hear(s, v9(77), 21);
+  assert.equal(gone, 'ipfix:192.0.2.1/1', 'domain 1 (heard at entry 2) is the least recent; the newcomer is a v9 Source ID');
+  assert.equal(s.lookup(ipfix(1, 50_000), 300), null, 'its templates go with it');
+  assert.notEqual(s.lookup(ipfix(0, 50_000), 300), null);
+  assert.equal(s.exportScopes().length, N16);
+  assert.equal(s.exportScopes().find((x) => x.protocol === 'v9')!.lastHeardEntryId, 21);
+  // The template accounting went with the evicted scope: 16 scopes of one template each remain.
+  assert.equal(s.inventory().length, N16 - 1);
+  // Evicting again takes the next least recent (domain 2, entry 3), not the newcomer.
+  assert.equal(hear(s, v9(78), 22), 'ipfix:192.0.2.1/2');
+  assert.notEqual(s.exportScopes().find((x) => x.protocol === 'v9' && x.domain === 77), undefined);
+});
+
+test('evict: ties after a format 1 restore go by sort order', () => {
+  // A format 1 restore hears every scope at the checkpoint's own through id.
+  const snaps = (): ScopeSnapshot[] => {
+    const src = new CollectorTemplateStore();
+    for (let d = N16 - 1; d >= 8; d--) hear(src, ipfix(d, 50_000), 1);
+    for (let d = 7; d >= 0; d--) hear(src, v9(d + 10), 1);
+    return src.exportScopes().map((x) => ({ ...x, lastHeardEntryId: 900 }));
+  };
+  const s = CollectorTemplateStore.fromScopes(snaps())!;
+  assert.notEqual(s, null);
+  assert.equal(s.exportScopes().length, N16);
+  assert.equal(s.admit(ipfix(99, 50_000), 901), 'v9:192.0.2.1/10', 'v9 sorts before IPFIX and 10 is its lowest domain');
+  begin(s, ipfix(99, 50_000), T0);
+  assert.equal(hear(s, ipfix(98, 50_000), 902), 'v9:192.0.2.1/11', 'the next tie');
+  for (let i = 2; i < 8; i++) assert.equal(hear(s, ipfix(100 + i, 50_000), 903 + i), `v9:192.0.2.1/${10 + i}`, `tie ${i + 1}`);
+  assert.deepEqual(s.exportScopes().filter((x) => x.protocol === 'v9'), [], 'the eight v9 scopes went first, in sort order, before any IPFIX one');
+});
+
+test('evict: ties are broken by sort order and the choice does not depend on arrival order', () => {
+  const a = new CollectorTemplateStore();
+  const b = new CollectorTemplateStore();
+  const domains = Array.from({ length: N16 }, (_, d) => d);
+  for (const d of domains) hear(a, ipfix(d, 50_000), 5);
+  for (const d of [...domains].reverse()) hear(b, ipfix(d, 50_000), 5);
+  assert.equal(a.admit(v9(1), 6), 'ipfix:192.0.2.1/0');
+  assert.equal(b.admit(v9(1), 6), 'ipfix:192.0.2.1/0');
 });
 
 test('retainExporter: scopes of another exporter go with their templates, the bounds follow, the kept exporter keeps its own', () => {

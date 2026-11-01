@@ -395,6 +395,22 @@ test('bounds: the 17th sampler is refused and the source\'s sampling becomes uns
   assert.notEqual(s2.sampling(KEY9).kind, 'unsupported');
 });
 
+test('evict: forgetSource drops one source, its sampling and its sequence, and keeps the rest', () => {
+  const s = new ExporterState();
+  const OTHER_KEY = `ipfix:${EXPORTER}/1`;
+  for (const m of rfcStream(ALTERNATING)) feed(s, m);
+  feed(s, { seq: 5, key: OTHER_KEY, samplers: [{ templateId: 256, scope: [], samplingInterval: 10 }] });
+  assert.deepEqual(s.exportSources().map((x) => x.key), [KEY, OTHER_KEY]);
+  assert.equal(s.sequence(KEY).mode, 'rfc');
+  s.forgetSource(KEY);
+  assert.deepEqual(s.exportSources().map((x) => x.key), [OTHER_KEY], 'only the named source went');
+  assert.equal(s.sequence(KEY).mode, 'learning', 'a source it forgot is a new one');
+  assert.deepEqual(s.sampling(OTHER_KEY), { kind: 'known', interval: 10, sinceEntryId: entry });
+  s.forgetSource(KEY);
+  s.forgetSource('ipfix:192.0.2.99/0');
+  assert.deepEqual(s.exportSources().map((x) => x.key), [OTHER_KEY], 'forgetting what it does not hold changes nothing');
+});
+
 // --- the clock --------------------------------------------------------------------------------------------------
 
 test('clock: skew is export time minus receipt, flagged past 10 s, with an event on crossing', () => {

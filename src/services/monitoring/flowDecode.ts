@@ -31,7 +31,7 @@ import { sourceKeyFor } from './sourceKeys';
 import {
   CollectorTemplateStore, REVERSE_PEN, isInterpretedDataField, isInterpretedOptionsField, templateShape, type TemplateScope,
 } from './templates';
-import { LIMITS, type DatagramEvidence, type DecodeResult } from './types';
+import type { DatagramEvidence, DecodeResult } from './types';
 
 export interface NormalizedFlow {
   srcAddr: string;
@@ -99,6 +99,8 @@ export type FlowDecode =
     options: OptionsReport[];
     withdrawalsIgnored: number;
     restart: boolean;
+    /** The source key of the identity this datagram evicted from the exporter's 16 places (ADR 0070): the caller forgets that source too. */
+    evictedSourceKey?: string;
     v5?: DecodeResult;
   }
   | { kind: 'unsupported' | 'malformed'; reason: string };
@@ -445,12 +447,10 @@ function decodeTemplated(e: DatagramEvidence, exporterIPv4: string, version: 9 |
 
   const protocol = version === 9 ? 'v9' : 'ipfix';
   const scope: TemplateScope = { protocol, exporter: exporterIPv4, exporterPort: version === 10 ? e.remotePort : null, domain: header.domain };
-  // An exporter's identities are bounded (LIMITS.enginesPerExporter, as admission bounds its engines): a datagram that
-  // would open one more is not counted and touches no state, so a spoofed or rotating identity cannot grow a checkpoint.
-  if (!store.canOpen(scope)) {
-    return { kind: 'unsupported', reason: `${exporterIPv4} already has ${LIMITS.enginesPerExporter} NetFlow sources; another ${protocol === 'v9' ? 'Source ID' : 'Observation Domain'} is not counted` };
-  }
+  // An exporter's identities are bounded (LIMITS.enginesPerExporter): one more recycles the least recently heard, so every
+  // valid datagram is counted and a spoofed or rotating identity cannot grow a checkpoint. Only a validated datagram gets here.
   const entryId = e.ref.entryId;
+  const evictedSourceKey = store.admit(scope, entryId);
   const uptimeMs = version === 9 ? header.sysUptimeMs ?? null : null;
   const exportMs = header.unixSecs * 1000;
   let restart = store.beginDatagram(scope, e.receivedMs, uptimeMs, e.remotePort) === 'restart';
@@ -507,6 +507,6 @@ function decodeTemplated(e: DatagramEvidence, exporterIPv4: string, version: 9 |
   return {
     kind: 'valid', protocol, sourceKey: sourceKeyFor(protocol, exporterIPv4, header.domain), sequence: header.sequence, exportMs, uptimeMs,
     flows, dataRecords, optionsRecords, awaiting: [...awaiting.values()], refused: [...refused.values()], unsupportedTemplates, options,
-    withdrawalsIgnored, restart,
+    withdrawalsIgnored, restart, ...(evictedSourceKey === null ? {} : { evictedSourceKey }),
   };
 }

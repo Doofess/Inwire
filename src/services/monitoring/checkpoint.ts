@@ -6,7 +6,8 @@
  * starts from a checkpoint. The encoding is therefore **deterministic** - a
  * checkpoint written live and the one a rebuild writes for the same entry are
  * byte-identical - and `decodeCheckpoint` accepts only what `encodeCheckpoint`
- * could have written, so restoring and encoding again gives the same bytes.
+ * could have written, so restoring and encoding again gives the same bytes
+ * (a format 1 checkpoint, which the encoder no longer writes, gives format 2's).
  *
  * Little-endian like the other monitoring formats; field specifiers are the
  * exception and keep the wire's network order. The layout is ADR 0064's, with
@@ -30,7 +31,12 @@ import { LIMITS } from './types';
 import type { FlowTemplateField } from '../flow/flowExport';
 
 const MAGIC = 'INWIREMT';
-const FORMAT = 1;
+/**
+ * What `encodeCheckpoint` writes. Format 2 (ADR 0070) is format 1 with an 8-byte last heard entry id at the end of
+ * each scope record (36 to 44 bytes). `decodeCheckpoint` reads both, for good: the archive holds format 1
+ * checkpoints and is never rewritten (ADR 0062). A format 1 scope is restored heard at the checkpoint's own through id.
+ */
+const FORMAT = 2;
 /** The decoder policy the state was derived under. */
 const POLICY = 2;
 const HEADER_BYTES = 32;
@@ -94,6 +100,7 @@ export function encodeCheckpoint(store: CollectorTemplateStore, state: ExporterS
     w.u16(s.port);
     w.bytes(ipv4Bytes(s.exporter));
     w.u32(s.domain); w.u32(s.uptimeMs ?? 0); w.u64(s.systemInitMs ?? 0); w.u64(s.messages); w.u16(s.templates.length); w.u16(0);
+    w.u64(s.lastHeardEntryId);
     for (const t of s.templates) {
       const specs = specifierBytes(s.protocol, t.fields);
       w.u16(t.id); w.u8((t.options ? 1 : 0) | (t.v9Options === true ? 2 : 0) | (t.previousSession ? 4 : 0)); w.u8(0);
@@ -166,7 +173,8 @@ function read(bytes: Uint8Array): { store: CollectorTemplateStore; state: Export
   expect(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(body, true) === crc32(bytes.subarray(0, body)), 'crc');
   const r = new Reader(bytes, body);
   expect(String.fromCharCode(...r.bytes(8)) === MAGIC, 'magic');
-  expect(r.u16() === FORMAT, 'format');
+  const format = r.u16();
+  expect(format === 1 || format === 2, 'format');
   expect(r.u16() === POLICY, 'policy');
   const scopeCount = r.u16();
   const sourceCount = r.u16();
@@ -189,12 +197,13 @@ function read(bytes: Uint8Array): { store: CollectorTemplateStore; state: Export
     const messages = r.u64();
     const templateCount = r.u16();
     expect(r.u16() === 0, 'reserved');
+    const lastHeardEntryId = format === 2 ? r.u64() : throughEntryId;
     expect((flags & 1) !== 0 || uptime === 0, 'uptime without its flag');
     expect((flags & 2) !== 0 || init === 0, 'systemInitTime without its flag');
     expect(templateCount <= LIMITS.templatesPerScope, 'templates per scope');
     const scope: ScopeSnapshot = {
       protocol, exporter: ip.join('.'), port, domain, uptimeMs: (flags & 1) !== 0 ? uptime : null, systemInitMs: (flags & 2) !== 0 ? init : null,
-      gap: (flags & 4) !== 0, messages, templates: [],
+      gap: (flags & 4) !== 0, messages, lastHeardEntryId, templates: [],
     };
     if (previous !== null) {
       const order = (previous.protocol === scope.protocol ? 0 : previous.protocol === 'v9' ? -1 : 1) || previous.domain - scope.domain || previous.port - scope.port;

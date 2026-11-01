@@ -1818,13 +1818,14 @@ async function v9CollectorMode(): Promise<void> {
 // --- the template checkpoint (ADR 0064) --------------------------------------------------------------
 
 /**
- * The checkpoint encoding ADR 0064 pins, as a prototype: product code is
+ * The checkpoint encoding ADR 0064 pins, as format 2 (ADR 0070: each scope also
+ * carries the entry id it was last heard in), as a prototype: product code is
  * written against the ADR under its own tests, and this produces its vector
  * and its sizes. Little-endian like the rest of the monitoring formats, except
  * field specifiers, which are copied from the wire as they arrived.
  */
 interface CkTemplate { id: number; options: boolean; v9Options: boolean; scopeCount: number; fieldSpecs: Uint8Array; fieldCount: number; definedEntryId: number; lastSeenMs: number; lastSeenMessage: number; intervalMs: number; intervalMessages: number }
-interface CkScope { protocol: 9 | 10; exporter: string; port: number; domain: number; uptimeMs: number | null; systemInitMs: number | null; messages: number; templates: CkTemplate[] }
+interface CkScope { protocol: 9 | 10; exporter: string; port: number; domain: number; uptimeMs: number | null; systemInitMs: number | null; messages: number; lastHeardEntryId: number; templates: CkTemplate[] }
 interface CkSampler { id: number; algorithm: number; interval: number; space: number }
 interface CkSource { key: string; sampling: 'absent' | 'known' | 'unsupported'; samplingInterval: number; samplingSinceEntryId: number; sequence: CkSequence; samplers: CkSampler[] }
 /** Sequence learning (ADR 0064): the convention is learned from the first eight message pairs that carry data records. */
@@ -1842,7 +1843,7 @@ function encodeCheckpoint(c: Checkpoint): Uint8Array {
   const scopes = [...c.scopes].sort((a, b) => a.protocol - b.protocol || a.domain - b.domain || a.port - b.port);
   const sources = [...c.sources].sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
   bytes(new TextEncoder().encode('INWIREMT'));
-  u16(1); u16(2); u16(scopes.length); u16(sources.length);
+  u16(2); u16(2); u16(scopes.length); u16(sources.length);
   u64(c.throughEntryId); u64(c.atMs);
   for (const s of scopes) {
     u8(s.protocol);
@@ -1850,6 +1851,7 @@ function encodeCheckpoint(c: Checkpoint): Uint8Array {
     u16(s.port);
     bytes(Uint8Array.from(s.exporter.split('.').map(Number)));
     u32(s.domain); u32(s.uptimeMs ?? 0); u64(s.systemInitMs ?? 0); u64(s.messages); u16(s.templates.length); u16(0);
+    u64(s.lastHeardEntryId);
     for (const t of [...s.templates].sort((a, b) => a.id - b.id)) {
       u16(t.id); u8((t.options ? 1 : 0) | (t.v9Options ? 2 : 0)); u8(0);
       u16(t.scopeCount); u16(t.fieldCount); u32(t.intervalMs); u32(t.intervalMessages); u64(t.definedEntryId); u64(t.lastSeenMs); u64(t.lastSeenMessage);
@@ -1894,7 +1896,7 @@ function checkpointMode(): void {
   const vector: Checkpoint = {
     throughEntryId: 4096, atMs: 1_700_000_600_000,
     scopes: [{
-      protocol: 10, exporter: '192.0.2.1', port: 50_000, domain: 0, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 4_090,
+      protocol: 10, exporter: '192.0.2.1', port: 50_000, domain: 0, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 4_090, lastHeardEntryId: 4096,
       templates: [
         { ...template(1024, plain.slice(0, 6), 17), lastSeenMessage: 4_080, intervalMs: 30_000, intervalMessages: 16 },
         { id: 256, options: true, v9Options: false, scopeCount: 1, fieldSpecs: specs([[143, 4], [305, 4], [306, 4], [304, 2]]), fieldCount: 4, definedEntryId: 17, lastSeenMs: 1_700_000_590_000, lastSeenMessage: 4_080, intervalMs: 30_000, intervalMessages: 16 },
@@ -1904,15 +1906,15 @@ function checkpointMode(): void {
       sequence: { mode: 'rfc', last: 123_456, lastRecords: 30, pairs: 8, fitRfc: 8, fitOwn: 0 }, samplers: [] }],
   };
   const v = encodeCheckpoint(vector);
-  console.log(`checkpoint vector (${v.length} bytes): through entry 4096 at 1700000600000 ms; IPFIX scope 192.0.2.1 port 50000 domain 0, `
-    + 'systemInitTimeMilliseconds 1699990000000, 4090 messages; template 1024 [8:4 12:4 22:4 21:4 1:4 2:4] defined at entry 17, last seen 1700000000000 at message 4080, '
+  console.log(`checkpoint vector, format 2 (${v.length} bytes): through entry 4096 at 1700000600000 ms; IPFIX scope 192.0.2.1 port 50000 domain 0, `
+    + 'systemInitTimeMilliseconds 1699990000000, 4090 messages, last heard at entry 4096; template 1024 [8:4 12:4 22:4 21:4 1:4 2:4] defined at entry 17, last seen 1700000000000 at message 4080, '
     + 'interval 30000 ms / 16 messages; options template 256 (1 scope) [143:4 305:4 306:4 304:2] defined at 17, last seen 1700000590000 at message 4080, interval 30000 ms / 16 messages; '
     + `source ipfix:192.0.2.1/0 sampling known 1-in-10 since entry 17, sequence rfc (8 pairs, 8 fit rfc, 0 fit own-records), last 123456 with 30 records:\n  ${hex(v)}`);
 
   // Sizes at the bound: 4,096 templates over 16 scopes.
   const sized = (label: string, perTemplate: (i: number) => [number, number, number?][]) => {
     const scopes: CkScope[] = Array.from({ length: 16 }, (_, s) => ({
-      protocol: 10, exporter: '192.0.2.1', port: 50_000 + s, domain: s, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 1 << 30,
+      protocol: 10, exporter: '192.0.2.1', port: 50_000 + s, domain: s, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 1 << 30, lastHeardEntryId: 1 << 30,
       templates: Array.from({ length: 256 }, (_, i) => template(256 + i, perTemplate(s * 256 + i), 1)),
     }));
     const sources: CkSource[] = Array.from({ length: 16 }, (_, s) => ({

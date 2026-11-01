@@ -88,6 +88,8 @@ export class DecodeState {
       return { kind: 'boundary' };
     }
     const decoded = decodeDatagram(e, e.remoteIPv4, e.policy, this.store);
+    // The evicted scope's source goes with it, before this datagram's own source is observed (ADR 0070).
+    if (decoded.kind === 'valid' && decoded.evictedSourceKey !== undefined) this.exporter.forgetSource(decoded.evictedSourceKey);
     const events = this.exporter.observe(decoded, e);
     if (decoded.kind !== 'valid') return { kind: 'datagram', decoded, events, sampling: [], skewMs: null };
     if (decoded.protocol === 'v5') {

@@ -357,8 +357,12 @@ The trailer is a u32 CRC-32, as the journal's, over every byte before it.
 
 #### The test vector
 
-`npx tsx scripts/monitoring/measurement.ts checkpoint` prints this vector.
-An implementation must reproduce it exactly. It encodes:
+This is format 1's vector, frozen as `FORMAT1_VECTOR_HEX` in
+`scripts/monitoring/checkpoint-codec.ts` and decode-only since
+[0070](0070-monitoring-identities-evict-least-recent.md) added format 2;
+`npx tsx scripts/monitoring/measurement.ts checkpoint` now prints format 2's
+(254 bytes, the same state). A format 1 implementation must reproduce this one
+exactly. It encodes:
 
 - the checkpoint through entry `4096`, at `1700000600000`;
 - one IPFIX scope: exporter `192.0.2.1`, port `50000`, domain 0,

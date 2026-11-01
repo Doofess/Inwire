@@ -17,6 +17,7 @@ import { decodeCheckpoint, encodeCheckpoint } from '../../src/services/monitorin
 import { DecodeState, type DecodeStep } from '../../src/services/monitoring/decodeState';
 import { ExporterState } from '../../src/services/monitoring/exporterState';
 import { decodeDatagram, type FlowDecode } from '../../src/services/monitoring/flowDecode';
+import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
 import { CollectorTemplateStore, type TemplateScope } from '../../src/services/monitoring/templates';
 import { crc32 } from '../../src/services/monitoring/journalCodec';
 import { LIMITS, type BoundaryEvidence, type Evidence } from '../../src/services/monitoring/types';
@@ -49,6 +50,41 @@ function adrVector(): Uint8Array {
   return Uint8Array.from(adr.slice(open + 4, close).split(/\s+/).filter(Boolean).map((h) => parseInt(h, 16)));
 }
 
+/**
+ * ADR 0064's vector as the encoder wrote it before format 2 (246 bytes), frozen: the archive holds format 1
+ * checkpoints and never rewrites them (ADR 0062), so `decodeCheckpoint` reads this for good. Decode-only now.
+ */
+const FORMAT1_VECTOR_HEX = [
+  '49 4e 57 49 52 45 4d 54 01 00 02 00 01 00 01 00 00 10 00 00 00 00 00 00 c0 8f ee cf 8b 01 00 00',
+  '0a 02 50 c3 c0 00 02 01 00 00 00 00 00 00 00 00 80 d1 4c cf 8b 01 00 00 fa 0f 00 00 00 00 00 00',
+  '02 00 00 00 00 01 01 00 01 00 04 00 30 75 00 00 10 00 00 00 11 00 00 00 00 00 00 00 b0 68 ee cf',
+  '8b 01 00 00 f0 0f 00 00 00 00 00 00 10 00 00 00 00 8f 00 04 01 31 00 04 01 32 00 04 01 30 00 02',
+  '00 04 00 00 00 00 06 00 30 75 00 00 10 00 00 00 11 00 00 00 00 00 00 00 00 68 e5 cf 8b 01 00 00',
+  'f0 0f 00 00 00 00 00 00 18 00 00 00 00 08 00 04 00 0c 00 04 00 16 00 04 00 15 00 04 00 01 00 04',
+  '00 02 00 04 11 69 70 66 69 78 3a 31 39 32 2e 30 2e 32 2e 31 2f 30 01 01 00 00 0a 00 00 00 11 00',
+  '00 00 00 00 00 00 01 08 08 00 40 e2 01 00 1e 00 00 00 b3 f3 bd ee',
+].join(' ');
+
+/**
+ * The same state as format 2 (254 bytes, ADR 0070): each scope record is 44 bytes, its last heard entry id (4096,
+ * the vector's through id) at offset 36 of the record. Printed by `measurement.ts checkpoint`, whose prototype
+ * encoder shares no code with the product's.
+ */
+const FORMAT2_VECTOR_HEX = [
+  '49 4e 57 49 52 45 4d 54 02 00 02 00 01 00 01 00 00 10 00 00 00 00 00 00 c0 8f ee cf 8b 01 00 00',
+  '0a 02 50 c3 c0 00 02 01 00 00 00 00 00 00 00 00 80 d1 4c cf 8b 01 00 00 fa 0f 00 00 00 00 00 00',
+  '02 00 00 00 00 10 00 00 00 00 00 00 00 01 01 00 01 00 04 00 30 75 00 00 10 00 00 00 11 00 00 00',
+  '00 00 00 00 b0 68 ee cf 8b 01 00 00 f0 0f 00 00 00 00 00 00 10 00 00 00 00 8f 00 04 01 31 00 04',
+  '01 32 00 04 01 30 00 02 00 04 00 00 00 00 06 00 30 75 00 00 10 00 00 00 11 00 00 00 00 00 00 00',
+  '00 68 e5 cf 8b 01 00 00 f0 0f 00 00 00 00 00 00 18 00 00 00 00 08 00 04 00 0c 00 04 00 16 00 04',
+  '00 15 00 04 00 01 00 04 00 02 00 04 11 69 70 66 69 78 3a 31 39 32 2e 30 2e 32 2e 31 2f 30 01 01',
+  '00 00 0a 00 00 00 11 00 00 00 00 00 00 00 01 08 08 00 40 e2 01 00 1e 00 00 00 58 3f 27 6a',
+].join(' ');
+
+const fromHex = (h: string): Uint8Array => Uint8Array.from(h.split(/\s+/).filter(Boolean).map((x) => parseInt(x, 16)));
+const vector1 = (): Uint8Array => fromHex(FORMAT1_VECTOR_HEX);
+const vector2 = (): Uint8Array => fromHex(FORMAT2_VECTOR_HEX);
+
 const T = 1_700_000_000_000;
 const SCOPE: TemplateScope = { protocol: 'ipfix', exporter: EXPORTER, exporterPort: 50_000, domain: 0 };
 const KEY = `ipfix:${EXPORTER}/0`;
@@ -73,6 +109,8 @@ function vectorState(): { store: CollectorTemplateStore; state: ExporterState } 
     }
   }
   store.observeSystemInit(SCOPE, 1_699_990_000_000, 4090);
+  // The scope was last heard at the vector's through id.
+  assert.equal(store.admit(SCOPE, 4096), null);
 
   const state = new ExporterState();
   const counts = [10, 20, 10, 20, 10, 20, 10, 20, 30];
@@ -90,16 +128,56 @@ function vectorState(): { store: CollectorTemplateStore; state: ExporterState } 
   return { store, state };
 }
 
-test('checkpoint-vector: the state of ADR 0064 encodes to exactly its 246 bytes', () => {
+test('checkpoint-vector: the state of ADR 0064 encodes to exactly its 254 bytes as format 2', () => {
   const { store, state } = vectorState();
   const bytes = encodeCheckpoint(store, state, 4096, 1_700_000_600_000);
-  const expected = adrVector();
-  assert.equal(expected.length, 246);
+  const expected = vector2();
+  assert.equal(expected.length, 254);
   assert.equal(hex(bytes), hex(expected));
+  assert.equal(store.exportScopes()[0].lastHeardEntryId, 4096);
+});
+
+test('checkpoint-vector: the frozen format 1 vector is the one ADR 0064 prints, 246 bytes', () => {
+  assert.equal(vector1().length, 246);
+  assert.equal(hex(vector1()), hex(adrVector()));
+});
+
+test('checkpoint-v1: a format 1 checkpoint restores, last heard = through, and encodes as format 2', () => {
+  const restored = decodeCheckpoint(vector1());
+  assert.notEqual(restored, null, 'format 1 is read for good: the archive never rewrites its checkpoints');
+  assert.equal(restored!.throughEntryId, 4096);
+  assert.equal(restored!.store.exportScopes()[0].lastHeardEntryId, 4096, 'the through entry id');
+  assert.equal(restored!.store.lookup(SCOPE, 1024)!.fields.length, 6);
+  assert.equal(restored!.store.counters(SCOPE).messages, 4090);
+  assert.deepEqual(restored!.state.sampling(KEY), { kind: 'known', interval: 10, sinceEntryId: 17 });
+  assert.equal(hex(encodeCheckpoint(restored!.store, restored!.state, 4096, 1_700_000_600_000)), hex(vector2()));
+});
+
+test('checkpoint-v1: every scope of a format 1 checkpoint restores heard at the through id', () => {
+  // 3 scopes, no templates, no sources: a format 1 body is the 32-byte header and 36 bytes a scope.
+  const store = new CollectorTemplateStore();
+  for (const d of [3, 1, 2]) {
+    const scope: TemplateScope = { protocol: 'v9', exporter: EXPORTER, exporterPort: null, domain: d };
+    store.admit(scope, d * 100);
+    store.beginDatagram(scope, T, null, 40_000);
+  }
+  const v2 = encodeCheckpoint(store, new ExporterState(), 7000, T);
+  const body = v2.slice(0, v2.length - 4);
+  const parts: Uint8Array[] = [body.slice(0, 32)];
+  for (let i = 0; i < 3; i++) parts.push(body.slice(32 + i * 44, 32 + i * 44 + 36));
+  const v1body = Uint8Array.from(parts.flatMap((p) => [...p]));
+  v1body[8] = 1;
+  const v1 = new Uint8Array(v1body.length + 4);
+  v1.set(v1body);
+  new DataView(v1.buffer).setUint32(v1body.length, crc32(v1body), true);
+  const restored = decodeCheckpoint(v1);
+  assert.notEqual(restored, null);
+  assert.deepEqual(restored!.store.exportScopes().map((s) => [s.domain, s.lastHeardEntryId]), [[1, 7000], [2, 7000], [3, 7000]]);
+  assert.equal(decodeCheckpoint(v2)!.store.exportScopes().map((s) => s.lastHeardEntryId).join(), '100,200,300', 'format 2 keeps each its own');
 });
 
 test('checkpoint-vector: decode then re-encode gives identical bytes, and the state came back', () => {
-  const expected = adrVector();
+  const expected = vector2();
   const restored = decodeCheckpoint(expected);
   assert.notEqual(restored, null);
   assert.equal(restored!.throughEntryId, 4096);
@@ -115,13 +193,15 @@ test('checkpoint-vector: decode then re-encode gives identical bytes, and the st
 });
 
 test('checkpoint-vector: a flipped byte, a truncation, a bad magic, format or policy give null', () => {
-  const good = adrVector();
-  for (let i = 0; i < good.length; i++) {
-    const bad = good.slice();
-    bad[i] ^= 0x01;
-    assert.equal(decodeCheckpoint(bad), null, `byte ${i} flipped`);
+  const good = vector2();
+  for (const v of [good, vector1()]) {
+    for (let i = 0; i < v.length; i++) {
+      const bad = v.slice();
+      bad[i] ^= 0x01;
+      assert.equal(decodeCheckpoint(bad), null, `byte ${i} flipped, format ${v[8]}`);
+    }
+    for (let n = 0; n < v.length; n++) assert.equal(decodeCheckpoint(v.slice(0, n)), null, `${n} bytes, format ${v[8]}`);
   }
-  for (let n = 0; n < good.length; n++) assert.equal(decodeCheckpoint(good.slice(0, n)), null, `${n} bytes`);
   assert.equal(decodeCheckpoint(Uint8Array.from([...good, 0])), null, 'a trailing byte');
   // Damage that keeps the CRC valid is still refused: it is the structure that is wrong.
   const resealed = (patch: (b: Uint8Array) => void): Uint8Array => {
@@ -134,20 +214,22 @@ test('checkpoint-vector: a flipped byte, a truncation, a bad magic, format or po
   };
   assert.notEqual(decodeCheckpoint(resealed(() => undefined)), null, 'the resealing itself is sound');
   assert.equal(decodeCheckpoint(resealed((b) => { b[0] = 0x58; })), null, 'magic');
-  assert.equal(decodeCheckpoint(resealed((b) => { b[8] = 2; })), null, 'format');
+  assert.equal(decodeCheckpoint(resealed((b) => { b[8] = 3; })), null, 'a format after 2');
+  assert.equal(decodeCheckpoint(resealed((b) => { b[8] = 0; })), null, 'format 0');
+  assert.equal(decodeCheckpoint(resealed((b) => { b[8] = 1; })), null, 'format 1 bytes laid out as format 2 do not parse as format 1');
   assert.equal(decodeCheckpoint(resealed((b) => { b[10] = 1; })), null, 'policy');
   assert.equal(decodeCheckpoint(resealed((b) => { b[12] = 2; })), null, 'a scope count with no scope behind it');
   assert.equal(decodeCheckpoint(resealed((b) => { b[14] = 2; })), null, 'a source count with no source behind it');
   assert.equal(decodeCheckpoint(resealed((b) => { b[32] = 11; })), null, 'a protocol that is neither 9 nor 10');
   assert.equal(decodeCheckpoint(resealed((b) => { b[33] |= 0x08; })), null, 'an undefined scope flag');
-  assert.equal(decodeCheckpoint(resealed((b) => { b[32 + 36 + 3] = 1; })), null, 'a reserved template byte');
+  assert.equal(decodeCheckpoint(resealed((b) => { b[32 + 44 + 3] = 1; })), null, 'a reserved template byte');
   assert.equal(decodeCheckpoint(new Uint8Array(LIMITS.checkpointBytes + 1)), null, 'over the bound');
 });
 
 test('checkpoint-vector: no input makes decodeCheckpoint throw', () => {
   let seed = 0x1ee7;
   const rnd = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32;
-  const good = adrVector();
+  const good = vector2();
   for (let i = 0; i < 300; i++) {
     const bytes = new Uint8Array(Math.floor(rnd() * 300));
     for (let j = 0; j < bytes.length; j++) bytes[j] = Math.floor(rnd() * 256);
@@ -160,7 +242,7 @@ test('checkpoint-vector: no input makes decodeCheckpoint throw', () => {
 
 test('checkpoint-gap-bits: gapEnded() sets scope and template bit 2, the next datagram clears the scope\'s, restore keeps them', () => {
   const { store, state } = vectorState();
-  const flags = (b: Uint8Array) => ({ scope: b[33], template: b[32 + 36 + 2] });
+  const flags = (b: Uint8Array) => ({ scope: b[33], template: b[32 + 44 + 2] });
   assert.deepEqual(flags(encodeCheckpoint(store, state, 1, 1)), { scope: 2, template: 1 }, 'bit 1 (IE 160 known) and bit 0 (options)');
   store.gapEnded();
   state.gapEnded();
@@ -218,7 +300,7 @@ test('checkpoint-strict: unordered ids, unordered sources and trailing bytes are
     return reseal(patch(body) ?? body);
   };
   // Two templates of two fields each: the second's id sits 44 + 8 bytes after the first's.
-  const first = 32 + 36;
+  const first = 32 + 44;
   const second = first + 44 + 8;
   assert.equal(good[first] | (good[first + 1] << 8), 300);
   assert.equal(good[second] | (good[second + 1] << 8), 301);
@@ -408,24 +490,102 @@ test('exporter change: a start naming the same exporter keeps its state; a resto
   assert.deepEqual(s.exporter.exportSources(), []);
 });
 
-test('bounds: an exporter holds at most enginesPerExporter scopes and sources, and a 17th identity decodes as unsupported', () => {
+const evicted = (step: DecodeStep | null): string | undefined => (step !== null && step.kind === 'datagram' && step.decoded.kind === 'valid' ? step.decoded.evictedSourceKey : undefined);
+const kindOf = (step: DecodeStep | null): string => (step === null ? 'skipped' : step.kind === 'datagram' ? step.decoded.kind : step.kind);
+
+test('bounds: a 17th identity evicts the least recently heard scope and its source', () => {
   resetEntries();
   const s = DecodeState.empty();
-  const kinds: string[] = [];
+  const N = LIMITS.enginesPerExporter;
+  for (let id = 1; id <= N; id++) {
+    const step = s.step(v9From(EXPORTER, id));
+    assert.equal(kindOf(step), 'valid');
+    assert.equal(evicted(step), undefined, `identity ${id} fits`);
+  }
+  assert.equal(s.store.exportScopes().length, N);
+  assert.equal(kindOf(s.step(v9From(EXPORTER, 1))), 'valid', 'identity 1 is heard again, at entry 17');
+  const step = s.step(v9From(EXPORTER, N + 1));
+  assert.equal(kindOf(step), 'valid', 'the 17th is counted, not refused');
+  assert.equal(evicted(step), sourceKeyFor('v9', EXPORTER, 2), 'identity 2 was heard least recently');
+  const domains = s.store.exportScopes().map((x) => x.domain);
+  assert.equal(domains.length, N);
+  assert.ok(!domains.includes(2) && domains.includes(1) && domains.includes(N + 1));
+  assert.equal(s.store.exportScopes().find((x) => x.domain === 1)!.lastHeardEntryId, N + 1);
+  assert.equal(s.store.exportScopes().find((x) => x.domain === N + 1)!.lastHeardEntryId, N + 2);
+  const keys = s.exporter.exportSources().map((x) => x.key);
+  assert.equal(keys.length, N);
+  assert.ok(!keys.includes(sourceKeyFor('v9', EXPORTER, 2)), 'its source is gone with it');
+  assert.ok(keys.includes(sourceKeyFor('v9', EXPORTER, N + 1)));
+  assert.equal(s.store.lookup({ protocol: 'v9', exporter: EXPORTER, exporterPort: null, domain: 2 }, 256), null, 'its templates are gone');
+  assertRoundTrips(s, 'after the eviction');
+  // It comes back as a new identity: held again, and that evicts the next least recent (identity 3).
+  const back = s.step(v9From(EXPORTER, 2));
+  assert.equal(kindOf(back), 'valid');
+  assert.equal(evicted(back), sourceKeyFor('v9', EXPORTER, 3));
+});
+
+test('bounds: an exporter holds at most enginesPerExporter scopes and sources however many identities it uses', () => {
+  resetEntries();
+  const s = DecodeState.empty();
   const N = 40;
   for (let domain = 1; domain <= N; domain++) {
-    const step = s.step(ipfixFrom(EXPORTER, domain)) as DecodeStep;
-    kinds.push(step.kind === 'datagram' ? step.decoded.kind : step.kind);
+    assert.equal(kindOf(s.step(ipfixFrom(EXPORTER, domain))), 'valid', `domain ${domain} is counted`);
     assertRoundTrips(s, `after domain ${domain}`);
   }
   assert.equal(s.store.exportScopes().length, LIMITS.enginesPerExporter);
   assert.equal(s.exporter.exportSources().length, LIMITS.enginesPerExporter);
-  assert.deepEqual(kinds.slice(0, LIMITS.enginesPerExporter), Array(LIMITS.enginesPerExporter).fill('valid'));
-  assert.deepEqual(kinds.slice(LIMITS.enginesPerExporter), Array(N - LIMITS.enginesPerExporter).fill('unsupported'), 'the rest are refused, not malformed');
-  // A domain the exporter already has still decodes.
-  const again = s.step(ipfixFrom(EXPORTER, 3)) as DecodeStep;
-  assert.equal(again.kind === 'datagram' && again.decoded.kind, 'valid');
+  assert.deepEqual(s.store.exportScopes().map((x) => x.domain), Array.from({ length: LIMITS.enginesPerExporter }, (_, i) => N - LIMITS.enginesPerExporter + 1 + i), 'the newest 16 remain');
   assert.ok(s.checkpoint().length <= LIMITS.checkpointBytes);
+});
+
+test('evict: live and restored agree', () => {
+  resetEntries();
+  const live = DecodeState.empty();
+  for (let id = 1; id <= LIMITS.enginesPerExporter; id++) live.step(v9From(EXPORTER, id));
+  live.step(v9From(EXPORTER, 1));
+  const restored = DecodeState.fromCheckpoint(live.checkpoint())!;
+  assert.notEqual(restored, null);
+  assert.equal(hex(restored.checkpoint()), hex(live.checkpoint()), 'restore then encode');
+  const next = v9From(EXPORTER, LIMITS.enginesPerExporter + 1);
+  const a = live.step(next);
+  const b = restored.step(next);
+  assert.equal(evicted(a), sourceKeyFor('v9', EXPORTER, 2));
+  assert.equal(evicted(b), evicted(a), 'the same identity is dropped');
+  assert.equal(hex(restored.checkpoint()), hex(live.checkpoint()), 'identical checkpoints after the eviction');
+  // And the one after that: scopes of the restored state keep ordering, so a second eviction matches too.
+  const after = v9From(EXPORTER, LIMITS.enginesPerExporter + 2);
+  assert.equal(evicted(restored.step(after)), evicted(live.step(after)));
+  assert.equal(hex(restored.checkpoint()), hex(live.checkpoint()));
+});
+
+test('evict: 16 scopes tied at the through id of a format 1 checkpoint: the 17th drops the lowest v9 domain, live and restored from format 2 alike', () => {
+  // A format 1 body (no last heard) of 16 empty scopes: v9 domains 20..13 and IPFIX 40, 39... in one exporter.
+  resetEntries();
+  const store = new CollectorTemplateStore();
+  const mix = [...Array.from({ length: 8 }, (_, i) => ({ protocol: 'ipfix' as const, domain: 30 + i })), ...Array.from({ length: 8 }, (_, i) => ({ protocol: 'v9' as const, domain: 20 - i }))];
+  for (const m of mix) {
+    const scope: TemplateScope = { protocol: m.protocol, exporter: EXPORTER, exporterPort: m.protocol === 'ipfix' ? 40_000 : null, domain: m.domain };
+    store.admit(scope, 500);
+    store.beginDatagram(scope, T, null, 40_000);
+  }
+  const v2 = encodeCheckpoint(store, new ExporterState(), 500, T);
+  const body = v2.slice(0, v2.length - 4);
+  const parts: number[] = [...body.slice(0, 32)];
+  for (let i = 0; i < 16; i++) parts.push(...body.slice(32 + i * 44, 32 + i * 44 + 36));
+  parts[8] = 1;
+  const v1 = new Uint8Array(parts.length + 4);
+  v1.set(parts);
+  new DataView(v1.buffer).setUint32(parts.length, crc32(Uint8Array.from(parts)), true);
+  const fromV1 = DecodeState.fromCheckpoint(v1)!;
+  const fromV2 = DecodeState.fromCheckpoint(v2)!;
+  assert.notEqual(fromV1, null);
+  nextEntry = 500;
+  const e = v9From(EXPORTER, 99);
+  const a = fromV1.step(e);
+  const b = fromV2.step(e);
+  assert.equal(evicted(a), sourceKeyFor('v9', EXPORTER, 13), 'v9 sorts before IPFIX, and domain 13 is the lowest');
+  assert.equal(evicted(b), evicted(a));
+  assert.equal(hex(fromV1.checkpoint()), hex(fromV2.checkpoint()));
 });
 
 test('bounds: 40,000 domains from one exporter leave a checkpoint under the limit (the u16 scope count never wraps)', () => {
