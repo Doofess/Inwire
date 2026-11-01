@@ -146,6 +146,7 @@ import type { CaptureSource } from './services/export/captureMeta';
 import type { CaptureFileFacts } from './services/captureFileFacts';
 import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
 import { getImportJob, IMPORT_RUNNING_REASON, IMPORT_RUNNING_START, useImportJob } from './services/importJob';
+import { beginCaptureStart, CAPTURE_STARTING_REASON, endCaptureStart, useCaptureStarting } from './services/captureStarting';
 import { createImportLifecycle, type ImportEffects } from './services/importLifecycle';
 import { FilterEngine } from './services/filterEngine';
 import { pushRecentFilter, recentFiltersStore } from './services/recentFilters';
@@ -784,6 +785,9 @@ export default function App() {
   // A file being imported, for the reasons shown at render. The handlers that
   // must refuse one read `getImportJob()` instead, which is never a render old.
   const importRunning = useImportJob().status === 'running';
+  // A Start in its awaits, for the reason the import panel shows; the panel's own
+  // refusal reads `isCaptureStarting()` live.
+  const captureStarting = useCaptureStarting();
   // Bumped by the welcome's "Open a capture file…"; the Export / Import panel
   // opens its file picker when it changes. Reset when the panel goes away, so a
   // stale count cannot open the picker the next time the panel is shown.
@@ -2434,6 +2438,19 @@ export default function App() {
     // The palette and Ctrl+E reach this guarded only by a render-time ref; the
     // job is read live. A Start here would replace the capture the import writes.
     if (getImportJob().status === 'running') return;
+    // From here to the capture being flagged as running, an import is refused
+    // (`captureStarting.ts`): Start awaits twice before it opens its capture, and
+    // an import pressed in those awaits found nothing to stop. The first of the
+    // two to begin wins. Cleared in `finally`, so a throw cannot shut imports.
+    beginCaptureStart();
+    try {
+      await startCaptureUnguarded();
+    } finally {
+      endCaptureStart();
+    }
+  };
+
+  const startCaptureUnguarded = async () => {
     // Before anything touches the store: an export reading the previous
     // capture ends - its file removed - and says why, rather than reading on
     // into the new one (`cancelExportForChange`). Every Start goes through
@@ -2481,6 +2498,9 @@ export default function App() {
     // capturing first, not by the effect on `isCapturing` a render later, or
     // the capture's first frames can reach it before it keeps any.
     startLiveCapture(pipeline, startCaptureCommand(captureOptionsRef.current, captureIdRef.current));
+    // The ref now and not a render later (its effect): an import pressed before
+    // that render must find a live capture to stop, as `stopCaptureAndSeal` sets it.
+    isCapturingRef.current = true;
     setIsCapturing(true);
   };
 
@@ -3366,7 +3386,7 @@ export default function App() {
                 captureId={captureStorage.captureId}
                 capturedFileCount={keptFiles(captureFiles).length}
                 capturing={isCapturing}
-                importBlockedBy={reopening ? 'Not while the last capture is being reopened - an import would replace it.' : null}
+                importBlockedBy={reopening ? 'Not while the last capture is being reopened - an import would replace it.' : captureStarting ? CAPTURE_STARTING_REASON : null}
                 pickRequest={pickRequest}
               />
             )}

@@ -267,7 +267,15 @@ class CaptureClient {
   private readonly outbox = new PortQueue<MessagePort>(() => this.ensurePort());
 
   private send(message: ToCapture): void {
-    this.outbox.run((port) => port?.postMessage(message));
+    this.outbox.run((port) => {
+      try {
+        port?.postMessage(message);
+      } catch (error) {
+        // Nobody awaits a send, and a queued use runs in a `.then` nobody holds:
+        // a throw would be an unhandled rejection and nothing more. Say so.
+        console.warn(`the capture store was sent a '${message.type}' it could not clone`, error);
+      }
+    });
   }
 
   private update(patch: Partial<CaptureStorageState>): void {
@@ -518,7 +526,16 @@ class CaptureClient {
       if (port === null) { resolve(fallback); return; }
       const requestId = this.nextRequest++;
       (pendingMap as Map<number, (value: T) => void>).set(requestId, resolve);
-      port.postMessage(build(requestId));
+      try {
+        port.postMessage(build(requestId));
+      } catch (error) {
+        // A post that throws (a DataCloneError) must answer the caller now: the
+        // store never saw the request, so nothing will, and a queued use runs
+        // in a `.then` where a throw is an unhandled rejection.
+        pendingMap.delete(requestId);
+        console.warn('the capture store was sent something it could not clone', error);
+        resolve(fallback);
+      }
     }));
   }
 
@@ -757,7 +774,14 @@ class CaptureClient {
       const id = this.nextRequest++;
       requestId = id;
       this.pendingScan.set(id, { onProgress, settle });
-      port.postMessage({ type: 'scan', requestId: id, filter });
+      try {
+        port.postMessage({ type: 'scan', requestId: id, filter });
+      } catch (error) {
+        // As in `request`: the store never saw the scan, so nothing will end it.
+        this.pendingScan.delete(id);
+        requestId = null;
+        settle({ status: 'failed', message: error instanceof Error ? error.message : 'the scan could not be sent' });
+      }
     }));
 
     return {

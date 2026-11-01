@@ -65,8 +65,30 @@ check('the last result is the job\'s, so a remounted panel still shows it',
   panel.includes('job.result?.message') && panel.includes('job.result?.notes') && !panel.includes('setStatus'));
 check('handleFile hands the progress callback to the import', handleFile.includes('onProgress: importJobProgress'));
 check('the panel renders from useImportJob, so a remount shows the running import',
-  panel.includes('useImportJob()') && panel.includes('importProgressText('));
+  panel.includes('useImportJob()') && panel.includes('importProgressSizes('));
 check('the panel keeps no running flag of its own', !panel.includes('setBusy'));
+check('handleFile asks the one pure gate, with the job and the Start read live, before its first await',
+  beforeAwait.includes('importRefusal({') && beforeAwait.includes('captureStarting: isCaptureStarting()')
+  && beforeAwait.includes('blockedBy,'));
+check('the progress is in the zone: a bar with its values, no separate line under the card',
+  panel.includes("role={busy ? 'progressbar' : undefined}") && panel.includes('aria-valuenow=') && panel.includes('aria-valuemin=') && panel.includes('aria-valuemax=')
+  && !panel.includes('importProgressText'));
+const zone = between(panel, '<label', '</label>');
+// The zone is as tall busy as idle at every width because both bodies share a
+// grid cell; the one not showing is `invisible`, which also drops its text from
+// the accessibility tree and from innerText (the drive asserts the latter).
+const idleBody = between(zone, "${busy ? 'invisible' : ''}", "${busy ? '' : 'invisible'}");
+const busyBody = zone.slice(zone.indexOf("${busy ? '' : 'invisible'}"));
+check('the zone shows the invitation and the formats only while idle, the progress only while busy',
+  idleBody.includes('Click to upload') && idleBody.includes('.pcapng')
+  && !busyBody.includes('Click to upload') && !busyBody.includes('.pcapng') && busyBody.includes('Importing'));
+check('...in one grid cell, so the zone keeps its height',
+  zone.includes('grid w-full') && (zone.match(/col-start-1 row-start-1/g) ?? []).length === 2);
+check('the name truncates with the full name in a title',
+  busyBody.includes('truncate') && busyBody.includes('title={'));
+check('the result and notes sit above the help card',
+  panel.indexOf('{status && (') !== -1 && panel.indexOf('{status && (') < panel.indexOf('Spreadsheets and tables are checked')
+  && panel.indexOf('{notes.length > 0 && (') < panel.indexOf('Spreadsheets and tables are checked'));
 
 // --- App --------------------------------------------------------------------
 
@@ -96,6 +118,19 @@ check('handleStartCapture refuses while the job runs, before anything else',
   startCapture.includes(RUNNING));
 check('...a palette command and Ctrl+E reach it with only a render-time ref to stop them',
   app.includes("case 'capture.start': void handleStartCapture(); return;"));
+
+// --- a Start and an import: the first to begin wins (captureStarting.ts) --------
+const startWhole = between(app, 'const handleStartCapture = async () => {', 'const startCaptureUnguarded');
+check('Start marks itself before its first await, after the import check',
+  startWhole.indexOf(RUNNING) < startWhole.indexOf('beginCaptureStart();')
+  && startWhole.indexOf('beginCaptureStart();') < startWhole.indexOf('await '));
+check('...and clears the mark in a finally, so a throw cannot shut imports for good',
+  /try \{\s*await startCaptureUnguarded\(\);\s*\} finally \{\s*endCaptureStart\(\);/.test(startWhole));
+const unguarded = between(app, 'const startCaptureUnguarded = async () => {', 'const handlePauseCapture');
+check('the capture is flagged running in the ref, not a render later, right before the state',
+  /isCapturingRef\.current = true;\s*setIsCapturing\(true\);/.test(unguarded));
+check('the import panel is told why, from the rendered store',
+  app.includes('useCaptureStarting()') && app.includes('captureStarting ? CAPTURE_STARTING_REASON : null'));
 
 const rail = readFileSync('src/components/common/ActivityRail.tsx', 'utf8');
 const confirmEffect = between(rail, 'React.useEffect(() => {\n    if (isCapturing || !restartDiscards', '}, [isCapturing');

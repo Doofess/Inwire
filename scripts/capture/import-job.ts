@@ -8,10 +8,13 @@
  * flag has to outlive the panel, or a closed and reopened side bar would offer
  * a second import over the first.
  */
-import { importProgressText } from '../../src/lib/importProgress';
+import { importProgressPercent, importProgressSizes } from '../../src/lib/importProgress';
 import {
   beginImportJob, endImportJob, getImportJob, importJobProgress, subscribeImportJob,
 } from '../../src/services/importJob';
+import {
+  beginCaptureStart, endCaptureStart, importRefusal, isCaptureStarting, subscribeCaptureStarting,
+} from '../../src/services/captureStarting';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -26,13 +29,18 @@ function check(name: string, actual: unknown, expected: unknown): void {
 
 // --- the line ---------------------------------------------------------------
 
+// The zone shows the name on its own line and these sizes beneath the bar.
 check('GB, one decimal, percentage floored',
-  importProgressText('cap.pcapng', 1_288_490_189, 2_682_861_736), 'Importing cap.pcapng: 1.2 of 2.5 GB (48%)');
+  importProgressSizes(1_288_490_189, 2_682_861_736), '1.2 of 2.5 GB (48%)');
+check('the owner\'s example: 1.2 of 2.7 GB (44%)',
+  importProgressSizes(1.2 * 1024 ** 3 + 1, 2.7 * 1024 ** 3), '1.2 of 2.7 GB (44%)');
 check('below 1 GiB: MB with no decimal',
-  importProgressText('cap.pcap', 340 * 1024 * 1024, 812 * 1024 * 1024), 'Importing cap.pcap: 340 of 812 MB (41%)');
-check('0 of 0 reads 0%, not NaN', importProgressText('a.pcap', 0, 0), 'Importing a.pcap: 0 of 0 MB (0%)');
+  importProgressSizes(340 * 1024 * 1024, 812 * 1024 * 1024), '340 of 812 MB (41%)');
+check('0 of 0 reads 0%, not NaN', importProgressSizes(0, 0), '0 of 0 MB (0%)');
 check('the percentage never exceeds 100',
-  importProgressText('a.pcap', 2 * 1024 * 1024, 1024 * 1024), 'Importing a.pcap: 2 of 1 MB (100%)');
+  importProgressSizes(2 * 1024 * 1024, 1024 * 1024), '2 of 1 MB (100%)');
+check('the bar\'s percent is the same number, as a number',
+  [importProgressPercent(1_288_490_189, 2_682_861_736), importProgressPercent(0, 0), importProgressPercent(9, 3)], [48, 0, 100]);
 
 // --- the store --------------------------------------------------------------
 
@@ -83,6 +91,96 @@ const quiet = heard;
 beginImportJob('c.pcap', 1);
 endImportJob();
 check('an unsubscribed listener hears nothing', heard, quiet);
+
+// --- an import and a Start: the first to begin wins -----------------------------
+//
+// `handleStartCapture` awaits twice before it opens its capture. An import
+// pressed in those awaits found no live capture and no import, and the two
+// interleaved on the one store. The decisions below are the two gates, called
+// in the bad order with the module stores `App` and the panel read live.
+
+/**
+ * `ImportPanel.handleFile`'s head, as its source reads: refuse on the gate,
+ * else begin the job. Returns whether the import began.
+ */
+function pressImport(file: string, blockedBy: string | null = null): { began: boolean; why: string | null } {
+  const why = importRefusal({
+    importRunning: getImportJob().status === 'running',
+    captureStarting: isCaptureStarting(),
+    blockedBy,
+  });
+  if (why !== null) return { began: false, why };
+  return { began: beginImportJob(file, 100), why: null };
+}
+
+/** `handleStartCapture`'s head: refuse while an import runs, else mark the Start. */
+function pressStart(): boolean {
+  if (getImportJob().status === 'running') return false;
+  beginCaptureStart();
+  return true;
+}
+
+check('idle: an import may begin', pressImport('first.pcap').began, true);
+endImportJob();
+
+{
+  // The bad order: Start is past its first line and in its awaits.
+  check('Start begins when no import runs', pressStart(), true);
+  check('...and an import pressed in its awaits is refused, with the reason',
+    pressImport('late.pcap'), { began: false, why: 'Not while a capture is starting.' });
+  check('...it never began the job', getImportJob().status, 'idle');
+  check('...and the panel\'s own reason, when it has one, is shown instead', pressImport('late.pcap', 'Not while an export is running.').why,
+    'Not while an export is running.');
+  endCaptureStart();
+  check('once Start has ended, the import may begin', pressImport('after.pcap').began, true);
+  endImportJob();
+}
+
+{
+  // The other order: the import is first, and Start must stay refused.
+  pressImport('first.pcap');
+  check('an import that is running refuses a Start, and marks nothing', [pressStart(), isCaptureStarting()], [false, false]);
+  check('...and a second import is refused', pressImport('second.pcap').began, false);
+  endImportJob();
+}
+
+{
+  // Every exit of Start clears the mark: a throw must not shut imports for good.
+  const run = async (body: () => Promise<void>) => {
+    if (!pressStart()) return;
+    try { await body(); } finally { endCaptureStart(); }
+  };
+  await run(async () => { await Promise.resolve(); });
+  check('a Start that finishes clears the mark', isCaptureStarting(), false);
+  await run(async () => { await Promise.resolve(); throw new Error('clearSession failed'); }).catch(() => {});
+  check('a Start that throws clears the mark', isCaptureStarting(), false);
+  check('...so an import may begin after it', pressImport('after-throw.pcap').began, true);
+  endImportJob();
+}
+
+{
+  // Two Starts in flight (a double press, a schedule under a press): the first
+  // to end must not reopen the gate under the second.
+  pressStart();
+  pressStart();
+  endCaptureStart();
+  check('one of two Starts ended: still starting', isCaptureStarting(), true);
+  check('...and the import is still refused', pressImport('x.pcap').began, false);
+  endCaptureStart();
+  check('both ended: not starting', isCaptureStarting(), false);
+  endCaptureStart();
+  check('an extra end does not go negative', [isCaptureStarting(), (beginCaptureStart(), isCaptureStarting())], [false, true]);
+  endCaptureStart();
+
+  let rang = 0;
+  const unsubscribe = subscribeCaptureStarting(() => { rang++; });
+  beginCaptureStart();
+  beginCaptureStart();
+  endCaptureStart();
+  endCaptureStart();
+  unsubscribe();
+  check('listeners hear the edges only: on once, off once', rang, 2);
+}
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed.`);

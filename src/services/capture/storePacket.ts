@@ -52,9 +52,10 @@ import type { Packet } from '../../types/packet';
  *
  * `prepareBatch` calls `persist` **before** `absorb`: the store is handed the
  * frames, and only then does the buffer's field writer claim a row and set
- * `cols` on those very objects. And `CaptureClient.send` awaits the port, so
- * the `postMessage` happens a microtask later. Hand back the same object and
- * the message serialises a packet that grew a `FieldBlock` in between - which
+ * `cols` on those very objects. Once the port is up the `postMessage` is
+ * synchronous (`portQueue.ts`), but while it is still connecting a queued post
+ * serialises later. Hand back the same object and the message can serialise
+ * a packet that grew a `FieldBlock` in between - which
  * is exactly the failure this module exists to prevent, arriving by a
  * completely different route.
  *
