@@ -378,13 +378,25 @@ except 10 and 15, which were not run:
   this was not a storage refusal. `scripts/monitoring/expiry-sidecar.ts`
   holds the sequence, and the drive now waits for the sidecar to grow.
 
-  What that reset costs at the default limit is estimated, not measured. At
-  8 GiB a segment is 256 MiB and an expiry at the limit frees two. At
-  softflowd's day of 741 MiB, that is an expiry about every 17 hours. Each one
-  rebuilds the roughly 10 days still retained, from the archive cut's
-  checkpoint. At the measured 25 to 31 s a day, that is 4 to 5 minutes of
-  Worker time, and History reads "Rebuilding summaries" meanwhile. ADR 0062
-  chose reset-and-rebuild and allows a compaction once a test shows it equal.
+  That reset is what ADR 0071 replaced: an expiry now trims the sidecar
+  (rewrites it without the entries at or below the cut) and the Worker keeps
+  its place. At the default limit a segment is 256 MiB and an expiry at the
+  limit frees two; at softflowd's day of 741 MiB that is an expiry about every
+  17 hours, which with the reset meant rebuilding the roughly 10 days still
+  retained at 25 to 31 s a day, 4 to 5 minutes of Worker time with History
+  reading "Rebuilding summaries".
+
+  What the trim costs is measured (`measurement.ts trim`, a day of each v9
+  pass, 622,570 datagrams, rolled up by the Worker host, then the first
+  segment trimmed through the product's own partial-and-rename on a real
+  folder, this machine, i9-13900K). softflowd v9: 741 MiB of journal in 3
+  segments, sidecar 0.66 MiB (0.9 MiB per GiB of journal), trim 12 ms,
+  sidecar 0.43 MiB after. pmacct v9: 295 MiB in 2 segments, sidecar 0.63 MiB
+  (2.2 MiB per GiB), trim 9 ms, 0.08 MiB after. Extrapolated linearly to
+  8 GiB (the trim reads and rewrites the sidecar once, so its time follows the
+  sidecar's size): sidecars of about 7 MiB (softflowd) to 18 MiB (pmacct) and a
+  trim of roughly 0.15 to 0.25 s, against minutes of rebuild. Extrapolated,
+  not measured at 8 GiB.
 
 `npx tsx scripts/monitoring/load.ts --quick --protocol v9` (and `ipfix`)
 sends templated datagrams, the template set in the first and every 20th:

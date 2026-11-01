@@ -12,13 +12,14 @@
  * Imports nothing from Electron: the root is handed in, so a script can open
  * a volume under a temp directory with plain `tsx`.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { NodeBlockFile } from '../../src/services/capture/nodeBlockFile';
 import type { BlockFile } from '../../src/services/capture/blockFile';
 import { ARCHIVE_NAME } from '../../src/services/monitoring/datasetPlan';
 import { isSegmentFileName, type SegmentDirectory } from '../../src/services/monitoring/segments';
-import { writeFileAtomic } from '../atomicWrite';
+import type { SidecarReplace } from '../../src/services/monitoring/rollupStore';
+import { partialPath, writeFileAtomic } from '../atomicWrite';
 
 export const ROLLUP_FILE = 'rollups.iwmr';
 
@@ -83,10 +84,47 @@ export class NodeSegmentDirectory implements SegmentDirectory {
   }
 }
 
+/**
+ * The sidecar's handle, which outlives a trim (ADR 0071). Windows will not rename a file over one that is open,
+ * so the file under it is closed for the rename and reopened after; the object a `RollupStore` holds stays the
+ * same, and a rename that fails leaves it on the old file, which is as it was.
+ */
+class SidecarFile implements BlockFile {
+  private inner: NodeBlockFile;
+
+  constructor(readonly path: string) {
+    this.inner = NodeBlockFile.open(path);
+  }
+
+  read(offset: number, into: Uint8Array): number { return this.inner.read(offset, into); }
+  write(offset: number, from: Uint8Array): void { this.inner.write(offset, from); }
+  truncate(length: number): void { this.inner.truncate(length); }
+  flush(): void { this.inner.flush(); }
+  size(): number { return this.inner.size(); }
+  close(): void { this.inner.close(); }
+
+  /** Makes `partial` (complete, flushed and closed) the sidecar. On a throw the sidecar is the file it was. */
+  replaceWith(partial: string): void {
+    this.inner.close();
+    try {
+      renameSync(partial, this.path);
+    } finally {
+      // The new file after a rename, the old one after a failure.
+      this.inner = new NodeBlockFile(this.path);
+    }
+  }
+}
+
 export interface MonitoringVolume {
   segments: NodeSegmentDirectory;
   rollups: BlockFile;
   archive: BlockFile;
+  /**
+   * The trim's seam (`SidecarReplace`, ADR 0071): a new file beside the sidecar (`rollups.iwmr.<12 hex>.partial`) is
+   * filled by `write`, flushed and renamed over it, and `rollups` goes on as the same handle. On a throw the old sidecar
+   * is untouched and the partial is removed.
+   */
+  replaceRollups: SidecarReplace;
   /** Every name in the folder, files and folders alike: what a discard and an adoption decide from. */
   names(): string[];
   /** Unlinks one file by name. Works after `close()`; the discard closes first, Windows will not unlink an open file. */
@@ -174,20 +212,40 @@ export interface CollectorFolderView {
 /** Opens (creating, with the directory) the segment folder, the rollup cache and the archive under `root`. */
 export function openMonitoringVolume(root: string): MonitoringVolume {
   const segments = new NodeSegmentDirectory(root);
-  const opened: NodeBlockFile[] = [];
+  const opened: BlockFile[] = [];
+  const rollupsPath = path.join(root, ROLLUP_FILE);
+  let rollups: SidecarFile;
+  let archive: BlockFile;
   try {
-    opened.push(NodeBlockFile.open(path.join(root, ROLLUP_FILE)));
-    opened.push(NodeBlockFile.open(path.join(root, ARCHIVE_NAME)));
+    rollups = new SidecarFile(rollupsPath);
+    opened.push(rollups);
+    archive = NodeBlockFile.open(path.join(root, ARCHIVE_NAME));
   } catch (e) {
     for (const f of opened) { try { f.close(); } catch { /* the first failure is the one to report */ } }
     segments.close();
     throw e;
   }
-  const [rollups, archive] = opened;
   return {
     segments,
     rollups,
     archive,
+    replaceRollups(write) {
+      const partial = partialPath(rollupsPath);
+      let fresh: NodeBlockFile | null = null;
+      try {
+        fresh = NodeBlockFile.open(partial);
+        write(fresh);
+        fresh.flush();
+        fresh.close();
+        fresh = null;
+        rollups.replaceWith(partial);
+      } catch (error) {
+        try { fresh?.close(); } catch { /* the write's own error is the one to report */ }
+        try { rmSync(partial, { force: true }); } catch { /* a stale partial is removed at the next writable open */ }
+        throw error;
+      }
+      return rollups;
+    },
     names: () => readdirSync(root),
     removeFile(name) {
       assertPlainName(name);

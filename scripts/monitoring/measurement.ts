@@ -11,6 +11,7 @@
  *   npx tsx scripts/monitoring/measurement.ts softflowd --pcap <capture> [--port n]
  *   npx tsx scripts/monitoring/measurement.ts segments [--quick]   (milestone 1.5, ADR 0062)
  *   npx tsx scripts/monitoring/measurement.ts v9collector [--quick]   (Task 11: the collector's own v9/IPFIX decoder, a day's rebuild)
+ *   npx tsx scripts/monitoring/measurement.ts trim [--quick]   (ADR 0071: what the sidecar trim costs on a day of v9)
  *
  * Not a test: every number is a property of the machine it ran on, and the
  * journal mode writes about 2.7 GB under the OS temp folder (and deletes it).
@@ -1724,6 +1725,71 @@ async function collectorRebuild(passName: string, day: number, expectedRecords: 
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/**
+ * ADR 0071: what the sidecar trim costs. A v9 journal of `day` datagrams is rolled up by the Worker host, then the
+ * first segment's worth is trimmed through the product's own `replaceRollups` (a partial beside the sidecar, a
+ * flush, a rename) on a real folder. Prints the sidecar's size per GiB of journal and the trim's time.
+ */
+async function trimMeasurement(passName: string, day: number): Promise<void> {
+  const stream = collectorStreams().find((s) => s.name === passName);
+  if (stream === undefined) throw new Error(`no pass named ${passName}`);
+  const root = join(tmpdir(), `inwire-v9trim-${process.pid}`);
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(root, { recursive: true });
+  const limitBytes = 8 * 1024 * MB;
+  const feed = new StreamFeed(stream);
+  let lastMs = 0;
+  try {
+    const vol = openMonitoringVolume(root);
+    const { journal } = MonitoringJournal.open(vol.segments, { limitBytes });
+    journal.append([{
+      kind: 'boundary', sessionId: 'c1'.repeat(16), receivedMs: stream.baseSecs * 1000, action: 'start', reason: '', droppedDatagrams: null,
+      source: { exporterIPv4: COLLECTOR_EXPORTER, bindIPv4: '192.0.2.10', port: 2055 },
+    }]);
+    for (let done = 0; done < day; done += PAGE) {
+      const batch: EvidenceInput[] = [];
+      for (let k = 0; k < Math.min(PAGE, day - done); k++) {
+        const { slot, receivedMs } = feed.next();
+        lastMs = receivedMs;
+        batch.push({ kind: 'datagram', receivedMs, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: COLLECTOR_EXPORTER, remotePort: slot.port, bytes: slot.work.slice() });
+      }
+      const r = journal.append(batch);
+      if (r.refused > 0) throw new Error(`the journal refused ${r.refused} entries (${r.state})`);
+    }
+    journal.flush();
+    const snap = journal.snapshot();
+    const names = vol.segments.list();
+    console.log(`\n${passName}: ${day.toLocaleString()} datagrams, ${fmt(dirBytes(root) / MB, 0)} MiB of journal in ${names.length} segments`);
+    if (names.length < 2) { console.log('  fewer than two segments: nothing to trim at a segment start; use a longer run'); journal.close(); vol.close(); return; }
+    const opened = RollupStore.open(vol.rollups, { generation: snap.generation, throughEntryId: snap.throughEntryId }, { nowMs: () => Date.now() });
+    const runtime = new LocalRuntime(journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
+    const rig = new HostRig(runtime, { wallNow: () => lastMs + 60_000 });
+    const [reply, rebuildMs] = (() => { const t = performance.now(); return [rig.connect(), t] as const; })();
+    const connected = await reply;
+    if (connected.type !== 'connect-reply' || !connected.ok) throw new Error(`connect failed: ${JSON.stringify(connected)}`);
+    const rebuilt = performance.now() - rebuildMs;
+    const journalBytes = dirBytes(root) - opened.store.size();
+    const sidecarBefore = opened.store.size();
+    const secondFirst = Number(/journal-(\d+)\.iwmj/.exec(names[1])![1]);
+    const cut = secondFirst - 1;
+    const [outcome, trimMs] = timeIt(() => opened.store.trim(cut, vol.replaceRollups));
+    const after = opened.store.size();
+    console.log(`  rebuild ${fmt(rebuilt / 1000, 2)} s; sidecar ${fmt(sidecarBefore / MB, 2)} MiB = ${fmt(sidecarBefore / MB / (journalBytes / (1024 * MB)), 1)} MiB per GiB of journal`);
+    console.log(`  trim through entry ${cut.toLocaleString()} (the first segment): ${outcome} in ${fmt(trimMs, 0)} ms, sidecar ${fmt(sidecarBefore / MB, 2)} -> ${fmt(after / MB, 2)} MiB, `
+      + `${readdirSync(root).filter((f) => f.endsWith('.partial')).length} partials left`);
+    journal.close();
+    vol.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+async function trimMode(): Promise<void> {
+  const DAY = quick ? 200_000 : 622_570;
+  console.log(`trim: node ${process.versions.node} (${process.platform} ${process.arch}), ${cpus().length} x ${cpus()[0]?.model.trim()}, ${new Date().toISOString()}`);
+  for (const name of ['softflowd v9', 'pmacct v9']) {
+    try { await trimMeasurement(name, DAY); } catch (e) { console.log(`NOT RUN  trim (${name}): ${(e as Error).message}`); }
+  }
+}
+
 async function v9CollectorMode(): Promise<void> {
   const DAY = quick ? 62_257 : 622_570;
   console.log(`v9collector: node ${process.versions.node} (${process.platform} ${process.arch}), ${cpus().length} x ${cpus()[0]?.model.trim()}, ${fmt(totalmem() / (1024 ** 3), 1)} GiB RAM, ${new Date().toISOString()}`);
@@ -1876,6 +1942,7 @@ if (!isMainThread) {
   case 'softflowd': await softflowdMode(); break;
   case 'v9decode': v9DecodeMode(); break;
   case 'v9collector': await v9CollectorMode(); break;
+  case 'trim': await trimMode(); break;
   case 'checkpoint': checkpointMode(); break;
   case 'bindpair': await bindPairMode(); break;
   case 'socket': await socketMode(); break;
@@ -1885,6 +1952,6 @@ if (!isMainThread) {
   case 'firewall': await firewallMode(); break;
   case 'segments': await segmentsMode(); break;
   default:
-    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick] | v9decode [--quick] | v9collector [--quick] | checkpoint');
+    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick] | v9decode [--quick] | v9collector [--quick] | trim [--quick] | checkpoint');
     process.exitCode = 2;
 }

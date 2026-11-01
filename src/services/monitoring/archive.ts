@@ -28,7 +28,7 @@ import type { ExpiryPlan } from './retention';
 import { EngineAdmission, MinuteAccumulator, MinuteAggregator, feedEntry } from './rollup';
 import { DecodeState } from './decodeState';
 import { encodeMinuteRollup, type Deflate } from './rollupCodec';
-import type { RollupStore } from './rollupStore';
+import type { RollupStore, SidecarReplace } from './rollupStore';
 import { ACCEPTED_POLICIES, LIMITS, type Evidence, type MinuteRollup, type SessionContext } from './types';
 
 export const ARCHIVE_FRAMING: Framing = { magic: 'INWIREMA', maxBodyBytes: 1 << 20 };
@@ -461,6 +461,11 @@ export interface RunExpiryOptions {
    * decode state through the entry before the first), archive fragments and the state through the last entry out.
    */
   replay?: (entries: Evidence[], sessionAtStart: SessionContext, start: DecodeState) => { minutes: ArchivedMinute[]; checkpoint: Uint8Array };
+  /**
+   * How the sidecar is replaced by its trimmed copy (ADR 0071). Without it, or when the trim fails, the cache is
+   * reset and rebuilt, as `resumeExpiry` does for an expiry that was interrupted.
+   */
+  replaceSidecar?: SidecarReplace;
 }
 
 /**
@@ -474,23 +479,42 @@ function startState(cut: ArchiveCut | null, firstEntryId: number): DecodeState |
   return state !== null && state.throughEntryId === firstEntryId - 1 ? state : null;
 }
 
-/** The newest `expired` boundary the journal still holds: its own entry id and the last entry id it took out. */
 /**
- * Resets a cache whose watermark is below the newest retained `expired` boundary. The new base is where the
- * journal begins once that boundary's segments are gone, even while a failed unlink still lists them, so a
- * batch the Worker had in flight from the old watermark is refused rather than carried past the boundary.
+ * Resets a cache the newest retained `expired` boundary leaves stale: one not trimmed for it (its trimmed-through
+ * is before the boundary's through entry) and whose watermark is before the boundary's own entry, so it still
+ * holds minutes of entries that are gone and the archive holds, and a query would add the two. The new base is
+ * where the journal begins once that boundary's segments are gone, even while a failed unlink still lists them,
+ * so a batch the Worker had in flight from the old watermark is refused rather than carried past the boundary.
+ * A trimmed cache is not stale, whatever its watermark: the trim is what leaves it correct (ADR 0071).
  */
 function resetIfStale(journal: MonitoringJournal, cache: RollupStore, coveringThrough = Infinity): boolean {
   const boundary = newestExpiredBoundary(journal);
   const mark = cache.watermark();
   if (boundary === null) return false;
+  if (cache.trimmedThrough() >= boundary.throughEntryId) return false;
   // An expiry that has just written its boundary resets even an empty cache, for the base.
   const fresh = boundary.throughEntryId >= coveringThrough;
-  if (!fresh && (mark === null || mark.throughEntryId >= boundary.entryId)) return false;
+  if (!fresh && mark !== null && mark.throughEntryId >= boundary.entryId) return false;
   cache.reset(Math.max(journal.snapshot().firstEntryId - 1, boundary.throughEntryId));
   return true;
 }
 
+/**
+ * Trims the cache to an expiry's cut, once the journal's `expired` boundary for it is durable (before that the
+ * cache still matches the journal, and after a failed trim `resetIfStale` is what makes it right). A failure is
+ * not an expiry's failure: the old cache is untouched and `resetIfStale` resets it next.
+ */
+function trimTo(journal: MonitoringJournal, cache: RollupStore, cutThroughEntryId: number, replace: SidecarReplace): void {
+  try {
+    const boundary = newestExpiredBoundary(journal);
+    if (boundary === null || boundary.throughEntryId < cutThroughEntryId) return;
+    cache.trim(cutThroughEntryId, replace);
+  } catch {
+    // The old file is as it was; the reset after this rebuilds it.
+  }
+}
+
+/** The newest `expired` boundary the journal still holds: its own entry id and the last entry id it took out. */
 function newestExpiredBoundary(journal: MonitoringJournal): { entryId: number; throughEntryId: number } | null {
   const snap = journal.snapshot();
   let after = snap.firstEntryId - 1;
@@ -621,8 +645,10 @@ export function runExpiry(
     try {
       r = journal.dropSegments(plan.segments, plan.reason, nowMs);
     } finally {
-      // Once the boundary is durable the cache is stale, whether or not the unlink then failed. The new
-      // sidecar continues from where the journal begins without those segments; a batch that does not is refused.
+      // Once the boundary is durable the cache is stale, whether or not the unlink then failed. It is trimmed to the
+      // cut when it can be, and the Worker's next post continues; else it is reset, and the new sidecar continues from
+      // where the journal begins without those segments, and a batch that does not is refused (ADR 0071).
+      if (opts.replaceSidecar !== undefined) trimTo(journal, cache, plan.throughEntryId, opts.replaceSidecar);
       resetIfStale(journal, cache, plan.throughEntryId);
     }
     if (r.refused > 0 || r.state === 'failed') return 'failed';

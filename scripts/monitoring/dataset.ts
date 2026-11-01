@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   classifyAdoption, classifyMonitoringName, DATASET_SUBFOLDER, encodeDatasetFile, newDatasetFile,
-  planMonitoringDiscard, readDatasetFile, refuseLocation,
+  planMonitoringDiscard, readDatasetFile, refuseLocation, staleSidecarPartials,
 } from '../../src/services/monitoring/datasetPlan';
 import type { RecoveryResult } from '../../src/services/monitoring/journal';
 import { readMonitoringSettings, saveMonitoringSettings, SETTINGS_FILE } from '../../electron/monitoring/settings';
@@ -291,6 +291,13 @@ test('settings: a location that is not a string, and a retention that is not a p
     writeFileSync(path.join(dir, SETTINGS_FILE), JSON.stringify({ version: 2, source: SOURCE, location: null, retention: { keepRawDays: 0, atLimit: 'stop' } }));
     assert.equal(readMonitoringSettings(dir).ok, false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('staleSidecarPartials: only the sidecar\'s own partials', () => {
+  assert.deepEqual(staleSidecarPartials([
+    'rollups.iwmr.0123456789ab.partial', 'archive.iwma.0123456789ab.partial', 'x.iwmon.0123456789ab.partial', 'rollups.iwmr', 'dataset.json',
+  ]), ['rollups.iwmr.0123456789ab.partial']);
+  assert.deepEqual(staleSidecarPartials(['rollups.iwmr', SEG1]), []);
 });
 
 if (failures > 0) {

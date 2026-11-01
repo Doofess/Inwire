@@ -277,9 +277,10 @@ export class MonitoringWorkerHost {
   /**
    * The watermark a rebuild may continue from, after wiping a sidecar that cannot be continued: one of
    * another generation or policy; one that ends before the journal's first retained entry (it counts
-   * entries the journal no longer has); one that ends before the newest retained `expired` boundary (it
-   * still counts entries the archive now holds, and a query would add the two: a crash between the
-   * boundary and the reset leaves exactly this, and `resumeExpiry` is what normally closes it). An empty
+   * entries the journal no longer has); one that ends before the newest retained `expired` boundary and was
+   * not trimmed for it (it still counts entries the archive now holds, and a query would add the two: a crash
+   * between the boundary and the trim's rename leaves exactly this, and `resumeExpiry` is what normally
+   * closes it; ADR 0071). An empty
    * sidecar is reset too when entries have expired, so its base is the journal's start and not entry 0.
    */
   private async settleSidecar(
@@ -289,7 +290,12 @@ export class MonitoringWorkerHost {
     if (mark !== null) {
       if (mark.generation !== snapshot.generation || !isReadablePolicy(mark.policyVersion)) wipe = true;
       else if (mark.throughEntryId < snapshot.firstEntryId - 1) wipe = true;
-      else if (mark.throughEntryId < await this.newestExpiredBoundary(runtime, snapshot)) wipe = true;
+      else {
+        // Stale unless the sidecar was trimmed for that boundary (ADR 0071): its watermark is behind the boundary's
+        // own entry, which is appended last, whatever it holds.
+        const newest = await this.newestExpiredBoundary(runtime, snapshot);
+        if (newest !== null && mark.throughEntryId < newest.entryId && (mark.trimmedThroughEntryId ?? 0) < newest.throughEntryId) wipe = true;
+      }
     } else if (snapshot.firstEntryId > 1) {
       wipe = true;
     }
@@ -298,13 +304,19 @@ export class MonitoringWorkerHost {
     return runtime.watermark();
   }
 
-  /** The entry id of the newest `expired` boundary the journal still holds, 0 for none. */
-  private async newestExpiredBoundary(runtime: HostRuntime, snapshot: JournalSnapshot): Promise<number> {
-    let newest = 0;
+  /** The newest `expired` boundary the journal still holds: its own entry id and the last entry id it took out, null for none. */
+  private async newestExpiredBoundary(
+    runtime: HostRuntime, snapshot: JournalSnapshot,
+  ): Promise<{ entryId: number; throughEntryId: number } | null> {
+    let newest: { entryId: number; throughEntryId: number } | null = null;
     let after = snapshot.firstEntryId - 1;
     for (;;) {
       const page = await runtime.readBoundaries(snapshot, after, LIMITS.pageEntries);
-      for (const b of page.entries) if (b.action === 'expired') newest = Math.max(newest, b.ref.entryId);
+      for (const b of page.entries) {
+        if (b.action === 'expired' && (newest === null || b.ref.entryId > newest.entryId)) {
+          newest = { entryId: b.ref.entryId, throughEntryId: b.expired?.throughEntryId ?? 0 };
+        }
+      }
       if (page.done) return newest;
       after = page.nextAfterId;
     }
@@ -529,6 +541,22 @@ export class MonitoringWorkerHost {
     await this.rebuild();
   }
 
+  /** Whether `e` is the first entry of a segment the aggregator has not fed yet. */
+  private atSegmentStart(e: Evidence): boolean {
+    return e.segmentFirstId === e.ref.entryId && e.ref.entryId > this.aggregator.fedThrough;
+  }
+
+  /**
+   * Before a segment's first entry is fed: every minute so far is sealed (`feedEntry` would, a moment later) and posted
+   * at a watermark of this very entry's predecessor. A fragment is then never posted in a batch whose watermark is past
+   * a segment start it lies before, so an expiry's cut, which is one, leaves the sidecar's `through > cut` meaning
+   * "made of entries after the cut" and nothing in it is counted twice with the archive (ADR 0071).
+   */
+  private async closeBeforeSegment(runtime: HostRuntime): Promise<void> {
+    this.aggregator.seal(Infinity);
+    await this.postDrained(runtime);
+  }
+
   /** Reads `(fed, snapshot.through]` into the aggregator in slices, posting what may be posted after each page. */
   private async readThrough(runtime: HostRuntime, snapshot: Snapshot): Promise<void> {
     const slicer = new Slicer(this.options.now, this.options.yieldNow);
@@ -538,7 +566,18 @@ export class MonitoringWorkerHost {
       const page = await runtime.readPage(snapshot, after, LIMITS.pageEntries, LIMITS.pageBytes);
       // A reopen or a shutdown while the page was being read: it is the old dataset's, or nobody's.
       if (this.stopRebuild) return;
-      for (const e of page.entries) this.feed(e);
+      let fedInPage = false;
+      for (const e of page.entries) {
+        if (this.atSegmentStart(e)) {
+          await this.closeBeforeSegment(runtime);
+          if (this.stopRebuild) return;
+          // The rest of this page is read again from the segment's start, so a page never straddles one: batches
+          // then depend on the segment alone, and a rebuild from a cut batches as the build it replaces did.
+          if (fedInPage) break;
+        }
+        this.feed(e);
+        fedInPage = true;
+      }
       if (page.entries.length === 0 && this.aggregator.fedThrough <= after) {
         throw new Error(`the journal returned no entries after ${after} though it holds ${snapshot.throughEntryId}`);
       }
@@ -642,6 +681,10 @@ export class MonitoringWorkerHost {
         // A push that was missed (or dropped while rebuilding) left a hole: read it before going on.
         if (id > this.aggregator.fedThrough + 1) await this.readThrough(runtime, { generation: this.generation, throughEntryId: id - 1 });
         if (this.stopRebuild) return;
+        if (this.atSegmentStart(e)) {
+          await this.closeBeforeSegment(runtime);
+          if (this.stopRebuild) return;
+        }
         this.feed(e);
       }
       await this.postDrained(runtime);

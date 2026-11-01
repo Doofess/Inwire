@@ -103,6 +103,16 @@ export interface RollupStoreOptions {
 
 const READ_ONLY = 'the dataset is read-only, so its rollups are not stored';
 
+/**
+ * How a trim puts a new sidecar in place of the old (ADR 0071). `write` fills a new, empty file; the contract is to
+ * create it beside the sidecar, let `write` fill it, flush it, then make it the sidecar and return the open handle.
+ * On a throw the old sidecar is untouched and the new file is gone. File names are the volume's, not this module's.
+ */
+export type SidecarReplace = (write: (fresh: BlockFile) => void) => BlockFile;
+
+/** The most bytes of kept entries held before they are written to the new file. */
+const TRIM_WRITE_BYTES = 1 << 20;
+
 export interface MinuteInput { sourceKey: string; minuteMs: number; bytes: Uint8Array }
 
 interface Located { minuteMs: number; offset: number; bodyLength: number; bytes: number; throughEntryId: number }
@@ -256,7 +266,7 @@ export class RollupStore {
   private readOnly = false;
 
   private constructor(
-    private readonly file: BlockFile,
+    private file: BlockFile,
     private readonly journal: JournalBounds,
     private readonly nowMs: () => number,
     private end: number,
@@ -548,5 +558,94 @@ export class RollupStore {
     if (this.readOnly) throw new Error(READ_ONLY);
     if (!Number.isSafeInteger(baseEntryId) || baseEntryId < 0) throw new RangeError('a base is a non-negative entry id');
     this.writeFreshHeader(baseEntryId);
+  }
+
+  /**
+   * What an expiry does to the sidecar (ADR 0071): a new file holding what the cut leaves, in place of the old. The
+   * header keeps the generation and policy and records `cutThroughEntryId` as trimmed-through. Every minute, checkpoint
+   * and watermark whose through entry is after the cut is copied, in file order, body as it is (renumbered, since
+   * entry ids count the file's own entries); the rest describes entries the archive now holds. No fragment straddles
+   * a segment start, and the cut is always at a segment's end, so a fragment is wholly before it or wholly after.
+   *
+   * Runs to the end without yielding, and is verified before it is committed: the new file is scanned as an open
+   * would, and anything but a sidecar throws with the old one untouched. `emptied` when nothing was kept (the
+   * file is the header alone and the base is the cut: the Worker's next post is refused and the retry rebuilds
+   * from there). Throws when read-only or not usable; a throw leaves this store as it was.
+   */
+  trim(cutThroughEntryId: number, replace: SidecarReplace): 'trimmed' | 'emptied' {
+    if (this.readOnly) throw new Error(READ_ONLY);
+    this.requireUsable();
+    if (!Number.isSafeInteger(cutThroughEntryId) || cutThroughEntryId < this.trimmed) {
+      throw new RangeError(`a trim cut is an entry id at or after ${this.trimmed} (got ${cutThroughEntryId})`);
+    }
+    const oldBytes = new Uint8Array(FILE_HEADER_BYTES);
+    this.file.read(0, oldBytes);
+    const old = decodeFileHeader(ROLLUP_FRAMING, oldBytes);
+    if (!old.ok) throw new CorruptRollupError(`the sidecar's header no longer reads: ${old.reason}`);
+    const source = this.file;
+    const bounds: JournalBounds = { generation: this.journal.generation, throughEntryId: Number.MAX_SAFE_INTEGER };
+    const found: { scan: SidecarScan | null } = { scan: null };
+
+    const fresh = replace((out) => {
+      out.write(0, encodeFileHeader(ROLLUP_FRAMING, {
+        generation: old.generation, createdMs: old.createdMs, policyVersion: old.policyVersion,
+        formatVersion: ROLLUP_FORMAT_VERSION, trimmedThroughEntryId: cutThroughEntryId,
+      }));
+      let at = FILE_HEADER_BYTES;
+      let id = 0;
+      let held: Uint8Array[] = [];
+      let heldBytes = 0;
+      const flush = (): void => {
+        if (heldBytes === 0) return;
+        const all = new Uint8Array(heldBytes);
+        let w = 0;
+        for (const h of held) { all.set(h, w); w += h.length; }
+        out.write(at, all);
+        at += all.length;
+        held = [];
+        heldBytes = 0;
+      };
+      const outcome = scanEntries(source, ROLLUP_FRAMING, FILE_HEADER_BYTES, 0, (e) => {
+        const v = new DataView(e.body.buffer, e.body.byteOffset, e.body.byteLength);
+        let through: number;
+        if (e.kind === KIND_MINUTE) through = Number(v.getBigUint64(2 + v.getUint16(0, true) + 8, true));
+        else if (e.kind === KIND_CHECKPOINT) through = Number(v.getBigUint64(8, true));
+        else if (e.kind === KIND_WATERMARK) through = Number(v.getBigUint64(16, true));
+        else return `unknown kind ${e.kind}`;
+        if (through <= cutThroughEntryId) return null;
+        const entry = encodeEntry(ROLLUP_FRAMING, ++id, e.kind, e.body);
+        held.push(entry);
+        heldBytes += entry.length;
+        if (heldBytes >= TRIM_WRITE_BYTES) flush();
+        return null;
+      });
+      if (outcome.problem !== null || outcome.tornTail !== null) {
+        throw new CorruptRollupError(`the sidecar changed under the trim: ${outcome.problem ?? 'a torn tail'}`);
+      }
+      flush();
+      // What a reopen would make of it, before it is anyone's sidecar.
+      const scan = scanSidecar(out, bounds);
+      if (scan.verdict === 'rebuild-required') throw new CorruptRollupError(`the trimmed sidecar is not one: ${scan.reason ?? 'unknown'}`);
+      found.scan = scan;
+    });
+
+    const scan = found.scan;
+    if (scan === null) throw new Error('the replace did not run the write');
+    this.file = fresh;
+    this.trimmed = cutThroughEntryId;
+    if (scan.verdict === 'empty') {
+      this.end = FILE_HEADER_BYTES;
+      this.lastId = 0;
+      this.mark = null;
+      this.minutes = new Map();
+      this.checkpointIndex = [];
+      return 'emptied';
+    }
+    this.end = scan.batchEnd;
+    this.lastId = scan.lastEntryId;
+    this.mark = scan.watermark;
+    this.minutes = scan.minutes;
+    this.checkpointIndex = scan.checkpoints;
+    return 'trimmed';
   }
 }

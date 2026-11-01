@@ -42,6 +42,14 @@ of a segment boundary, and kind 1 records only its last entry.
   segments, and an expiry, which only ever takes whole segments, never cuts
   through one. A minute that spans a segment start has two fragments, and every
   reader already sums a minute's fragments (0062's straddling minute).
+- The Worker also **posts** those sealed fragments before it feeds the
+  segment's first entry, at a watermark of that entry's predecessor, and a
+  rebuild's page stops there so the next page starts at the segment. A
+  fragment's `through` in the sidecar is its batch's watermark, not its own
+  last entry. Without this post, a fragment made before a cut could ride in a
+  batch whose watermark is past the cut, survive the trim and be counted again
+  beside the archive. *(Added during implementation, 2026-11-01: the
+  equality tests in `expiry-sidecar.ts` failed without it.)*
 
 ### The sidecar's format 2
 
