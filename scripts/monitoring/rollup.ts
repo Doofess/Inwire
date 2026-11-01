@@ -19,7 +19,7 @@
  */
 import assert from 'node:assert/strict';
 import { MemoryBlockFile } from '../../src/services/capture/blockFile';
-import { EngineAdmission, MinuteAccumulator, MinuteAggregator, byAddress, minuteOf, sortByAddresses } from '../../src/services/monitoring/rollup';
+import { MinuteAccumulator, MinuteAggregator, byAddress, minuteOf, sortByAddresses } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { runExpiry } from '../../src/services/monitoring/archive';
 import { DEFAULT_RETENTION, planExpiry } from '../../src/services/monitoring/retention';
@@ -217,24 +217,49 @@ test('aggregator: sampling is counted per record, known or not', () => {
   assert.equal(r.unknownSamplingRecords, 2);
 });
 
-// --- engine admission --------------------------------------------------------------------------------------
+// --- the identity guard (ADR 0070) -------------------------------------------------------------------------
 
-test('admission: the first 16 engines of an exporter, in journal order, and no more', () => {
-  const adm = new EngineAdmission();
-  for (let e = 0; e < 16; e++) assert.equal(adm.admit(sourceKey(BUSY, 0, e)), true, `engine ${e}`);
-  assert.equal(adm.admit(sourceKey(BUSY, 0, 16)), false);
-  assert.equal(adm.admit(sourceKey(BUSY, 0, 0)), true, 'an admitted engine stays admitted');
-  assert.equal(adm.admit(sourceKey(BUSY, 1, 0)), false, 'type is part of the engine');
-  assert.equal(adm.admit(sourceKey(EXPORTER, 0, 16)), true, 'the cap is per exporter');
+/** Rolls `items` up with a real host and returns the rig: the sidecar holds the lot. */
+async function rolled(items: EvidenceInput[]): Promise<Rig> {
+  const rig = new Rig(0xa0);
+  rig.append(items);
+  const host = await rollUp(rig);
+  host.host.handle({ type: 'shutdown', requestId: 9300 });
+  await host.host.settled();
+  return rig;
+}
+
+const engineDgram = (ms: number, engine: number): EvidenceInput => dgram(ms, [{ src: '10.9.0.1', dst: '10.9.0.2', octets: 10, packets: 1 }], { engineId: engine });
+
+test('guard: a Source ID per datagram gives 16 rows a minute and the rest churn', async () => {
+  const items: EvidenceInput[] = [start(m(0, 100), S1)];
+  for (let e = 0; e < 40; e++) items.push(engineDgram(m(0, 1000 + e), e));
+  for (let e = 40; e < 80; e++) items.push(engineDgram(m(1, 1000 + e), e));
+  items.push(stop(m(1, 50_000), S1));
+  const rig = await rolled(items);
+  for (const [minute, first] of [[0, 0], [1, 40]] as const) {
+    const rows = rig.store.sources().filter((s) => s.startsWith(`${EXPORTER}/`)
+      && rig.store.readMinutes(s, m(minute), m(minute + 1), 1 << 30).length > 0);
+    assert.equal(rows.length, LIMITS.enginesPerExporter, `minute ${minute} has ${LIMITS.enginesPerExporter} engine rows`);
+    const a = await askBoth(rig, spec(m(minute), m(minute + 1), 1, { sourceKey: sourceKey(EXPORTER, 0, first) }));
+    assert.deepEqual(withoutProvenance(a.fast), withoutProvenance(a.raw));
+    assert.equal(a.raw.unsupported, 24, `minute ${minute}: 40 identities, 16 rows, 24 churn`);
+    assert.equal(a.raw.matchingRecords, 1);
+    const churned = await askBoth(rig, spec(m(minute), m(minute + 1), 1, { sourceKey: sourceKey(EXPORTER, 0, first + 20) }));
+    assert.deepEqual(withoutProvenance(churned.fast), withoutProvenance(churned.raw));
+    assert.equal(churned.raw.matchingRecords, 0, 'a churned identity has no row');
+  }
 });
 
-test('admission: learned from the sidecar\'s source keys, and an exporter key is not an engine', () => {
-  const known = [exporterKey(BUSY), ...Array.from({ length: 16 }, (_, e) => sourceKey(BUSY, 0, e))];
-  const adm = new EngineAdmission(known);
-  assert.equal(adm.has(exporterKey(BUSY)), false);
-  assert.equal(adm.admit(sourceKey(BUSY, 0, 99)), false, 'the 17th is refused after a restart too');
-  const fewer = new EngineAdmission([exporterKey(BUSY), sourceKey(BUSY, 0, 0)]);
-  assert.equal(fewer.admit(sourceKey(BUSY, 0, 1)), true, 'an exporter key does not use up a slot');
+test('guard: rows while held: an identity that returns after eviction continues its row', async () => {
+  const items: EvidenceInput[] = [start(m(0, 100), S1), engineDgram(m(0, 1000), 0)];
+  for (let e = 1; e <= 16; e++) items.push(engineDgram(m(1, 1000 + e), e));
+  items.push(engineDgram(m(2, 1000), 0), stop(m(2, 50_000), S1));
+  const rig = await rolled(items);
+  const a = await askBoth(rig, spec(m(0), m(3), 3, { sourceKey: sourceKey(EXPORTER, 0, 0) }));
+  assert.deepEqual(withoutProvenance(a.fast), withoutProvenance(a.raw));
+  assert.equal(a.raw.matchingRecords, 2, 'minutes 0 and 2 join up under one source key');
+  assert.equal(a.raw.unsupported, 0);
 });
 
 // --- the minute key budget ---------------------------------------------------------------------------------
@@ -340,7 +365,7 @@ function buildWorld(seed = 7): World {
   push(junk(m(1, 100)), unreadVersion(m(1, 150)), junk(m(1, 160), OTHER));
   w.bad.push({ ms: m(1, 100), exporter: EXPORTER, kind: 'malformed' }, { ms: m(1, 150), exporter: EXPORTER, kind: 'unsupported' });
   push(...traffic(2, 0, 60_000, 4, { sampling: 0 })); // a whole minute whose sampling is unknown
-  for (let e = 0; e < 20; e++) push(put(m(2, 1000 + e), e, [rflow()], {}, BUSY)); // 20 engines on one exporter: 16 are admitted
+  for (let e = 0; e < 20; e++) push(put(m(2, 1000 + e), e, [rflow()], {}, BUSY)); // 20 identities in one minute: the guard admits 16
   push(...traffic(3, 0, 60_000, 6));
   push(...traffic(4, 0, 60_000, 4));
   push(unreadVersion(m(4, 200)));
@@ -518,7 +543,7 @@ test('equality: the stored sidecar holds every phase-1 record and no phase-2 rec
   assert.equal(stored, admitted.length, 'the sidecar holds the admitted records of phase 1 and nothing of phase 2');
 });
 
-test('equality: only the 16 admitted engines of the busy exporter have rows', async () => {
+test('equality: the busy exporter has 16 identity rows in the minute and the other four are churn', async () => {
   const { rig } = await built;
   const sources = rig.store.sources().filter((s) => s.startsWith(`${BUSY}/`));
   assert.equal(sources.length, 16);

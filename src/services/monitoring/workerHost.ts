@@ -35,7 +35,7 @@ import { StaleGenerationError } from './journal';
 import { ROLLUP_FRAMING } from './journalCodec';
 import { BoundaryCache, runHistoryQuery } from './queries';
 import { encodeMinuteRollup, type Deflate, type Inflate } from './rollupCodec';
-import { EngineAdmission, MinuteAggregator, feedEntry, v5View } from './rollup';
+import { MinuteAggregator, feedEntry, v5View } from './rollup';
 import { DecodeState, type DecodeStep } from './decodeState';
 import { RuntimeUnavailableError, type HostRuntime } from './runtime';
 import { initialSourceHealth, reduceSourceHealth, type ExporterSnapshot, type HealthEvent, type SourceHealth } from './sourceHealth';
@@ -207,7 +207,6 @@ export class MonitoringWorkerHost {
   private pendingCheckpoints: CheckpointCandidate[] = [];
   private spacing: CheckpointSpacing = { role1Through: 0, latestMs: 0, storedThrough: 0 };
   private markPolicy = LOWEST_POLICY;
-  private admission = new EngineAdmission();
   private targetEntryId = 0;
   private stopRebuild = false;
   private reopenPending = 0;
@@ -408,7 +407,6 @@ export class MonitoringWorkerHost {
     this.analyzedThrough = null;
     this.rolledUpThrough = null;
     this.targetEntryId = 0;
-    this.admission = new EngineAdmission(sources);
     this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
     this.decodeState = DecodeState.empty(this.aggregator.fedThrough);
     this.pendingCheckpoints = [];
@@ -782,7 +780,7 @@ export class MonitoringWorkerHost {
     }
     // The aggregator's own steps are `feedEntry`'s, shared with the expiry's replay; the health and
     // the source list are this host's.
-    const fed = feedEntry(this.aggregator, this.admission, this.decodeState, e);
+    const fed = feedEntry(this.aggregator, this.decodeState, e);
     if (e.kind === 'boundary') {
       if (fresh && e.action === 'stop') {
         this.pendingCheckpoints.push({ role: 2, throughEntryId: id, throughMs: e.receivedMs, raw: this.decodeState.checkpoint() });
@@ -791,8 +789,8 @@ export class MonitoringWorkerHost {
     }
     if (fed === null) return;
     const d = fed.step.decoded;
-    if (d.kind === 'valid' && fed.admitted) this.knownSources.add(d.sourceKey);
-    this.watch(e, fed.step, fed.admitted);
+    if (d.kind === 'valid') this.knownSources.add(d.sourceKey);
+    this.watch(e, fed.step);
   }
 
   /**
@@ -801,30 +799,34 @@ export class MonitoringWorkerHost {
    * moment it is fed: the rebuild's later passes read entries that arrived minutes earlier, and
    * a source that went quiet meanwhile must not look fresh for another `staleMs`.
    */
-  private watch(e: DatagramEvidence, step: DatagramStep, admitted: boolean): void {
+  private watch(e: DatagramEvidence, step: DatagramStep): void {
     const id = e.ref.entryId;
     if (id <= Math.max(this.healthFloor, this.healthThrough)) return;
     this.healthThrough = id;
     const age = Math.max(0, this.options.wallNow() - e.receivedMs);
     const timing = { elapsedMs: this.options.now() - age, wallMs: e.receivedMs };
     const d = step.decoded;
+    if (step.churn) {
+      this.observeDatagram(e.remoteIPv4, { kind: 'datagram', outcome: 'identity-churn', entryId: id, ...timing });
+      return;
+    }
     if (d.kind === 'valid' && d.protocol !== 'v5') {
       let awaitingSets = 0;
       let awaitingBytes = 0;
       for (const a of [...d.awaiting, ...d.refused]) { awaitingSets += a.sets; awaitingBytes += a.bytes; }
       this.observeDatagram(e.remoteIPv4, {
         kind: 'datagram', outcome: 'valid-template', protocol: d.protocol, sourceKey: d.sourceKey, flowCount: d.flows.length,
-        entryId: id, awaitingSets, awaitingBytes, admitted, ...timing,
+        entryId: id, awaitingSets, awaitingBytes, ...timing,
       });
       // What `ExporterState` saw in it, on the source's row (none without one).
-      if (admitted) for (const event of step.events) this.observe({ ...event, ...timing });
+      for (const event of step.events) this.observe({ ...event, ...timing });
       return;
     }
     const decoded = v5View(d);
     if (decoded.kind === 'valid') {
       this.observeDatagram(e.remoteIPv4, {
         kind: 'datagram', outcome: 'valid', engineType: decoded.engineType, engineId: decoded.engineId,
-        sequence: decoded.sequence, flowCount: decoded.flows.length, entryId: id, admitted, ...timing,
+        sequence: decoded.sequence, flowCount: decoded.flows.length, entryId: id, ...timing,
       });
     } else {
       this.observeDatagram(e.remoteIPv4, { kind: 'datagram', outcome: decoded.kind, entryId: id, ...timing });
@@ -849,10 +851,9 @@ export class MonitoringWorkerHost {
       const step = this.decodeState.step(e);
       if (e.kind !== 'datagram' || step === null || step.kind !== 'datagram') continue;
       const d = step.decoded;
-      // Engine admission and the source list are the Worker's own facts, independent of the aggregator.
-      const admitted = d.kind === 'valid' && this.admission.admit(d.sourceKey);
-      if (admitted) this.knownSources.add(d.sourceKey);
-      this.watch(e, step, admitted);
+      // The source list is the Worker's own fact, independent of the aggregator.
+      if (d.kind === 'valid') this.knownSources.add(d.sourceKey);
+      this.watch(e, step);
     }
   }
 

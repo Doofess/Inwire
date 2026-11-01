@@ -57,7 +57,7 @@ import { decodeV5 } from '../../src/services/monitoring/v5';
 import { CollectorTemplateStore } from '../../src/services/monitoring/templates';
 import { decodeDatagram, type FlowDecode } from '../../src/services/monitoring/flowDecode';
 import { DecodeState } from '../../src/services/monitoring/decodeState';
-import { EngineAdmission, MinuteAggregator, feedEntry } from '../../src/services/monitoring/rollup';
+import { MinuteAggregator, feedEntry } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
@@ -1542,7 +1542,6 @@ function runCollectorStage(stream: CollectorStream, day: number, stage: Collecto
   const store = new CollectorTemplateStore();
   const state = DecodeState.empty(0);
   const agg = new MinuteAggregator(0);
-  const admission = new EngineAdmission();
   const row: CollectorRow = {
     name: stream.name, protocol: stream.protocol, datagrams: day, bytes: 0, records: 0, valid: 0, awaitingSets: 0, events: 0, minutes: 0, encodedBytes: 0, ms: 0,
   };
@@ -1564,7 +1563,7 @@ function runCollectorStage(stream: CollectorStream, day: number, stage: Collecto
     if (stage === 'decode') {
       d = decodeDatagram(e, COLLECTOR_EXPORTER, 2, store);
     } else {
-      const fed = feedEntry(agg, admission, state, e);
+      const fed = feedEntry(agg, state, e);
       if (fed === null) throw new Error(`entry ${ordinal} was not fed`);
       d = fed.step.decoded;
       row.events += fed.step.events.length;

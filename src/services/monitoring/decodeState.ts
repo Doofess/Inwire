@@ -24,6 +24,7 @@
 import { decodeCheckpoint, encodeCheckpoint } from './checkpoint';
 import { ExporterState, type ExporterEvent } from './exporterState';
 import { decodeDatagram, type FlowDecode } from './flowDecode';
+import { IdentityMinuteGuard } from './identityGuard';
 import { CollectorTemplateStore } from './templates';
 import type { Evidence } from './types';
 
@@ -41,9 +42,14 @@ export type DecodeStep =
     sampling: RecordSampling[];
     /** v9 and IPFIX export time less receipt time; null for v5 and anything not decoded. */
     skewMs: number | null;
+    /** A valid datagram of one identity too many in its minute (ADR 0070): every reader counts it as unsupported. */
+    churn: boolean;
   };
 
 export class DecodeState {
+  /** Not checkpointed: it is reset wherever a checkpoint can lie, so every reader decides the same churn. */
+  private readonly guard = new IdentityMinuteGuard();
+
   private constructor(
     readonly store: CollectorTemplateStore,
     readonly exporter: ExporterState,
@@ -74,6 +80,7 @@ export class DecodeState {
   /** One entry, in id order. An entry at or below `throughEntryId` is already in the state and returns null. */
   step(e: Evidence): DecodeStep | null {
     if (e.ref.entryId <= this.through) return null;
+    if (e.segmentFirstId === e.ref.entryId) this.guard.reset();
     this.through = e.ref.entryId;
     this.throughAtMs = e.receivedMs;
     if (e.kind === 'boundary') {
@@ -85,19 +92,21 @@ export class DecodeState {
         this.store.gapEnded();
         this.exporter.gapEnded();
       }
+      if (e.action === 'stop' || e.action === 'suspend' || e.action === 'interrupted') this.guard.reset();
       return { kind: 'boundary' };
     }
-    const decoded = decodeDatagram(e, e.remoteIPv4, e.policy, this.store);
+    const decoded = decodeDatagram(e, e.remoteIPv4, e.policy, this.store, (key) => this.guard.admit(e.remoteIPv4, key, e.receivedMs));
+    const churn = decoded.kind === 'unsupported' && decoded.churn === true;
     // The evicted scope's source goes with it, before this datagram's own source is observed (ADR 0070).
     if (decoded.kind === 'valid' && decoded.evictedSourceKey !== undefined) this.exporter.forgetSource(decoded.evictedSourceKey);
     const events = this.exporter.observe(decoded, e);
-    if (decoded.kind !== 'valid') return { kind: 'datagram', decoded, events, sampling: [], skewMs: null };
+    if (decoded.kind !== 'valid') return { kind: 'datagram', decoded, events, sampling: [], skewMs: null, churn };
     if (decoded.protocol === 'v5') {
       const flows = decoded.v5 !== undefined && decoded.v5.kind === 'valid' ? decoded.v5.flows : [];
       const sampling = flows.map((f): RecordSampling => (
         f.sampling.kind === 'reported' ? { kind: 'known', interval: Math.max(1, f.sampling.interval) } : { kind: 'unknown' }
       ));
-      return { kind: 'datagram', decoded, events, sampling, skewMs: null };
+      return { kind: 'datagram', decoded, events, sampling, skewMs: null, churn: false };
     }
     const key = decoded.sourceKey;
     const status = this.exporter.sampling(key);
@@ -109,6 +118,6 @@ export class DecodeState {
       const rate = f.samplerId === null ? null : this.exporter.samplerRate(key, f.samplerId);
       return rate === null ? fallback : { kind: 'known', interval: rate };
     });
-    return { kind: 'datagram', decoded, events, sampling, skewMs: decoded.exportMs - e.receivedMs };
+    return { kind: 'datagram', decoded, events, sampling, skewMs: decoded.exportMs - e.receivedMs, churn: false };
   }
 }

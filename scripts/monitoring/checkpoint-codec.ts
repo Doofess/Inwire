@@ -428,11 +428,12 @@ function start(exporterIPv4: string): BoundaryEvidence {
 /** An IPFIX datagram (template and data) from `remoteIPv4`'s source port 40,000, in `domain`. */
 function ipfixFrom(remoteIPv4: string, domain: number): Evidence {
   nextEntry++;
-  return evidence(ipfixSample({ secs: 1_760_000_000, sequence: nextEntry, domain }, [FLOW], false), { ref: { generation: GENERATION, entryId: nextEntry }, remoteIPv4, remotePort: 40_000 });
+  return evidence(ipfixSample({ secs: 1_760_000_000, sequence: nextEntry, domain }, [FLOW], false), { ref: { generation: GENERATION, entryId: nextEntry }, remoteIPv4, remotePort: 40_000, receivedMs: 1_760_000_000_500 + (nextEntry - 1) * 60_000 });
 }
+// Each datagram is its own receipt minute, so the per-minute identity guard never refuses these and the store's own eviction is what is tested.
 function v9From(remoteIPv4: string, sourceId: number): Evidence {
   nextEntry++;
-  return evidence(v9Sample({ uptime: 600_000, secs: 1_760_000_000, sequence: nextEntry, sourceId }, [FLOW], null), { ref: { generation: GENERATION, entryId: nextEntry }, remoteIPv4, remotePort: 40_000 });
+  return evidence(v9Sample({ uptime: 600_000, secs: 1_760_000_000, sequence: nextEntry, sourceId }, [FLOW], null), { ref: { generation: GENERATION, entryId: nextEntry }, remoteIPv4, remotePort: 40_000, receivedMs: 1_760_000_000_500 + (nextEntry - 1) * 60_000 });
 }
 /** The IPFIX selector 1-in-(1 + 0xFFFFFFFF): a rate of 2^32. */
 function selectorEntry(): Evidence {

@@ -36,7 +36,7 @@
 import { ExpiredRangeError, StaleGenerationError } from './journal';
 import { decodeMinuteRollup, type Inflate } from './rollupCodec';
 import {
-  MINUTE_MS, EngineAdmission, MinuteAccumulator, foldOf, foldSampling, minuteOf, sortByAddresses, type FlowLeg,
+  MINUTE_MS, MinuteAccumulator, foldOf, foldSampling, minuteOf, sortByAddresses, type FlowLeg,
 } from './rollup';
 import { CorruptRollupError, RuntimeUnavailableError, type ArchiveSource, type EvidenceReader, type RollupReader } from './runtime';
 import {
@@ -47,9 +47,7 @@ import {
 import { exporterKey, exporterOf, isEngineSourceKey } from './v5';
 import { parseSourceKey } from './sourceKeys';
 import { DecodeState, type DecodeStep } from './decodeState';
-import { decodeDatagram } from './flowDecode';
 import { decodeStateBefore, type StateSource } from './stateAt';
-import { CollectorTemplateStore } from './templates';
 
 export interface QueryOptions {
   /** Bounded: the codec's own `maxOutput` is passed to it. */
@@ -491,8 +489,6 @@ class Query {
   private read = 0;
   private snapshot!: Snapshot;
   private watermark = 0;
-  private admission!: EngineAdmission;
-  private admitted = false;
   /** The journal's oldest retained entry: everything before it expired. */
   private firstEntryId = 1;
   /** Where the raw tail begins: after the sidecar's watermark, and never inside expired ids. */
@@ -603,7 +599,6 @@ class Query {
     if (mark !== null) this.checkCacheAgainstExpiry(mark.throughEntryId, boundaries);
     this.refuseFocusedOverExpired();
     await this.tick();
-    await this.admit();
 
     const lastAligned = this.alignedRange();
     const raw: Window[] = [];
@@ -739,7 +734,7 @@ class Query {
   private async archiveHolds(m: number): Promise<'none' | 'some' | 'lost'> {
     const found = new Map<number, MinuteRollup[]>();
     const lostMinutes = new Set<number>();
-    if (this.admitted) await this.archiveFragments(this.spec.sourceKey, m, m + MINUTE_MS, found, lostMinutes);
+    await this.archiveFragments(this.spec.sourceKey, m, m + MINUTE_MS, found, lostMinutes);
     await this.archiveFragments(exporterKey(this.exporter), m, m + MINUTE_MS, found, lostMinutes);
     return lostMinutes.size > 0 ? 'lost' : found.size > 0 ? 'some' : 'none';
   }
@@ -770,66 +765,6 @@ class Query {
       if (await this.archiveHolds(m) !== 'none') { this.markLost(from, to); return; }
     }
     raw.push({ from, to });
-  }
-
-  // --- admission -------------------------------------------------------------------------------------
-
-  /**
-   * Whether the source has a row at all: the first 16 engines of an exporter,
-   * in journal order. The sidecar's sources are the ones already admitted; the
-   * entries above the watermark are scanned in order for the rest. Learned from
-   * the sidecar even where it ran past `S`, the set only ever grows and freezes
-   * at the cap, so it is right for every entry the snapshot holds. With no
-   * usable sidecar the set starts empty and W is 0, so the scan covers the
-   * journal from its first entry.
-   *
-   * The scan stops as soon as the answer is decided: the source is admitted, or
-   * its exporter already has its 16 engines without it, which is "not admitted"
-   * (records 0 everywhere). Only the exporter's own datagrams can change that
-   * exporter's admission, so only they are decoded and only they count against
-   * the cap - another exporter's traffic, however much of it comes first, cannot
-   * strand a source.
-   */
-  private async admit(): Promise<void> {
-    const known = this.unusable === null && !this.cacheStale ? [...await this.rollupCall(() => this.rollups.sources())] : [];
-    // The engines the expired entries admitted are in the archive; admission freezes at its cap, so they decide who is next.
-    const archive = this.options.archive;
-    if (this.horizon !== null && archive !== undefined) {
-      try {
-        known.push(...await archive.sources());
-      } catch (e) {
-        if (this.signal.aborted || e instanceof RuntimeUnavailableError || (e instanceof Error && e.name === 'AbortError')) throw e;
-      }
-    }
-    this.admission = new EngineAdmission(known);
-    const key = this.spec.sourceKey;
-    this.admitted = this.admission.has(key);
-    if (this.admitted || this.admission.full(this.exporter)) return;
-    let datagrams = 0;
-    // Whether a datagram is valid, and the source it names, come from its header and structure, not from the
-    // templates in force: a scratch store is enough, and admission needs no replay.
-    const scratch = new CollectorTemplateStore();
-    await this.scan([{ fromId: this.tailAfter + 1, toId: this.snapshot.throughEntryId }], (e) => {
-      if (e.kind !== 'datagram' || e.remoteIPv4 !== this.exporter) return false;
-      if (++datagrams > LIMITS.rawQueryDatagrams) throw this.admissionRefusal();
-      const d = decodeDatagram(e, e.remoteIPv4, e.policy, scratch);
-      if (d.kind === 'valid') this.admission.admit(d.sourceKey);
-      if (this.admission.has(key)) { this.admitted = true; return true; }
-      return this.admission.full(this.exporter);
-    });
-  }
-
-  /**
-   * Admission could not be decided inside its cap. It looks for the source's
-   * first datagram, not for the range's, so narrowing the range cannot help and
-   * this does not say it can: it says what is actually limiting.
-   */
-  private admissionRefusal(): Refusal {
-    const lead = this.unusable !== null
-      ? `The rollups are unavailable (${this.unusable}), and the source's first datagram could not be found within the first ${LIMITS.rawQueryDatagrams} datagrams of its exporter in the journal.`
-      : `The source has no rollups yet, and its first datagram could not be found within the first ${LIMITS.rawQueryDatagrams} datagrams of its exporter after the last rollup.`;
-    const note = this.unusable === null ? this.options.rebuildNote?.() ?? null : null;
-    return new Refusal('range-too-large', `${lead} Whether it has any history could not be decided; a narrower range does not change that.${note === null ? '' : ` ${note}`}`);
   }
 
   // --- the tail ---------------------------------------------------------------------------------------
@@ -867,7 +802,7 @@ class Query {
         }
         return false;
       }
-      if (!this.admitted || fold.sourceKey !== this.spec.sourceKey) return false;
+      if (fold.sourceKey !== this.spec.sourceKey) return false;
       const acc = minute().acc;
       const before = acc.keyCount;
       acc.addDatagram(fold, e.policy);
@@ -896,14 +831,14 @@ class Query {
       await this.tick();
       const b = Math.min(r.b, a + CHUNK_MINUTES * MINUTE_MS);
       const unreadable = new Set<number>();
-      const fromSource = this.admitted ? await this.fragments(source, a, b, unreadable) : new Map<number, MinuteRollup[]>();
+      const fromSource = await this.fragments(source, a, b, unreadable);
       const fromExporter = await this.fragments(exporter, a, b, unreadable);
       const archivedSource = new Map<number, MinuteRollup[]>();
       const archivedExporter = new Map<number, MinuteRollup[]>();
       const lostMinutes = new Set<number>();
       if (expiredBelow > a) {
         const hi = Math.min(b, expiredBelow);
-        if (this.admitted) await this.archiveFragments(source, a, hi, archivedSource, lostMinutes);
+        await this.archiveFragments(source, a, hi, archivedSource, lostMinutes);
         await this.archiveFragments(exporter, a, hi, archivedExporter, lostMinutes);
       }
       const minutes = new Set<number>([...fromSource.keys(), ...fromExporter.keys(), ...unreadable, ...archivedSource.keys(), ...archivedExporter.keys(), ...lostMinutes]);
@@ -1098,7 +1033,7 @@ class Query {
       if (e.remoteIPv4 === this.exporter) { if (step.decoded.kind === 'malformed') this.malformed++; else this.unsupported++; }
       return;
     }
-    if (!this.admitted || fold.sourceKey !== this.spec.sourceKey) return;
+    if (fold.sourceKey !== this.spec.sourceKey) return;
     this.awaitingSets += fold.awaitingSets;
     this.awaitingBytes += fold.awaitingBytes;
     if (fold.skewMs !== null) this.noteClock(minuteOf(e.receivedMs), fold.skewMs, fold.skewMs, fold.skewMs);
@@ -1145,25 +1080,6 @@ class Query {
     if (d !== null) d.received += leg.octets;
     const c = this.conversations.upsert(`${leg.src}>${leg.dst}`, () => ({ src: leg.src, dst: leg.dst, octets: 0n, packets: 0n }));
     if (c !== null) { c.octets += leg.octets; c.packets += leg.packets; }
-  }
-
-  /** Pages through `ranges` in id order; `visit` returns true to stop early. */
-  private async scan(ranges: Range[], visit: (e: Evidence) => boolean): Promise<void> {
-    for (const r of ranges) {
-      if (r.fromId > r.toId) continue;
-      let after = r.fromId - 1;
-      paging: for (;;) {
-        await this.tick();
-        const page = await this.reader.readPage(this.snapshot, after, LIMITS.pageEntries, LIMITS.pageBytes);
-        for (const e of page.entries) {
-          // A page can run past the range's end; the next range picks up from its own start.
-          if (e.ref.entryId > r.toId) break paging;
-          if (visit(e)) return;
-        }
-        if (page.done || page.entries.length === 0) break;
-        after = page.nextAfterId;
-      }
-    }
   }
 
   /**

@@ -115,7 +115,7 @@ class Gate {
   }
 }
 
-type Gateable = 'snapshot' | 'readPage' | 'appendMinutes' | 'readEvidence' | 'sources';
+type Gateable = 'snapshot' | 'readPage' | 'appendMinutes' | 'readEvidence' | 'sources' | 'readMinutes';
 
 function gatedRuntime(rt: HostRuntime, method: Gateable, gate: Gate): HostRuntime {
   const call = (rt[method] as (...a: unknown[]) => Promise<unknown>).bind(rt);
@@ -1135,93 +1135,27 @@ test('admission: other exporters\' datagrams neither count against the scan nor 
     assert.ok(reply.ok, `${label}: ${reply.ok ? '' : `${reply.code}: ${reply.message}`}`);
     if (reply.ok) assert.deepEqual(withoutProvenance(reply.value), withoutProvenance(oracleRaw), label);
   }
-  // The exporter's own 100,000 datagrams are exactly the cap: engine 0/7 follows 100,002, so it is not found...
-  const refusedAt = await ask(rig, spec(m(9), m(10), 1, { sourceKey: SRC7 }), { rollupsUnavailable: 'x' });
-  assert.ok(!refusedAt.ok && refusedAt.code === 'range-too-large');
+  // Engine 0/7 follows 100,002 datagrams of its exporter: nothing scans for its first datagram, so it is answered.
+  const late = await askOk(rig, spec(m(9), m(10), 1, { sourceKey: SRC7 }), { rollupsUnavailable: 'x' });
+  assert.equal(late.matchingRecords, 1);
 });
 
-test('admission: a source past the cap of its own exporter is refused with what limits it, rollups or not', async () => {
-  const rig = lateRig();
-  const q = spec(m(9), m(10), 1, { sourceKey: SRC7 });
-  const noRollups = await ask(rig, q);
-  assert.ok(!noRollups.ok && noRollups.code === 'range-too-large', noRollups.ok ? 'ok' : noRollups.code);
-  if (!noRollups.ok) {
-    assert.match(noRollups.message, /The source has no rollups yet, and its first datagram could not be found within the first 100000 datagrams of its exporter after the last rollup\./);
-    assert.ok(!/narrow it/.test(noRollups.message), 'narrowing the range cannot help, so it is not advised');
-    assert.match(noRollups.message, /a narrower range does not change that/);
-  }
-  const degraded = await ask(rig, q, { rollupsUnavailable: 'the rollup sidecar has failed' });
-  assert.ok(!degraded.ok && degraded.code === 'range-too-large');
-  if (!degraded.ok) {
-    assert.match(degraded.message, /The rollups are unavailable \(the rollup sidecar has failed\), and the source's first datagram could not be found within the first 100000 datagrams of its exporter in the journal\./);
-    assert.ok(!/narrow it/.test(degraded.message));
-  }
-  const noted = await ask(rig, q, { rebuildNote: () => 'NOTE' });
-  assert.ok(!noted.ok);
-  if (!noted.ok) assert.match(noted.message, /NOTE$/, 'a rebuild in progress is still said');
-
-  // With the rollups in place the engine is known, and the same question is answered.
-  await rollUp(rig).then((h) => h.host.settled());
-  const fast = await askOk(rig, q);
-  const raw = await askOk(rig, q, { forceRaw: true });
-  assert.equal(fast.matchingRecords, 1);
-  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
-  assert.ok(fast.answeredFrom.rollupMinutes > 0);
-});
-
-test('admission: an exporter that already has its sixteen engines answers "not admitted" without reading to the end', async () => {
+test('focus: a 17th engine is counted, not refused', async () => {
   const rig = new Rig(0xc8);
   const inputs: EvidenceInput[] = [start(m(0))];
   for (let e = 0; e < 16; e++) inputs.push(dgram(m(1, e), [{ octets: 1 + e, packets: 1 }], { engineId: e }));
-  inputs.push(dgram(m(1, 500), [{ octets: 77, packets: 1 }], { engineId: 16 })); // the seventeenth, never admitted
-  // Eight pages of datagrams a long way from the range: reading any of them is the failure.
-  for (let i = 0; i < 8 * LIMITS.pageEntries; i++) inputs.push(dgram(m(400, i), [{ octets: 1, packets: 1 }], { engineId: i % 3 }));
-  inputs.push(stop(m(500)));
+  inputs.push(dgram(m(2, 500), [{ octets: 77, packets: 1 }], { engineId: 16 })); // the seventeenth, in the next minute
+  inputs.push(stop(m(3)));
   rig.append(inputs);
-
-  const SRC16 = sourceKey(EXPORTER, 0, 16);
-  const q = spec(m(1), m(2), 1, { sourceKey: SRC16 });
-  const reading = (rt: HostRuntime): { rt: HostRuntime; pages: number[] } => {
-    const seen: number[] = [];
-    return {
-      pages: seen,
-      rt: wrap(rt, {
-        readPage: async (snapshot, after, ...rest) => {
-          seen.push(after);
-          if (after >= 2 * LIMITS.pageEntries) throw new Error(`read past the point where the answer was decided (after ${after})`);
-          return rt.readPage(snapshot, after, ...rest);
-        },
-      }),
-    };
-  };
-  const notAdmitted = (r: Awaited<ReturnType<typeof ask>>): void => {
-    assert.ok(r.ok, r.ok ? '' : `${r.code}: ${r.message}`);
-    if (!r.ok) return;
-    assert.equal(r.value.matchingRecords, 0);
-    assert.deepEqual(r.value.endpoints, { status: 'ok', rows: [] });
-  };
-
-  // Rollups unusable: the scan starts at entry 1, and ends at the sixteenth engine's cap.
-  const degraded = reading(rig.runtime);
-  notAdmitted(await askWith(degraded.rt, q, { rollupsUnavailable: 'the rollup sidecar has failed' }));
-  assert.ok(degraded.pages.length <= 3, `${degraded.pages.length} pages read: ${degraded.pages.join(',')}`);
-
-  // No rollups yet: the same scan, from the watermark.
-  const bare = reading(rig.runtime);
-  notAdmitted(await askWith(bare.rt, q));
-  assert.ok(bare.pages.length <= 3, `${bare.pages.length} pages read`);
-
-  // Rollups that already hold the sixteen: no admission scan at all.
   await rollUp(rig).then((h) => h.host.settled());
-  const known = reading(rig.runtime);
-  notAdmitted(await askWith(known.rt, q));
-  assert.ok(known.pages.length <= 1, `${known.pages.length} pages read: only the raw pass`);
-
-  // Control: an engine that is one of the sixteen is found, on the same paths.
-  const sixteenth = sourceKey(EXPORTER, 0, 15);
-  const found = await ask(rig, spec(m(1), m(2), 1, { sourceKey: sixteenth }), { rollupsUnavailable: 'x' });
-  assert.ok(found.ok);
-  if (found.ok) assert.equal(found.value.matchingRecords, 1);
+  const SRC16 = sourceKey(EXPORTER, 0, 16);
+  const raw = await askOk(rig, spec(m(1), m(4), 3, { sourceKey: SRC16 }), { forceRaw: true });
+  assert.equal(raw.matchingRecords, 1);
+  const fast = await askOk(rig, spec(m(1), m(4), 3, { sourceKey: SRC16 }));
+  assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw));
+  assert.ok(fast.answeredFrom.rollupMinutes > 0, 'answered from rollups');
+  const focused = await askOk(rig, spec(m(1), m(4), 3, { sourceKey: SRC16, focus: { kind: 'endpoint', address: '10.0.0.1' } }));
+  assert.equal(focused.matchingRecords, 1, 'a focused query reads the journal and counts it too');
 });
 
 // =====================================================================================================
@@ -1532,7 +1466,6 @@ test('degraded: a stale generation raised by a sidecar call is the sidecar\'s fa
   const oracle = await askOk(rig, q, { forceRaw: true });
   for (const [label, over] of [
     ['watermark', { watermark: async () => stale() }],
-    ['sources', { sources: async () => stale() }],
     ['readMinutes', { readMinutes: async () => stale() }],
   ] as [string, Over][]) {
     const reply = await askWith(wrap(rt, over), q);
@@ -2453,10 +2386,10 @@ test('I1: an expiry after the query has read the boundaries and before it reads 
   const before = totals(await askOk(rig, WIDE));
   const gate = new Gate();
   gate.held = true;
-  const gated = gatedRuntime(rig.runtime, 'sources', gate);
+  const gated = gatedRuntime(rig.runtime, 'readMinutes', gate);
   const pending = runHistoryQuery(gated, gated, WIDE, new AbortController().signal, { inflate, nowMs: NOW, archive: rig.runtime.archive });
   await ticks();
-  assert.ok(gate.entered > 0, 'the query has read its boundaries and is waiting to ask the sidecar who it knows');
+  assert.ok(gate.entered > 0, 'the query has read its boundaries and is waiting to read the sidecar minutes');
   assert.equal(runExpiry(rig.journal, rig.store, rig.archive, plan, { nowMs: NOW, deflate }), 'done');
   assert.equal(rig.store.watermark(), null, 'the cache was reset under it');
   gate.release();
@@ -2576,7 +2509,8 @@ function admissionInputs(): EvidenceInput[] {
   return out;
 }
 
-test('I4: engine admission after an expiry is what a rebuild gives: the sixteen that expired keep the exporter full', async () => {
+
+test('I4: a 17th engine in a later minute is counted, before and after an expiry and a rebuild', async () => {
   const rig = new Rig(0xa0, SEG_LIMIT);
   const inputs = admissionInputs();
   for (let at = 0; at < inputs.length; at += 100) rig.append(inputs.slice(at, at + 100));
@@ -2584,8 +2518,9 @@ test('I4: engine admission after an expiry is what a rebuild gives: the sixteen 
   const q16 = spec(BASE, BASE + 120 * MIN, 120, { sourceKey: SRC16 });
   const q0 = spec(BASE, BASE + 120 * MIN, 120, { sourceKey: SRC });
   await rollUp(rig).then((h) => h.host.settled());
-  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'the seventeenth is not admitted over the whole journal');
-  assert.ok(!rig.store.sources().includes(SRC16));
+  const records = (await askOk(rig, q16)).matchingRecords;
+  assert.equal(records, 200 * 20, 'the seventeenth engine is counted in full: no cap holds it out for the life of the dataset');
+  assert.ok(rig.store.sources().includes(SRC16));
   const wide = totals(await askOk(rig, q0));
 
   const segs = rig.journal.segments();
@@ -2593,21 +2528,12 @@ test('I4: engine admission after an expiry is what a rebuild gives: the sixteen 
   const plan = planExpiry(segs, DEFAULT_RETENTION, NOW, 0, SEG_LIMIT, segs[1].lastReceivedMs + 1);
   assert.ok(plan !== null);
   expire(rig, plan);
-  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'after the expiry and a reopen, before any rebuild: the query\'s admission');
+  assert.equal((await askOk(rig, q16)).matchingRecords, records, 'after the expiry and a reopen, before any rebuild');
   assert.ok(rig.archive.sources().includes(SRC), 'the archive holds the engines that expired');
 
   await rollUp(rig).then((h) => h.host.settled());
-  assert.ok(!rig.store.sources().includes(SRC16), 'the Worker host rebuilt with the sixteen known, not the seventeenth admitted');
-  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'after the rebuild');
-
-  // The segments holding the seventeenth expire next: the archive must not admit it either.
-  const next = rig.journal.segments();
-  const plan2 = planExpiry(next, DEFAULT_RETENTION, NOW, 0, SEG_LIMIT, next[1].lastReceivedMs + 1);
-  assert.ok(plan2 !== null);
-  expire(rig, plan2);
-  assert.ok(!rig.archive.sources().includes(SRC16), 'expiryFragments did not admit the seventeenth');
-  assert.equal((await askOk(rig, q16)).matchingRecords, 0, 'after the second expiry');
-  assert.deepEqual(totals(await askOk(rig, q0)), wide, 'and the admitted engine\'s totals are exact throughout');
+  assert.equal((await askOk(rig, q16)).matchingRecords, records, 'after the rebuild');
+  assert.deepEqual(totals(await askOk(rig, q0)), wide, 'and the first engine\'s totals are exact throughout');
 });
 
 test('the recorded exporter survives the expiry of the only start boundary', async () => {

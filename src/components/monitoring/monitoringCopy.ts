@@ -218,6 +218,12 @@ export function notInterpretedText(elements: { pen: number | null; ie: number }[
   return `not interpreted: ${elements.map((e) => (e.pen === null ? `IE ${e.ie}` : `PEN ${e.pen} / IE ${e.ie}`)).join(', ')}`;
 }
 
+/** The source status's identity counters (ADR 0070): datagrams of a 17th identity in one minute, and identities recycled. */
+export const IDENTITY_CHURN_LABEL = 'Too many identities in one minute';
+export const IDENTITIES_REPLACED_LABEL = 'Identities replaced';
+/** Shown under the counters while any identity was replaced. */
+export const IDENTITIES_REPLACED_NOTE = 'The exporter took a new Source ID or Observation Domain, so the least recently heard one was dropped with its templates; its History is kept.';
+
 /** The word an estimate carries wherever it is shown, so it is never read as a reported figure. */
 export const ESTIMATE_LABEL = 'estimate';
 

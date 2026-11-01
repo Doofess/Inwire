@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import { ByteBudget } from '../../src/services/monitoring/budget';
 import {
-  canAdmitEngine, initialSourceHealth, reduceSourceHealth,
+  initialSourceHealth, reduceSourceHealth,
   type HealthEvent, type SourceHealth,
 } from '../../src/services/monitoring/sourceHealth';
 import { LIMITS } from '../../src/services/monitoring/types';
@@ -39,16 +39,16 @@ function run(events: HealthEvent[], from: SourceHealth = initialSourceHealth(EXP
 }
 
 function valid(
-  elapsedMs: number, engineId: number, sequence: number, flowCount: number, entryId = 1, wallMs = WALL + elapsedMs, admitted?: boolean,
+  elapsedMs: number, engineId: number, sequence: number, flowCount: number, entryId = 1, wallMs = WALL + elapsedMs,
 ): HealthEvent {
   return {
     kind: 'datagram', outcome: 'valid', engineType: 0, engineId, sequence, flowCount, entryId, elapsedMs, wallMs,
-    ...(admitted === undefined ? {} : { admitted }),
   };
 }
 
 const listening = (elapsedMs = 0): HealthEvent => ({ kind: 'listener', state: 'listening', elapsedMs, wallMs: WALL + elapsedMs });
 const tick = (elapsedMs: number, wallMs = WALL + elapsedMs): HealthEvent => ({ kind: 'tick', elapsedMs, wallMs });
+const churn = (elapsedMs: number, entryId = 1): HealthEvent => ({ kind: 'datagram', outcome: 'identity-churn', entryId, elapsedMs, wallMs: WALL + elapsedMs });
 const rejected = (address: string, elapsedMs = 0): HealthEvent => ({ kind: 'rejected-sender', address, elapsedMs, wallMs: WALL + elapsedMs });
 
 // --- the initial state -----------------------------------------------------------------
@@ -207,23 +207,42 @@ test('engines are separate sources under one exporter, keyed as the decoder keys
   assert.equal(h.engines[1].flows, 3);
 });
 
-test('a 17th engine is counted as rejected with engine-limit and never gets a row', () => {
+test('a 17th engine recycles the least recently heard row, of either kind, and identitiesReplaced counts it', () => {
   const events: HealthEvent[] = [listening()];
   for (let id = 0; id < LIMITS.enginesPerExporter; id++) events.push(valid(id + 1, id, 0, 1, id + 1));
   let h = run(events);
   assert.equal(h.engines.length, LIMITS.enginesPerExporter);
-  assert.equal(canAdmitEngine(h, 0, 5), true, 'a known engine is admitted');
-  assert.equal(canAdmitEngine(h, 0, 99), false, 'a new one is not');
-  const acceptedBefore = h.accepted;
+  assert.equal(h.identitiesReplaced, 0);
+  // Engine 0 is heard again, so engine 1 is the least recent.
+  h = run([valid(50, 0, 1, 1, 50)], h);
   h = run([valid(100, 99, 0, 1, 99)], h);
   assert.equal(h.engines.length, LIMITS.enginesPerExporter);
-  assert.equal(h.engineLimitRejected, 1);
-  assert.equal(h.accepted, acceptedBefore, 'it was kept in the journal, not accepted');
-  assert.ok(!h.engines.some((e) => e.engineId === 99));
+  assert.equal(h.identitiesReplaced, 1);
+  assert.equal(h.engineLimitRejected, 0);
+  assert.ok(!h.engines.some((e) => e.engineId === 1), 'the least recently heard row went');
+  assert.ok(h.engines.some((e) => e.engineId === 0) && h.engines.some((e) => e.engineId === 99));
+  assert.equal(h.engines.find((e) => e.engineId === 99)?.lastEntryId, 99);
   h = run([valid(101, 3, 1, 1, 100)], h);
-  assert.equal(h.engines.find((e) => e.engineId === 3)?.accepted, 2, 'a known engine still counts');
-  assert.equal(h.engineLimitRejected, 1);
+  assert.equal(h.engines.find((e) => e.engineId === 3)?.accepted, 2, 'a held engine still counts');
+  assert.equal(h.identitiesReplaced, 1);
+  // A template source with the oldest entry id is the one recycled, whichever kind it is.
+  const mixed = run([templated(0, `v9:${EXPORTER}/1`, 1, { entryId: 1 }), ...Array.from({ length: LIMITS.enginesPerExporter - 1 }, (_, i) => valid(i + 1, i, 0, 1, i + 10))]);
+  assert.equal(mixed.engines.length + mixed.templateSources.length, LIMITS.enginesPerExporter);
+  const after = run([valid(500, 77, 0, 1, 500)], mixed);
+  assert.equal(after.templateSources.length, 0, 'the v9 source was the least recent');
+  assert.equal(after.engines.length, LIMITS.enginesPerExporter);
+  assert.equal(after.identitiesReplaced, 1);
 });
+
+test('identity churn counts engineLimitRejected, makes no row and does not make the source fresh', () => {
+  const h = run([valid(0, 0, 0, 1), churn(10)]);
+  assert.equal(h.accepted, 1);
+  assert.equal(h.lastValidElapsedMs, 0);
+  assert.equal(h.engines.length, 1);
+  assert.equal(h.engineLimitRejected, 1);
+  assert.equal(h.identitiesReplaced, 0);
+});
+
 
 test('a changing remote UDP port creates no identity row (the port is not an input at all)', () => {
   // The reducer is never told a port: the same event, repeated, is one engine.
@@ -475,20 +494,6 @@ test('budget: releasing what was never admitted is a bug and throws', () => {
   b.release(10);
   assert.equal(b.items, 0);
 });
-
-test('a valid datagram the Worker did not admit counts against the engine limit and gives no row, even with room in the list', () => {
-  // The Worker's admission knows engines this health never saw (the sidecar's), so it can refuse a
-  // datagram while the health's own list has room; the health must not then show a row for it.
-  const refused = valid(10, 3, 0, 1, 1, undefined, false);
-  const h = run([valid(0, 0, 0, 1), refused]);
-  assert.equal(h.engines.length, 1);
-  assert.equal(h.engineLimitRejected, 1);
-  assert.equal(h.accepted, 1);
-  assert.equal(h.lastValidElapsedMs, 0);
-  const explicit = run([valid(0, 0, 0, 1, 1, undefined, true)]);
-  assert.equal(explicit.accepted, 1);
-});
-
 test('a datagram fed after the clock moved on keeps its own age, so an old one is stale and not fresh', () => {
   // A rebuild reads entries that arrived during it, stamped with when they arrived, after ticks
   // have advanced the clock: the high-water mark must not make a 115 s old datagram look new.
@@ -506,12 +511,12 @@ test('a datagram fed after the clock moved on keeps its own age, so an old one i
 const V9 = `v9:${EXPORTER}/1`;
 const IPFIX = `ipfix:${EXPORTER}/7`;
 function templated(
-  elapsedMs: number, key: string, flowCount: number, over: Partial<{ entryId: number; admitted: boolean; awaitingSets: number; awaitingBytes: number }> = {},
+  elapsedMs: number, key: string, flowCount: number, over: Partial<{ entryId: number; awaitingSets: number; awaitingBytes: number }> = {},
 ): HealthEvent {
   return {
     kind: 'datagram', outcome: 'valid-template', protocol: key.startsWith('v9:') ? 'v9' : 'ipfix', sourceKey: key, flowCount,
     entryId: over.entryId ?? 1, awaitingSets: over.awaitingSets ?? 0, awaitingBytes: over.awaitingBytes ?? 0,
-    elapsedMs, wallMs: WALL + elapsedMs, ...(over.admitted === undefined ? {} : { admitted: over.admitted }),
+    elapsedMs, wallMs: WALL + elapsedMs,
   };
 }
 
@@ -530,9 +535,9 @@ test('the template sources and the v5 engines share the sixteen rows an exporter
   const engines = Array.from({ length: LIMITS.enginesPerExporter - 1 }, (_, i) => valid(i, i, 0, 1));
   const h = run([...engines, templated(100, V9, 1), templated(101, IPFIX, 1), valid(102, 200, 0, 1)]);
   assert.equal(h.engines.length + h.templateSources.length, LIMITS.enginesPerExporter);
-  assert.equal(h.engineLimitRejected, 2, 'the seventeenth identity of either kind');
-  assert.equal(canAdmitEngine(h, 0, 200), false);
-  const refused = run([templated(0, V9, 1, { admitted: false })]);
+  assert.equal(h.engineLimitRejected, 0);
+  assert.equal(h.identitiesReplaced, 2, 'each of the two newcomers past the sixteenth took the place of the least recent row');
+  const refused = run([churn(0)]);
   assert.equal(refused.templateSources.length, 0);
   assert.equal(refused.engineLimitRejected, 1);
 });

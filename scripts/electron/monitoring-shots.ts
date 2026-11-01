@@ -46,9 +46,12 @@ const wanted = (name: string) => ONLY === null || ONLY.some((prefix) => name.sta
 /** The numbered states are one long run (two waits of a minute and a rebuild); skip it when only the newer ones are asked for. */
 const legacy = ONLY === null || ONLY.some((prefix) => /^\d/.test(prefix));
 const TEMPLATE_STATES = /^(onboarding|exporter)/;
-const fresh = ONLY === null || ONLY.some((prefix) => !/^\d/.test(prefix) && !TEMPLATE_STATES.test(prefix));
+const IDENTITY_STATES = /^identities/;
+const fresh = ONLY === null || ONLY.some((prefix) => !/^\d/.test(prefix) && !TEMPLATE_STATES.test(prefix) && !IDENTITY_STATES.test(prefix));
 /** v9 and IPFIX (Task 10): the exporter cards, the sampled history, their datagrams and the onboarding picker. */
 const templated = ONLY === null || ONLY.some((prefix) => TEMPLATE_STATES.test(prefix));
+/** ADR 0070: an exporter's 17th and 18th Source IDs in one minute, then a new one a minute later that replaces the least recent. */
+const identities = ONLY === null || ONLY.some((prefix) => IDENTITY_STATES.test(prefix));
 mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -508,6 +511,50 @@ for (const width of WIDTHS) {
     await until(() => text(/Stopped/), 10_000);
     await close(app, p);
     rmSync(second, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+  if (identities) {
+    // A profile of its own: the counters belong to one session's health.
+    const third = mkdtempSync(path.join(tmpdir(), 'inwire-monshots-'));
+    ({ app, p } = await launch(third, width));
+    const sheet = p.locator(SHEET);
+    console.log('    identities: churn, then a replacement (two minute boundaries)');
+    await p.getByRole('button', { name: 'Network', exact: true }).click();
+    await until(() => text('Open monitoring'), 10_000);
+    await openSheet();
+    await until(() => text(/No history yet/), 60_000);
+    await field('Exporter').fill('127.0.0.1');
+    await field('Listen on').fill('127.0.0.1');
+    await field('Port').fill(String(port));
+    await sheet.getByRole('button', { name: 'Start', exact: true }).click();
+    await until(() => text(/Listening, nothing received yet/), 15_000);
+    const sock = await socketFrom('127.0.0.1');
+    const secs = () => Math.floor(Date.now() / 1000);
+    const flows = (i: number) => flowsFor(i, 2).map((f) => ({
+      src: f.src!, dst: f.dst!, octets: f.octets!, packets: f.packets!, proto: f.protocol, sport: f.srcPort, dport: f.dstPort,
+    }));
+    // Eighteen Source IDs early in one minute: sixteen are held, the last two are identity churn.
+    await sleep(61_000 - (Date.now() % 60_000));
+    for (let id = 0; id < 18; id++) {
+      await send(sock, v9Sample({ uptime: 3_600_000, secs: secs(), sequence: 0, sourceId: 100 + id }, flows(id), 1), port);
+    }
+    await until(() => text('Too many identities in one minute'), 20_000);
+    await sleep(5_500);
+    await scrollTo(`${SHEET} >> text=Transport loss`);
+    await sleep(300);
+    await shot('identities-churn');
+    // The next minute, a Source ID never held takes the place of the one heard least recently.
+    await sleep(61_000 - (Date.now() % 60_000));
+    await send(sock, v9Sample({ uptime: 3_700_000, secs: secs(), sequence: 0, sourceId: 300 }, flows(30), 1), port);
+    await until(() => text('Identities replaced'), 20_000);
+    await sleep(5_500);
+    await scrollTo(`${SHEET} >> text=Transport loss`);
+    await sleep(300);
+    await shot('identities-replaced');
+    sock.close();
+    await sheet.getByRole('button', { name: 'Stop', exact: true }).click();
+    await until(() => text(/Stopped/), 10_000);
+    await close(app, p);
+    rmSync(third, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
   rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }

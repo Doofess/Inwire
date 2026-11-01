@@ -25,11 +25,11 @@ import {
 } from './journalCodec';
 import type { MonitoringJournal } from './journal';
 import type { ExpiryPlan } from './retention';
-import { EngineAdmission, MinuteAccumulator, MinuteAggregator, feedEntry } from './rollup';
+import { MinuteAccumulator, MinuteAggregator, feedEntry } from './rollup';
 import { DecodeState } from './decodeState';
 import { encodeMinuteRollup, type Deflate } from './rollupCodec';
 import type { RollupStore, SidecarReplace } from './rollupStore';
-import { ACCEPTED_POLICIES, LIMITS, type Evidence, type MinuteRollup, type SessionContext } from './types';
+import { ACCEPTED_POLICIES, LIMITS, type Evidence, type MinuteRollup } from './types';
 
 export const ARCHIVE_FRAMING: Framing = { magic: 'INWIREMA', maxBodyBytes: 1 << 20 };
 
@@ -415,12 +415,11 @@ export class ArchiveStore {
  * that stepped back - is merged into one. `deflate` is injected like everywhere else a rollup is encoded.
  */
 export function expiryFragments(
-  entries: Evidence[], session: SessionContext, deflate: Deflate, start: DecodeState,
+  entries: Evidence[], deflate: Deflate, start: DecodeState,
 ): { minutes: ArchivedMinute[]; checkpoint: Uint8Array } {
   if (entries.length === 0) return { minutes: [], checkpoint: start.checkpoint() };
   const agg = new MinuteAggregator(entries[0].ref.entryId - 1);
-  const admission = new EngineAdmission(session.knownSources);
-  for (const e of entries) feedEntry(agg, admission, start, e);
+  for (const e of entries) feedEntry(agg, start, e);
   agg.seal(Infinity);
   // The state through the last entry: the cut keeps it, so the first retained entry can be decoded after the rest is gone.
   const checkpoint = start.checkpoint();
@@ -460,7 +459,7 @@ export interface RunExpiryOptions {
    * The seam Task 4 puts the Worker behind: entries and the world before them in (the sources admitted and the
    * decode state through the entry before the first), archive fragments and the state through the last entry out.
    */
-  replay?: (entries: Evidence[], sessionAtStart: SessionContext, start: DecodeState) => { minutes: ArchivedMinute[]; checkpoint: Uint8Array };
+  replay?: (entries: Evidence[], start: DecodeState) => { minutes: ArchivedMinute[]; checkpoint: Uint8Array };
   /**
    * How the sidecar is replaced by its trimmed copy (ADR 0071). Without it, or when the trim fails, the cache is
    * reset and rebuilt, as `resumeExpiry` does for an expiry that was interrupted.
@@ -620,16 +619,14 @@ export function runExpiry(
     }
     if (entries.length === 0) return 'failed';
 
-    // Everything admitted before this range is in the archive; nothing later is known yet.
-    const context: SessionContext = { knownSources: archive.sources() };
     // The replay starts from the state the last cut kept (ADR 0066): what the templates were when the entries
     // before these went. A checkpoint that does not decode, or that is not the state just before the first
     // entry, is not a start to trust: nothing is written, and a later run says the same.
     const start = startState(archive.lastCut(), first.firstEntryId);
     if (start === null) return 'failed';
     let replayed: { minutes: ArchivedMinute[]; checkpoint: Uint8Array };
-    if (opts.replay !== undefined) replayed = opts.replay(entries, context, start);
-    else if (opts.deflate !== undefined) replayed = expiryFragments(entries, context, opts.deflate, start);
+    if (opts.replay !== undefined) replayed = opts.replay(entries, start);
+    else if (opts.deflate !== undefined) replayed = expiryFragments(entries, opts.deflate, start);
     else return 'failed';
     const fragments = replayed.minutes;
     // The archive is never rewritten, so a start state it holds that no later run can decode fails every later expiry

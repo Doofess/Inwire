@@ -413,13 +413,3 @@ export type HistoryReply =
     expiry?: ExpiryCause;
   };
 
-/**
- * What a replay of expiring entries needs to know of the world before them:
- * the sources already admitted (admission freezes at a cap, so the set decides
- * who is admitted next) and the session and source open at the first entry.
- */
-export interface SessionContext {
-  knownSources: readonly string[];
-  sessionId?: string | null;
-  source?: SegmentSource | null;
-}

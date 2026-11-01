@@ -51,7 +51,8 @@
  * follow other rules: `ExporterState` reads those and raises the events this
  * folds (`source-restart`, `export-gap`, `clock-skew`, `sampling-changed`,
  * `awaiting-template`). Engines and template sources share the sixteen rows an
- * exporter gets, as the Worker's admission does.
+ * exporter gets; a seventeenth identity takes the place of the row heard least
+ * recently, by the entry id of its last valid datagram (ADR 0070).
  *
  * Everything is plain data - arrays and numbers, no Map or class - because a
  * `SourceHealth` crosses `postMessage`.
@@ -75,6 +76,8 @@ export interface EngineHealth {
   /** Flow records in them. */
   flows: number;
   lastValidWallMs: number;
+  /** The entry id of the last valid datagram: the least recent row is the one recycled (ADR 0070). */
+  lastEntryId: number;
   /** The last valid datagram's own sequence number, to tell a repeat from a late arrival. */
   lastSequence: number | null;
   /** The sequence the next datagram should carry: the last one's plus its record count. */
@@ -107,6 +110,8 @@ export interface TemplateSourceHealth {
   /** Data records decoded in them. */
   flows: number;
   lastValidWallMs: number;
+  /** As for an engine. */
+  lastEntryId: number;
   /** Data sets whose template was not in scope or was refused by the bounds, and their bytes: records unknown. */
   awaitingSets: number;
   awaitingBytes: number;
@@ -154,8 +159,10 @@ export interface SourceHealth {
   accepted: number;
   malformed: number;
   unsupported: number;
-  /** Valid datagrams from a seventeenth engine: kept in the journal, given no row. */
+  /** Valid datagrams past the identity limit of their minute (ADR 0070): kept in the journal, counted as unsupported, given no row. */
   engineLimitRejected: number;
+  /** Rows given up to a newer identity: the exporter took a new Source ID, Observation Domain or engine. */
+  identitiesReplaced: number;
   rejectedSenders: RejectedSender[];
   /** Datagrams from addresses past the sixteenth. */
   rejectedOverflow: number;
@@ -175,18 +182,13 @@ export type HealthEvent =
   | (Timed & {
     kind: 'datagram'; outcome: 'valid'; engineType: number; engineId: number;
     sequence: number; flowCount: number; entryId: number;
-    /**
-     * False when the Worker's own admission refused this engine (it knows engines from the
-     * sidecar that this health, which starts at connect, never saw). Absent means admitted.
-     */
-    admitted?: boolean;
   })
   | (Timed & {
     kind: 'datagram'; outcome: 'valid-template'; protocol: 'v9' | 'ipfix'; sourceKey: string; flowCount: number; entryId: number;
     awaitingSets: number; awaitingBytes: number;
-    /** As for v5: false when the Worker's admission refused this source. */
-    admitted?: boolean;
   })
+  /** A valid datagram of one identity too many in its minute (ADR 0070): counted, given no row, and not fresh. */
+  | (Timed & { kind: 'datagram'; outcome: 'identity-churn'; entryId: number })
   | (Timed & { kind: 'source-restart'; sourceKey: string; entryId: number })
   | (Timed & { kind: 'export-gap'; sourceKey: string; entryId: number; missing: number })
   | (Timed & { kind: 'clock-skew'; sourceKey: string; entryId: number; skewMs: number })
@@ -221,6 +223,7 @@ export function initialSourceHealth(exporterIPv4: string): SourceHealth {
     malformed: 0,
     unsupported: 0,
     engineLimitRejected: 0,
+    identitiesReplaced: 0,
     rejectedSenders: [],
     rejectedOverflow: 0,
     shedDatagrams: 0,
@@ -233,10 +236,18 @@ export function initialSourceHealth(exporterIPv4: string): SourceHealth {
 /** Rows an exporter has used: v5 engines and v9/IPFIX sources share `LIMITS.enginesPerExporter`. */
 const rowsUsed = (health: SourceHealth): number => health.engines.length + health.templateSources.length;
 
-/** Whether a valid datagram from this engine would get a row: a known engine, or room for a new one. */
-export function canAdmitEngine(health: SourceHealth, engineType: number, engineId: number): boolean {
-  return rowsUsed(health) < LIMITS.enginesPerExporter
-    || health.engines.some((e) => e.engineType === engineType && e.engineId === engineId);
+/** Makes room for a new row: with every place used, the row heard least recently goes (ADR 0070). */
+function recycleIfFull(h: SourceHealth): void {
+  if (rowsUsed(h) < LIMITS.enginesPerExporter) return;
+  let oldest = Infinity;
+  let list: 'engines' | 'templateSources' = 'engines';
+  let at = -1;
+  h.engines.forEach((r, i) => { if (r.lastEntryId < oldest) { oldest = r.lastEntryId; list = 'engines'; at = i; } });
+  h.templateSources.forEach((r, i) => { if (r.lastEntryId < oldest) { oldest = r.lastEntryId; list = 'templateSources'; at = i; } });
+  if (at < 0) return;
+  if (list === 'engines') h.engines = h.engines.filter((_, i) => i !== at);
+  else h.templateSources = h.templateSources.filter((_, i) => i !== at);
+  h.identitiesReplaced++;
 }
 
 /** A valid datagram's effect on freshness and the last-valid fields, v5 or not. */
@@ -358,19 +369,17 @@ export function reduceSourceHealth(previous: SourceHealth, event: HealthEvent): 
     case 'datagram': {
       if (event.outcome === 'malformed') { h.malformed++; return h; }
       if (event.outcome === 'unsupported') { h.unsupported++; return h; }
+      if (event.outcome === 'identity-churn') { h.engineLimitRejected++; return h; }
       if (event.outcome === 'valid-template') {
         const at = h.templateSources.findIndex((r) => r.sourceKey === event.sourceKey);
-        if (event.admitted === false || (at < 0 && rowsUsed(h) >= LIMITS.enginesPerExporter)) {
-          h.engineLimitRejected++;
-          return h;
-        }
+        if (at < 0) recycleIfFull(h);
         const row: TemplateSourceHealth = at >= 0 ? h.templateSources[at] : {
-          sourceKey: event.sourceKey, protocol: event.protocol, accepted: 0, flows: 0, lastValidWallMs: event.wallMs,
+          sourceKey: event.sourceKey, protocol: event.protocol, accepted: 0, flows: 0, lastValidWallMs: event.wallMs, lastEntryId: event.entryId,
           awaitingSets: 0, awaitingBytes: 0, lastAwaitingTemplateId: null, restarts: 0, exportGaps: 0, missingSequence: 0,
           clockFlags: 0, lastFlaggedSkewMs: null, sampling: null,
         };
         const next: TemplateSourceHealth = {
-          ...row, accepted: row.accepted + 1, flows: row.flows + event.flowCount, lastValidWallMs: event.wallMs,
+          ...row, accepted: row.accepted + 1, flows: row.flows + event.flowCount, lastValidWallMs: event.wallMs, lastEntryId: event.entryId,
           awaitingSets: row.awaitingSets + event.awaitingSets, awaitingBytes: row.awaitingBytes + event.awaitingBytes,
         };
         h.templateSources = at >= 0 ? h.templateSources.map((r, i) => (i === at ? next : r)) : [...h.templateSources, next];
@@ -378,21 +387,16 @@ export function reduceSourceHealth(previous: SourceHealth, event: HealthEvent): 
         return h;
       }
       const at = h.engines.findIndex((e) => e.engineType === event.engineType && e.engineId === event.engineId);
-      if (event.admitted === false || (at < 0 && rowsUsed(h) >= LIMITS.enginesPerExporter)) {
-        // Only an admitted engine's datagrams are analyzed, so this one gets
-        // no row and does not make the source fresh; the sheet shows the count.
-        h.engineLimitRejected++;
-        return h;
-      }
+      if (at < 0) recycleIfFull(h);
       const engine: EngineHealth = at >= 0 ? h.engines[at] : {
         engineType: event.engineType,
         engineId: event.engineId,
         sourceKey: sourceKey(h.exporterIPv4, event.engineType, event.engineId),
-        accepted: 0, flows: 0, lastValidWallMs: event.wallMs, lastSequence: null, expectedSequence: null,
+        accepted: 0, flows: 0, lastValidWallMs: event.wallMs, lastEntryId: event.entryId, lastSequence: null, expectedSequence: null,
         lastFlowCount: null, jumpedFlows: 0, gaps: 0, duplicates: 0, reordered: 0, resets: 0,
         unresolved: 0, pending: null,
       };
-      const advanced = advanceSequence(engine, event.sequence, event.flowCount, event.wallMs);
+      const advanced = { ...advanceSequence(engine, event.sequence, event.flowCount, event.wallMs), lastEntryId: event.entryId };
       h.engines = at >= 0 ? h.engines.map((e, i) => (i === at ? advanced : e)) : [...h.engines, advanced];
       markValid(h, elapsedMs, event);
       return h;

@@ -103,7 +103,17 @@ export type FlowDecode =
     evictedSourceKey?: string;
     v5?: DecodeResult;
   }
-  | { kind: 'unsupported' | 'malformed'; reason: string };
+  | {
+    kind: 'unsupported' | 'malformed';
+    reason: string;
+    /** The identity gate refused this valid datagram (ADR 0070): nothing was admitted, defined or learned from it. */
+    churn?: true;
+  };
+
+/** Whether a valid datagram of this source key may count now; false makes it identity churn. */
+export type IdentityGate = (sourceKey: string) => boolean;
+
+const CHURN: FlowDecode = { kind: 'unsupported', reason: 'too many identities from this exporter in one minute', churn: true };
 
 const u16 = (b: Uint8Array, p: number): number => (b[p] << 8) | b[p + 1];
 const u32 = (b: Uint8Array, p: number): number => ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0;
@@ -112,12 +122,18 @@ const u32 = (b: Uint8Array, p: number): number => ((b[p] << 24) | (b[p + 1] << 1
  * Decodes one datagram. `exporterIPv4` is the configured exporter, which names
  * the source and the template scope; `e.remoteIPv4` stays provenance.
  */
-export function decodeDatagram(e: DatagramEvidence, exporterIPv4: string, policy: number, store: CollectorTemplateStore): FlowDecode {
+export function decodeDatagram(
+  e: DatagramEvidence, exporterIPv4: string, policy: number, store: CollectorTemplateStore, admitIdentity?: IdentityGate,
+): FlowDecode {
   if (policy !== 1 && policy !== 2) return { kind: 'unsupported', reason: `decoder policy ${policy} is not read` };
   const b = e.bytes;
   const version = b.length >= 2 ? u16(b, 0) : 0;
-  if (version === 5) return decodeV5Mapped(e, exporterIPv4);
-  if ((version === 9 || version === 10) && policy === 2) return decodeTemplated(e, exporterIPv4, version, store);
+  if (version === 5) {
+    // A v5 engine has no decoder state, so the gate can be asked after the decode.
+    const r = decodeV5Mapped(e, exporterIPv4);
+    return r.kind === 'valid' && admitIdentity !== undefined && !admitIdentity(r.sourceKey) ? CHURN : r;
+  }
+  if ((version === 9 || version === 10) && policy === 2) return decodeTemplated(e, exporterIPv4, version, store, admitIdentity);
   // Policy 1 reads v5 only, and a version nobody reads is decodeV5's to name.
   const r = decodeV5(e, exporterIPv4);
   return r.kind === 'valid' ? { kind: 'unsupported', reason: `NetFlow version ${version} is not read` } : r;
@@ -419,7 +435,9 @@ const hasInformation = (r: OptionsReport): boolean =>
 
 // --- v9 and IPFIX ------------------------------------------------------------------------------------------------
 
-function decodeTemplated(e: DatagramEvidence, exporterIPv4: string, version: 9 | 10, store: CollectorTemplateStore): FlowDecode {
+function decodeTemplated(
+  e: DatagramEvidence, exporterIPv4: string, version: 9 | 10, store: CollectorTemplateStore, admitIdentity: IdentityGate | undefined,
+): FlowDecode {
   const b = e.bytes;
   const header = readFlowHeader(b, 0, b.length);
   if (header === null) return { kind: 'malformed', reason: `header truncated: ${b.length} bytes, a v${version === 9 ? 9 : '10 (IPFIX)'} header is ${version === 9 ? 20 : 16}` };
@@ -447,6 +465,8 @@ function decodeTemplated(e: DatagramEvidence, exporterIPv4: string, version: 9 |
 
   const protocol = version === 9 ? 'v9' : 'ipfix';
   const scope: TemplateScope = { protocol, exporter: exporterIPv4, exporterPort: version === 10 ? e.remotePort : null, domain: header.domain };
+  // A datagram of one identity too many in its minute is refused here, before the store admits (and so evicts) anything.
+  if (admitIdentity !== undefined && !admitIdentity(sourceKeyFor(protocol, exporterIPv4, header.domain))) return CHURN;
   // An exporter's identities are bounded (LIMITS.enginesPerExporter): one more recycles the least recently heard, so every
   // valid datagram is counted and a spoofed or rotating identity cannot grow a checkpoint. Only a validated datagram gets here.
   const entryId = e.ref.entryId;

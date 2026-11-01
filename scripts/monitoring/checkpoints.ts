@@ -22,16 +22,16 @@ import {
 import { encodeBoundaryBody, type EvidenceInput } from '../../src/services/monitoring/journal';
 import { DEFAULT_RETENTION, planExpiry } from '../../src/services/monitoring/retention';
 import {
-  EngineAdmission, MinuteAccumulator, MinuteAggregator, feedEntry, type DatagramFold, type RecordFold,
+  MinuteAccumulator, MinuteAggregator, feedEntry, type DatagramFold, type RecordFold,
 } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { CorruptRollupError } from '../../src/services/monitoring/runtime';
 import { MemorySegmentDirectory, encodeSegmentHeader, segmentName } from '../../src/services/monitoring/segments';
 import { decodeStateBefore, type StateSource } from '../../src/services/monitoring/stateAt';
-import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
+import { sourceKey, sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
 import { LIMITS, SAMPLING_MIXED, type Evidence, type MinuteRollup, type QueryFocus, type StoredCheckpoint } from '../../src/services/monitoring/types';
 import {
-  EXPORTER, COLLECTOR, be, dataSet, ipfixMessage, templateRecord, templateSet, v5Payload, v9Message, type WireField,
+  EXPORTER, COLLECTOR, GENERATION, be, dataSet, evidence, ipfixMessage, templateRecord, templateSet, v5Payload, v9Message, type WireField,
 } from './fixtures';
 import {
   BASE, MIN, NOW, S1, S2, SRC, Rig, ask, askBoth, askOk, dgram, deflate, inflate, runAll, spec, start, stop, test, withoutProvenance,
@@ -153,10 +153,9 @@ async function playWorker(rig: Rig, options: PlayOptions = {}): Promise<Played> 
   const starts = new Set(geometry.slice(1).map((g) => g.firstEntryId));
   const state = DecodeState.empty();
   const agg = new MinuteAggregator(0);
-  const admission = new EngineAdmission();
   const captured = new Map<number, { throughMs: number; raw: Uint8Array }>();
   for (const e of await allEntries(rig)) {
-    feedEntry(agg, admission, state, e);
+    feedEntry(agg, state, e);
     if (starts.has(e.ref.entryId + 1)) captured.set(e.ref.entryId, { throughMs: state.throughMs, raw: state.checkpoint() });
   }
   agg.seal(Infinity);
@@ -404,8 +403,7 @@ test('checkpoint-errors: an unavailable runtime and an abort are not skipped', a
 /** The minutes an aggregator made from the entries after `after`, started from `state`, as hex of their encoding. */
 function fragmentsAfter(entries: Evidence[], state: DecodeState, after: number): string[] {
   const agg = new MinuteAggregator(after);
-  const admission = new EngineAdmission();
-  for (const e of entries) if (e.ref.entryId > after) feedEntry(agg, admission, state, e);
+  for (const e of entries) if (e.ref.entryId > after) feedEntry(agg, state, e);
   agg.seal(Infinity);
   const d = agg.drain();
   return d === null ? [] : d.fragments.map((f) => Buffer.from(encodeMinuteRollup(f.rollup, deflate)).toString('hex'));
@@ -556,7 +554,7 @@ test('policy-mix: a minute written under policy 1 and the same minute under poli
   const entries = await allEntries(rig);
   assert.deepEqual([...new Set(entries.map((e) => e.policy))], [1, 2]);
 
-  const { minutes } = expiryFragments(entries, { knownSources: [] }, deflate, DecodeState.empty());
+  const { minutes } = expiryFragments(entries, deflate, DecodeState.empty());
   const v5Minutes = minutes.filter((a) => a.sourceKey === SRC && a.minuteMs === m(0));
   assert.deepEqual(v5Minutes.map((a) => a.policyVersion).sort(), [1, 2], 'one fragment per policy for the same source and minute');
   for (const a of v5Minutes) {
@@ -807,6 +805,68 @@ test('sampling-and-clock: a range reports the rate its records stated, mixed whe
   assert.deepEqual(withoutProvenance(all.fast), withoutProvenance(all.raw));
   assert.deepEqual(all.raw.sampling, { kind: 'mixed' });
   assert.deepEqual([all.raw.clock.minSkewMs, all.raw.clock.maxSkewMs, all.raw.clock.latestSkewMs, all.raw.clock.flagged], [0, 30_000, 30_000, true]);
+});
+
+test('guard: a rebuild from a role-1 checkpoint decides churn as the live run did', async () => {
+  // One minute of 2,000 kilobyte datagrams from 40 engines in turn: the roll to the second segment lands inside it,
+  // and the guard (never checkpointed) starts afresh there on every path.
+  const rig = new Rig(0xa0, 32 * 1024 * 1024);
+  const items: EvidenceInput[] = [start(m(0, 100), S1)];
+  for (let i = 0; i < 2000; i++) {
+    const flows = Array.from({ length: 20 }, (_, j) => ({ src: `10.${i % 5}.${j}.1`, dst: `172.16.${j % 4}.1`, octets: 50 + j, packets: 1 }));
+    items.push(dgram(m(0, 200 + i * 20), flows, { engineId: i % 40 }));
+  }
+  items.push(stop(m(0, 55_000), S1));
+  for (let at = 0; at < items.length; at += 100) rig.append(items.slice(at, at + 100));
+  const segs = rig.journal.segments();
+  assert.ok(segs.length >= 2, `the journal rolled (${segs.length} segments)`);
+  const cp = segs[1].firstEntryId - 1;
+  const played = await playWorker(rig);
+  const captured = played.captured.get(cp);
+  assert.ok(captured !== undefined, 'a checkpoint was captured at the segment start');
+  const entries = await allEntries(rig);
+  const rebuilt = fragmentsAfter(entries, DecodeState.fromCheckpoint(captured.raw) as DecodeState, cp);
+  const full = fragmentsAfter(entries, await steppedState(rig, cp), cp);
+  assert.ok(rebuilt.length > 0);
+  assert.deepEqual(rebuilt, full, 'byte for byte');
+  // The live minutes (the first segment's closed at the cut) equal the rollups the harness stored, and both equal the raw scan.
+  for (const engine of [0, 17, 39]) {
+    const { fast, raw } = await askBoth(rig, spec(m(0), m(1), 1, { sourceKey: sourceKey(EXPORTER, 0, engine) }));
+    assert.deepEqual(withoutProvenance(fast), withoutProvenance(raw), `engine ${engine}`);
+    assert.ok(raw.unsupported > 0, 'churn was decided');
+  }
+});
+
+test('guard: a churned v9 datagram touches no decoder state: the held scopes keep their templates', () => {
+  const state = DecodeState.empty();
+  let id = 0;
+  const at = m(0, 1000);
+  const feed = (sourceId: number, sets: number[][], ms = at) => {
+    const bytes = v9Message({ uptime: 1_000_000 + id, secs: Math.floor(ms / 1000), sequence: id, sourceId }, sets);
+    return state.step(evidence(bytes, { ref: { generation: GENERATION, entryId: ++id }, receivedMs: ms, receiveOrdinal: id, segmentFirstId: 1 }));
+  };
+  const first = LIMITS.enginesPerExporter;
+  for (let s = 100; s < 100 + first; s++) feed(s, [tplSet('A')]);
+  const held = (): number[] => state.store.exportScopes().map((x) => x.domain);
+  assert.equal(held().length, first);
+  // Two more Source IDs in the same minute are churn.
+  for (const s of [100 + first, 101 + first]) {
+    const step = feed(s, [tplSet('A')]);
+    assert.ok(step !== null && step.kind === 'datagram' && step.churn, `source ${s} is churn`);
+    assert.equal(step.decoded.kind, 'unsupported', 'and decodes as unsupported');
+  }
+  assert.deepEqual(held(), Array.from({ length: first }, (_, i) => 100 + i), 'the first sixteen scopes are still held');
+  assert.ok(state.store.exportScopes().every((x) => x.templates.length === 1), 'each keeps its template');
+  assert.ok(!held().includes(100 + first) && !held().includes(101 + first), 'the churned identities have no scope');
+  // A later datagram of the first Source ID still decodes against its template.
+  const data = dataSet(256, [record('A', '10.7.0.1', '10.7.0.2', 500, 5)]);
+  const later = feed(100, [data], at + 1000);
+  assert.ok(later !== null && later.kind === 'datagram' && !later.churn);
+  assert.equal(later.decoded.kind, 'valid');
+  if (later.decoded.kind === 'valid') {
+    assert.equal(later.decoded.flows.length, 1, 'decoded with its template');
+    assert.equal(later.decoded.awaiting.length, 0, 'nothing awaits a template');
+  }
 });
 
 // =====================================================================================================

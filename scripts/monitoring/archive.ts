@@ -19,7 +19,7 @@ import {
 import { ENTRY_HEADER_BYTES, FILE_HEADER_BYTES, encodeEntry } from '../../src/services/monitoring/journalCodec';
 import { MonitoringJournal } from '../../src/services/monitoring/journal';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan } from '../../src/services/monitoring/retention';
-import { EngineAdmission, MinuteAccumulator, MinuteAggregator, feedEntry, minuteOf } from '../../src/services/monitoring/rollup';
+import { MinuteAccumulator, MinuteAggregator, feedEntry, minuteOf } from '../../src/services/monitoring/rollup';
 import { DecodeState } from '../../src/services/monitoring/decodeState';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { MemorySegmentDirectory } from '../../src/services/monitoring/segments';
@@ -261,11 +261,10 @@ function readFrom(rig: Rig, afterId: number): Evidence[] {
 }
 
 /** What the Worker would hold for these entries, as encoded minutes, from an aggregator started after `afterId`. */
-function rollUpEntries(entries: Evidence[], afterId: number, known: string[]): { rollup: MinuteRollup; bytes: Uint8Array }[] {
+function rollUpEntries(entries: Evidence[], afterId: number): { rollup: MinuteRollup; bytes: Uint8Array }[] {
   const agg = new MinuteAggregator(afterId);
-  const admission = new EngineAdmission(known);
   const state = DecodeState.empty(afterId);
-  for (const e of entries) feedEntry(agg, admission, state, e);
+  for (const e of entries) feedEntry(agg, state, e);
   agg.seal(Infinity);
   const drained = agg.drain();
   return (drained?.fragments ?? []).map((f) => ({ rollup: f.rollup, bytes: encodeMinuteRollup(f.rollup, deflate) }));
@@ -297,7 +296,7 @@ function world(jdir?: MemorySegmentDirectory): World {
   const segs = rig.journal.segments();
   assert.ok(segs.filter((s) => s.sealed).length >= 3, `the fixture should seal three segments (got ${segs.length} segments)`);
   const all = readFrom(rig, 0);
-  const rolled = rollUpEntries(all, 0, []);
+  const rolled = rollUpEntries(all, 0);
   rig.store.appendMinutes(
     rolled.map((r) => ({ sourceKey: r.rollup.sourceKey, minuteMs: r.rollup.minuteMs, bytes: r.bytes })),
     { generation: rig.generation, throughEntryId: rig.through, policyVersion: 2 },
@@ -337,7 +336,7 @@ const SOURCES = [SRC, SRC1];
 function afterExpiry(w: World): Map<string, MinuteRollup> {
   const { rig } = w;
   const first = rig.journal.snapshot().firstEntryId;
-  const retained = rollUpEntries(readFrom(rig, first - 1), first - 1, w.cacheKnown);
+  const retained = rollUpEntries(readFrom(rig, first - 1), first - 1);
   const out = new Map<string, MinuteRollup>();
   const minutes = new Set<number>([...w.before.values()].map((r) => r.minuteMs));
   for (const src of SOURCES) {
@@ -408,7 +407,7 @@ test('the minute the cut falls inside is split: the archive fragment and the ret
     const fromArchive = archiveRollups(rig, src, straddle, straddle + MIN);
     assert.equal(fromArchive.length, 1, `${src}: an archive fragment for the straddling minute`);
     const first = rig.journal.snapshot().firstEntryId;
-    const retained = rollUpEntries(readFrom(rig, first - 1), first - 1, w.cacheKnown)
+    const retained = rollUpEntries(readFrom(rig, first - 1), first - 1)
       .filter((r) => r.rollup.sourceKey === src && r.rollup.minuteMs === straddle).map((r) => r.rollup);
     assert.equal(retained.length, 1, `${src}: a retained fragment`);
     assert.equal(show(merge([...fromArchive, ...retained], src, straddle)), show(merge([w.before.get(keyOf(src, straddle))!], src, straddle)));
@@ -441,7 +440,7 @@ test('after an expiry the cache is empty, and a rebuild from the retained journa
   assert.deepEqual(rig.store.sources(), []);
   const archiveBytes = rig.archive.bytes();
   const first = rig.journal.snapshot().firstEntryId;
-  const rebuilt = rollUpEntries(readFrom(rig, first - 1), first - 1, w.cacheKnown);
+  const rebuilt = rollUpEntries(readFrom(rig, first - 1), first - 1);
   const rebuiltRecords = rebuilt.reduce((n, r) => n + r.rollup.records, 0);
   let archivedRecords = 0;
   for (const src of SOURCES) for (const r of archiveRollups(rig, src, 0, 4e12)) archivedRecords += r.records;
@@ -487,7 +486,7 @@ test('crash (a): fragments written, no cut - the reopened archive drops them and
   // What a crash between the fragments and the cut leaves: the fragments, no cut, the journal untouched.
   const first = rig.journal.segments()[0].firstEntryId;
   const entries = readFrom(rig, first - 1).filter((e) => e.ref.entryId <= w.plan.throughEntryId);
-  const frags = expiryFragments(entries, { knownSources: w.cacheKnown }, deflate, DecodeState.empty(first - 1)).minutes;
+  const frags = expiryFragments(entries, deflate, DecodeState.empty(first - 1)).minutes;
   assert.ok(frags.length > 10);
   rig.archive.append(frags, {
     fromEntryId: first, throughEntryId: w.plan.throughEntryId, fromMs: entries[0].receivedMs, throughMs: w.plan.throughMs,
@@ -645,7 +644,7 @@ test('a replay whose checkpoint does not decode fails the run before anything is
   const journalBefore = rig.journal.snapshot();
   for (const bad of [new Uint8Array(0), new Uint8Array([1, 2, 3]), (() => { const c = DecodeState.empty(0).checkpoint().slice(); c[10] ^= 0xff; return c; })()]) {
     const r = runExpiry(rig.journal, rig.store, rig.archive, w.plan, {
-      nowMs: NOW, deflate, replay: (entries, context, start) => ({ ...expiryFragments(entries, context, deflate, start), checkpoint: bad }),
+      nowMs: NOW, deflate, replay: (entries, start) => ({ ...expiryFragments(entries, deflate, start), checkpoint: bad }),
     });
     assert.equal(r, 'failed');
     assert.equal(rig.archive.lastCut(), null, 'no cut was promised');
@@ -662,8 +661,8 @@ test('a replay whose checkpoint does not decode fails the run before anything is
 test('expiryFragments is deterministic and carries the policy it wrote under', () => {
   const w = world();
   const entries = readFrom(w.rig, 0).slice(0, 700);
-  const a = expiryFragments(entries, { knownSources: [] }, deflate, DecodeState.empty(0)).minutes;
-  const b = expiryFragments(entries, { knownSources: [] }, deflate, DecodeState.empty(0)).minutes;
+  const a = expiryFragments(entries, deflate, DecodeState.empty(0)).minutes;
+  const b = expiryFragments(entries, deflate, DecodeState.empty(0)).minutes;
   assert.deepEqual(a.map((m) => hex(m.bytes)), b.map((m) => hex(m.bytes)));
   assert.ok(a.length > 0 && a.every((m) => m.policyVersion === 2 && m.bytes[0] === 2 && m.bytes[1] === 0));
   assert.ok(a.every((m) => m.throughEntryId <= 700));
