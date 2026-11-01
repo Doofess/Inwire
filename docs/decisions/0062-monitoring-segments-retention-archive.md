@@ -1,5 +1,10 @@
 # 0062 — The monitoring journal is cut into segments; whole segments expire into a sealed archive the user's retention policy asks for
 
+> **Amended by [0071](0071-monitoring-sidecar-trimmed-at-expiry.md).** An
+> expiry trims the rollup sidecar instead of resetting it, the compaction
+> allowed below, with minutes sealed at every segment start and a test
+> showing the result equal to a rebuild.
+
 **Status:** accepted 2026-10-19, with the owner's four rulings: checkpoints in
 the sidecar and the archive cut, the milestone-1 file sealed and expired whole,
 `clamp(limit/32, 1 MiB, 256 MiB)` segments, and expiry by replay, cut and the

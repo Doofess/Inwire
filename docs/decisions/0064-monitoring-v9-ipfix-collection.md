@@ -9,6 +9,11 @@
 > carries the checkpoint's through entry id and receipt time outside the
 > deflate, at offsets 8 and 16, so the store can index it. Everything else
 > here stands.
+>
+> **Amended by [0070](0070-monitoring-identities-evict-least-recent.md).** An
+> exporter that holds 16 identities recycles the least recently heard one
+> rather than refusing a 17th, and the checkpoint is format 2: each scope
+> records its last heard entry id. Format 1 stays readable.
 
 **Status:** accepted 2026-10-23 by the owner, who ruled on four of its
 departures from the spec: UDP withdrawals ignored and counted, lifetime by
