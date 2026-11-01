@@ -29,7 +29,7 @@ How assertion scripts and drivers are written and run; loaded when you work unde
 ## Drives (in `NOT_TESTS`, run by hand)
 
 - `live-revisit-drive.ts`, `capture-options-drive.ts`, `capture-file-drive.ts`: real traffic through the installed current agent; need Npcap, the service and an Ethernet adapter.
-- `revisit-drive.ts`, `disk-drive.ts`, `import-drive.ts`: the store path; one to three minutes each. `import-heap-drive.ts --pcap <file>`: the renderer's heap after a large import (#19); needs a file of millions of frames. `gpu-restore-drive.ts`: skips without a map on screen. `update-center-drive.ts`: builds its manifest from this machine's Npcap and installs nothing.
+- `revisit-drive.ts`, `disk-drive.ts`, `import-drive.ts`: the store path; one to three minutes each. `import-heap-drive.ts --pcap <file>`: the renderer's heap after a large import (#19); needs a file of millions of frames. `import-gate-drive.ts [--shots <dir>]`: generates a ~200 MB pcap, imports it and presses Start, Ctrl+E and a second import mid-way; ~10 s a run, its assertions sit inside a window the import's speed sets. `gpu-restore-drive.ts`: skips without a map on screen. `update-center-drive.ts`: builds its manifest from this machine's Npcap and installs nothing.
 - Run the matching drive after a change on its path, and say which you could not run.
 
 ## Performance

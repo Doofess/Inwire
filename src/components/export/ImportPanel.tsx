@@ -11,7 +11,8 @@ import type { CaptureFileFacts } from '../../services/captureFileFacts';
 import {
   beginImportJob, endImportJob, getImportJob, importJobProgress, useImportJob, type ImportResult,
 } from '../../services/importJob';
-import { importProgressText } from '../../lib/importProgress';
+import { importProgressPercent, importProgressSizes } from '../../lib/importProgress';
+import { importRefusal, isCaptureStarting } from '../../services/captureStarting';
 
 /**
  * The Import half of the Import/Export centre.
@@ -84,6 +85,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   // last result, for the same reason: it can arrive while the panel is closed.
   const job = useImportJob();
   const busy = job.status === 'running';
+  const percent = job.status === 'running' ? importProgressPercent(job.readBytes, job.totalBytes) : 0;
   const status = job.status === 'idle' ? job.result?.message ?? null : null;
   const notes = job.status === 'idle' ? job.result?.notes ?? [] : [];
   const [dragging, setDragging] = useState(false);
@@ -97,8 +99,14 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   }, [retryToken]);
 
   const handleFile = async (file: File | undefined) => {
-    // Read from the store, not from the render's copy: this closure can be old.
-    if (!file || getImportJob().status === 'running' || blockedBy !== null) return;
+    // Read from the stores, not from the render's copy: this closure can be old,
+    // and a Start that has not opened its capture yet is exactly the gap that
+    // left it so (`captureStarting.ts`). `blockedBy` is the panel's, a render old.
+    if (!file || importRefusal({
+      importRunning: getImportJob().status === 'running',
+      captureStarting: isCaptureStarting(),
+      blockedBy,
+    }) !== null) return;
 
     beginImportJob(file.name, file.size);
     let result: ImportResult | undefined;
@@ -173,24 +181,54 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
             void handleFile(e.dataTransfer.files?.[0]);
           }}
           aria-disabled={blockedBy !== null}
-          className={`border-2 border-dashed rounded-lg p-6 flex flex-col items-center justify-center transition-colors ${
-            busy ? 'cursor-wait opacity-70' : blockedBy !== null ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
-          } ${dragging ? 'border-primary bg-primary/10' : 'border-border hover:border-sky-500 bg-muted/30'}`}
+          className={`block border-2 border-dashed rounded-lg px-3 py-6 transition-colors ${
+            busy ? 'cursor-wait' : blockedBy !== null ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
+          } ${dragging ? 'border-primary bg-primary/10' : busy ? 'border-border bg-muted/30' : 'border-border hover:border-sky-500 bg-muted/30'}`}
         >
-          {busy ? (
-            <LoaderCircle className="w-8 h-8 text-foreground mb-2 animate-spin" />
-          ) : (
-            <Upload className="w-8 h-8 text-foreground mb-2" />
-          )}
-          <span className="font-semibold text-foreground">
-            {dragging ? 'Drop to import' : 'Click to upload, or drag & drop'}
-          </span>
-          <span className="text-[11px] text-muted-foreground mt-1 text-center">
-            .pcap .pcapng .cap · .csv .tsv · .xlsx · .json · .zip
-          </span>
-          {blockedBy !== null && (
-            <span className="text-[11px] text-warning mt-1 text-center">{blockedBy}</span>
-          )}
+          {/* Both bodies share one grid cell and the one not showing is
+              `invisible`, so the zone is as tall as the taller of the two at
+              every width: the idle text wraps in a narrow side bar and the busy
+              rows do not, and the cards below must not jump when an import
+              starts or ends. `invisible` also keeps the hidden body out of the
+              accessibility tree and out of `innerText`. */}
+          <div className="grid w-full grid-cols-[minmax(0,1fr)]">
+            <div className={`col-start-1 row-start-1 flex flex-col items-center justify-center ${busy ? 'invisible' : ''}`}>
+              <Upload className="w-8 h-8 text-foreground mb-2" />
+              <span className="font-semibold text-foreground text-center">
+                {dragging ? 'Drop to import' : 'Click to upload, or drag & drop'}
+              </span>
+              <span className="text-[11px] text-muted-foreground mt-1 text-center">
+                .pcap .pcapng .cap · .csv .tsv · .xlsx · .json · .zip
+              </span>
+              {blockedBy !== null && (
+                <span className="text-[11px] text-warning mt-1 text-center">{blockedBy}</span>
+              )}
+            </div>
+            {/* The progress is the zone's: nothing here invites a second file. */}
+            <div className={`col-start-1 row-start-1 flex flex-col items-center justify-center ${busy ? '' : 'invisible'}`}>
+              <LoaderCircle className="w-8 h-8 text-foreground mb-2 animate-spin" />
+              <span className="flex max-w-full gap-1 font-semibold text-foreground" title={job.status === 'running' ? job.fileName : undefined}>
+                <span className="shrink-0">Importing</span>
+                <span className="min-w-0 truncate">{job.status === 'running' ? job.fileName : ' '}</span>
+              </span>
+              <div
+                role={busy ? 'progressbar' : undefined}
+                aria-label={job.status === 'running' ? `Importing ${job.fileName}` : undefined}
+                aria-valuemin={busy ? 0 : undefined}
+                aria-valuemax={busy ? 100 : undefined}
+                aria-valuenow={busy ? percent : undefined}
+                className="mt-2.5 h-1 w-full overflow-hidden rounded-full bg-muted"
+              >
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-300"
+                  style={{ width: `${percent}%` }}
+                />
+              </div>
+              <span className="mt-1.5 text-[11px] text-muted-foreground text-center tabular-nums">
+                {job.status === 'running' ? importProgressSizes(job.readBytes, job.totalBytes) : ' '}
+              </span>
+            </div>
+          </div>
           <input
             ref={inputRef}
             type="file"
@@ -202,24 +240,11 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
         </label>
       </div>
 
-      <div className="rounded-lg border border-border bg-muted/30 p-3 text-[11px] text-muted-foreground leading-relaxed space-y-1.5">
-        <p>
-          Spreadsheets and tables are checked before anything is imported: a file whose columns are not
-          packet data is refused rather than turned into frames that were never captured.
-        </p>
-        <p>
-          A row carries no wire bytes unless it was exported with{' '}
-          <span className="font-semibold text-foreground/80">Include raw packet bytes</span>. Without
-          them a re-imported packet has no hex dump and no protocol tree.
-        </p>
-      </div>
-
-      {job.status === 'running' ? (
-        <div className="text-muted-foreground font-medium" role="status">
-          {importProgressText(job.fileName, job.readBytes, job.totalBytes)}
-        </div>
-      ) : status && (
-        <div className="text-emerald-500 flex items-start gap-1.5 font-medium">
+      {/* The outcome sits directly under the zone it came from, above the help
+          card: while an import runs the zone shows the progress, and the line
+          that replaces it should not land below paragraphs of explanation. */}
+      {status && (
+        <div className="text-success-muted flex items-start gap-1.5 font-medium">
           <Check className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{status}</span>
         </div>
@@ -237,6 +262,18 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
           ))}
         </ul>
       )}
+
+      <div className="rounded-lg border border-border bg-muted/30 p-3 text-[11px] text-muted-foreground leading-relaxed space-y-1.5">
+        <p>
+          Spreadsheets and tables are checked before anything is imported: a file whose columns are not
+          packet data is refused rather than turned into frames that were never captured.
+        </p>
+        <p>
+          A row carries no wire bytes unless it was exported with{' '}
+          <span className="font-semibold text-foreground/80">Include raw packet bytes</span>. Without
+          them a re-imported packet has no hex dump and no protocol tree.
+        </p>
+      </div>
     </div>
   );
 };

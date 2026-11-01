@@ -139,7 +139,8 @@ try {
           .find((el) => el.getClientRects().length > 0) ?? null;
         return {
           done: (document.body.innerText.match(/Imported [\d,]+ packets from [^\n]+/) ?? [''])[0],
-          progress: (document.body.innerText.match(/Importing [^\n]+ of [^\n]+\(\d+%\)/) ?? [''])[0],
+          // The zone's sizes line (`importProgressSizes`): "340 of 812 MB (41%)".
+          progress: (document.body.innerText.match(/[\d.]+ of [\d.]+ (?:MB|GB) \(\d+%\)/) ?? [''])[0],
           dialog: dialog === null ? null : {
             heading: dialog.querySelector('h1, h2, h3, [role="heading"]')?.textContent?.trim() ?? '',
             message: dialog.innerText.trim(),

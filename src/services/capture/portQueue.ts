@@ -10,6 +10,12 @@
  * Here a use runs at once when the port is in hand and nothing is waiting
  * ahead of it. Otherwise it waits behind the connection with the others, so
  * an `open` never overtakes a read that was asked for first.
+ *
+ * Known edge, no behaviour change: a pass that starts before the port first
+ * connects (an import begun in the first moments after launch; there is no
+ * realistic trigger, because the startup reopen connects it) queues every use
+ * for as long as that pass holds the thread, which is #19's shape for that one
+ * pass. The queue empties when the connection resolves.
  */
 export class PortQueue<P> {
   private port: P | null = null;
