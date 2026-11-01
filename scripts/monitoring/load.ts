@@ -379,7 +379,7 @@ async function readCounters(p: Page): Promise<Counters> {
   return {
     listener, freshness,
     accepted: grab(/Accepted\s+/),
-    malformed: grab(/Malformed:\s*/), unsupported: grab(/Unsupported version:\s*/), engineLimit: grab(/Past the engine limit:\s*/),
+    malformed: grab(/Malformed:\s*/), unsupported: grab(/Unsupported version:\s*/), engineLimit: grab(/Too many identities in one minute:\s*/),
     shed: grab(/Shed before writing:\s*/),
     refused: digitsOf(new RegExp('127\\.0\\.0\\.2\\s+' + NUM + 'datagram').exec(t)?.[1]),
     records: rec ? digitsOf(rec[1]) : null,

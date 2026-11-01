@@ -38,7 +38,7 @@ import {
   MonitoringJournal, StaleGenerationError, recoverJournal,
   type EvidenceInput, type JournalOptions,
 } from '../../src/services/monitoring/journal';
-import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES, RollupStore } from '../../src/services/monitoring/rollupStore';
+import { MAX_APPEND_BYTES, MAX_APPEND_MINUTES, ROLLUP_FORMAT_VERSION, RollupStore } from '../../src/services/monitoring/rollupStore';
 import { MAX_ROLLUP_INFLATED_BYTES, decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { EntryIndex, INDEX_STRIDE } from '../../src/services/monitoring/index';
 import { NodeSegmentDirectory, monitoringRoot, openMonitoringVolume } from '../../electron/monitoring/volume';
@@ -171,6 +171,23 @@ test('a journal header and a sidecar header are not interchangeable', () => {
   const rollup = encodeFileHeader(ROLLUP_FRAMING, { generation: g, createdMs: 5 });
   assert.equal(new TextDecoder().decode(rollup.subarray(0, 8)), 'INWIREMR');
   assert.equal(decodeFileHeader(JOURNAL_FRAMING, rollup).ok, false);
+});
+
+test('sidecar header: trimmed-through round-trips and is covered by the CRC', () => {
+  const generation = Uint8Array.from({ length: 16 }, (_, i) => i);
+  const trimmed = 2 ** 40 + 7;
+  const header = encodeFileHeader(ROLLUP_FRAMING, { generation, createdMs: 5, formatVersion: ROLLUP_FORMAT_VERSION, trimmedThroughEntryId: trimmed });
+  const back = decodeFileHeader(ROLLUP_FRAMING, header);
+  assert.ok(back.ok);
+  if (back.ok) assert.equal(back.trimmedThroughEntryId, trimmed);
+  const plain = decodeFileHeader(ROLLUP_FRAMING, encodeFileHeader(ROLLUP_FRAMING, { generation, createdMs: 5 }));
+  assert.ok(plain.ok);
+  if (plain.ok) assert.equal(plain.trimmedThroughEntryId, 0, 'the default is a sidecar never trimmed');
+  const flipped = header.slice();
+  flipped[41] ^= 0x01;
+  const bad = decodeFileHeader(ROLLUP_FRAMING, flipped);
+  assert.equal(bad.ok, false);
+  if (!bad.ok) assert.match(bad.reason, /checksum/);
 });
 
 // --- helpers ---------------------------------------------------------------------------
@@ -1608,7 +1625,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.equal(rig.file.size(), size, 'each refusal wrote nothing');
     assert.equal(store.watermark(), null);
     store.appendMinutes([one], WM(110), 60);
-    assert.deepEqual(store.watermark(), WM(110), 'from the base is accepted');
+    assert.deepEqual(store.watermark(), { ...WM(110), trimmedThroughEntryId: 60 }, 'from the base is accepted, and the base is read back from the header');
     assert.throws(() => store.appendMinutes([one], WM(120), 60), RangeError, 'and the base is spent once there is a watermark');
     store.appendMinutes([one], WM(120), 110);
     // A reset with no argument is a reset to the start of the journal.
@@ -1677,7 +1694,7 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.equal(openStore(rig.load(noMagic)).status, 'rebuild-required');
     // An unknown sidecar format version is a cache we cannot read, not a journal we must keep.
     const ver = good.slice();
-    new DataView(ver.buffer).setUint16(8, FORMAT_VERSION + 1, true);
+    new DataView(ver.buffer).setUint16(8, ROLLUP_FORMAT_VERSION + 1, true);
     new DataView(ver.buffer).setUint32(60, crc32(ver.subarray(0, 60)), true);
     assert.equal(openStore(rig.load(ver)).status, 'rebuild-required');
     // And reset is how it recovers.
@@ -1768,6 +1785,45 @@ function sidecarCases(kind: 'memory' | 'disk'): void {
     assert.throws(() => store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: new Uint8Array(1 << 20) }], WM(2), 1), RangeError);
     assert.equal(rig.file.size(), before, 'a refused batch writes nothing');
     assert.deepEqual(store.watermark(), WM(1));
+  });
+
+  test(tag('a format 1 sidecar is rebuild-required'), () => {
+    const rig = newRig(kind);
+    rig.file.write(0, encodeFileHeader(ROLLUP_FRAMING, { generation: GEN_BYTES, createdMs: T0, formatVersion: 1, policyVersion: WRITE_POLICY_VERSION }));
+    const opened = openStore(rig.reopen());
+    assert.equal(opened.status, 'rebuild-required');
+    assert.match(opened.reason ?? '', /format 1/);
+    assert.throws(() => opened.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(1), 0), /rebuild/i);
+    // And the control: a format 2 header over the same bytes opens.
+    const fresh = newRig(kind);
+    fresh.file.write(0, encodeFileHeader(ROLLUP_FRAMING, { generation: GEN_BYTES, createdMs: T0, formatVersion: ROLLUP_FORMAT_VERSION, policyVersion: WRITE_POLICY_VERSION }));
+    assert.equal(openStore(fresh.reopen()).status, 'empty');
+  });
+
+  test(tag('reset(base) survives a reopen'), () => {
+    const rig = newRig(kind);
+    const J = { ...JOURNAL_INFO, throughEntryId: 600 };
+    const { store } = openStore(rig.file, J);
+    store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(1) }], WM(10), 0);
+    store.reset(500);
+    assert.equal(store.trimmedThrough(), 500);
+    const again = openStore(rig.reopen(), J);
+    assert.equal(again.status, 'empty', 'a header and no watermark');
+    assert.equal(again.store.trimmedThrough(), 500, 'the base is on disk, not only in memory');
+    assert.throws(
+      () => again.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(510), 0),
+      /does not continue/,
+    );
+    again.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0, bytes: mb(2) }], WM(510), 500);
+    assert.equal(again.store.watermark()?.trimmedThroughEntryId, 500, 'the watermark carries the header\'s value');
+    // Once it holds a watermark, the base is the watermark's; the header's value stays.
+    const third = openStore(rig.reopen(), J);
+    assert.equal(third.status, 'ok');
+    assert.equal(third.store.trimmedThrough(), 500);
+    third.store.appendMinutes([{ sourceKey: 'a', minuteMs: M0 + MIN, bytes: mb(3) }], WM(520), 510);
+    // A plain reset() is a base of 0.
+    third.store.reset();
+    assert.equal(openStore(rig.reopen(), J).store.trimmedThrough(), 0);
   });
 }
 

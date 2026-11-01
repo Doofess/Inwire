@@ -43,7 +43,7 @@ import { ArchiveStore, resumeExpiry, runExpiry, type ArchiveStatus } from '../..
 import { readSourceConfig } from '../../src/services/monitoring/config';
 import { isIntakeStopReason, type DiscardPreviewResult, type DiscardResult, type DiscardScope, type InspectResult, type IntakeStatus, type IntakeStopReason, type RetentionPreviewResult, type RetentionResult, type StartResult, type StopReason, type StopResult } from '../../src/services/monitoring/control';
 import {
-  DATASET_FILE, classifyAdoption, encodeDatasetFile, newDatasetFile, planMonitoringDiscard, readDatasetFile,
+  DATASET_FILE, classifyAdoption, encodeDatasetFile, newDatasetFile, planMonitoringDiscard, readDatasetFile, staleSidecarPartials,
   type AdoptionResult, type DatasetFile,
 } from '../../src/services/monitoring/datasetPlan';
 import { MonitoringJournal, recoverJournal, type EvidenceInput, type JournalState } from '../../src/services/monitoring/journal';
@@ -52,7 +52,7 @@ import { LiveFeed } from '../../src/services/monitoring/liveFeed';
 import { LocalArchiveSource, LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { recordedSource } from '../../src/services/monitoring/queries';
 import { DEFAULT_RETENTION, planExpiry, type ExpiryPlan, type RetentionPolicy } from '../../src/services/monitoring/retention';
-import { RollupStore } from '../../src/services/monitoring/rollupStore';
+import { RollupStore, type SidecarReplace } from '../../src/services/monitoring/rollupStore';
 import { isSegmentFileName, type SegmentInfo } from '../../src/services/monitoring/segments';
 import { RuntimeUnavailableError, archiveOf, type DatasetMeta, type HostRuntime } from '../../src/services/monitoring/runtime';
 import { serveRuntime, type RpcPort, type RuntimeServer } from '../../src/services/monitoring/runtimeRpc';
@@ -82,6 +82,8 @@ export interface CollectorVolume {
   segments: SegmentDirectory;
   rollups: BlockFile;
   archive: BlockFile;
+  /** How an expiry puts its trimmed copy of the sidecar in place (ADR 0071). Without it an expiry resets the sidecar instead. */
+  replaceRollups?: SidecarReplace;
   names(): string[];
   removeFile(name: string): void;
   readText(name: string): string | null;
@@ -736,6 +738,14 @@ export class Collector {
       // Another dataset's archive is neither served nor written.
       const archive = archiveHex === snapshot.generation && archiveStatus !== 'corrupt' && archiveStatus !== 'failed' ? holder.archive : null;
 
+      // A trim a crash interrupted left its partial, as large as the sidecar; it is harmless, so a removal that fails is only logged.
+      for (const name of staleSidecarPartials(volume.names())) {
+        try {
+          volume.removeFile(name);
+        } catch (e) {
+          this.env.log?.(`monitoring: a leftover ${name} could not be removed: ${message(e)}`);
+        }
+      }
       const opened = RollupStore.open(volume.rollups, {
         generation: snapshot.generation, throughEntryId: snapshot.throughEntryId,
       }, { nowMs: this.env.now, readOnly: false });
@@ -995,7 +1005,8 @@ export class Collector {
     const { plan, segments } = due;
     const first = segments[0];
     const one: ExpiryPlan = { segments: [first.name], throughEntryId: first.lastEntryId, throughMs: first.lastReceivedMs, reason: plan.reason };
-    if (runExpiry(d.journal, d.rollups, d.archive, one, { nowMs: this.env.now(), deflate }) === 'failed') return 'failed';
+    const replaceSidecar = d.volume?.replaceRollups;
+    if (runExpiry(d.journal, d.rollups, d.archive, one, { nowMs: this.env.now(), deflate, ...(replaceSidecar === undefined ? {} : { replaceSidecar }) }) === 'failed') return 'failed';
     // A journal that stopped at its limit takes appends again once the drop made room (`setLimit`'s contract).
     if (d.journal.state === 'storage-limit') d.journal.setLimit(d.limitBytes);
     if (d.journal.state === 'open') d.problem = null;

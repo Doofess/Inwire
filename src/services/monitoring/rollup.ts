@@ -30,7 +30,7 @@ import {
   LIMITS, SAMPLING_MIXED, WRITE_POLICY_VERSION, type ConversationTotals, type DecodeResult, type EndpointTotals, type Evidence,
   type MinuteClock, type MinuteRollup, type NormalizedV5,
 } from './types';
-import { exporterKey, exporterOf, isEngineSourceKey } from './v5';
+import { exporterKey } from './v5';
 import type { DecodeState, DecodeStep, RecordSampling } from './decodeState';
 import type { FlowDecode } from './flowDecode';
 import { addressBytes, compareAddresses } from './rollupCodec';
@@ -322,45 +322,6 @@ export class MinuteAccumulator {
   }
 }
 
-/**
- * Which engines get a row. The first `LIMITS.enginesPerExporter` distinct
- * `(type, id)` per exporter *in journal order* are admitted and the rest are
- * never rolled up - the same rule as `canAdmitEngine`, which the utility
- * applies to its health. The set only grows and freezes at the cap, so the set
- * at any point in the journal is right for every entry before it, and the
- * Worker can learn it from the sidecar's source keys and extend it from the
- * entries after.
- */
-export class EngineAdmission {
-  private readonly keys = new Set<string>();
-  private readonly perExporter = new Map<string, number>();
-
-  /** `known` is a list of source keys; an exporter-level key is not an engine and is skipped. */
-  constructor(known: Iterable<string> = []) {
-    for (const k of known) if (isEngineSourceKey(k)) this.add(k);
-  }
-
-  private add(key: string): void {
-    if (this.keys.has(key)) return;
-    this.keys.add(key);
-    const exporter = exporterOf(key);
-    this.perExporter.set(exporter, (this.perExporter.get(exporter) ?? 0) + 1);
-  }
-
-  has(key: string): boolean { return this.keys.has(key); }
-
-  /** True when the exporter already has its full set of engines: nothing new is admitted for it, ever. */
-  full(exporter: string): boolean { return (this.perExporter.get(exporter) ?? 0) >= LIMITS.enginesPerExporter; }
-
-  /** True when `key` is admitted, admitting it now if it is new and there is room. */
-  admit(key: string): boolean {
-    if (this.keys.has(key)) return true;
-    if ((this.perExporter.get(exporterOf(key)) ?? 0) >= LIMITS.enginesPerExporter) return false;
-    this.add(key);
-    return true;
-  }
-}
-
 /** A sealed minute and the journal entries it was made from. */
 export interface Fragment { rollup: MinuteRollup; firstId: number; lastId: number }
 
@@ -506,16 +467,19 @@ export function v5View(d: FlowDecode): DecodeResult {
  * every entry; an id the aggregator already fed is then ignored and returns null, which is how a
  * catch-up from a checkpoint at or below the watermark replays state alone. A boundary returns null.
  * The live feed, the rebuild and the expiry's replay all go through this, so the archive's minutes are
- * made by the same code as the cache's (ADR 0062). A datagram returns its decode step and whether its
- * engine was admitted, which the live feed's health and source list need and a replay does not.
+ * made by the same code as the cache's (ADR 0062). A datagram returns its decode step, which the live
+ * feed's health and source list need and a replay does not.
  */
 export function feedEntry(
-  agg: MinuteAggregator, admission: EngineAdmission, state: DecodeState, e: Evidence,
-): { step: Extract<DecodeStep, { kind: 'datagram' }>; admitted: boolean } | null {
+  agg: MinuteAggregator, state: DecodeState, e: Evidence,
+): { step: Extract<DecodeStep, { kind: 'datagram' }> } | null {
   const id = e.ref.entryId;
   const step = state.step(e);
   if (id <= agg.fedThrough) return null;
   if (step === null) throw new Error(`entry ${id} is already in the decode state but not in the aggregator`);
+  // The first entry of a segment starts afresh: no fragment holds entries of two segments, so an expiry (which
+  // takes whole segments) never cuts through one and the sidecar can be trimmed at any segment start (ADR 0071).
+  if (e.segmentFirstId === id) agg.seal(Infinity);
   agg.enterPolicy(e.policy);
   if (e.kind === 'boundary') {
     agg.fed(id);
@@ -527,11 +491,9 @@ export function feedEntry(
   if (step.kind !== 'datagram') throw new Error(`entry ${id} is a datagram the decode state stepped as a boundary`);
   const decoded = step.decoded;
   const fold = foldOf(step);
-  const admitted = fold !== null && admission.admit(fold.sourceKey);
   if (fold !== null) {
     // A valid datagram with nothing in it still makes its minute: the exporter spoke.
-    if (!admitted) agg.fed(id);
-    else agg.addDatagram(fold, e.receivedMs, id);
+    agg.addDatagram(fold, e.receivedMs, id);
   } else if (decoded.kind === 'malformed') {
     agg.addMalformed(e.remoteIPv4, e.receivedMs, id);
   } else {
@@ -540,5 +502,5 @@ export function feedEntry(
   // Receipt time has passed every earlier minute; the watermark, not the
   // wall clock, is what makes it safe to post them.
   agg.seal(minuteOf(e.receivedMs));
-  return { step, admitted };
+  return { step };
 }

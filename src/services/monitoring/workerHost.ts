@@ -35,7 +35,7 @@ import { StaleGenerationError } from './journal';
 import { ROLLUP_FRAMING } from './journalCodec';
 import { BoundaryCache, runHistoryQuery } from './queries';
 import { encodeMinuteRollup, type Deflate, type Inflate } from './rollupCodec';
-import { EngineAdmission, MinuteAggregator, feedEntry, v5View } from './rollup';
+import { MinuteAggregator, feedEntry, v5View } from './rollup';
 import { DecodeState, type DecodeStep } from './decodeState';
 import { RuntimeUnavailableError, type HostRuntime } from './runtime';
 import { initialSourceHealth, reduceSourceHealth, type ExporterSnapshot, type HealthEvent, type SourceHealth } from './sourceHealth';
@@ -207,7 +207,6 @@ export class MonitoringWorkerHost {
   private pendingCheckpoints: CheckpointCandidate[] = [];
   private spacing: CheckpointSpacing = { role1Through: 0, latestMs: 0, storedThrough: 0 };
   private markPolicy = LOWEST_POLICY;
-  private admission = new EngineAdmission();
   private targetEntryId = 0;
   private stopRebuild = false;
   private reopenPending = 0;
@@ -277,9 +276,10 @@ export class MonitoringWorkerHost {
   /**
    * The watermark a rebuild may continue from, after wiping a sidecar that cannot be continued: one of
    * another generation or policy; one that ends before the journal's first retained entry (it counts
-   * entries the journal no longer has); one that ends before the newest retained `expired` boundary (it
-   * still counts entries the archive now holds, and a query would add the two: a crash between the
-   * boundary and the reset leaves exactly this, and `resumeExpiry` is what normally closes it). An empty
+   * entries the journal no longer has); one that ends before the newest retained `expired` boundary and was
+   * not trimmed for it (it still counts entries the archive now holds, and a query would add the two: a crash
+   * between the boundary and the trim's rename leaves exactly this, and `resumeExpiry` is what normally
+   * closes it; ADR 0071). An empty
    * sidecar is reset too when entries have expired, so its base is the journal's start and not entry 0.
    */
   private async settleSidecar(
@@ -289,7 +289,12 @@ export class MonitoringWorkerHost {
     if (mark !== null) {
       if (mark.generation !== snapshot.generation || !isReadablePolicy(mark.policyVersion)) wipe = true;
       else if (mark.throughEntryId < snapshot.firstEntryId - 1) wipe = true;
-      else if (mark.throughEntryId < await this.newestExpiredBoundary(runtime, snapshot)) wipe = true;
+      else {
+        // Stale unless the sidecar was trimmed for that boundary (ADR 0071): its watermark is behind the boundary's
+        // own entry, which is appended last, whatever it holds.
+        const newest = await this.newestExpiredBoundary(runtime, snapshot);
+        if (newest !== null && mark.throughEntryId < newest.entryId && (mark.trimmedThroughEntryId ?? 0) < newest.throughEntryId) wipe = true;
+      }
     } else if (snapshot.firstEntryId > 1) {
       wipe = true;
     }
@@ -298,13 +303,19 @@ export class MonitoringWorkerHost {
     return runtime.watermark();
   }
 
-  /** The entry id of the newest `expired` boundary the journal still holds, 0 for none. */
-  private async newestExpiredBoundary(runtime: HostRuntime, snapshot: JournalSnapshot): Promise<number> {
-    let newest = 0;
+  /** The newest `expired` boundary the journal still holds: its own entry id and the last entry id it took out, null for none. */
+  private async newestExpiredBoundary(
+    runtime: HostRuntime, snapshot: JournalSnapshot,
+  ): Promise<{ entryId: number; throughEntryId: number } | null> {
+    let newest: { entryId: number; throughEntryId: number } | null = null;
     let after = snapshot.firstEntryId - 1;
     for (;;) {
       const page = await runtime.readBoundaries(snapshot, after, LIMITS.pageEntries);
-      for (const b of page.entries) if (b.action === 'expired') newest = Math.max(newest, b.ref.entryId);
+      for (const b of page.entries) {
+        if (b.action === 'expired' && (newest === null || b.ref.entryId > newest.entryId)) {
+          newest = { entryId: b.ref.entryId, throughEntryId: b.expired?.throughEntryId ?? 0 };
+        }
+      }
       if (page.done) return newest;
       after = page.nextAfterId;
     }
@@ -396,7 +407,6 @@ export class MonitoringWorkerHost {
     this.analyzedThrough = null;
     this.rolledUpThrough = null;
     this.targetEntryId = 0;
-    this.admission = new EngineAdmission(sources);
     this.aggregator = new MinuteAggregator(Math.max(mark === null ? 0 : mark.throughEntryId, snapshot.firstEntryId - 1));
     this.decodeState = DecodeState.empty(this.aggregator.fedThrough);
     this.pendingCheckpoints = [];
@@ -529,6 +539,22 @@ export class MonitoringWorkerHost {
     await this.rebuild();
   }
 
+  /** Whether `e` is the first entry of a segment the aggregator has not fed yet. */
+  private atSegmentStart(e: Evidence): boolean {
+    return e.segmentFirstId === e.ref.entryId && e.ref.entryId > this.aggregator.fedThrough;
+  }
+
+  /**
+   * Before a segment's first entry is fed: every minute so far is sealed (`feedEntry` would, a moment later) and posted
+   * at a watermark of this very entry's predecessor. A fragment is then never posted in a batch whose watermark is past
+   * a segment start it lies before, so an expiry's cut, which is one, leaves the sidecar's `through > cut` meaning
+   * "made of entries after the cut" and nothing in it is counted twice with the archive (ADR 0071).
+   */
+  private async closeBeforeSegment(runtime: HostRuntime): Promise<void> {
+    this.aggregator.seal(Infinity);
+    await this.postDrained(runtime);
+  }
+
   /** Reads `(fed, snapshot.through]` into the aggregator in slices, posting what may be posted after each page. */
   private async readThrough(runtime: HostRuntime, snapshot: Snapshot): Promise<void> {
     const slicer = new Slicer(this.options.now, this.options.yieldNow);
@@ -538,7 +564,18 @@ export class MonitoringWorkerHost {
       const page = await runtime.readPage(snapshot, after, LIMITS.pageEntries, LIMITS.pageBytes);
       // A reopen or a shutdown while the page was being read: it is the old dataset's, or nobody's.
       if (this.stopRebuild) return;
-      for (const e of page.entries) this.feed(e);
+      let fedInPage = false;
+      for (const e of page.entries) {
+        if (this.atSegmentStart(e)) {
+          await this.closeBeforeSegment(runtime);
+          if (this.stopRebuild) return;
+          // The rest of this page is read again from the segment's start, so a page never straddles one: batches
+          // then depend on the segment alone, and a rebuild from a cut batches as the build it replaces did.
+          if (fedInPage) break;
+        }
+        this.feed(e);
+        fedInPage = true;
+      }
       if (page.entries.length === 0 && this.aggregator.fedThrough <= after) {
         throw new Error(`the journal returned no entries after ${after} though it holds ${snapshot.throughEntryId}`);
       }
@@ -642,6 +679,10 @@ export class MonitoringWorkerHost {
         // A push that was missed (or dropped while rebuilding) left a hole: read it before going on.
         if (id > this.aggregator.fedThrough + 1) await this.readThrough(runtime, { generation: this.generation, throughEntryId: id - 1 });
         if (this.stopRebuild) return;
+        if (this.atSegmentStart(e)) {
+          await this.closeBeforeSegment(runtime);
+          if (this.stopRebuild) return;
+        }
         this.feed(e);
       }
       await this.postDrained(runtime);
@@ -707,13 +748,19 @@ export class MonitoringWorkerHost {
     this.options.post({ type: 'health', health: this.health, sources, exporters });
   }
 
-  /** The live state of every known v9 or IPFIX source; none while the decode state is a rebuild's or a failed host's. */
+  /**
+   * The live state of every v9 or IPFIX source the decoder holds now; none while the decode state is a rebuild's or a
+   * failed host's. Not every source ever heard (`knownSources`, History's list): an identity the exporter's bound
+   * evicted has no template in force and no state, and a card for it would read as a live source stuck waiting (ADR 0070).
+   */
   private exporterSnapshots(): ExporterSnapshot[] {
     if (this.phase !== 'live') return [];
     const state = this.decodeState;
     const inventory = state.store.inventory();
+    const held = new Set<string>();
+    for (const s of state.store.exportScopes()) held.add(sourceKeyFor(s.protocol, s.exporter, s.domain));
     const out: ExporterSnapshot[] = [];
-    for (const key of [...this.knownSources].sort()) {
+    for (const key of [...held].sort()) {
       const parsed = parseSourceKey(key);
       if (parsed === null || parsed.protocol === 'v5') continue;
       out.push({
@@ -739,7 +786,7 @@ export class MonitoringWorkerHost {
     }
     // The aggregator's own steps are `feedEntry`'s, shared with the expiry's replay; the health and
     // the source list are this host's.
-    const fed = feedEntry(this.aggregator, this.admission, this.decodeState, e);
+    const fed = feedEntry(this.aggregator, this.decodeState, e);
     if (e.kind === 'boundary') {
       if (fresh && e.action === 'stop') {
         this.pendingCheckpoints.push({ role: 2, throughEntryId: id, throughMs: e.receivedMs, raw: this.decodeState.checkpoint() });
@@ -748,8 +795,8 @@ export class MonitoringWorkerHost {
     }
     if (fed === null) return;
     const d = fed.step.decoded;
-    if (d.kind === 'valid' && fed.admitted) this.knownSources.add(d.sourceKey);
-    this.watch(e, fed.step, fed.admitted);
+    if (d.kind === 'valid') this.knownSources.add(d.sourceKey);
+    this.watch(e, fed.step);
   }
 
   /**
@@ -758,30 +805,34 @@ export class MonitoringWorkerHost {
    * moment it is fed: the rebuild's later passes read entries that arrived minutes earlier, and
    * a source that went quiet meanwhile must not look fresh for another `staleMs`.
    */
-  private watch(e: DatagramEvidence, step: DatagramStep, admitted: boolean): void {
+  private watch(e: DatagramEvidence, step: DatagramStep): void {
     const id = e.ref.entryId;
     if (id <= Math.max(this.healthFloor, this.healthThrough)) return;
     this.healthThrough = id;
     const age = Math.max(0, this.options.wallNow() - e.receivedMs);
     const timing = { elapsedMs: this.options.now() - age, wallMs: e.receivedMs };
     const d = step.decoded;
+    if (step.churn) {
+      this.observeDatagram(e.remoteIPv4, { kind: 'datagram', outcome: 'identity-churn', entryId: id, ...timing });
+      return;
+    }
     if (d.kind === 'valid' && d.protocol !== 'v5') {
       let awaitingSets = 0;
       let awaitingBytes = 0;
       for (const a of [...d.awaiting, ...d.refused]) { awaitingSets += a.sets; awaitingBytes += a.bytes; }
       this.observeDatagram(e.remoteIPv4, {
         kind: 'datagram', outcome: 'valid-template', protocol: d.protocol, sourceKey: d.sourceKey, flowCount: d.flows.length,
-        entryId: id, awaitingSets, awaitingBytes, admitted, ...timing,
+        entryId: id, awaitingSets, awaitingBytes, ...timing,
       });
       // What `ExporterState` saw in it, on the source's row (none without one).
-      if (admitted) for (const event of step.events) this.observe({ ...event, ...timing });
+      for (const event of step.events) this.observe({ ...event, ...timing });
       return;
     }
     const decoded = v5View(d);
     if (decoded.kind === 'valid') {
       this.observeDatagram(e.remoteIPv4, {
         kind: 'datagram', outcome: 'valid', engineType: decoded.engineType, engineId: decoded.engineId,
-        sequence: decoded.sequence, flowCount: decoded.flows.length, entryId: id, admitted, ...timing,
+        sequence: decoded.sequence, flowCount: decoded.flows.length, entryId: id, ...timing,
       });
     } else {
       this.observeDatagram(e.remoteIPv4, { kind: 'datagram', outcome: decoded.kind, entryId: id, ...timing });
@@ -806,10 +857,9 @@ export class MonitoringWorkerHost {
       const step = this.decodeState.step(e);
       if (e.kind !== 'datagram' || step === null || step.kind !== 'datagram') continue;
       const d = step.decoded;
-      // Engine admission and the source list are the Worker's own facts, independent of the aggregator.
-      const admitted = d.kind === 'valid' && this.admission.admit(d.sourceKey);
-      if (admitted) this.knownSources.add(d.sourceKey);
-      this.watch(e, step, admitted);
+      // The source list is the Worker's own fact, independent of the aggregator.
+      if (d.kind === 'valid') this.knownSources.add(d.sourceKey);
+      this.watch(e, step);
     }
   }
 

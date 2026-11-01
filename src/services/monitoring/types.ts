@@ -302,7 +302,13 @@ export const SAMPLING_MIXED = 0xffff_ffff;
 export interface MinuteClock { minSkewMs: number; maxSkewMs: number; lastSkewMs: number }
 
 /** What the sidecar covers. Any disagreement with the journal means rebuild, never trust. `policyVersion` is the highest policy decoded (ADR 0066). */
-export interface RollupWatermark { generation: Generation; throughEntryId: number; policyVersion: number }
+export interface RollupWatermark {
+  generation: Generation;
+  throughEntryId: number;
+  policyVersion: number;
+  /** Set by `RollupStore.watermark()` from the sidecar's header, and only once it is not 0; a posted watermark leaves it unset and the kind-2 encoding ignores it (ADR 0071). */
+  trimmedThroughEntryId?: number;
+}
 
 /** One sidecar kind-3 entry as the store indexes it (ADRs 0064, 0066): `bytes` is the deflated checkpoint. */
 export interface StoredCheckpoint { role: 1 | 2; throughEntryId: number; throughMs: number; bytes: Uint8Array }
@@ -407,13 +413,3 @@ export type HistoryReply =
     expiry?: ExpiryCause;
   };
 
-/**
- * What a replay of expiring entries needs to know of the world before them:
- * the sources already admitted (admission freezes at a cap, so the set decides
- * who is admitted next) and the session and source open at the first entry.
- */
-export interface SessionContext {
-  knownSources: readonly string[];
-  sessionId?: string | null;
-  source?: SegmentSource | null;
-}

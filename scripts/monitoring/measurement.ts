@@ -11,6 +11,7 @@
  *   npx tsx scripts/monitoring/measurement.ts softflowd --pcap <capture> [--port n]
  *   npx tsx scripts/monitoring/measurement.ts segments [--quick]   (milestone 1.5, ADR 0062)
  *   npx tsx scripts/monitoring/measurement.ts v9collector [--quick]   (Task 11: the collector's own v9/IPFIX decoder, a day's rebuild)
+ *   npx tsx scripts/monitoring/measurement.ts trim [--quick]   (ADR 0071: what the sidecar trim costs on a day of v9)
  *
  * Not a test: every number is a property of the machine it ran on, and the
  * journal mode writes about 2.7 GB under the OS temp folder (and deletes it).
@@ -56,7 +57,7 @@ import { decodeV5 } from '../../src/services/monitoring/v5';
 import { CollectorTemplateStore } from '../../src/services/monitoring/templates';
 import { decodeDatagram, type FlowDecode } from '../../src/services/monitoring/flowDecode';
 import { DecodeState } from '../../src/services/monitoring/decodeState';
-import { EngineAdmission, MinuteAggregator, feedEntry } from '../../src/services/monitoring/rollup';
+import { MinuteAggregator, feedEntry } from '../../src/services/monitoring/rollup';
 import { decodeMinuteRollup, encodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
 import { LocalRuntime } from '../../src/services/monitoring/localRuntime';
 import { RollupStore } from '../../src/services/monitoring/rollupStore';
@@ -1541,7 +1542,6 @@ function runCollectorStage(stream: CollectorStream, day: number, stage: Collecto
   const store = new CollectorTemplateStore();
   const state = DecodeState.empty(0);
   const agg = new MinuteAggregator(0);
-  const admission = new EngineAdmission();
   const row: CollectorRow = {
     name: stream.name, protocol: stream.protocol, datagrams: day, bytes: 0, records: 0, valid: 0, awaitingSets: 0, events: 0, minutes: 0, encodedBytes: 0, ms: 0,
   };
@@ -1563,7 +1563,7 @@ function runCollectorStage(stream: CollectorStream, day: number, stage: Collecto
     if (stage === 'decode') {
       d = decodeDatagram(e, COLLECTOR_EXPORTER, 2, store);
     } else {
-      const fed = feedEntry(agg, admission, state, e);
+      const fed = feedEntry(agg, state, e);
       if (fed === null) throw new Error(`entry ${ordinal} was not fed`);
       d = fed.step.decoded;
       row.events += fed.step.events.length;
@@ -1724,6 +1724,71 @@ async function collectorRebuild(passName: string, day: number, expectedRecords: 
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/**
+ * ADR 0071: what the sidecar trim costs. A v9 journal of `day` datagrams is rolled up by the Worker host, then the
+ * first segment's worth is trimmed through the product's own `replaceRollups` (a partial beside the sidecar, a
+ * flush, a rename) on a real folder. Prints the sidecar's size per GiB of journal and the trim's time.
+ */
+async function trimMeasurement(passName: string, day: number): Promise<void> {
+  const stream = collectorStreams().find((s) => s.name === passName);
+  if (stream === undefined) throw new Error(`no pass named ${passName}`);
+  const root = join(tmpdir(), `inwire-v9trim-${process.pid}`);
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(root, { recursive: true });
+  const limitBytes = 8 * 1024 * MB;
+  const feed = new StreamFeed(stream);
+  let lastMs = 0;
+  try {
+    const vol = openMonitoringVolume(root);
+    const { journal } = MonitoringJournal.open(vol.segments, { limitBytes });
+    journal.append([{
+      kind: 'boundary', sessionId: 'c1'.repeat(16), receivedMs: stream.baseSecs * 1000, action: 'start', reason: '', droppedDatagrams: null,
+      source: { exporterIPv4: COLLECTOR_EXPORTER, bindIPv4: '192.0.2.10', port: 2055 },
+    }]);
+    for (let done = 0; done < day; done += PAGE) {
+      const batch: EvidenceInput[] = [];
+      for (let k = 0; k < Math.min(PAGE, day - done); k++) {
+        const { slot, receivedMs } = feed.next();
+        lastMs = receivedMs;
+        batch.push({ kind: 'datagram', receivedMs, localIPv4: '192.0.2.10', localPort: 2055, remoteIPv4: COLLECTOR_EXPORTER, remotePort: slot.port, bytes: slot.work.slice() });
+      }
+      const r = journal.append(batch);
+      if (r.refused > 0) throw new Error(`the journal refused ${r.refused} entries (${r.state})`);
+    }
+    journal.flush();
+    const snap = journal.snapshot();
+    const names = vol.segments.list();
+    console.log(`\n${passName}: ${day.toLocaleString()} datagrams, ${fmt(dirBytes(root) / MB, 0)} MiB of journal in ${names.length} segments`);
+    if (names.length < 2) { console.log('  fewer than two segments: nothing to trim at a segment start; use a longer run'); journal.close(); vol.close(); return; }
+    const opened = RollupStore.open(vol.rollups, { generation: snap.generation, throughEntryId: snap.throughEntryId }, { nowMs: () => Date.now() });
+    const runtime = new LocalRuntime(journal, opened.store, opened.reason === undefined ? { status: opened.status } : { status: opened.status, reason: opened.reason });
+    const rig = new HostRig(runtime, { wallNow: () => lastMs + 60_000 });
+    const [reply, rebuildMs] = (() => { const t = performance.now(); return [rig.connect(), t] as const; })();
+    const connected = await reply;
+    if (connected.type !== 'connect-reply' || !connected.ok) throw new Error(`connect failed: ${JSON.stringify(connected)}`);
+    const rebuilt = performance.now() - rebuildMs;
+    const journalBytes = dirBytes(root) - opened.store.size();
+    const sidecarBefore = opened.store.size();
+    const secondFirst = Number(/journal-(\d+)\.iwmj/.exec(names[1])![1]);
+    const cut = secondFirst - 1;
+    const [outcome, trimMs] = timeIt(() => opened.store.trim(cut, vol.replaceRollups));
+    const after = opened.store.size();
+    console.log(`  rebuild ${fmt(rebuilt / 1000, 2)} s; sidecar ${fmt(sidecarBefore / MB, 2)} MiB = ${fmt(sidecarBefore / MB / (journalBytes / (1024 * MB)), 1)} MiB per GiB of journal`);
+    console.log(`  trim through entry ${cut.toLocaleString()} (the first segment): ${outcome} in ${fmt(trimMs, 0)} ms, sidecar ${fmt(sidecarBefore / MB, 2)} -> ${fmt(after / MB, 2)} MiB, `
+      + `${readdirSync(root).filter((f) => f.endsWith('.partial')).length} partials left`);
+    journal.close();
+    vol.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+async function trimMode(): Promise<void> {
+  const DAY = quick ? 200_000 : 622_570;
+  console.log(`trim: node ${process.versions.node} (${process.platform} ${process.arch}), ${cpus().length} x ${cpus()[0]?.model.trim()}, ${new Date().toISOString()}`);
+  for (const name of ['softflowd v9', 'pmacct v9']) {
+    try { await trimMeasurement(name, DAY); } catch (e) { console.log(`NOT RUN  trim (${name}): ${(e as Error).message}`); }
+  }
+}
+
 async function v9CollectorMode(): Promise<void> {
   const DAY = quick ? 62_257 : 622_570;
   console.log(`v9collector: node ${process.versions.node} (${process.platform} ${process.arch}), ${cpus().length} x ${cpus()[0]?.model.trim()}, ${fmt(totalmem() / (1024 ** 3), 1)} GiB RAM, ${new Date().toISOString()}`);
@@ -1752,13 +1817,14 @@ async function v9CollectorMode(): Promise<void> {
 // --- the template checkpoint (ADR 0064) --------------------------------------------------------------
 
 /**
- * The checkpoint encoding ADR 0064 pins, as a prototype: product code is
+ * The checkpoint encoding ADR 0064 pins, as format 2 (ADR 0070: each scope also
+ * carries the entry id it was last heard in), as a prototype: product code is
  * written against the ADR under its own tests, and this produces its vector
  * and its sizes. Little-endian like the rest of the monitoring formats, except
  * field specifiers, which are copied from the wire as they arrived.
  */
 interface CkTemplate { id: number; options: boolean; v9Options: boolean; scopeCount: number; fieldSpecs: Uint8Array; fieldCount: number; definedEntryId: number; lastSeenMs: number; lastSeenMessage: number; intervalMs: number; intervalMessages: number }
-interface CkScope { protocol: 9 | 10; exporter: string; port: number; domain: number; uptimeMs: number | null; systemInitMs: number | null; messages: number; templates: CkTemplate[] }
+interface CkScope { protocol: 9 | 10; exporter: string; port: number; domain: number; uptimeMs: number | null; systemInitMs: number | null; messages: number; lastHeardEntryId: number; templates: CkTemplate[] }
 interface CkSampler { id: number; algorithm: number; interval: number; space: number }
 interface CkSource { key: string; sampling: 'absent' | 'known' | 'unsupported'; samplingInterval: number; samplingSinceEntryId: number; sequence: CkSequence; samplers: CkSampler[] }
 /** Sequence learning (ADR 0064): the convention is learned from the first eight message pairs that carry data records. */
@@ -1776,7 +1842,7 @@ function encodeCheckpoint(c: Checkpoint): Uint8Array {
   const scopes = [...c.scopes].sort((a, b) => a.protocol - b.protocol || a.domain - b.domain || a.port - b.port);
   const sources = [...c.sources].sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
   bytes(new TextEncoder().encode('INWIREMT'));
-  u16(1); u16(2); u16(scopes.length); u16(sources.length);
+  u16(2); u16(2); u16(scopes.length); u16(sources.length);
   u64(c.throughEntryId); u64(c.atMs);
   for (const s of scopes) {
     u8(s.protocol);
@@ -1784,6 +1850,7 @@ function encodeCheckpoint(c: Checkpoint): Uint8Array {
     u16(s.port);
     bytes(Uint8Array.from(s.exporter.split('.').map(Number)));
     u32(s.domain); u32(s.uptimeMs ?? 0); u64(s.systemInitMs ?? 0); u64(s.messages); u16(s.templates.length); u16(0);
+    u64(s.lastHeardEntryId);
     for (const t of [...s.templates].sort((a, b) => a.id - b.id)) {
       u16(t.id); u8((t.options ? 1 : 0) | (t.v9Options ? 2 : 0)); u8(0);
       u16(t.scopeCount); u16(t.fieldCount); u32(t.intervalMs); u32(t.intervalMessages); u64(t.definedEntryId); u64(t.lastSeenMs); u64(t.lastSeenMessage);
@@ -1828,7 +1895,7 @@ function checkpointMode(): void {
   const vector: Checkpoint = {
     throughEntryId: 4096, atMs: 1_700_000_600_000,
     scopes: [{
-      protocol: 10, exporter: '192.0.2.1', port: 50_000, domain: 0, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 4_090,
+      protocol: 10, exporter: '192.0.2.1', port: 50_000, domain: 0, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 4_090, lastHeardEntryId: 4096,
       templates: [
         { ...template(1024, plain.slice(0, 6), 17), lastSeenMessage: 4_080, intervalMs: 30_000, intervalMessages: 16 },
         { id: 256, options: true, v9Options: false, scopeCount: 1, fieldSpecs: specs([[143, 4], [305, 4], [306, 4], [304, 2]]), fieldCount: 4, definedEntryId: 17, lastSeenMs: 1_700_000_590_000, lastSeenMessage: 4_080, intervalMs: 30_000, intervalMessages: 16 },
@@ -1838,15 +1905,15 @@ function checkpointMode(): void {
       sequence: { mode: 'rfc', last: 123_456, lastRecords: 30, pairs: 8, fitRfc: 8, fitOwn: 0 }, samplers: [] }],
   };
   const v = encodeCheckpoint(vector);
-  console.log(`checkpoint vector (${v.length} bytes): through entry 4096 at 1700000600000 ms; IPFIX scope 192.0.2.1 port 50000 domain 0, `
-    + 'systemInitTimeMilliseconds 1699990000000, 4090 messages; template 1024 [8:4 12:4 22:4 21:4 1:4 2:4] defined at entry 17, last seen 1700000000000 at message 4080, '
+  console.log(`checkpoint vector, format 2 (${v.length} bytes): through entry 4096 at 1700000600000 ms; IPFIX scope 192.0.2.1 port 50000 domain 0, `
+    + 'systemInitTimeMilliseconds 1699990000000, 4090 messages, last heard at entry 4096; template 1024 [8:4 12:4 22:4 21:4 1:4 2:4] defined at entry 17, last seen 1700000000000 at message 4080, '
     + 'interval 30000 ms / 16 messages; options template 256 (1 scope) [143:4 305:4 306:4 304:2] defined at 17, last seen 1700000590000 at message 4080, interval 30000 ms / 16 messages; '
     + `source ipfix:192.0.2.1/0 sampling known 1-in-10 since entry 17, sequence rfc (8 pairs, 8 fit rfc, 0 fit own-records), last 123456 with 30 records:\n  ${hex(v)}`);
 
   // Sizes at the bound: 4,096 templates over 16 scopes.
   const sized = (label: string, perTemplate: (i: number) => [number, number, number?][]) => {
     const scopes: CkScope[] = Array.from({ length: 16 }, (_, s) => ({
-      protocol: 10, exporter: '192.0.2.1', port: 50_000 + s, domain: s, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 1 << 30,
+      protocol: 10, exporter: '192.0.2.1', port: 50_000 + s, domain: s, uptimeMs: null, systemInitMs: 1_699_990_000_000, messages: 1 << 30, lastHeardEntryId: 1 << 30,
       templates: Array.from({ length: 256 }, (_, i) => template(256 + i, perTemplate(s * 256 + i), 1)),
     }));
     const sources: CkSource[] = Array.from({ length: 16 }, (_, s) => ({
@@ -1876,6 +1943,7 @@ if (!isMainThread) {
   case 'softflowd': await softflowdMode(); break;
   case 'v9decode': v9DecodeMode(); break;
   case 'v9collector': await v9CollectorMode(); break;
+  case 'trim': await trimMode(); break;
   case 'checkpoint': checkpointMode(); break;
   case 'bindpair': await bindPairMode(); break;
   case 'socket': await socketMode(); break;
@@ -1885,6 +1953,6 @@ if (!isMainThread) {
   case 'firewall': await firewallMode(); break;
   case 'segments': await segmentsMode(); break;
   default:
-    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick] | v9decode [--quick] | v9collector [--quick] | checkpoint');
+    console.log('usage: measurement.ts socket | journal [--quick] | rollup [--quick] | vector | firewall --electron <exe> | segments [--quick] | v9decode [--quick] | v9collector [--quick] | trim [--quick] | checkpoint');
     process.exitCode = 2;
 }

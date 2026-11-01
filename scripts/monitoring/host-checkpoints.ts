@@ -16,6 +16,7 @@ import { DecodeState } from '../../src/services/monitoring/decodeState';
 import { ROLLUP_FRAMING, decodeFileHeader, encodeFileHeader } from '../../src/services/monitoring/journalCodec';
 import type { EvidenceInput } from '../../src/services/monitoring/journal';
 import { decodeMinuteRollup } from '../../src/services/monitoring/rollupCodec';
+import { ROLLUP_FORMAT_VERSION } from '../../src/services/monitoring/rollupStore';
 import { MemorySegmentDirectory, decodeSegmentHeader, encodeSegmentHeader } from '../../src/services/monitoring/segments';
 import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
 import { LIMITS, type Evidence, type SegmentGeometry } from '../../src/services/monitoring/types';
@@ -162,7 +163,7 @@ test('policy-1-cache-under-policy-2: the 1.5 cache opens ok and is continued; it
   rig.sfile.read(0, header);
   const parsed = decodeFileHeader(ROLLUP_FRAMING, header);
   assert.ok(parsed.ok);
-  rig.sfile.write(0, encodeFileHeader(ROLLUP_FRAMING, { generation: parsed.generation, createdMs: parsed.createdMs, policyVersion: 1 }));
+  rig.sfile.write(0, encodeFileHeader(ROLLUP_FRAMING, { generation: parsed.generation, createdMs: parsed.createdMs, policyVersion: 1, formatVersion: ROLLUP_FORMAT_VERSION }));
 
   rig.reopen();
   rig.append([start(m(10), S2), template(m(11)), data(m(11, 10), TWO), stop(m(12), S2)]);

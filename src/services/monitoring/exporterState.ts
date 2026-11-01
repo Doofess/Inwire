@@ -267,6 +267,11 @@ export class ExporterState {
     for (const key of [...this.sources.keys()]) if (parseSourceKey(key)?.exporter !== exporter) this.sources.delete(key);
   }
 
+  /** The source of a scope the template store evicted (ADR 0070): its sequence, sampling and samplers go with its templates. */
+  forgetSource(key: string): void {
+    this.sources.delete(key);
+  }
+
   /** A start, resume or gap boundary: the next message of each source is the new reference, whatever its number. The mode is kept. */
   gapEnded(): void {
     for (const st of this.sources.values()) st.sequence.seen = false;

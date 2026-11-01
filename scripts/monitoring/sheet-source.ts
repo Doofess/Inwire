@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  ESTIMATE_LABEL, MONITORING_FOLDER, clockText, engineLabel, notInterpretedText, readDraft, samplingEstimate, samplingText,
+  ESTIMATE_LABEL, IDENTITIES_REPLACED_LABEL, IDENTITIES_REPLACED_NOTE, IDENTITY_CHURN_LABEL, MONITORING_FOLDER, clockText, engineLabel, notInterpretedText, readDraft, samplingEstimate, samplingText,
 } from '../../src/components/monitoring/monitoringCopy';
 import { ONBOARDING_SNIPPETS, SNIPPET_CAVEAT, fillSnippet } from '../../src/components/monitoring/onboardingSnippets';
 import { test, runAll } from './queryRig';
@@ -210,6 +210,18 @@ test('Task 10: Aruba is marked unverified and gives no lines, its page having re
   assert.deepEqual(aruba[0].lines, [], 'an unreadable page gives no guessed lines');
   for (const s of ONBOARDING_SNIPPETS) if (s.vendor !== 'HPE Aruba') assert.equal(s.verified, true, `${s.id} was read`);
   assert.match(read('Onboarding.tsx'), /UNVERIFIED_CAVEAT/);
+});
+
+test('the source status reads its identity counters from monitoringCopy', () => {
+  const src = read('SourceStatus.tsx');
+  for (const name of ['IDENTITY_CHURN_LABEL', 'IDENTITIES_REPLACED_LABEL', 'IDENTITIES_REPLACED_NOTE']) assert.match(src, new RegExp(`\\b${name}\\b`), name);
+  assert.ok(!src.includes('Past the engine limit'), 'the old label is gone');
+  assert.equal(IDENTITY_CHURN_LABEL, 'Too many identities in one minute');
+  assert.equal(IDENTITIES_REPLACED_LABEL, 'Identities replaced');
+  assert.equal(
+    IDENTITIES_REPLACED_NOTE,
+    'A new Source ID, Observation Domain or engine took the place of the one heard least recently; a NetFlow v9 or IPFIX one is dropped with its templates. Its History is kept.',
+  );
 });
 
 process.exit((await runAll()) === 0 ? 0 : 1);

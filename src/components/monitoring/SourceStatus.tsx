@@ -4,7 +4,9 @@ import { nothingArriving, type MonitoringState } from '../../services/monitoring
 import type { EngineHealth } from '../../services/monitoring/sourceHealth';
 import type { SourceConfig } from '../../services/monitoring/types';
 import { formatBytes } from '../../lib/formatBytes';
-import { count, localTime, MONITORING_FOLDER, stopReasonText, type Tone } from './monitoringCopy';
+import {
+  count, IDENTITIES_REPLACED_LABEL, IDENTITIES_REPLACED_NOTE, IDENTITY_CHURN_LABEL, localTime, MONITORING_FOLDER, stopReasonText, type Tone,
+} from './monitoringCopy';
 import { Fact, Note, ToneDot } from './parts';
 
 /**
@@ -75,8 +77,12 @@ export function SourceStatus({ state, config }: { state: MonitoringState; config
                 ['Malformed', health.malformed],
                 ['Data sets waiting for a template', health.templateSources.reduce((n, t) => n + t.awaitingSets, 0)],
                 ['Unsupported version', health.unsupported],
-                ['Past the engine limit', health.engineLimitRejected],
+                [IDENTITY_CHURN_LABEL, health.engineLimitRejected],
+                [IDENTITIES_REPLACED_LABEL, health.identitiesReplaced],
               ]} />
+              {health.identitiesReplaced > 0 && (
+                <p className="text-[11px] leading-snug text-muted-foreground">{IDENTITIES_REPLACED_NOTE}</p>
+              )}
             </>
           )}
           <Counters items={[['Shed before writing', intake.shedDatagrams]]} />

@@ -12,8 +12,9 @@
 import assert from 'node:assert/strict';
 import { initialSourceHealth } from '../../src/services/monitoring/sourceHealth';
 import { LIMITS, type Evidence } from '../../src/services/monitoring/types';
+import { sourceKeyFor } from '../../src/services/monitoring/sourceKeys';
 import { sourceKey } from '../../src/services/monitoring/v5';
-import { EXPORTER } from './fixtures';
+import { COLLECTOR, EXPORTER, v9Sample } from './fixtures';
 import {
   BASE, HostRig, MIN, Rig, S2, SRC, SRC1, dgram, junk, rollUp, runAll, start, stop, test, unreadVersion,
 } from './queryRig';
@@ -196,24 +197,57 @@ test('sources: a change in the list alone is posted, and an unchanged one is not
   assert.equal(h.healthPosts().length, 3, 'the counts changed');
 });
 
-test('health: a datagram from an engine the Worker did not admit is counted against the limit and given no row', async () => {
-  const rig = new Rig();
-  const sixteen = Array.from({ length: LIMITS.enginesPerExporter }, (_, i) => dgram(m(1, i), [{}], { engineId: i }));
-  rig.append([start(m(0)), ...sixteen, stop(m(2))]);
-  await rollUp(rig);
-  rig.append([start(m(3), S2)]);
-  const h = new HostRig(rig.runtime);
-  h.wall = BASE;
-  await h.connect();
-  await push(rig, h, dgram(m(3, 5), [{}], { engineId: LIMITS.enginesPerExporter }));
+test('health: a 17th engine, heard in a later minute, takes the place of the least recent row and is counted', async () => {
+  const { rig, h } = await live();
+  for (let i = 0; i <= LIMITS.enginesPerExporter; i++) await push(rig, h, dgram(m(1 + i), [{}], { engineId: i }));
   h.tick();
-  const health = h.healthPosts().at(-1)?.health;
-  assert.ok(health);
-  assert.equal(health.engineLimitRejected, 1);
-  assert.equal(health.engines.length, 0);
-  assert.equal(health.freshness, 'never');
-  assert.ok(!h.healthPosts().at(-1)?.sources.includes(sourceKey(EXPORTER, 0, LIMITS.enginesPerExporter)));
+  const post = h.healthPosts().at(-1);
+  const health = post?.health;
+  assert.ok(health && post);
+  assert.equal(health.engines.length, LIMITS.enginesPerExporter);
+  assert.equal(health.identitiesReplaced, 1);
+  assert.equal(health.engineLimitRejected, 0);
+  assert.equal(health.freshness, 'fresh');
+  assert.ok(!health.engines.some((e) => e.engineId === 0), 'the engine heard least recently went');
+  assert.ok(health.engines.some((e) => e.engineId === LIMITS.enginesPerExporter));
+  assert.ok(post.sources.includes(sourceKey(EXPORTER, 0, LIMITS.enginesPerExporter)), 'and it is a source with History');
 });
+
+test('exporters: a rotating v9 Source ID leaves at most the bound of cards, and an evicted identity has none (ADR 0070)', async () => {
+  const { rig, h } = await live();
+  const ids = LIMITS.enginesPerExporter + 4;
+  for (let i = 1; i <= ids; i++) {
+    const receivedMs = m(i);
+    const header = { uptime: 1_000_000 + i * 60_000, secs: Math.floor(receivedMs / 1000), sequence: i, sourceId: i };
+    const bytes = v9Sample(header, [{ src: '10.0.0.1', dst: '10.0.0.2', octets: 100, packets: 2 }], null);
+    await push(rig, h, { kind: 'datagram', receivedMs, localIPv4: COLLECTOR, localPort: 2055, remoteIPv4: EXPORTER, remotePort: 40_000, bytes });
+    h.tick();
+  }
+  const posts = h.healthPosts();
+  for (const p of posts) assert.ok(p.exporters.length <= LIMITS.enginesPerExporter, `${p.exporters.length} cards in one push`);
+  const last = posts.at(-1)!;
+  assert.equal(last.exporters.length, LIMITS.enginesPerExporter, 'the sixteen held identities have a card each');
+  const keys = last.exporters.map((x) => x.sourceKey);
+  for (let i = 1; i <= ids - LIMITS.enginesPerExporter; i++) {
+    assert.ok(!keys.includes(sourceKeyFor('v9', EXPORTER, i)), `Source ID ${i} was evicted and has no card`);
+    assert.ok(last.sources.includes(sourceKeyFor('v9', EXPORTER, i)), `Source ID ${i} is still a source with History`);
+  }
+  assert.ok(keys.includes(sourceKeyFor('v9', EXPORTER, ids)), 'the newest identity has its card');
+});
+
+test('health: a 17th engine in one minute is identity churn: counted, given no row', async () => {
+  const { rig, h } = await live();
+  for (let i = 0; i <= LIMITS.enginesPerExporter; i++) await push(rig, h, dgram(m(1, i), [{}], { engineId: i }));
+  h.tick();
+  const post = h.healthPosts().at(-1);
+  const health = post?.health;
+  assert.ok(health && post);
+  assert.equal(health.engineLimitRejected, 1);
+  assert.equal(health.identitiesReplaced, 0);
+  assert.equal(health.engines.length, LIMITS.enginesPerExporter);
+  assert.ok(!post.sources.includes(sourceKey(EXPORTER, 0, LIMITS.enginesPerExporter)));
+});
+
 
 test('health: the analyzed and rolled-up watermarks follow the entries and the acknowledged posts', async () => {
   const { rig, h } = await live();

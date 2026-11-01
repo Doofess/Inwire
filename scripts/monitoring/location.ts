@@ -722,6 +722,55 @@ async function main(): Promise<void> {
     } finally { await unopened.close(); }
   });
 
+  await test('a crash\'s sidecar partial is removed at a writable open and kept at a read-only one', async (dir) => {
+    const root = path.join(dir, DATASET_SUBFOLDER);
+    const first = new Disk();
+    await first.record(root);
+    await first.close();
+    const partial = path.join(root, 'rollups.iwmr.0123456789ab.partial');
+    const other = path.join(root, 'archive.iwma.0123456789ab.partial');
+    writeFileSync(partial, 'half a trim');
+    writeFileSync(other, 'not the sidecar\'s');
+    // A dataset note from another dataset adopts the folder read-only.
+    const note = readFileSync(path.join(root, DATASET_FILE), 'utf8');
+    writeFileSync(path.join(root, DATASET_FILE), JSON.stringify({ ...datasetFile(root), generation: 'f'.repeat(32) }));
+    const readOnly = new Disk();
+    try {
+      assert.deepEqual(await readOnly.collector.open(root, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      assert.equal(readOnly.collector.status().storage, 'refused-corrupt');
+      assert.equal(existsSync(partial), true, 'a folder being read is not written to');
+    } finally { await readOnly.close(); }
+    writeFileSync(path.join(root, DATASET_FILE), note);
+    const writable = new Disk();
+    try {
+      assert.deepEqual(await writable.collector.open(root, CFG.storageLimitBytes, { isDefaultLocation: false }), { ok: true });
+      assert.equal(existsSync(partial), false, 'the sidecar\'s own partial is removed');
+      assert.equal(existsSync(other), true, 'another file\'s partial is not this code\'s to remove');
+    } finally { await writable.close(); }
+  });
+
+  await test('the volume\'s replaceRollups swaps the file under the same handle; a throw leaves the old file and no partial', async (dir) => {
+    const volume = openMonitoringVolume(dir);
+    try {
+      const handle = volume.rollups;
+      handle.write(0, new Uint8Array([1, 2, 3, 4]));
+      handle.flush();
+      assert.throws(() => volume.replaceRollups((fresh) => { fresh.write(0, new Uint8Array([9])); throw new Error('boom'); }), /boom/);
+      assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith('.partial')), [], 'the failed trim left no partial');
+      assert.deepEqual([...readFileSync(path.join(dir, 'rollups.iwmr'))], [1, 2, 3, 4], 'and the old file');
+      const same = volume.replaceRollups((fresh) => { fresh.write(0, new Uint8Array([7, 8])); });
+      assert.equal(same, handle, 'the store goes on with the handle it holds');
+      assert.equal(handle.size(), 2);
+      const back = new Uint8Array(2);
+      assert.equal(handle.read(0, back), 2);
+      assert.deepEqual([...back], [7, 8]);
+      handle.write(2, new Uint8Array([5]));
+      handle.flush();
+      assert.deepEqual([...readFileSync(path.join(dir, 'rollups.iwmr'))], [7, 8, 5], 'the handle appends to the new file');
+      assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith('.partial')), []);
+    } finally { volume.close(); }
+  });
+
   console.log(`\n${passes} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);
 }

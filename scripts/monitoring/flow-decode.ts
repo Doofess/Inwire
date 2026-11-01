@@ -103,6 +103,27 @@ test('policy: v5 decodes under policies 1 and 2, anything else is unsupported', 
 
 // --- scope and order ------------------------------------------------------------------------------------
 
+test('evict: a datagram of a 17th identity is decoded in full, and the valid result names the source it displaced', () => {
+  const store = new CollectorTemplateStore();
+  const msg = (sourceId: number) => v9m([templateSet(9, [templateRecord(9, 256, BASIC)]), dataSet(256, [basicRecord('10.0.0.1', '10.0.0.2', 1, 2, 6, 100, 1)])], { sourceId });
+  for (let id = 1; id <= LIMITS.enginesPerExporter; id++) {
+    const d = valid(decode(store, msg(id)));
+    assert.equal(d.evictedSourceKey, undefined, `identity ${id}`);
+    assert.ok(!('evictedSourceKey' in d), 'the field is absent, not undefined: older results are unchanged');
+  }
+  const before = store.exportScopes().length;
+  const seventeenth = valid(decode(store, msg(LIMITS.enginesPerExporter + 1)));
+  assert.equal(seventeenth.flows.length, 1, 'it is counted, with its own templates');
+  assert.equal(seventeenth.evictedSourceKey, `v9:${EXPORTER}/1`, 'identity 1 was heard least recently');
+  assert.equal(store.exportScopes().length, before);
+  assert.equal(store.lookup({ protocol: 'v9', exporter: EXPORTER, exporterPort: null, domain: 1 }, 256), null);
+  // A malformed datagram of a new identity evicts nothing: admission follows validation.
+  const bad = decode(store, ipf([templateSet(10, [templateRecord(10, 256, BASIC)])], { domain: 500, length: 99 }));
+  assert.equal(bad.kind, 'malformed');
+  assert.equal(store.exportScopes().length, before);
+  assert.ok(store.exportScopes().some((s) => s.domain === 2), 'and identity 2 is still held');
+});
+
 test('isolation: template 256 in (v9, A, 1) never decodes data in (v9, A, 2) or in IPFIX', () => {
   const store = new CollectorTemplateStore();
   const one = valid(decode(store, v9m([templateSet(9, [templateRecord(9, 256, BASIC)]), dataSet(256, [basicRecord('10.0.0.1', '10.0.0.2', 1, 2, 6, 100, 1)])])));

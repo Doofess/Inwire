@@ -47,9 +47,15 @@ import {
 import { MAX_ROLLUP_INFLATED_BYTES } from './rollupCodec';
 import { CorruptRollupError } from './runtime';
 import {
-  FORMAT_VERSION, LIMITS, WRITE_POLICY_VERSION, isReadablePolicy,
+  LIMITS, WRITE_POLICY_VERSION, isReadablePolicy,
   type CheckpointInfo, type Generation, type RollupWatermark, type StoredCheckpoint,
 } from './types';
+
+/**
+ * The sidecar's own header format (ADR 0071). 2 means no fragment straddles a segment start, so a trim can cut the
+ * file at any segment boundary. It is not the journal's `FORMAT_VERSION`; a format 1 sidecar is rebuilt once.
+ */
+export const ROLLUP_FORMAT_VERSION = 2;
 
 const KIND_MINUTE = 1;
 const KIND_WATERMARK = 2;
@@ -97,6 +103,16 @@ export interface RollupStoreOptions {
 
 const READ_ONLY = 'the dataset is read-only, so its rollups are not stored';
 
+/**
+ * How a trim puts a new sidecar in place of the old (ADR 0071). `write` fills a new, empty file; the contract is to
+ * create it beside the sidecar, let `write` fill it, flush it, then make it the sidecar and return the open handle.
+ * On a throw the old sidecar is untouched and the new file is gone. File names are the volume's, not this module's.
+ */
+export type SidecarReplace = (write: (fresh: BlockFile) => void) => BlockFile;
+
+/** The most bytes of kept entries held before they are written to the new file. */
+const TRIM_WRITE_BYTES = 1 << 20;
+
 export interface MinuteInput { sourceKey: string; minuteMs: number; bytes: Uint8Array }
 
 interface Located { minuteMs: number; offset: number; bodyLength: number; bytes: number; throughEntryId: number }
@@ -111,12 +127,17 @@ interface SidecarScan {
   watermark: RollupWatermark | null;
   minutes: Map<string, Located[]>;
   checkpoints: LocatedCheckpoint[];
+  /** The header's trimmed-through entry (0 when the header could not be read or was never trimmed). */
+  trimmedThrough: number;
 }
 
 interface LocatedCheckpoint extends CheckpointInfo { offset: number; bodyLength: number }
 
-function emptyScan(verdict: SidecarScan['verdict'], reason?: string): SidecarScan {
-  return { verdict, ...(reason === undefined ? {} : { reason }), batchEnd: FILE_HEADER_BYTES, lastEntryId: 0, watermark: null, minutes: new Map(), checkpoints: [] };
+function emptyScan(verdict: SidecarScan['verdict'], reason?: string, trimmedThrough = 0): SidecarScan {
+  return {
+    verdict, ...(reason === undefined ? {} : { reason }), batchEnd: FILE_HEADER_BYTES, lastEntryId: 0, watermark: null, minutes: new Map(), checkpoints: [],
+    trimmedThrough,
+  };
 }
 
 function scanSidecar(file: BlockFile, journal: JournalBounds): SidecarScan {
@@ -131,8 +152,8 @@ function scanSidecar(file: BlockFile, journal: JournalBounds): SidecarScan {
   file.read(0, headerBytes);
   const header = decodeFileHeader(ROLLUP_FRAMING, headerBytes);
   if (!header.ok) return emptyScan('rebuild-required', header.reason);
-  if (header.formatVersion !== FORMAT_VERSION) {
-    return emptyScan('rebuild-required', `sidecar format ${header.formatVersion}; this build reads ${FORMAT_VERSION}`);
+  if (header.formatVersion !== ROLLUP_FORMAT_VERSION) {
+    return emptyScan('rebuild-required', `sidecar format ${header.formatVersion}; this build reads ${ROLLUP_FORMAT_VERSION}`);
   }
   // The header's policy is the one the file was created under; a newer build's is not ours to continue (ADR 0066).
   if (!isReadablePolicy(header.policyVersion)) {
@@ -228,21 +249,24 @@ function scanSidecar(file: BlockFile, journal: JournalBounds): SidecarScan {
 
   if (outcome.problem !== null) return emptyScan('rebuild-required', outcome.problem);
   const wm = seen.watermark;
-  if (wm === null) return emptyScan('empty');
+  if (wm === null) return emptyScan('empty', undefined, header.trimmedThroughEntryId);
   if (wm.throughEntryId > journal.throughEntryId) {
     return emptyScan('rebuild-required', `the sidecar covers entry ${wm.throughEntryId}, past the journal's ${journal.throughEntryId}`);
   }
-  return { verdict: 'ok', batchEnd, lastEntryId: batchLastId, watermark: wm, minutes, checkpoints };
+  return { verdict: 'ok', batchEnd, lastEntryId: batchLastId, watermark: wm, minutes, checkpoints, trimmedThrough: header.trimmedThroughEntryId };
 }
 
 export class RollupStore {
-  /** The entry a batch must begin after while there is no watermark; set by `reset`, 0 for a file that was never reset. */
-  private base = 0;
+  /**
+   * The header's trimmed-through entry: 0 for a file never reset or trimmed, else the entry id the file continues from.
+   * It is the entry a batch must begin after while there is no watermark, and it is on disk, so it survives a reopen.
+   */
+  private trimmed = 0;
   /** Opened for a read-only adoption: refuses `reset` as well as every read and append. */
   private readOnly = false;
 
   private constructor(
-    private readonly file: BlockFile,
+    private file: BlockFile,
     private readonly journal: JournalBounds,
     private readonly nowMs: () => number,
     private end: number,
@@ -272,7 +296,7 @@ export class RollupStore {
     if (scan.verdict === 'empty') {
       const store = new RollupStore(file, journal, nowMs, FILE_HEADER_BYTES, 0, null, new Map(), null);
       try {
-        store.writeFreshHeader();
+        store.writeFreshHeader(scan.trimmedThrough);
       } catch (e) {
         const reason = `the sidecar's header could not be written: ${e instanceof Error ? e.message : String(e)}`;
         store.rebuildReason = reason;
@@ -295,14 +319,17 @@ export class RollupStore {
       }
     }
     const store = new RollupStore(file, journal, nowMs, scan.batchEnd, scan.lastEntryId, scan.watermark, scan.minutes, null, scan.checkpoints);
+    store.trimmed = scan.trimmedThrough;
     return { store, status: 'ok' };
   }
 
-  private writeFreshHeader(): void {
+  private writeFreshHeader(trimmedThroughEntryId = 0): void {
     this.file.truncate(0);
     this.file.write(0, encodeFileHeader(ROLLUP_FRAMING, {
       generation: generationFromHex(this.journal.generation), createdMs: this.nowMs(), policyVersion: WRITE_POLICY_VERSION,
+      formatVersion: ROLLUP_FORMAT_VERSION, trimmedThroughEntryId,
     }));
+    this.trimmed = trimmedThroughEntryId;
     this.end = FILE_HEADER_BYTES;
     this.lastId = 0;
     this.mark = null;
@@ -311,9 +338,17 @@ export class RollupStore {
     this.rebuildReason = null;
   }
 
+  /**
+   * The watermark the file holds. `trimmedThroughEntryId` is the header's, left off while it is 0 (never trimmed),
+   * so a watermark that was posted and one read back compare equal until a trim happens.
+   */
   watermark(): RollupWatermark | null {
-    return this.mark === null ? null : { ...this.mark };
+    if (this.mark === null) return null;
+    return this.trimmed === 0 ? { ...this.mark } : { ...this.mark, trimmedThroughEntryId: this.trimmed };
   }
+
+  /** The header's trimmed-through entry id: 0 for a sidecar never trimmed or reset past 0. */
+  trimmedThrough(): number { return this.trimmed; }
 
   size(): number { return this.end; }
 
@@ -368,7 +403,7 @@ export class RollupStore {
     if (bounds.journalThroughEntryId !== undefined && watermark.throughEntryId > bounds.journalThroughEntryId) {
       throw new RangeError(`a watermark of ${watermark.throughEntryId} is past the journal's ${bounds.journalThroughEntryId}`);
     }
-    const continuesFrom = this.mark === null ? this.base : this.mark.throughEntryId;
+    const continuesFrom = this.mark === null ? this.trimmed : this.mark.throughEntryId;
     if (afterEntryId !== continuesFrom) {
       throw new RangeError(`a batch after entry ${afterEntryId} does not continue the sidecar, which continues from entry ${continuesFrom}`);
     }
@@ -522,7 +557,95 @@ export class RollupStore {
   reset(baseEntryId = 0): void {
     if (this.readOnly) throw new Error(READ_ONLY);
     if (!Number.isSafeInteger(baseEntryId) || baseEntryId < 0) throw new RangeError('a base is a non-negative entry id');
-    this.writeFreshHeader();
-    this.base = baseEntryId;
+    this.writeFreshHeader(baseEntryId);
+  }
+
+  /**
+   * What an expiry does to the sidecar (ADR 0071): a new file holding what the cut leaves, in place of the old. The
+   * header keeps the generation and policy and records `cutThroughEntryId` as trimmed-through. Every minute, checkpoint
+   * and watermark whose through entry is after the cut is copied, in file order, body as it is (renumbered, since
+   * entry ids count the file's own entries); the rest describes entries the archive now holds. No fragment straddles
+   * a segment start, and the cut is always at a segment's end, so a fragment is wholly before it or wholly after.
+   *
+   * Runs to the end without yielding, and is verified before it is committed: the new file is scanned as an open
+   * would, and anything but a sidecar throws with the old one untouched. `emptied` when nothing was kept (the
+   * file is the header alone and the base is the cut: the Worker's next post is refused and the retry rebuilds
+   * from there). Throws when read-only or not usable; a throw leaves this store as it was.
+   */
+  trim(cutThroughEntryId: number, replace: SidecarReplace): 'trimmed' | 'emptied' {
+    if (this.readOnly) throw new Error(READ_ONLY);
+    this.requireUsable();
+    if (!Number.isSafeInteger(cutThroughEntryId) || cutThroughEntryId < this.trimmed) {
+      throw new RangeError(`a trim cut is an entry id at or after ${this.trimmed} (got ${cutThroughEntryId})`);
+    }
+    const oldBytes = new Uint8Array(FILE_HEADER_BYTES);
+    this.file.read(0, oldBytes);
+    const old = decodeFileHeader(ROLLUP_FRAMING, oldBytes);
+    if (!old.ok) throw new CorruptRollupError(`the sidecar's header no longer reads: ${old.reason}`);
+    const source = this.file;
+    const bounds: JournalBounds = { generation: this.journal.generation, throughEntryId: Number.MAX_SAFE_INTEGER };
+    const found: { scan: SidecarScan | null } = { scan: null };
+
+    const fresh = replace((out) => {
+      out.write(0, encodeFileHeader(ROLLUP_FRAMING, {
+        generation: old.generation, createdMs: old.createdMs, policyVersion: old.policyVersion,
+        formatVersion: ROLLUP_FORMAT_VERSION, trimmedThroughEntryId: cutThroughEntryId,
+      }));
+      let at = FILE_HEADER_BYTES;
+      let id = 0;
+      let held: Uint8Array[] = [];
+      let heldBytes = 0;
+      const flush = (): void => {
+        if (heldBytes === 0) return;
+        const all = new Uint8Array(heldBytes);
+        let w = 0;
+        for (const h of held) { all.set(h, w); w += h.length; }
+        out.write(at, all);
+        at += all.length;
+        held = [];
+        heldBytes = 0;
+      };
+      const outcome = scanEntries(source, ROLLUP_FRAMING, FILE_HEADER_BYTES, 0, (e) => {
+        const v = new DataView(e.body.buffer, e.body.byteOffset, e.body.byteLength);
+        let through: number;
+        if (e.kind === KIND_MINUTE) through = Number(v.getBigUint64(2 + v.getUint16(0, true) + 8, true));
+        else if (e.kind === KIND_CHECKPOINT) through = Number(v.getBigUint64(8, true));
+        else if (e.kind === KIND_WATERMARK) through = Number(v.getBigUint64(16, true));
+        else return `unknown kind ${e.kind}`;
+        if (through <= cutThroughEntryId) return null;
+        const entry = encodeEntry(ROLLUP_FRAMING, ++id, e.kind, e.body);
+        held.push(entry);
+        heldBytes += entry.length;
+        if (heldBytes >= TRIM_WRITE_BYTES) flush();
+        return null;
+      });
+      if (outcome.problem !== null || outcome.tornTail !== null) {
+        throw new CorruptRollupError(`the sidecar changed under the trim: ${outcome.problem ?? 'a torn tail'}`);
+      }
+      flush();
+      // What a reopen would make of it, before it is anyone's sidecar.
+      const scan = scanSidecar(out, bounds);
+      if (scan.verdict === 'rebuild-required') throw new CorruptRollupError(`the trimmed sidecar is not one: ${scan.reason ?? 'unknown'}`);
+      found.scan = scan;
+    });
+
+    const scan = found.scan;
+    if (scan === null) throw new Error('the replace did not run the write');
+    this.file = fresh;
+    this.trimmed = cutThroughEntryId;
+    if (scan.verdict === 'empty') {
+      this.end = FILE_HEADER_BYTES;
+      this.lastId = 0;
+      this.mark = null;
+      this.minutes = new Map();
+      this.checkpointIndex = [];
+      return 'emptied';
+    }
+    this.end = scan.batchEnd;
+    this.lastId = scan.lastEntryId;
+    this.mark = scan.watermark;
+    this.minutes = scan.minutes;
+    this.checkpointIndex = scan.checkpoints;
+    return 'trimmed';
   }
 }

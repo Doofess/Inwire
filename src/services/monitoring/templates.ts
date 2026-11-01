@@ -13,9 +13,11 @@
  *   count, not by time;
  * - a restart (v9 `sysUptime` going back, an IPFIX source port changing, IE 160
  *   changing) invalidates the whole scope;
- * - the bounds refuse, never evict: an exporter opens at most `LIMITS.enginesPerExporter` scopes (`canOpen`),
- *   and a start boundary naming another exporter drops the old exporter's scopes (`retainExporter`), so a
- *   checkpoint never holds two exporters' scopes of one protocol, domain and port.
+ * - the bounds recycle (ADR 0070): an exporter holds at most `LIMITS.enginesPerExporter` scopes, and a datagram
+ *   of one more evicts the scope heard from least recently, templates and all (`admit`), so every valid datagram
+ *   is counted and a rotating identity cannot grow a checkpoint. A start boundary naming another exporter drops
+ *   the old exporter's scopes (`retainExporter`), so a checkpoint never holds two exporters' scopes of one
+ *   protocol, domain and port.
  *
  * Counting: a scope's message counter increments in `beginDatagram`, before the
  * expiry check, so the datagram doing the checking counts itself. A template
@@ -28,6 +30,7 @@
  * Pure: no `node:*`, no Electron, like everything under `src/services/`.
  */
 import type { FlowTemplate, FlowTemplateField } from '../flow/flowExport';
+import { sourceKeyFor } from './sourceKeys';
 import { LIMITS } from './types';
 
 export interface TemplateScope {
@@ -81,6 +84,8 @@ export interface ScopeSnapshot {
   /** A collection gap has ended since this scope's last datagram (ADR 0065). */
   gap: boolean;
   messages: number;
+  /** The entry id of the last datagram this scope was heard in (ADR 0070): which scope a 17th identity displaces. */
+  lastHeardEntryId: number;
   templates: StoredTemplate[];
 }
 
@@ -190,6 +195,7 @@ interface ScopeState {
   domain: number;
   templates: Map<number, StoredTemplate>;
   messages: number;
+  lastHeardEntryId: number;
   gap: boolean;
   uptimeMs: number | null;
   systemInitMs: number | null;
@@ -214,6 +220,10 @@ function sameSpecifiers(a: FlowTemplate, b: FlowTemplate): boolean {
 
 const clamp32 = (n: number): number => Math.min(Math.max(n, 0), U32 - 1);
 
+/** The checkpoint's scope order: protocol (v9 first), then Source ID or domain, then port. It also breaks eviction ties. */
+const scopeOrder = (a: { protocol: string; domain: number; port: number }, b: { protocol: string; domain: number; port: number }): number =>
+  (a.protocol === b.protocol ? 0 : a.protocol === 'v9' ? -1 : 1) || a.domain - b.domain || a.port - b.port;
+
 export class CollectorTemplateStore {
   private readonly scopes = new Map<string, ScopeState>();
   private templateCount = 0;
@@ -234,20 +244,42 @@ export class CollectorTemplateStore {
   private fresh(scope: TemplateScope): ScopeState {
     return {
       protocol: scope.protocol, exporter: scope.exporter, port: scope.exporterPort ?? 0, domain: scope.domain,
-      templates: new Map(), messages: 0, gap: false, uptimeMs: null, systemInitMs: null,
+      templates: new Map(), messages: 0, lastHeardEntryId: 0, gap: false, uptimeMs: null, systemInitMs: null,
       withdrawalsIgnored: 0, refused: 0, restarts: 0, refusedIds: new Set(),
     };
   }
 
   /**
-   * Whether a datagram of `scope` may be counted by it: the scope exists, or its exporter has fewer than
-   * `LIMITS.enginesPerExporter` scopes. A datagram that may not creates nothing - no scope, no source.
+   * A valid datagram of `scope`, heard at `entryId`, before `beginDatagram`: the scope exists (it is heard
+   * again), or it is made, and while its exporter already holds `LIMITS.enginesPerExporter` scopes the one
+   * heard from least recently is evicted first, templates included (ADR 0070). A tie, which only a format 1
+   * checkpoint restores, goes to the first in the checkpoint's order. Returns the evicted scope's source key
+   * for the caller to drop its source too (`ExporterState.forgetSource`), or null when nothing was evicted.
+   * A datagram that is not valid is never admitted: it creates and evicts nothing.
    */
-  canOpen(scope: TemplateScope): boolean {
-    if (this.scopes.has(CollectorTemplateStore.key(scope))) return true;
+  admit(scope: TemplateScope, entryId: number): string | null {
+    const existing = this.scopes.get(CollectorTemplateStore.key(scope));
+    if (existing !== undefined) {
+      existing.lastHeardEntryId = entryId;
+      return null;
+    }
     let held = 0;
-    for (const st of this.scopes.values()) if (st.exporter === scope.exporter) held++;
-    return held < LIMITS.enginesPerExporter;
+    let victim: ScopeState | null = null;
+    for (const st of this.scopes.values()) {
+      if (st.exporter !== scope.exporter) continue;
+      held++;
+      if (victim === null || st.lastHeardEntryId < victim.lastHeardEntryId || (st.lastHeardEntryId === victim.lastHeardEntryId && scopeOrder(st, victim) < 0)) victim = st;
+    }
+    let evicted: string | null = null;
+    if (held >= LIMITS.enginesPerExporter && victim !== null) {
+      this.forget(victim);
+      this.scopes.delete(CollectorTemplateStore.key(victim));
+      evicted = sourceKeyFor(victim.protocol, victim.exporter, victim.domain);
+    }
+    const st = this.fresh(scope);
+    st.lastHeardEntryId = entryId;
+    this.scopes.set(CollectorTemplateStore.key(scope), st);
+    return evicted;
   }
 
   /** Drops every scope, templates included, that is not `exporter`'s: a start boundary naming another exporter (the owner changed it). */
@@ -286,6 +318,7 @@ export class CollectorTemplateStore {
         st.refused = old.refused;
         st.restarts = old.restarts + 1;
         st.messages = old.messages;
+        st.lastHeardEntryId = old.lastHeardEntryId;
         restart = true;
       }
       this.scopes.set(key, st);
@@ -449,10 +482,10 @@ export class CollectorTemplateStore {
   /** Every scope in the checkpoint's order: protocol, then Source ID or domain, then port; templates by id. */
   exportScopes(): ScopeSnapshot[] {
     return [...this.scopes.values()]
-      .sort((a, b) => (a.protocol === b.protocol ? 0 : a.protocol === 'v9' ? -1 : 1) || a.domain - b.domain || a.port - b.port)
+      .sort(scopeOrder)
       .map((st) => ({
         protocol: st.protocol, exporter: st.exporter, port: st.port, domain: st.domain, uptimeMs: st.uptimeMs, systemInitMs: st.systemInitMs,
-        gap: st.gap, messages: st.messages, templates: [...st.templates.values()].sort((a, b) => a.id - b.id),
+        gap: st.gap, messages: st.messages, lastHeardEntryId: st.lastHeardEntryId, templates: [...st.templates.values()].sort((a, b) => a.id - b.id),
       }));
   }
 
@@ -468,7 +501,7 @@ export class CollectorTemplateStore {
       perExporter.set(snap.exporter, held);
       const st: ScopeState = {
         protocol: snap.protocol, exporter: snap.exporter, port: snap.port, domain: snap.domain, templates: new Map(),
-        messages: snap.messages, gap: snap.gap, uptimeMs: snap.uptimeMs, systemInitMs: snap.systemInitMs,
+        messages: snap.messages, lastHeardEntryId: snap.lastHeardEntryId, gap: snap.gap, uptimeMs: snap.uptimeMs, systemInitMs: snap.systemInitMs,
         withdrawalsIgnored: 0, refused: 0, restarts: 0, refusedIds: new Set(),
       };
       for (const t of snap.templates) {

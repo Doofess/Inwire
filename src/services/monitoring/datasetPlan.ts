@@ -55,6 +55,15 @@ export function classifyMonitoringName(name: string, opts: { isDefaultLocation: 
   return partial === null ? 'foreign' : classifyBase(partial[1], opts.isDefaultLocation);
 }
 
+/**
+ * The sidecar's `.partial`s that a crash left (ADR 0071): the new file of a trim that died before its rename, as large
+ * as the sidecar. `atomicWrite` removes its partial only after a failure it saw. Only `rollups.iwmr`'s: another
+ * file's partial is that file's writer's business. The caller removes these when it opens the dataset writable.
+ */
+export function staleSidecarPartials(names: readonly string[]): string[] {
+  return names.filter((n) => PARTIAL_SUFFIX.exec(n)?.[1] === ROLLUP_NAME);
+}
+
 export interface DiscardPlan {
   /** What a discard deletes, in the order it deletes it. `dataset.json`, where present, is last. */
   remove: string[];
