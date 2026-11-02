@@ -149,11 +149,16 @@ export interface CoordinatorOptions {
 
 /**
  * Frames in flight past which the Worker's flush stops handing the coordinator
- * more: a cap, not the bound. It bounds the entry map and the id ring
- * (`treeLane`, 8192 a lane) when frames are tiny, where
- * `PARALLEL_BACKLOG_BYTES` would admit a million.
+ * more: a cap, not the bound. It bounds the entry map, the frames held for
+ * routing and the shards' queued batches when frames are tiny, where
+ * `PARALLEL_BACKLOG_BYTES` would admit almost a million.
+ *
+ * What binds then is the heap each entry holds, not its bytes: a frame answered
+ * and waiting behind the hot shard held 643-756 bytes (2026-11-02), so at this
+ * cap tiny frames hold about 120 MB. It is the burst's 135,000 frames under
+ * `PARALLEL_BACKLOG_BYTES` with room to spare; 262,144 allowed 190 MB.
  */
-export const PARALLEL_BACKLOG_FRAMES = 262_144;
+export const PARALLEL_BACKLOG_FRAMES = 163_840;
 
 /**
  * Estimated bytes (`inFlightCost`) in flight past which the flush stops: the
@@ -170,13 +175,21 @@ export const PARALLEL_BACKLOG_FRAMES = 262_144;
 export const PARALLEL_BACKLOG_BYTES = 160 * 1024 * 1024;
 
 /**
- * What a frame in flight holds beyond its captured bytes, on the V8 heap.
+ * What a frame in flight holds beyond its captured bytes, on the V8 heap,
+ * **before its shard answers**.
  *
  * Measured 2026-11-02 on the first 100,000 frames of the burst, 6 shards, with
  * every message to a shard dropped so that nothing merged (`heapUsed` after
  * `gc()` before and after, divided by 100,000): 122.5 bytes a frame (the entry
  * and what hangs from it), rounded up to the next 64. The frame's bytes are a
  * view into the agent's batch and are not in it.
+ *
+ * **An answered frame waiting to merge holds more**: its result, side record
+ * and a share of its pack, about 0.4 kB more (measured with each frame its own
+ * buffer, 643-756 bytes answered against 289-381 not). Under skew most frames
+ * in flight are in that state; at the burst's frame size that is about 60 MB
+ * of heap the estimate leaves out, against the bytes it counts off the heap. A
+ * decoded row holds more again and is counted (`DECODED_ROW_COST`).
  *
  * **Not in it either:** a batch still waiting for its shard holds a copy of
  * each frame's bytes and about 260 bytes of op row, as typed arrays, which
@@ -217,6 +230,21 @@ export const LANE_ZERO_WAITING_BYTES = 256 * 1024 * 1024;
 export function laneZeroCost(capturedLength: number): number {
   return 14 * 1024 + 4 * capturedLength;
 }
+
+/**
+ * What a shard row decoded at the merge holds beyond a light one, while it
+ * waits to merge: the `Packet` and its field bag. Counted with lane 0's
+ * results (`laneZeroWaiting`), which are the same thing - dissected and
+ * waiting - from the other lane.
+ *
+ * A row is decoded with more than one interface (`decodeRows`) or for a
+ * `needsRow` result. Under skew most frames in flight are answered and waiting
+ * behind the hot shard, and decoded each held 3,807-3,860 bytes of V8 heap
+ * against 643-756 light (2026-11-02, two shards, one never answering, 60,000
+ * frames of 60 and 1,114 bytes): 3,104-3,164 more, rounded up to the next 64.
+ * Uncounted, the frame cap let a capture on two adapters hold about 1 GB.
+ */
+export const DECODED_ROW_COST = 3200;
 
 /** What the flush reads of the coordinator. */
 type Load = Pick<Coordinator, 'backlog' | 'laneZeroWaiting' | 'inFlightBytes'>;
@@ -501,7 +529,11 @@ export class Coordinator {
     return this.held.length - this.heldFrom + this.entries.size;
   }
 
-  /** Estimated bytes of lane-0 results dissected and not yet merged (`LANE_ZERO_WAITING_BYTES`). */
+  /**
+   * Estimated bytes of results dissected and not yet merged
+   * (`LANE_ZERO_WAITING_BYTES`): lane 0's, and shard rows decoded here
+   * (`DECODED_ROW_COST`).
+   */
   get laneZeroWaiting(): number {
     return this.waitingCost;
   }
@@ -557,6 +589,8 @@ export class Coordinator {
           packet.rawBytes = entry.bytes ?? new Uint8Array(0);
           entry.packet = packet;
           entry.packed = { pack, index: result.row, mark: overlayMark(packet) };
+          entry.cost = (entry.cost ?? 0) + DECODED_ROW_COST;
+          this.waitingCost += DECODED_ROW_COST;
         } else {
           // Light: the row stays where the shard put it.
           entry.packed = { pack, index: result.row };

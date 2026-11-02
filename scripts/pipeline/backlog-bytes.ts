@@ -7,7 +7,8 @@
  * and at 65,536 frames in flight that connection's frames filled the allowance
  * while the other shards sat idle (ADR 0053, "Shard skew"). The flush now stops
  * on bytes - `PARALLEL_BACKLOG_BYTES` of `inFlightCost` - and on a high frame
- * cap, `PARALLEL_BACKLOG_FRAMES`, which bounds the entry map and the id ring.
+ * cap, `PARALLEL_BACKLOG_FRAMES`, which bounds the entry map. Rows decoded at
+ * the merge are counted with lane 0's results waiting (`DECODED_ROW_COST`).
  *
  * Held here: `inFlightBytes` is the sum of `inFlightCost` over frames
  * dispatched and not yet merged, markers not counted, and is back to exactly
@@ -18,7 +19,7 @@
  */
 import { ethernet, ipv4, tcpFrame, udp } from '../parity/synthetic';
 import {
-  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG_BYTES, PARALLEL_BACKLOG_FRAMES, coordinatorSequencer,
+  Coordinator, DECODED_ROW_COST, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG_BYTES, PARALLEL_BACKLOG_FRAMES, coordinatorSequencer,
   flushTake, inFlightCost, parallelRoom, parallelRoomAgain, type CoordFrame,
 } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
@@ -139,6 +140,60 @@ console.log('\n--- what is counted, and when it is let go ---\n');
   check('frames routed to lane 0 after it are counted and released as well',
     merged.length === before.length + after.length && coordinator.inFlightBytes === 0,
     `${merged.length} merged, ${coordinator.inFlightBytes} bytes`);
+}
+
+console.log('\n--- answered frames waiting behind the hot shard ---\n');
+{
+  // Skew's own state: one shard never answers, the other's frames are answered
+  // and wait to merge behind it. With more than one interface each of them
+  // holds a decoded row, measured at about 3.1 kB more than a light one
+  // (`DECODED_ROW_COST`), which the bytes in flight do not count.
+  const run = (decodeRows: boolean) => {
+    const toShard: ToShard[][] = [[], []];
+    const back: FromShard[] = [];
+    const shards = [0, 1].map(() => new Shard((message, transfer) => {
+      back.push(structuredClone(message, { transfer: transfer as ArrayBuffer[] }));
+    }, { shards: 2, cacheFrames: 64, env: FIXED_ENV, withTrees: false }));
+    const merged: number[] = [];
+    const sequencer = coordinatorSequencer();
+    const coordinator = new Coordinator({
+      shards: 2, route: 'connection', trackers: trackers(sequencer), sequencer, env: shardEnv(FIXED_ENV, 2),
+      ifaceOf: () => undefined,
+      send: (s, message, transfer) => { toShard[s].push(structuredClone(message, { transfer: transfer as ArrayBuffer[] })); },
+      emit: (m) => { merged.push(m.id); },
+    });
+    coordinator.decodeRows = decodeRows;
+    const deliver = (s: number): void => {
+      for (;;) {
+        const out = toShard[s].shift();
+        if (out !== undefined) shards[s].handle(out);
+        const answer = back.shift();
+        if (answer !== undefined) coordinator.receive(s, answer);
+        if (out === undefined && answer === undefined) return;
+      }
+    };
+    const hot = frameOf(1, tcpFrame(40000, 443, 1, 1, new Uint8Array(10)));
+    const cold = Array.from({ length: 20 }, (_, i) => frameOf(i + 2, tcpFrame(40001, 443, i + 2, 1, new Uint8Array(10))));
+    coordinator.dispatch([hot, ...cold]);
+    const hotShard = toShard[0].length > 0 ? 0 : 1;
+    deliver(1 - hotShard);
+    const waiting = coordinator.laneZeroWaiting;
+    deliver(hotShard);
+    return { waiting, merged: merged.length, after: coordinator.laneZeroWaiting, bytes: coordinator.inFlightBytes };
+  };
+  const decoded = run(true);
+  check('20 answered rows decoded and waiting are counted as results waiting to merge',
+    decoded.waiting === 20 * DECODED_ROW_COST, `${decoded.waiting} against ${20 * DECODED_ROW_COST}`);
+  check('...and let go when the hot shard answers and they merge',
+    decoded.merged === 21 && decoded.after === 0 && decoded.bytes === 0, `${decoded.merged} merged, ${decoded.after} waiting`);
+  const light = run(false);
+  check('light rows (one interface) are not counted as decoded', light.waiting === 0 && light.merged === 21,
+    `${light.waiting} waiting`);
+  // A light answered frame holds about 0.7 kB of heap while it waits (measured
+  // 643-756 B with each frame its own buffer), whatever its size: at the frame
+  // cap, tiny frames are bounded by that and not by their bytes.
+  check('the frame cap holds light answered frames to about 120 MB of heap',
+    PARALLEL_BACKLOG_FRAMES * 768 <= 120 * 2 ** 20, `${((PARALLEL_BACKLOG_FRAMES * 768) / 2 ** 20).toFixed(0)} MiB`);
 }
 
 console.log('\n--- the flush\'s decisions ---\n');

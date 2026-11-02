@@ -763,6 +763,91 @@ dominates. `findUdpPort` runs twice for a datagram on a dispatch port, once in
 (`scripts/perf/profile.ts`, `inwire` fixture) and too small to sample on the
 half-QUIC one.
 
+### Shard skew, as built
+
+**Landed 2026-11-02.** Phase 5 left the next limit as one busy shard. On the
+TCP burst (`burst300k`, 300,000 frames, mean 1,114 B) that is one connection:
+it carries 66,594 frames, 22% of the capture, and pins its shard at 92-95%
+busy. Six shards gave 69,100 frames a second in `parallel-threads.ts` and
+eight gave 69,200, so more shards do not move it. `shardFor` already places
+new connections by load, so placement was not the cause either.
+
+**Measured first:**
+
+- **The backlog starved the skewed shard.** With 65,536 frames in flight (the
+  old `PARALLEL_BACKLOG`) the hot shard's queue emptied while the coordinator
+  waited on the others: 53,800 and 64,200 a second. With 131,072 in flight,
+  72,400 and 71,100. More batches in flight per shard (2, 4, 8) changed
+  nothing.
+- **A shard's own frame cost 39 us** alone against 20.5 us for the bare
+  dissection: `dissect` 62%, `encodeChunk` 17.8% inclusive (`fieldEntries`
+  8.7% self), collection 14%. Six shards side by side cost about 62 us a
+  frame each, from contention.
+
+**What changed:**
+
+- **Frames in flight are bounded by bytes**, not by count:
+  `PARALLEL_BACKLOG_BYTES` is 160 MiB, each frame costed at its length plus
+  `IN_FLIGHT_FRAME_OVERHEAD` (128 B, measured at 122.5 B of V8 heap for a
+  frame its shard has not answered), with `PARALLEL_BACKLOG_FRAMES` (163,840)
+  as a ceiling for tiny frames. Room is 0 at the bound and a dispatch
+  overshoots by at most one slice. On the burst the bound admits about 135,000
+  frames, the figure that fed the hot shard above. `scripts/pipeline/backlog-bytes.ts`.
+- **What the bound does not count.** The second copy of the bytes, in a batch
+  waiting for its shard, is off the V8 heap (about 1.35 kB a frame on the
+  burst). Under skew most frames in flight are answered and waiting behind the
+  hot shard, which holds about 0.4 kB a frame more than 128 B: about 60 MB on
+  the burst, and at the frame cap about 120 MB for tiny frames, which is why
+  the cap is 163,840 and not the 262,144 first built (190 MB). With more than
+  one interface every answered row is decoded at the merge, 3.1 kB more again;
+  those are counted with lane 0's results (`DECODED_ROW_COST` against
+  `LANE_ZERO_WAITING_BYTES`), since uncounted the cap let a capture on two
+  adapters hold about 1 GB of the renderer's shared heap. The whole-branch
+  review found it; the gate ran on one interface and could not.
+- **A shard packs a row's fields without materialising them.**
+  `forEachField` (`fieldAccess.ts`) walks the bag and the dense columns in
+  `fieldEntries`' order and `encodeChunk` writes each one as it is visited,
+  patching the count after. The chunk bytes are identical to the old encoder's
+  on all three fixtures. Measured with `scripts/perf/shard-cost.ts`, which
+  replays one shard's recorded messages in-process (threaded figures moved
+  36.6-49.5 us between runs on a busy machine): fastest of nine, alternated,
+  31.25 and 32.91 us a frame against 37.30 and 34.62.
+
+**Measured and left.** The shard allocates about 53 kB a frame
+(`shard-cost.ts --alloc-prof`), nearly all of it the detail tree built inline
+with the summary: `dissectTcpTransport` 17%, `decodeNetworkLayer` 15%,
+`decodeRawEthernetPacket` 8.5%, `analyzeTcpSegment` 6.5%, `tcpFlagFields` 6%.
+That is where the collection time comes from. Cutting it means building trees
+on demand from records instead, a change across the dissectors, and it is
+the next lever. `set toTemporalInstant` (3% of a profile) is tsx's `__name`
+and absent from the built app.
+
+**The gate**, `ui-burst-drive.ts --follow-only`, six shards, 1 GB buffer,
+`burst300k`, against fce4f57 built the same way:
+
+| | fce4f57 | This build |
+|---|---|---|
+| 60,000 offered, alternated (5 runs) | 3 of 3 kept up; lag 25,000-114,000 | 2 of 2 kept up; lag 18,000-41,000 |
+| 60,000 offered, gate (3 runs) | | 58,200 / 57,800 / 57,600 advanced of 57,900 / 57,900 / 57,600 sent; lag flat at 16,000-35,000; 0 skipped |
+| 90,000 offered | 60,800 advanced, behind into catch-up | 60,400 advanced, behind into catch-up |
+| 60,000 offered, after the review's fix (3 runs) | | 57,400 / 58,100 / 58,400 advanced of 57,300 / 57,700 / 57,600 sent; lag flat at 17,000-51,000; 0 skipped |
+| Worker heap, every 2 s over all its runs | 16-67 MB | 12-41 MB |
+
+"Advanced" counts the frames shown during the 25 seconds, the ones still
+queued when they began included, so a run that ends closer to live than it
+started shows more than it was sent. A first run of this build on a busier machine fell behind after 16 seconds
+(50,700 advanced of 57,900); the runs above were alternated so both builds
+met the same load. The half-QUIC capture at 60,000: 60,050 advanced of
+60,200, lag flat at about 20,000 (86,000-115,000 under **Phase 5, as
+built**), Worker heap 66-121 MB. `live-revisit-drive.ts` passes through the
+installed agent.
+
+**The single-connection ceiling stands.** At 90,000 both builds advance the
+same, because the hot connection's shard is the limit and one connection is
+one shard. Splitting a connection across shards is the option not taken:
+TCP's reassembly and analysis state is per connection and ordered, and
+splitting it would mean handing that state between threads mid-stream.
+
 ## What came first
 
 Measured before any of the above, because the rule in CLAUDE.md §7 is that no
