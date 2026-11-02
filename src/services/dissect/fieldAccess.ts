@@ -95,6 +95,36 @@ export function fieldEntries(packet: Packet): [string, string | number][] {
 }
 
 /**
+ * `fieldEntries` without the array: every field to `visit`, in the same order
+ * (the bag's own keys as `Object.entries` lists them, then the dense columns),
+ * answering how many there were.
+ *
+ * For a per-frame writer. `encodeChunk` packing a shard's rows materialised a
+ * pair per field, about 25 a frame, and `fieldEntries` was 7.3% of a shard's
+ * own time (`scripts/perf/shard-cost.ts`, ADR 0053 "Shard skew").
+ */
+export function forEachField(packet: Packet, visit: (key: string, value: string | number) => void): number {
+  let count = 0;
+  const bag = packet.fields;
+  if (bag !== undefined) {
+    // A bag is a plain object: `for...in` walks exactly `Object.entries`' keys, in its order.
+    for (const key in bag) {
+      visit(key, bag[key]);
+      count++;
+    }
+  }
+  const block = packet.cols;
+  if (block !== undefined && packet.row !== undefined) {
+    assertLiveBlock(block);
+    for (const key of DENSE_FIELDS) {
+      const value = block.read(packet.row, key.abbrev);
+      if (value !== undefined) { visit(key.abbrev, value); count++; }
+    }
+  }
+  return count;
+}
+
+/**
  * A `FieldBlock` that lost its methods, which means it crossed a boundary.
  *
  * A structured clone carries the Maps and the typed arrays and drops the
