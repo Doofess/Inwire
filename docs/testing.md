@@ -176,6 +176,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | Reverse DNS has at most four lookups in flight | `scripts/geoip/reverse-dns-queue.ts` |
 | One icon set; `Map` and `Image` aliased | `scripts/themes/icon-set.ts` |
 | Scripts launch the app in the background | `scripts/electron/background-launch.ts` |
+| The motion setting reaches motion/react: with "always" a modal card's transform animates, with "never" it snaps from start to rest with no frame in between (read from the computed transform: motion 14 animates through the Web Animations API) | `scripts/electron/motion-setting.ts` (needs `dist/`) |
 | `reg query` error shapes read correctly | `scripts/electron/agent-health.ts` |
 | Update Center scripts keep no bare `-ArgumentList` | `scripts/electron/update-center.ts` |
 | The monitoring quit drain always settles | `scripts/monitoring/quit-drain.ts` |
