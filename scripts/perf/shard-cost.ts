@@ -14,13 +14,18 @@
  * fastest and the median. The fastest is the figure a cut is judged on: noise
  * only ever adds time.
  *
+ * `--alloc-prof <file.heapprofile>` adds one replay under V8's sampling heap
+ * profiler, collected objects included, and prints the bytes a frame each
+ * function allocated: where the shard's collection time comes from.
+ *
  * Under `--cpu-prof` the profile is the shard's work alone, reps included.
  * Run it under `node --import tsx` rather than `npx tsx` so `--expose-gc` and
  * `--cpu-prof` reach the process that does the work.
  *
  * A measurement, so not a test (`check.ts` NOT_TESTS).
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { Session } from 'node:inspector';
 import { PcapService } from '../../src/services/pcapParser';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
@@ -45,6 +50,7 @@ if (!pcap) {
 }
 const maxFrames = Number(arg('--frames') ?? 100_000);
 const reps = Number(arg('--reps') ?? 7);
+const allocProf = arg('--alloc-prof');
 /** Frames handed to the coordinator at a time, as `parallel-threads.ts` does. */
 const DISPATCH = 2048;
 const CACHE_FRAMES = 2000;
@@ -121,6 +127,50 @@ async function main(): Promise<void> {
   const sorted = [...perFrame].sort((a, b) => a - b);
   console.log(`us a frame: fastest ${sorted[0].toFixed(2)}, median ${sorted[Math.floor(sorted.length / 2)].toFixed(2)}`
     + ` (${perFrame.map((x) => x.toFixed(2)).join(' ')})${gc ? '' : '; no --expose-gc, so no collection between reps'}`);
+
+  if (allocProf !== undefined) await allocations(recorded, onShard, allocProf);
+}
+
+/**
+ * One more replay under V8's sampling heap profiler, counting what the
+ * collector has already taken back (`--heap-prof` keeps only what is still
+ * alive at exit, which says nothing about churn). Prints the bytes a frame
+ * each function allocated, and writes the `.heapprofile` for DevTools.
+ */
+async function allocations(recorded: ToShard[], onShard: number, out: string): Promise<void> {
+  const session = new Session();
+  session.connect();
+  const post = (method: string, params?: object) => new Promise<unknown>((resolve, reject) => {
+    session.post(method, params ?? {}, (err, result) => (err ? reject(err) : resolve(result)));
+  });
+  const messages = recorded.map((m) => structuredClone(m));
+  const shard = new Shard(() => { /* not the measurement */ }, { shards: 1, cacheFrames: CACHE_FRAMES });
+  await post('HeapProfiler.enable');
+  await post('HeapProfiler.startSampling', {
+    samplingInterval: 4096, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true,
+  });
+  for (const message of messages) shard.handle(message);
+  const { profile } = await post('HeapProfiler.stopSampling') as { profile: SamplingNode & object };
+  session.disconnect();
+  writeFileSync(out, JSON.stringify(profile));
+  const self = new Map<string, number>();
+  const walk = (node: SamplingNode) => {
+    const where = `${node.callFrame.functionName || '(anonymous)'} ${node.callFrame.url.split('/').slice(-2).join('/')}`;
+    self.set(where, (self.get(where) ?? 0) + node.selfSize);
+    for (const child of node.children) walk(child);
+  };
+  walk((profile as unknown as { head: SamplingNode }).head);
+  const total = [...self.values()].reduce((a, b) => a + b, 0);
+  console.log(`allocated ${(total / onShard).toFixed(0)} bytes a frame (sampled); by function:`);
+  for (const [where, bytes] of [...self].sort((a, b) => b[1] - a[1]).slice(0, 25)) {
+    console.log(`  ${(bytes / onShard).toFixed(0).padStart(6)} B  ${(100 * bytes / total).toFixed(1).padStart(5)}%  ${where}`);
+  }
+}
+
+interface SamplingNode {
+  callFrame: { functionName: string; url: string };
+  selfSize: number;
+  children: SamplingNode[];
 }
 
 void main();
