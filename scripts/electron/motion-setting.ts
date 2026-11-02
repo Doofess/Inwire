@@ -12,8 +12,8 @@
  * confirm's card (`AlertCard`, `modalPanelMotion`: scale 0.96 and y 8 to rest
  * in 180 ms). motion's reduced mode drops TRANSFORM animations and keeps
  * opacity, so the card's transform is what tells the two apart. With "always"
- * it passes through in-between values for several frames; with "never" it is
- * at rest by the first frame after mount.
+ * it passes through in-between values for several frames; with "never" it
+ * snaps from its start to rest and is never in between (see `pose`).
  *
  * Opened the way a person opens it: frames are marked unsaved and main closes
  * the window, which the quit guard turns into the renderer's confirm. Keep is
@@ -25,6 +25,7 @@ import path from 'node:path';
 import { startStubAgent } from './stubAgent';
 import { launchApp } from './launchApp';
 import { QUIT_CONFIRM_TEXT } from '../../src/lib/quitConfirm';
+import { modalPanelMotion } from '../../src/lib/modalMotion';
 
 let failed = false;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -56,7 +57,7 @@ const RECORD = `(() => {
     const card = document.querySelector('[role="alertdialog"] > div');
     if (card) {
       if (!start) start = now;
-      samples.push(card.style.transform || 'none');
+      samples.push(getComputedStyle(card).transform || 'none');
       if (now - start > 400) { window.__motionSamples = samples; return; }
     }
     requestAnimationFrame(tick);
@@ -64,13 +65,29 @@ const RECORD = `(() => {
   requestAnimationFrame(tick);
 })()`;
 
-/** A transform at rest: none, or one whose scale is 1 and whose translateY is 0. */
-function atRest(transform: string): boolean {
-  if (transform === 'none' || transform === '') return true;
-  const scale = /scale\(([^)]+)\)/.exec(transform);
-  const y = /translateY\(([^)]+)\)/.exec(transform);
-  if (!scale && !y) return false; // a spelling this does not know is not proof of rest
-  return (!scale || parseFloat(scale[1]) === 1) && (!y || parseFloat(y[1]) === 0);
+/**
+ * Where a sampled transform sits: at `rest`, at the panel's `start`
+ * (modalPanelMotion's initial scale and y), or `between` - and only between is
+ * animation. Reduced motion is a snap from start to rest, and when the snap
+ * lands is the library's business: motion 12 is at rest on the frame after
+ * mount, motion 14 holds the start for one more frame and then snaps. A frame
+ * between the two is a frame of movement, which is what "never" must not have.
+ *
+ * The sample is the COMPUTED transform (`none` or a `matrix(...)`), because
+ * motion 14 runs the animation through the Web Animations API and writes only
+ * the end value inline - an inline-style reader saw its whole animation as
+ * already at rest, in both settings.
+ */
+const START = modalPanelMotion.initial;
+function pose(transform: string): 'rest' | 'start' | 'between' {
+  if (transform === 'none' || transform === '') return 'rest';
+  const matrix = /^matrix\(([^)]+)\)$/.exec(transform);
+  if (!matrix) return 'between'; // a form this does not read is not proof of stillness
+  const [a, b, c, d, e, f] = matrix[1].split(',').map((n) => parseFloat(n));
+  if (b !== 0 || c !== 0 || e !== 0 || a !== d) return 'between';
+  if (a === 1 && f === 0) return 'rest';
+  if (Math.abs(a - START.scale) < 1e-6 && Math.abs(f - START.y) < 1e-6) return 'start';
+  return 'between';
 }
 
 async function framesInMotion(setting: 'always' | 'never'): Promise<{ moving: number; total: number; first: string[] }> {
@@ -113,9 +130,7 @@ async function framesInMotion(setting: 'always' | 'never'): Promise<{ moving: nu
 
     await page.locator('[role="alertdialog"] button', { hasText: QUIT_CONFIRM_TEXT.keep }).click({ timeout: 30_000 });
     await page.evaluate('window.inwire.setUnsavedCapture(false)');
-    // Frames after the first: the first is the mount, which may show the
-    // initial values before motion has run at all.
-    const moving = samples.slice(1).filter((t) => !atRest(t)).length;
+    const moving = samples.filter((t) => pose(t) === 'between').length;
     return { moving, total: samples.length, first: samples.slice(0, 4) };
   } finally {
     // Unconditionally, and before the close: a step that threw with the flag
@@ -126,12 +141,15 @@ async function framesInMotion(setting: 'always' | 'never'): Promise<{ moving: nu
   }
 }
 
-// The parser first: a check that reads every transform as "at rest" passes the
+// The reader first: one that called every transform still would pass the
 // "never" half for free.
-check('at rest: none, scale(1), translateY(0px)',
-  atRest('none') && atRest('translateY(0px) scale(1)') && atRest('translateY(0px)') && atRest('scale(1)'));
-check('moving: scale(0.98), translateY(4px)',
-  !atRest('translateY(4px) scale(0.98)') && !atRest('scale(0.98)') && !atRest('translateY(4px)'));
+check('reads none and the identity matrix as rest',
+  pose('none') === 'rest' && pose('matrix(1, 0, 0, 1, 0, 0)') === 'rest');
+check(`reads the panel's initial scale ${START.scale} and y ${START.y} as its start`,
+  pose(`matrix(${START.scale}, 0, 0, ${START.scale}, 0, ${START.y})`) === 'start');
+check('reads anything in between, or unreadable, as movement',
+  pose('matrix(0.98, 0, 0, 0.98, 0, 4)') === 'between' && pose('matrix(1, 0, 0, 1, 0, 4)') === 'between'
+  && pose('translateY(4px)') === 'between');
 
 try {
   const always = await framesInMotion('always');
