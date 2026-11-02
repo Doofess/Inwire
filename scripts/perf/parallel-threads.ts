@@ -3,7 +3,7 @@
  * through a capture, against one core (ADR 0053 phase 3).
  *
  *   npx tsx scripts/perf/parallel-threads.ts --pcap some.pcapng [--shards 2,4,6]
- *     [--route connection|pair] [--in-flight 2]
+ *     [--route connection|pair] [--in-flight 2] [--backlog-mb N | --backlog FRAMES]
  *
  * The coordinator runs here and each shard on a `worker_threads` thread, over
  * the same messages - structured clones, buffers transferred - the app's
@@ -30,7 +30,9 @@ import { L3Tracker } from '../../src/services/l3Tracker';
 import { FrameClock, Sequencer } from '../../src/services/dissect/sequencer';
 import { LIVE_ENV } from '../../src/services/dissect/dissectEnv';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
-import { Coordinator, coordinatorSequencer, type CoordFrame, type ShardRoute } from '../../src/services/pipeline/coordinator';
+import {
+  Coordinator, PARALLEL_BACKLOG_FRAMES, coordinatorSequencer, parallelRoom, type CoordFrame, type ShardRoute,
+} from '../../src/services/pipeline/coordinator';
 import { shardEnv } from '../../src/services/pipeline/shard';
 import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
 
@@ -49,8 +51,23 @@ const route = (arg('--route') ?? 'connection') as ShardRoute;
 const inFlight = Number(arg('--in-flight') ?? 2);
 /** Frames handed to the coordinator at a time, as the Worker's flush does. */
 const DISPATCH = 2048;
-/** Frames in flight past which dispatch waits, as `PARALLEL_BACKLOG` (coordinator.ts) does for the Worker's flush. */
-const BACKLOG = Number(arg('--backlog') ?? 32_768);
+/**
+ * How many frames dispatch may hand over now. By default the Worker's own
+ * decision (`parallelRoom`: `PARALLEL_BACKLOG_BYTES`, `PARALLEL_BACKLOG_FRAMES`
+ * and the lane-0 bound). `--backlog-mb N` moves the byte bound; `--backlog N`
+ * replaces both with a frame count, for comparing with the runs made before
+ * the bound counted bytes.
+ */
+const backlogFrames = arg('--backlog');
+const backlogMb = arg('--backlog-mb');
+function room(coordinator: Coordinator): number {
+  if (backlogFrames !== undefined) return coordinator.backlog <= Number(backlogFrames) ? DISPATCH : 0;
+  if (backlogMb !== undefined) {
+    if (coordinator.inFlightBytes >= Number(backlogMb) * 1024 * 1024) return 0;
+    return Math.max(0, Math.min(DISPATCH, PARALLEL_BACKLOG_FRAMES - coordinator.backlog));
+  }
+  return parallelRoom(DISPATCH, coordinator);
+}
 
 function trackers(sequencer: Sequencer) {
   return {
@@ -129,13 +146,26 @@ async function main(): Promise<void> {
       const t0 = performance.now();
       const elu0 = nodePerformance.eventLoopUtilization();
       let dispatchMs = 0;
-      for (let i = 0; i < inputs.length; i += DISPATCH) {
-        while (coordinator.backlog > BACKLOG) await new Promise<void>((resolve) => { wake = resolve; });
+      let peakFrames = 0;
+      let peakBytes = 0;
+      for (let i = 0; i < inputs.length;) {
+        // A whole chunk or nothing: the Worker's flush hands a slice at a time, and a
+        // dribble of a few frames a merge makes tiny batches the shards pay for.
+        const whole = Math.min(DISPATCH, inputs.length - i);
+        let take = room(coordinator);
+        while (take < whole) {
+          await new Promise<void>((resolve) => { wake = resolve; });
+          take = room(coordinator);
+        }
+        take = whole;
         wake = null;
-        const chunk: CoordFrame[] = inputs.slice(i, i + DISPATCH).map((input) => ({ ...input, bytes: input.bytes.slice() }));
+        const chunk: CoordFrame[] = inputs.slice(i, i + take).map((input) => ({ ...input, bytes: input.bytes.slice() }));
+        i += chunk.length;
         const c0 = performance.now();
         coordinator.dispatch(chunk);
         dispatchMs += performance.now() - c0;
+        peakFrames = Math.max(peakFrames, coordinator.backlog);
+        peakBytes = Math.max(peakBytes, coordinator.inFlightBytes);
         // The shards' answers come in between dispatches, as on the Worker's event loop.
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -144,7 +174,8 @@ async function main(): Promise<void> {
       const elu = nodePerformance.eventLoopUtilization(elu0);
       line = `${shards} shards (${route}, ${inFlight} in flight): ${rate.toFixed(0).padStart(7)} frames/s, `
         + `${(rate / oneCore).toFixed(2)}x one core; lanes ${coordinator.perLane.join(' / ')}\n`
-        + `        coordinator ${(elu.utilization * 100).toFixed(0)}% busy, ${((dispatchMs * 1000) / inputs.length).toFixed(1)} us a frame dispatching`;
+        + `        coordinator ${(elu.utilization * 100).toFixed(0)}% busy, ${((dispatchMs * 1000) / inputs.length).toFixed(1)} us a frame dispatching; `
+        + `peak in flight ${peakFrames.toLocaleString()} frames, ${(peakBytes / 2 ** 20).toFixed(0)} MiB estimated`;
     }
     for (const worker of workers) worker.postMessage({ type: 'stats' });
     while (stats.length < shards) await new Promise<void>((resolve) => { wake = resolve; });

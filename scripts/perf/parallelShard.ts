@@ -36,7 +36,7 @@ parentPort!.on('message', (message: ToShard | { type: 'stats' }) => {
     return;
   }
   const h0 = performance.now();
-  if (message.type === 'batch' && message.ops !== null) frames += message.ops.bytes.length;
+  if (message.type === 'batch' && message.ops !== null) frames += message.ops.ends.length;
   shard!.handle(message);
   handleMs += performance.now() - h0;
 });
