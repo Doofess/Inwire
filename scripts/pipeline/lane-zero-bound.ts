@@ -4,8 +4,9 @@
  *   npx tsx scripts/pipeline/lane-zero-bound.ts
  *
  * Lane 0 dissects a frame the moment it is handed over and keeps the whole
- * result until every shard frame before it has merged. `PARALLEL_BACKLOG`
- * counted those frames and nothing counted what they held: on a capture of
+ * result until every shard frame before it has merged. The frame-count bound
+ * (then 65,536; now `PARALLEL_BACKLOG_FRAMES`, a cap) counted those frames and
+ * nothing counted what they held: on a capture of
  * TCP and QUIC, with the shards behind, the coordinator held 33-38k lane-0
  * results at 41 kB each and the renderer died out of heap (ADR 0053, phase 5).
  *
@@ -13,8 +14,8 @@
  * `laneZeroCost`, back to zero when they merge or the capture is reset; the
  * flush's decisions, `parallelRoom` and `parallelRoomAgain`, stop at
  * `LANE_ZERO_WAITING_BYTES`; and a flush that follows them, with the one shard
- * never answering, stops within one slice of the limit instead of at 65,536
- * frames. The last block prints what a waiting result really retains beside
+ * never answering, stops within one slice of the limit instead of at the frame
+ * cap. The last block prints what a waiting result really retains beside
  * the estimate, and fails if the estimate is under it by a third or more.
  */
 import { setFlagsFromString } from 'node:v8';
@@ -22,7 +23,7 @@ import { runInNewContext } from 'node:vm';
 import { Bytes, ipv4, ethernet, tcp, tcpFrame, udp } from '../parity/synthetic';
 import { MAX_TCP_CONNECTIONS } from '../../src/services/dissect/sequencer';
 import {
-  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG, coordinatorSequencer, flushTake, laneZero, laneZeroCost,
+  Coordinator, LANE_ZERO_WAITING_BYTES, PARALLEL_BACKLOG_FRAMES, coordinatorSequencer, flushTake, laneZero, laneZeroCost,
   parallelRoom, parallelRoomAgain, type CoordFrame,
 } from '../../src/services/pipeline/coordinator';
 import { Shard, shardEnv } from '../../src/services/pipeline/shard';
@@ -98,15 +99,15 @@ console.log('\n--- what is counted, and when it is let go ---\n');
 
 console.log('\n--- the flush\'s two decisions ---\n');
 {
-  const at = (backlog: number, laneZeroWaiting: number) => ({ backlog, laneZeroWaiting });
+  const at = (backlog: number, laneZeroWaiting: number) => ({ backlog, laneZeroWaiting, inFlightBytes: 0 });
   check('room is what was asked for when both are low', parallelRoom(4000, at(0, 0)) === 4000);
-  check('the frame limit still bounds it', parallelRoom(4000, at(PARALLEL_BACKLOG - 10, 0)) === 10);
+  check('the frame limit still bounds it', parallelRoom(4000, at(PARALLEL_BACKLOG_FRAMES - 10, 0)) === 10);
   check('no room once lane 0 holds its limit, however few frames that is',
     parallelRoom(4000, at(100, LANE_ZERO_WAITING_BYTES)) === 0);
   check('just under the limit, the frame count decides', parallelRoom(4000, at(100, LANE_ZERO_WAITING_BYTES - 1)) === 4000);
   check('a merge asks for a flush once both are under half', parallelRoomAgain(at(0, LANE_ZERO_WAITING_BYTES / 2 - 1)));
   check('...and not while lane 0 is still over half', !parallelRoomAgain(at(0, LANE_ZERO_WAITING_BYTES / 2)));
-  check('...nor while the frames are', !parallelRoomAgain(at(PARALLEL_BACKLOG / 2, 0)));
+  check('...nor while the frames are', !parallelRoomAgain(at(PARALLEL_BACKLOG_FRAMES / 2, 0)));
 }
 
 console.log('\n--- a flush that follows them, with the shard never answering ---\n');
@@ -123,13 +124,13 @@ console.log('\n--- a flush that follows them, with the shard never answering ---
     const take = parallelRoom(SLICE, coordinator);
     if (take === 0) break;
     coordinator.dispatch(Array.from({ length: take }, () => frameAt(next++)));
-    if (next > PARALLEL_BACKLOG + 1) break;
+    if (next > PARALLEL_BACKLOG_FRAMES + 1) break;
   }
   gc();
   const retained = process.memoryUsage().heapUsed - before;
   const handed = next - 1;
   const waiting = coordinator.laneZeroWaiting;
-  check('it stops before the frame limit', handed < PARALLEL_BACKLOG, `${handed} frames handed over`);
+  check('it stops before the frame limit', handed < PARALLEL_BACKLOG_FRAMES, `${handed} frames handed over`);
   check('it stops at the byte limit, within one slice',
     waiting >= LANE_ZERO_WAITING_BYTES && waiting < LANE_ZERO_WAITING_BYTES + SLICE * laneZeroCost(frameAt(2).bytes.length),
     `${(waiting / 2 ** 20).toFixed(0)} MiB estimated`);
@@ -151,13 +152,13 @@ console.log('\n--- Stop, with everything that waited released at once ---\n');
   const SLICE = 3000;
   const stopped = { capturing: false, behind: false };
   check('a stop without shards still releases everything', flushTake(250_000, SLICE, stopped, null) === 250_000);
-  check('a stop with shards takes a slice', flushTake(250_000, SLICE, stopped, { backlog: 0, laneZeroWaiting: 0 }) === SLICE);
+  check('a stop with shards takes a slice', flushTake(250_000, SLICE, stopped, { backlog: 0, laneZeroWaiting: 0, inFlightBytes: 0 }) === SLICE);
   check('...and nothing while lane 0 holds its limit',
-    flushTake(250_000, SLICE, stopped, { backlog: 0, laneZeroWaiting: LANE_ZERO_WAITING_BYTES }) === 0);
+    flushTake(250_000, SLICE, stopped, { backlog: 0, laneZeroWaiting: LANE_ZERO_WAITING_BYTES, inFlightBytes: 0 }) === 0);
   check('a stop is not held back by a slow store, as before',
-    flushTake(250_000, SLICE, { capturing: false, behind: true }, { backlog: 0, laneZeroWaiting: 0 }) === SLICE);
+    flushTake(250_000, SLICE, { capturing: false, behind: true }, { backlog: 0, laneZeroWaiting: 0, inFlightBytes: 0 }) === SLICE);
   check('while capturing a slow store still holds the flush',
-    flushTake(250_000, SLICE, { capturing: true, behind: true }, { backlog: 0, laneZeroWaiting: 0 }) === 0);
+    flushTake(250_000, SLICE, { capturing: true, behind: true }, { backlog: 0, laneZeroWaiting: 0, inFlightBytes: 0 }) === 0);
 
   // The drain as the Worker runs it: take what the flush allows, and when it
   // allows nothing, let the shard answer.

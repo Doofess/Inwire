@@ -147,8 +147,61 @@ export interface CoordinatorOptions {
   withTrees?: boolean;
 }
 
-/** Frames in flight past which the Worker's flush stops handing the coordinator more. */
-export const PARALLEL_BACKLOG = 65_536;
+/**
+ * Frames in flight past which the Worker's flush stops handing the coordinator
+ * more: a cap, not the bound. It bounds the entry map, the frames held for
+ * routing and the shards' queued batches when frames are tiny, where
+ * `PARALLEL_BACKLOG_BYTES` would admit almost a million.
+ *
+ * What binds then is the heap each entry holds, not its bytes: a frame answered
+ * and waiting behind the hot shard held 643-756 bytes (2026-11-02), so at this
+ * cap tiny frames hold about 120 MB. It is the burst's 135,000 frames under
+ * `PARALLEL_BACKLOG_BYTES` with room to spare; 262,144 allowed 190 MB.
+ */
+export const PARALLEL_BACKLOG_FRAMES = 163_840;
+
+/**
+ * Estimated bytes (`inFlightCost`) in flight past which the flush stops: the
+ * bound on what the frames dispatched and not yet merged hold.
+ *
+ * **A frame count made one connection the limit.** On a 300,000-frame burst a
+ * single connection is 22% of the frames and one shard's work; at 65,536
+ * frames in flight its frames alone filled the allowance, and the other shards
+ * waited for it. At 131,072 the 6-shard throughput rose from 54-64k to 71-72k
+ * frames a second (ADR 0053, "Shard skew"). 160 MiB is the smallest multiple
+ * of 16 MiB that admits 131,072 frames of that burst's mean size (1,114 bytes
+ * captured, plus `IN_FLIGHT_FRAME_OVERHEAD`).
+ */
+export const PARALLEL_BACKLOG_BYTES = 160 * 1024 * 1024;
+
+/**
+ * What a frame in flight holds beyond its captured bytes, on the V8 heap,
+ * **before its shard answers**.
+ *
+ * Measured 2026-11-02 on the first 100,000 frames of the burst, 6 shards, with
+ * every message to a shard dropped so that nothing merged (`heapUsed` after
+ * `gc()` before and after, divided by 100,000): 122.5 bytes a frame (the entry
+ * and what hangs from it), rounded up to the next 64. The frame's bytes are a
+ * view into the agent's batch and are not in it.
+ *
+ * **An answered frame waiting to merge holds more**: its result, side record
+ * and a share of its pack, about 0.4 kB more (measured with each frame its own
+ * buffer, 643-756 bytes answered against 289-381 not). Under skew most frames
+ * in flight are in that state; at the burst's frame size that is about 60 MB
+ * of heap the estimate leaves out, against the bytes it counts off the heap. A
+ * decoded row holds more again and is counted (`DECODED_ROW_COST`).
+ *
+ * **Not in it either:** a batch still waiting for its shard holds a copy of
+ * each frame's bytes and about 260 bytes of op row, as typed arrays, which
+ * are off the V8 heap (`arrayBuffers` rose by 1.35 kB a frame for frames of
+ * 1,094 bytes). That is a second `capturedLength` the estimate does not count.
+ */
+export const IN_FLIGHT_FRAME_OVERHEAD = 128;
+
+/** What a frame in flight is estimated to hold, from dispatch until it merges. */
+export function inFlightCost(capturedLength: number): number {
+  return capturedLength + IN_FLIGHT_FRAME_OVERHEAD;
+}
 
 /**
  * Estimated bytes of lane-0 results waiting to merge past which the flush
@@ -157,8 +210,8 @@ export const PARALLEL_BACKLOG = 65_536;
  * **A frame count did not bound memory.** Lane 0 dissects as frames arrive
  * and keeps each whole result - tree, field bag, record - until every shard
  * frame before it has merged. QUIC is lane 0's, and with shards behind on TCP
- * the measured drive held 33-38k lane-0 results of the 65,536 frames
- * `PARALLEL_BACKLOG` allowed, at 41 kB each, and the renderer died out of heap
+ * the measured drive held 33-38k lane-0 results of the 65,536 frames the
+ * frame-count bound then allowed, at 41 kB each, and the renderer died out of heap
  * at 60k frames a second (ADR 0053, phase 5). Past this the frames wait in the
  * Worker undissected, at their wire size, which main's credit bounds and
  * sheds with a count that catch-up reads back.
@@ -178,10 +231,34 @@ export function laneZeroCost(capturedLength: number): number {
   return 14 * 1024 + 4 * capturedLength;
 }
 
-/** How many of `want` frames the flush may hand the coordinator now. */
-export function parallelRoom(want: number, coordinator: Pick<Coordinator, 'backlog' | 'laneZeroWaiting'>): number {
+/**
+ * What a shard row decoded at the merge holds beyond a light one, while it
+ * waits to merge: the `Packet` and its field bag. Counted with lane 0's
+ * results (`laneZeroWaiting`), which are the same thing - dissected and
+ * waiting - from the other lane.
+ *
+ * A row is decoded with more than one interface (`decodeRows`) or for a
+ * `needsRow` result. Under skew most frames in flight are answered and waiting
+ * behind the hot shard, and decoded each held 3,807-3,860 bytes of V8 heap
+ * against 643-756 light (2026-11-02, two shards, one never answering, 60,000
+ * frames of 60 and 1,114 bytes): 3,104-3,164 more, rounded up to the next 64.
+ * Uncounted, the frame cap let a capture on two adapters hold about 1 GB.
+ */
+export const DECODED_ROW_COST = 3200;
+
+/** What the flush reads of the coordinator. */
+type Load = Pick<Coordinator, 'backlog' | 'laneZeroWaiting' | 'inFlightBytes'>;
+
+/**
+ * How many of `want` frames the flush may hand the coordinator now: none once
+ * the bytes in flight or lane 0's waiting results are at their bound, else
+ * what the frame cap leaves. A slice's bytes are known only once it is handed
+ * over, so the bytes can overshoot by one slice.
+ */
+export function parallelRoom(want: number, coordinator: Load): number {
   if (coordinator.laneZeroWaiting >= LANE_ZERO_WAITING_BYTES) return 0;
-  return Math.max(0, Math.min(want, PARALLEL_BACKLOG - coordinator.backlog));
+  if (coordinator.inFlightBytes >= PARALLEL_BACKLOG_BYTES) return 0;
+  return Math.max(0, Math.min(want, PARALLEL_BACKLOG_FRAMES - coordinator.backlog));
 }
 
 /**
@@ -198,7 +275,7 @@ export function parallelRoom(want: number, coordinator: Pick<Coordinator, 'backl
  */
 export function flushTake(
   waiting: number, slice: number, state: { capturing: boolean; behind: boolean },
-  coordinator: Pick<Coordinator, 'backlog' | 'laneZeroWaiting'> | null,
+  coordinator: Load | null,
 ): number {
   if (state.capturing && state.behind) return 0;
   if (coordinator === null) return state.capturing ? Math.min(waiting, slice) : waiting;
@@ -207,10 +284,12 @@ export function flushTake(
 
 /**
  * Whether a merge brought the coordinator low enough to ask for another flush:
- * half of both limits, so it is not asked for one frame at a time.
+ * half of each limit, so it is not asked for one frame at a time.
  */
-export function parallelRoomAgain(coordinator: Pick<Coordinator, 'backlog' | 'laneZeroWaiting'>): boolean {
-  return coordinator.backlog < PARALLEL_BACKLOG / 2 && coordinator.laneZeroWaiting < LANE_ZERO_WAITING_BYTES / 2;
+export function parallelRoomAgain(coordinator: Load): boolean {
+  return coordinator.backlog < PARALLEL_BACKLOG_FRAMES / 2
+    && coordinator.inFlightBytes < PARALLEL_BACKLOG_BYTES / 2
+    && coordinator.laneZeroWaiting < LANE_ZERO_WAITING_BYTES / 2;
 }
 
 /** FNV-1a over a string: the default assignment. */
@@ -305,6 +384,8 @@ interface Entry {
   tls?: number[];
   /** A lane-0 result's `laneZeroCost`, counted in `laneZeroWaiting` until it merges. */
   cost?: number;
+  /** The frame's `inFlightCost`, counted in `inFlightBytes` from dispatch until it merges. */
+  held: number;
 }
 
 /** How many datagrams' first fragments are remembered for their connection. */
@@ -378,6 +459,8 @@ export class Coordinator {
   private readonly treeLane: IdRing;
   private idleWaiters: (() => void)[] = [];
   private waitingCost = 0;
+  /** `inFlightCost` summed over frames dispatched and not yet merged. */
+  private heldCost = 0;
 
   /**
    * Decode every shard pack on arrival. Off, a pack is decoded only when a
@@ -446,14 +529,30 @@ export class Coordinator {
     return this.held.length - this.heldFrom + this.entries.size;
   }
 
-  /** Estimated bytes of lane-0 results dissected and not yet merged (`LANE_ZERO_WAITING_BYTES`). */
+  /**
+   * Estimated bytes of results dissected and not yet merged
+   * (`LANE_ZERO_WAITING_BYTES`): lane 0's, and shard rows decoded here
+   * (`DECODED_ROW_COST`).
+   */
   get laneZeroWaiting(): number {
     return this.waitingCost;
   }
 
+  /**
+   * Estimated bytes of the frames dispatched and not yet merged, those waiting
+   * to be routed included (`PARALLEL_BACKLOG_BYTES`). A message between frames
+   * is not counted.
+   */
+  get inFlightBytes(): number {
+    return this.heldCost;
+  }
+
   /** Hands frames over, in ascending contiguous id order. */
   dispatch(frames: readonly CoordFrame[]): void {
-    for (const frame of frames) this.held.push(frame);
+    for (const frame of frames) {
+      this.held.push(frame);
+      this.heldCost += inFlightCost(frame.bytes.length);
+    }
     this.advance();
     this.pump();
   }
@@ -490,6 +589,8 @@ export class Coordinator {
           packet.rawBytes = entry.bytes ?? new Uint8Array(0);
           entry.packet = packet;
           entry.packed = { pack, index: result.row, mark: overlayMark(packet) };
+          entry.cost = (entry.cost ?? 0) + DECODED_ROW_COST;
+          this.waitingCost += DECODED_ROW_COST;
         } else {
           // Light: the row stays where the shard put it.
           entry.packed = { pack, index: result.row };
@@ -553,6 +654,7 @@ export class Coordinator {
     this.barrier = null;
     this.entries.clear();
     this.waitingCost = 0;
+    this.heldCost = 0;
     this.nextEmit = null;
     for (let s = 0; s < this.shards; s++) {
       this.writers[s] = new OpWriter();
@@ -702,6 +804,11 @@ export class Coordinator {
     return null;
   }
 
+  /** The entry for a frame routed to `shard`, waiting for its answer. */
+  private shardEntry(frame: CoordFrame, shard: number): Entry {
+    return { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes, held: inFlightCost(frame.bytes.length) };
+  }
+
   private routeSegment(frame: CoordFrame, lane: TcpLane): void {
     const home = this.keyHome.get(lane.key);
     const shard = home === undefined ? this.shardFor(this.route === 'pair' ? lane.pair : lane.key) : home - 1;
@@ -717,7 +824,7 @@ export class Coordinator {
     this.writers[shard].tcp(frame, lane.family,
       { a: lane.srcMac, b: lane.dstMac, facts: eth }, { a: lane.src, b: lane.dst, facts: ip }, lane.key, streamId);
     this.queued(shard);
-    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes });
+    this.entries.set(frame.id, this.shardEntry(frame, shard));
   }
 
   private routeFragment(frame: CoordFrame, lane: TcpFragmentLane): void {
@@ -750,7 +857,7 @@ export class Coordinator {
     this.writers[shard].fragment(frame, lane.family,
       { a: lane.srcMac, b: lane.dstMac, facts: eth }, { a: lane.src, b: lane.dst, facts: ip }, hint);
     this.queued(shard);
-    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes });
+    this.entries.set(frame.id, this.shardEntry(frame, shard));
     this.barrier = { id: frame.id, shard, hint };
   }
 
@@ -822,7 +929,7 @@ export class Coordinator {
       { a: udpA, b: udpB, facts: udp },
       { flow: lane.flow, known: route.known, resolveAt: route.walk.resolveAt, matched: route.matched, long: route.walk.long, number });
     this.queued(shard);
-    this.entries.set(frame.id, { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes });
+    this.entries.set(frame.id, this.shardEntry(frame, shard));
   }
 
   /** A flow the QUIC order forgot: dropped from the lane that holds it, ahead of whatever is queued next. */
@@ -924,7 +1031,9 @@ export class Coordinator {
 
   private dissectHere(frame: CoordFrame): void {
     const lane0 = this.lane0;
-    const entry: Entry = { lane: 0, meta: frame.meta, done: true, cost: laneZeroCost(frame.bytes.length) };
+    const entry: Entry = {
+      lane: 0, meta: frame.meta, done: true, cost: laneZeroCost(frame.bytes.length), held: inFlightCost(frame.bytes.length),
+    };
     try {
       entry.d = lane0.dissect({
         id: frame.id, bytes: frame.bytes, tsUs: frame.tsUs, relativeTime: frame.relativeTime,
@@ -1013,6 +1122,7 @@ export class Coordinator {
       const entry = this.entries.get(id);
       if (entry === undefined || !entry.done) return;
       this.entries.delete(id);
+      this.heldCost -= entry.held;
       if (entry.cost !== undefined) this.waitingCost -= entry.cost;
       this.nextEmit = id + 1;
       this.emit(id, entry);

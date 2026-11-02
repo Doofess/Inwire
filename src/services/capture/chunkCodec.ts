@@ -76,7 +76,7 @@
  * index and the prefix and byte blocks stay readable.
  */
 import type { Packet, PacketStatus, ProtocolType, ExpertInfo, ExpertCategory } from '../../types/packet';
-import { fieldEntries } from '../dissect/fieldAccess';
+import { forEachField } from '../dissect/fieldAccess';
 import type { FieldBlock } from '../dissect/fieldBlock';
 import type { FieldBlockWriter } from '../dissect/fieldSplit';
 import { DENSE_FIELDS } from '../dissect/denseFields';
@@ -340,6 +340,11 @@ class Sink {
   f64(v: number): void { this.grow(8); this.view.setFloat64(this.at, v, true); this.at += 8; }
   raw(b: Uint8Array): void { this.grow(b.length); this.buf.set(b, this.at); this.at += b.length; }
 
+  /** Where the next write lands, for a count written once what it counts is. */
+  get length(): number { return this.at; }
+  /** Overwrites a u16 already written at `at`. */
+  setU16(at: number, v: number): void { this.view.setUint16(at, v & 0xffff, true); }
+
   bytes(): Uint8Array { return this.buf.slice(0, this.at); }
 }
 
@@ -463,6 +468,12 @@ export function encodeChunk(
   };
 
   const body = new Sink(packets.length * 256);
+  // Made once for the chunk, not once a frame.
+  const writeField = (key: string, value: string | number): void => {
+    body.u32(id(key));
+    if (typeof value === 'number') { body.u8(0); body.f64(value); }
+    else { body.u8(1); body.u32(id(value)); }
+  };
 
   for (let i = 0; i < packets.length; i++) {
     const p = packets[i];
@@ -521,15 +532,16 @@ export function encodeChunk(
     }
 
     // The whole field bag, dense columns and sparse remainder alike.
-    // `fieldEntries` is the one function that knows a value can be in either
+    // `forEachField` is the one function that knows a value can be in either
     // place, which is exactly why the codec asks it rather than reading
-    // `packet.fields` and silently losing every dense key.
-    const entries = p.fields === undefined && p.cols === undefined ? [] : fieldEntries(p);
-    body.u16(p.fields === undefined && p.cols === undefined ? ABSENT : entries.length);
-    for (const [key, value] of entries) {
-      body.u32(id(key));
-      if (typeof value === 'number') { body.u8(0); body.f64(value); }
-      else { body.u8(1); body.u32(id(value)); }
+    // `packet.fields` and silently losing every dense key. The count goes
+    // first and is filled in after: walking the fields once, with no array.
+    if (p.fields === undefined && p.cols === undefined) {
+      body.u16(ABSENT);
+    } else {
+      const countAt = body.length;
+      body.u16(0);
+      body.setU16(countAt, forEachField(p, writeField));
     }
   }
 
