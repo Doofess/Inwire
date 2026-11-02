@@ -886,6 +886,44 @@ mod tests {
             string: *mut *mut u16,
             length: *mut u32,
         ) -> i32;
+        fn ConvertStringSidToSidW(text: *const u16, sid: *mut *mut std::ffi::c_void) -> i32;
+        fn SetNamedSecurityInfoW(
+            name: *const u16,
+            object_type: u32,
+            information: u32,
+            owner: *mut std::ffi::c_void,
+            group: *mut std::ffi::c_void,
+            dacl: *mut std::ffi::c_void,
+            sacl: *mut std::ffi::c_void,
+        ) -> u32;
+    }
+
+    /// Makes `sid` the owner of the file at `path`.
+    ///
+    /// What a file is created with is the token's default owner, and that is
+    /// not always its user: an elevated administrator's files are owned by
+    /// `Administrators` (S-1-5-32-544), which the agent trusts. GitHub's Windows
+    /// runner is one, so a test that relied on the default planted a file the
+    /// agent rightly kept, and failed there and nowhere else. Any account may
+    /// make itself the owner of a file it may `WRITE_OWNER`.
+    fn set_owner(path: &Path, sid: &str) {
+        let text: Vec<u16> = std::ffi::OsStr::new(sid).encode_wide().chain(Some(0)).collect();
+        let mut owner = std::ptr::null_mut();
+        assert!(unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut owner) } != 0, "{sid} is a SID");
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        unsafe { LocalFree(owner) };
+        assert_eq!(status, 0, "{path:?} could not be given the owner {sid}");
     }
 
     #[link(name = "kernel32")]
@@ -1160,6 +1198,10 @@ mod tests {
         let dir = temp("owned");
         fs::write(dir.join("agent.log"), b"forged").unwrap();
         fs::write(dir.join("agent.log.1"), b"forged").unwrap();
+        // Owned by this test's own account, not by whatever its token defaults
+        // to: elevated, that is Administrators, which the agent trusts.
+        set_owner(&dir.join("agent.log"), &me());
+        set_owner(&dir.join("agent.log.1"), &me());
         let read_back = owner_sid(&dir.join("agent.log")).ok();
         let unsafe_before = !log_names_are_safe(&dir, "S-1-5-18");
         clear_planted_links(&dir, "S-1-5-18");
