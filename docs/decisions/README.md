@@ -36,7 +36,7 @@ explanations in `docs/history.md`. The ADRs keep the old citations unedited.
 | [0008](0008-key-material.md) | Where TLS key material lives, and where it does not | Accepted 2026-09-04; **weakened** — its "as old as the tab" premise, by 0027 |
 | [0009](0009-off-wire-enrichment.md) | Facts that did not come off the wire | Accepted 2026-09-04 |
 | [0010](0010-raw-frame-capture.md) | The agent receives raw frames and dissects nothing | Accepted 2026-09-05 |
-| [0011](0011-dissection-cost-is-not-the-tree.md) | Dissection's cost was not the tree — **re-scopes 0001** | Accepted 2026-09-05 |
+| [0011](0011-dissection-cost-is-not-the-tree.md) | Dissection's cost was not the tree — **re-scopes 0001** | Accepted 2026-09-05; amended by 0072 |
 | [0012](0012-stored-captures-persist.md) | A stored capture is discarded only when the user asks | Accepted 2026-09-05; **mechanism superseded by 0025** |
 | [0013](0013-what-a-million-frames-actually-cost.md) | What a million frames actually cost — **re-targets the buffer work** | Accepted 2026-09-05; **superseded by 0025** |
 | [0014](0014-bounding-the-trackers.md) | Bounding the trackers — per connection, not per frame — **extends 0013** | Accepted 2026-09-05 |
@@ -97,6 +97,7 @@ explanations in `docs/history.md`. The ADRs keep the old citations unedited.
 | [0069](0069-release-channels-and-the-inwire-command.md) | Every desktop channel (Update Center, PowerShell bootstrap, WinGet, Git Bash) runs the one signed installer, from a descriptor generated after signing; the bootstrap pins the publisher certificate before elevating; terminal updates are explicit, never scheduled; `{app}\bin\inwire.exe` is the only `Path` entry the installer owns. The Update Center still checks only host, size and hash | Accepted 2026-10-31; public release blocked on a public certificate, a resolving host and a WinGet ID |
 | [0070](0070-monitoring-identities-evict-least-recent.md) | An exporter's 16 identities (v5 engines, v9 Source IDs, IPFIX domains) are recycled least recently heard first; every valid datagram is counted and a row kept while its identity is held, at most 16 identity rows per exporter a minute; health rows recycle and the sheet says how many were replaced; checkpoint format 2 records each scope's last heard entry, format 1 still read | Accepted 2026-11-01; amends 0059's engine rule and 0064's bound and checkpoint layout |
 | [0071](0071-monitoring-sidecar-trimmed-at-expiry.md) | An expiry trims `rollups.iwmr` instead of resetting it: the first entry of a segment (already marked by `segmentFirstId`) seals every open minute, sidecar format 2 with a persisted trimmed-through entry, the retained entries copied synchronously inside the expiry step to a partial renamed into place, a failed trim falling back to reset and rebuild; equality with a rebuild is tested | Accepted 2026-11-01; replaces 0062's reset-and-rebuild after an expiry |
+| [0072](0072-shards-dissect-without-the-hot-path-tree.md) | Shards dissect without the hot-path tree: under `withoutTree()` the Frame, Ethernet II, IPv4, IPv6, TCP and UDP layers keep only their findings, rows and records byte-identical to the tree-on branch (`tree-free-rows.ts`); shards keep no tree cache and a shard frame's tree comes from its record | Proposed 2026-11-03; amends 0011 |
 
 ## Review outcome: amendments to the spec's execution order
 

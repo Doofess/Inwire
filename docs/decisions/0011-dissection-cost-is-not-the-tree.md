@@ -2,6 +2,8 @@
 
 **Status:** Accepted 2026-09-05
 
+**Amended by [0072](0072-shards-dissect-without-the-hot-path-tree.md)** (2026-11-03): at a 32 us shard frame the tree is no longer a few per cent; building it and collecting it is about 12% of a shard, and shards no longer build it on the hot path.
+
 ## Context
 
 ADR 0001 specified a two-phase dissector: `dissectSummary` "must be O(bytes)

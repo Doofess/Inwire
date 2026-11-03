@@ -11,6 +11,7 @@
  */
 import { decodeRawEthernetPacket } from '../pcapParser';
 import { withDissectEnv, type DissectEnv } from '../dissect/dissectEnv';
+import { withoutTree } from '../dissect/treeMode';
 import { FrameRecorder } from '../dissect/frameRecord';
 import type { DeferredTlsNumbers } from '../dissect/sequencer';
 import type { TcpStreamTracker } from '../tcpStreamTracker';
@@ -61,6 +62,8 @@ export class FrameDissector {
     env: DissectEnv | undefined,
     /** The lane's `tls.stream` placeholders, when it hands them out. */
     readonly tls: DeferredTlsNumbers | null,
+    /** `tree: false` asks each layer for its findings only (ADR 0072); the default builds the tree. */
+    private readonly options?: { tree?: boolean },
   ) {
     this.recorder = new FrameRecorder({ ...trackers, ...(env ? { env } : {}) });
   }
@@ -70,10 +73,11 @@ export class FrameDissector {
     const recorder = this.recorder;
     recorder.begin();
     const src = recorder.sources;
-    const decoded = withDissectEnv(src.env, () => decodeRawEthernetPacket(
+    const decode = () => decodeRawEthernetPacket(
       input.bytes, input.id, input.tsUs, input.relativeTime, input.timeDelta, input.origLen,
       src.tcp, src.icmp, src.quic, src.dns, input.iface, input.linktype, src.l3, this.host, input.facts,
-    ));
+    );
+    const decoded = withDissectEnv(src.env, this.options?.tree === false ? () => withoutTree(decode) : decode);
     const record = recorder.end();
     return {
       packet: decoded.packet,
