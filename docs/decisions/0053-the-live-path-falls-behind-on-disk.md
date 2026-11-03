@@ -819,7 +819,8 @@ with the summary: `dissectTcpTransport` 17%, `decodeNetworkLayer` 15%,
 `decodeRawEthernetPacket` 8.5%, `analyzeTcpSegment` 6.5%, `tcpFlagFields` 6%.
 That is where the collection time comes from. Cutting it means building trees
 on demand from records instead, a change across the dissectors, and it is
-the next lever. `set toTemporalInstant` (3% of a profile) is tsx's `__name`
+the next lever. **Taken by [0072](0072-shards-dissect-without-the-hot-path-tree.md)**
+(2026-11-03): shards build no hot-path tree. `set toTemporalInstant` (3% of a profile) is tsx's `__name`
 and absent from the built app.
 
 **The gate**, `ui-burst-drive.ts --follow-only`, six shards, 1 GB buffer,

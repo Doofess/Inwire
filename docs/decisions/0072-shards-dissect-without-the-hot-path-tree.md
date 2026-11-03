@@ -1,7 +1,8 @@
 # 0072 — Shards dissect without the hot-path tree: a Frame, Ethernet, IP, TCP or UDP layer keeps only its findings, and a shard frame's tree always comes from its record
 
-**Status:** proposed 2026-11-03. The owner chose the scope the same day ("hot
-path first", "shards only"), after the measurement below. It amends
+**Status:** accepted 2026-11-03. The owner chose the scope the same day ("hot
+path first", "shards only") after the measurement below, and approved the
+plan. It amends
 [0011](0011-dissection-cost-is-not-the-tree.md), whose figure was right for the
 dissection it measured and is not right for today's. It builds on
 [0049](0049-a-frames-tree-is-rebuilt-from-its-own-record.md), which made the
@@ -90,4 +91,18 @@ tree, not from it.
   a fixture or the synthetic set carries the finding and the branch does not.
   A finding no capture exercises would slip through, which is why the
   synthetic set fires each one.
-- Measured result: _(filled in when the shards land)_.
+- **Measured result.** `shard-cost.ts`, burst300k, 100,000 frames, fastest of
+  9, interleaved with `main` (a1691dd9) in three rounds, all three clean:
+
+  | | `main` | tree-free shards |
+  |---|---|---|
+  | fastest, µs a frame | 31.06, 30.52, 30.14 | 18.34, 18.47, 18.17 |
+  | median, µs a frame | 31.89, 31.56, 31.28 | 19.37, 19.31, 18.98 |
+  | allocated (sampled) | 53,050 B a frame | 29,907 B a frame |
+
+  That is about 40% off a shard frame and 44% off its allocation. TCP took
+  the shard from 32.0 to 24.3 µs and Frame, Ethernet and IP to 19.3 (the
+  workers' uncommitted sanity runs, Tasks 2 and 3). What is left is led by
+  `decodeNetworkLayer`, `analyzeTcpSegment`, `dissectTcpTransport` and
+  `decodeRawEthernetPacket`: the summary's own work and the tracker's, not
+  tree rows.

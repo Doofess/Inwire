@@ -146,6 +146,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | The window's reader splits dense fields as it decodes (every field equal to the plain decode, no dense key left in a bag), and an overlay's dense key lands in the column, not a shadowed bag (#16) | `scripts/pipeline/row-pack.ts`, `scripts/capture/chunk-codec.ts` |
 | The string table's short-text decoder answers exactly as TextDecoder, malformed bytes included | `scripts/capture/chunk-codec.ts` |
 | Every frame's tree is rebuilt from its record | `scripts/pipeline/revisit.ts` |
+| A tree-free dissection (shards, ADR 0072) packs the same row, record and expert list as a full one, and a tree-free hot-path layer holds only its findings; a synthetic set fires every hot-path finding so it cannot go blind | `scripts/pipeline/tree-free-rows.ts` |
 | No Node in the renderer; the preload imports only `electron` (reads the built bundle) | `scripts/electron/preload-sandbox.ts` |
 | `src/services/` and `src/lib/` import no Electron or `node:*`; `nodeBlockFile.ts` is unreachable from `src/main.tsx` (import-graph walk) | `scripts/capture/node-safe.ts` |
 | Two tsconfigs with matching strictness flags; `electron/` excluded from the root program | `scripts/electron/tsconfigs.ts` |
