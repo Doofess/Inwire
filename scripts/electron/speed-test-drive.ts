@@ -53,7 +53,7 @@ try {
     await sleep(250);
   }
   const lag = await app.evaluate(() => {
-    const h = (globalThis as { __speedLag?: import('node:perf_hooks').IntervalHistogram }).__speedLag!;
+    const h = (globalThis as { __speedLag?: ReturnType<typeof import('node:perf_hooks').monitorEventLoopDelay> }).__speedLag!;
     h.disable();
     return { p50: h.percentile(50) / 1e6, p99: h.percentile(99) / 1e6, max: h.max / 1e6 };
   });

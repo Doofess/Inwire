@@ -32,3 +32,9 @@ updates:
         update-types: [version-update:semver-major]
       - dependency-name: electron-builder
         update-types: [version-update:semver-major]
+      # The types describe the oldest Node the code runs on, not the newest one
+      # published: engines is >=24, CI runs 24, and Electron 44 embeds 24. A
+      # newer major types APIs that runtime does not have. Moved by hand with
+      # the engines floor and Electron's Node.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
