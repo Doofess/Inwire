@@ -10,7 +10,7 @@ import {defineConfig, type Plugin} from 'vite';
  * one version number and `package.json` is the only place it is authored.
  */
 const INWIRE_VERSION: string = JSON.parse(
-  fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'),
+  fs.readFileSync(path.resolve(import.meta.dirname, 'package.json'), 'utf8'),
 ).version;
 
 /**
@@ -19,8 +19,8 @@ const INWIRE_VERSION: string = JSON.parse(
  * maplibre-gl 6 ships three files - the library, a shared chunk, and the worker
  * that fetches and parses every tile - and finds the worker at **run time** by
  * resolving `maplibre-gl-worker.mjs` as a sibling of whatever chunk it was
- * loaded from. In a production build that resolves to `/assets/`, where Rollup
- * has inlined the library and emitted no worker at all.
+ * loaded from. In a production build that resolves to `/assets/`, where the
+ * bundler has inlined the library and emitted no worker at all.
  *
  * A server that answers an unknown path with `index.html` then returns that
  * with a 200 - the browser parses HTML as an ES module, the worker dies before
@@ -68,7 +68,7 @@ function bundledMapAssets(): Plugin {
     name: 'inwire:map-assets',
     apply: 'build',
     generateBundle() {
-      const dir = path.resolve(__dirname, 'node_modules/maplibre-gl/dist');
+      const dir = path.resolve(import.meta.dirname, 'node_modules/maplibre-gl/dist');
       for (const file of maplibre) {
         const from = path.join(dir, file);
         if (!fs.existsSync(from)) {
@@ -80,7 +80,7 @@ function bundledMapAssets(): Plugin {
       }
 
       const rtl = path.resolve(
-        __dirname, 'node_modules/@mapbox/mapbox-gl-rtl-text/dist/mapbox-gl-rtl-text.js',
+        import.meta.dirname, 'node_modules/@mapbox/mapbox-gl-rtl-text/dist/mapbox-gl-rtl-text.js',
       );
       if (!fs.existsSync(rtl)) {
         this.error(`mapbox-gl-rtl-text missing: ${rtl}`);
@@ -98,26 +98,33 @@ export default defineConfig(() => {
     },
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
         // jsPDF's optional dependencies, reached only from `doc.html()` and
         // `addSvgAsImage()`, which the report never calls. Aliased away so
         // their chunks are not emitted; see `src/lib/unbundledOptional.ts`.
         ...Object.fromEntries(['html2canvas', 'dompurify', 'canvg'].map(name =>
-          [name, path.resolve(__dirname, 'src/lib/unbundledOptional.ts')])),
+          [name, path.resolve(import.meta.dirname, 'src/lib/unbundledOptional.ts')])),
       },
     },
     build: {
-      rollupOptions: {
+      // esbuild, not Vite 8's default Lightning CSS: measured on this
+      // stylesheet, Lightning wrote the same rules ~1.1 kB longer (unsimplified
+      // `calc()` in custom properties, longer infinity radii) and nothing it
+      // changed was a fix. The eager CSS ceiling only falls, so it would have
+      // been a raise bought with nothing. esbuild is a direct devDependency
+      // already, for `electron/build.cjs`.
+      cssMinify: 'esbuild' as const,
+      rolldownOptions: {
         // Two pages: the app, and the crash screen main loads into the window
         // when the renderer dies (`src/crash.tsx`). `index` stays the main one.
         input: {
-          index: path.resolve(__dirname, 'index.html'),
-          crash: path.resolve(__dirname, 'crash.html'),
+          index: path.resolve(import.meta.dirname, 'index.html'),
+          crash: path.resolve(import.meta.dirname, 'crash.html'),
         },
       },
     },
     optimizeDeps: {
-      // maplibre-gl ships its own web worker as a separate asset; esbuild's
+      // maplibre-gl ships its own web worker as a separate asset; Vite's
       // dependency pre-bundler doesn't resolve that worker's URL correctly,
       // which leaves the map's tile-parsing worker silently dead (map loads
       // its style but never renders a single tile). Exclude it so Vite serves

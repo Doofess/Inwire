@@ -113,6 +113,21 @@ right number of bytes for it to be.
 Verified in all four directions: a raise to exactly this build passes, a raise
 past it fails, a raise while the build still fits fails, and a lowering passes.
 
+## Amendment: "eager" was a filename, and it missed a preloaded chunk
+
+Found by the Vite 8 upgrade (2026-11-03), when Rolldown named the stylesheet
+`src-<hash>.css` and the script, matching the largest `index-<hash>.js` and
+`index-<hash>.css`, found nothing. Looking at why showed that the name had
+been under-measuring all along: Vite 6 split the code `index.html` shares
+with `crash.html` into a second `index-<hash>.js`, preloaded by the page
+before first paint, and at 643 kB it was never in `eagerJs`.
+
+`eagerJs` is now what the built `dist/index.html` loads: its entry script plus
+every `modulepreload`; `eagerCss` is every stylesheet it links. Recorded under
+Vite 6 first, in its own commit, so the ceiling's rise from 3,105,363 to
+3,748,278 bytes is the measurement being corrected and not a dependency
+adding bytes; the upgrade then lowered it.
+
 ## Consequences
 
 - `test/perf/ceilings.json` joins `test/fixtures/acceptance.json` as a tracked

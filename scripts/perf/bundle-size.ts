@@ -34,8 +34,17 @@
  *
  * - **Hashed filenames.** Vite emits `index-BOYwi-cz.js`; the hash changes on
  *   every content change, so a ceiling keyed on the exact filename would be
- *   unfindable after the first edit. Entries are matched by a glob on the
- *   stable part of the name.
+ *   unfindable after the first edit. The eager set is read from the built
+ *   `dist/index.html` instead - the entry `<script>`, every `modulepreload` and
+ *   every stylesheet it links - which is what the page loads before first
+ *   paint, whatever the bundler names it.
+ *
+ *   It used to be matched by name, as the largest `index-<hash>.js`, and that
+ *   measured less than the page loaded: Vite 6 split the code `index.html`
+ *   shares with `crash.html` into a second, preloaded `index-<hash>.js` of
+ *   643 kB that no ceiling counted. Vite 8's Rolldown splits the same code into
+ *   chunks named after their modules and calls the stylesheet `src-<hash>.css`,
+ *   so the name was never the right key.
  * - **The eager chunk is not the total.** `jspdf`, `exceljs` and the
  *   maplibre worker are all lazily fetched and land in `dist/assets` beside
  *   the entry chunk. Ceiling them together and a lazy chunk growing looks
@@ -61,9 +70,12 @@ interface Ceilings {
   note: string;
   measured: string;
   bundle: {
-    /** The entry chunk - what must parse before React's first commit. */
+    /**
+     * What `index.html` loads before React's first commit: the entry chunk and
+     * every chunk it preloads.
+     */
     eagerJs: number;
-    /** The render-blocking stylesheet beside it. */
+    /** The render-blocking stylesheets `index.html` links. */
     eagerCss: number;
     /** Every emitted asset, lazy chunks included. */
     total: number;
@@ -99,29 +111,40 @@ const files = readdirSync(ASSETS_DIR)
   .sort((a, b) => b.bytes - a.bytes);
 
 /**
- * The entry chunk, by the stable part of its name.
+ * The eager set, as `dist/index.html` names it.
  *
- * `index-<hash>.js` and not `pipeline.worker-<hash>.js`: the Worker is
- * constructed lazily by `pipelineClient.ts`'s `ensureWorker()`, so its 1.3 MB
- * is not on the path to first paint and ceiling it here would be wrong.
+ * Not `pipeline.worker-<hash>.js`: the Worker is constructed lazily by
+ * `pipelineClient.ts`'s `ensureWorker()`, so it is not on the path to first
+ * paint, and `index.html` does not name it. Nor `crash.html`'s entry, which
+ * loads only after the renderer has died.
  */
-const eagerJs = files.find((f) => /^index-[^.]+\.js$/.test(f.name));
-const eagerCss = files.find((f) => /^index-[^.]+\.css$/.test(f.name));
-const total = files.reduce((sum, f) => sum + f.bytes, 0);
+const html = readFileSync(join(root, 'dist', 'index.html'), 'utf8');
+const linked = (pattern: RegExp) => [...html.matchAll(pattern)].map((m) => m[1]);
+const eagerJsNames = [
+  ...linked(/<script\b[^>]*\btype="module"[^>]*\bsrc="\/assets\/([^"]+)"/g),
+  ...linked(/<link\b[^>]*\brel="modulepreload"[^>]*\bhref="\/assets\/([^"]+)"/g),
+];
+const eagerCssNames = linked(/<link\b[^>]*\brel="stylesheet"[^>]*\bhref="\/assets\/([^"]+)"/g);
+const byName = new Map(files.map((f) => [f.name, f]));
+const missing = [...eagerJsNames, ...eagerCssNames].filter((n) => !byName.has(n));
 
-if (eagerJs === undefined || eagerCss === undefined) {
-  console.log('FAIL  no index-<hash>.js / index-<hash>.css in dist/assets.');
-  console.log('      Either the build is broken or Vite\'s entry naming changed;');
-  console.log('      this script matches on it and would silently ceiling nothing.');
+if (eagerJsNames.length === 0 || eagerCssNames.length === 0 || missing.length > 0) {
+  console.log('FAIL  dist/index.html names no entry script or no stylesheet under');
+  console.log('      /assets/, or names a file that is not there'
+    + `${missing.length ? ` (${missing.join(', ')})` : ''}.`);
+  console.log('      Either the build is broken or its HTML changed shape; this');
+  console.log('      script reads it and would otherwise ceiling nothing.');
   process.exit(1);
 }
 
-const measured = { eagerJs: eagerJs.bytes, eagerCss: eagerCss.bytes, total };
+const sum = (names: string[]) => names.reduce((s, n) => s + byName.get(n)!.bytes, 0);
+const total = files.reduce((s, f) => s + f.bytes, 0);
+const measured = { eagerJs: sum(eagerJsNames), eagerCss: sum(eagerCssNames), total };
 
 console.log('dist/assets:\n');
 for (const f of files) {
-  const tag = f.name === eagerJs.name ? '  <- eager, parsed before first paint'
-    : f.name === eagerCss.name ? '  <- eager, render-blocking' : '';
+  const tag = eagerJsNames.includes(f.name) ? '  <- eager, parsed before first paint'
+    : eagerCssNames.includes(f.name) ? '  <- eager, render-blocking' : '';
   console.log(`  ${f.name.padEnd(34)} ${kb(f.bytes).padStart(10)}${tag}`);
 }
 console.log(`  ${'TOTAL'.padEnd(34)} ${kb(total).padStart(10)}\n`);
@@ -134,9 +157,10 @@ if (process.argv.includes('--write-ceilings')) {
       + 'one exception whose shape scripts/perf/bundle-size.ts enforces: a raise '
       + 'is allowed only when the build actually outgrew the previous ceiling, and '
       + 'only to exactly that build - never in advance, never past it. Read '
-      + 'against git HEAD. eagerJs is the entry chunk that must parse before '
-      + 'React\'s first commit; total is every emitted asset including '
-      + 'lazily-fetched ones.',
+      + 'against git HEAD. eagerJs is what dist/index.html loads before '
+      + 'React\'s first commit (its entry script and every modulepreload); '
+      + 'eagerCss is the stylesheets it links; total is every emitted asset '
+      + 'including lazily-fetched ones.',
     measured: new Date().toISOString().slice(0, 10),
     bundle: measured,
   };
