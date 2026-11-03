@@ -32,7 +32,7 @@ import { addProcessRow, annotatePacket } from '../services/dissect/processFields
 import { addLiveGapRow, markLiveGap } from '../services/dissect/liveGapFields';
 import { HOLE_MIN_FRAMES, LiveFlow } from '../services/pipeline/liveFlow';
 import { CaptureFiles, CatchUp, CatchUpRouter, type CatchUpEnd, type FileFrame } from '../services/pipeline/catchUp';
-import { clientFingerprints, learnOrLabelFingerprint } from '../services/dissect/clientFingerprints';
+import { addMatchRow, clientFingerprints, learnOrLabelFingerprint } from '../services/dissect/clientFingerprints';
 import { buildFallbackPacket } from '../services/sessionRestore';
 import { TcpStreamTracker } from '../services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../services/icmpEchoTracker';
@@ -63,6 +63,7 @@ import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
 import { mergeRowSide } from '../services/pipeline/rowSteps';
 import { shardEnv } from '../services/pipeline/shard';
 import { FifoMap } from '../services/pipeline/fifoMap';
+import { RebuiltTrees } from '../services/pipeline/rebuiltTrees';
 import type { FromShard, ToShard } from '../services/pipeline/shardProtocol';
 import { LIVE_ENV } from '../services/dissect/dissectEnv';
 import { settleTreeTls } from '../services/dissect/shardNumbering';
@@ -582,9 +583,11 @@ function emitMerged(merged: Merged): void {
   }
   if (merged.infoPatches) {
     pendingInfoPatches.push(...merged.infoPatches);
-    // Links into a tree lane 0 still caches; a shard frame has no tree to patch.
+    // Links into a tree lane 0 still caches. A shard frame's tree is only ever
+    // a rebuilt one, which is dropped, to be rebuilt with the link.
     for (const patch of merged.infoPatches) {
       if (patch.links === undefined && patch.responseInFrame === undefined) continue;
+      rebuiltTrees.patched(patch.frameId);
       const cached = treeCache.get(patch.frameId);
       if (cached !== undefined) {
         applyInfoPatch({ layers: cached, info: '', fields: {} } as unknown as Packet, { ...patch, suffix: undefined });
@@ -673,7 +676,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   networkFacts.reset();
   duplicates.reset();
   treeCache.clear();
-  revisitedTrees.clear();
+  rebuiltTrees.clear();
   derivedStore.clear();
   clearPendingRows();
   pendingIcmpReplies = [];
@@ -858,8 +861,11 @@ function ingest(frame: LiveFrame, id: number): void {
       // it gains the same rows the stored row does - or a frame opened soon
       // after its answer would lack the link it gains once it leaves the cache.
       for (const patch of decoded.infoPatches) {
+        if (patch.links === undefined && patch.responseInFrame === undefined) continue;
+        // A tree rebuilt after it left the cache is dropped, to be rebuilt with the link.
+        rebuiltTrees.patched(patch.frameId);
         const cached = treeCache.get(patch.frameId);
-        if (cached !== undefined && (patch.links !== undefined || patch.responseInFrame !== undefined)) {
+        if (cached !== undefined) {
           applyInfoPatch({ layers: cached, info: '', fields: {} } as unknown as Packet, { ...patch, suffix: undefined });
         }
       }
@@ -884,7 +890,7 @@ const REVISITED_TREES = 64;
 
 const kitWaiters = new Map<number, (kit: RevisitKit | null) => void>();
 let nextKitRequest = 1;
-const revisitedTrees = new Map<number, ProtocolLayer[]>();
+const rebuiltTrees = new RebuiltTrees(REVISITED_TREES);
 
 function requestKit(id: number): Promise<RevisitKit | null> {
   if (storePort === null) return Promise.resolve(null);
@@ -918,6 +924,19 @@ function processOfRow(row: Packet): ProcessInfo | null {
  * record or the record cannot give the tree back - the caller then replays.
  */
 async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
+  rebuiltTrees.begin(id);
+  let layers: ProtocolLayer[] | null = null;
+  try {
+    layers = await rebuildFromStore(id);
+  } finally {
+    // Kept for a second click, unless a later frame linked into it, or the key
+    // log went, while the store was answering.
+    rebuiltTrees.keep(id, layers);
+  }
+  return layers;
+}
+
+async function rebuildFromStore(id: number): Promise<ProtocolLayer[] | null> {
   const kit = await requestKit(id);
   if (kit === null || kit.record === null || kit.row === null) return null;
   const bytes = new Map(kit.frames);
@@ -941,12 +960,8 @@ async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
     if (links !== undefined) applyInfoPatch(packet, { frameId: id, links });
     addProcessRow(packet.layers, processOfRow(row));
     addLiveGapRow(packet.layers, row.fields?.['inwire.live.skipped']);
-    revisitedTrees.set(id, packet.layers);
-    while (revisitedTrees.size > REVISITED_TREES) {
-      const oldest = revisitedTrees.keys().next();
-      if (oldest.done) break;
-      revisitedTrees.delete(oldest.value);
-    }
+    // Arrival's last step, `learnOrLabelFingerprint`; the row keeps the match.
+    addMatchRow(packet.layers, row.fields, clientFingerprints);
     return packet.layers;
   } catch (error) {
     if (!(error instanceof RecordMiss)) {
@@ -1699,7 +1714,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       parallel?.coordinator.broadcast({ type: 'keylog', text: command.text });
       // A rebuilt tree read the key log as it was; with more keys, the same
       // frame may now decrypt. Arrival's cache stays, as ADR 0045 records.
-      revisitedTrees.clear();
+      rebuiltTrees.clear();
       break;
 
     case 'keylog-clear':
@@ -1713,7 +1728,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       // the panel said the secrets were gone. The decrypted answers kept for
       // revisits are the third.
       treeCache.clear();
-      revisitedTrees.clear();
+      rebuiltTrees.clear();
       derivedStore.clear();
       break;
 
@@ -1726,7 +1741,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       break;
 
     case 'detail': {
-      const layers = treeCache.get(command.id) ?? revisitedTrees.get(command.id);
+      const layers = treeCache.get(command.id) ?? rebuiltTrees.get(command.id);
       if (layers) {
         // Lane 0's tree, its `tls.stream` placeholders numbered by now.
         if (parallel !== null) settleTreeTls(layers, (p) => parallel!.coordinator.resolveLaneZero(p));

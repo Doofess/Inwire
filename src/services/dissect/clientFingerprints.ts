@@ -132,7 +132,7 @@ export function learnOrLabelFingerprint(
  * came from this machine's process table, not from the handshake, and putting
  * it under TLS would present it as something the bytes said.
  */
-function addFingerprintRow(layers: ProtocolLayer[], name: string, frames: number): void {
+function addFingerprintRow(layers: ProtocolLayer[], name: string, frames: number | undefined): void {
   const frame = layers.find((layer) => layer.name === 'Frame');
   if (!frame) return;
   frame.fields.push({
@@ -142,9 +142,28 @@ function addFingerprintRow(layers: ProtocolLayer[], name: string, frames: number
     abbrev: 'inwire.process.ja4_match',
     children: [{
       name: 'Basis',
-      value: `this TLS fingerprint has only been seen from ${name} on this machine`
-        + ` (${frames} attributed frame${frames === 1 ? '' : 's'})`,
+      value: frames === undefined
+        ? `this TLS fingerprint had only been seen from ${name} on this machine when the frame arrived`
+        : `this TLS fingerprint has only been seen from ${name} on this machine`
+          + ` (${frames} attributed frame${frames === 1 ? '' : 's'})`,
       generated: true,
     }],
   });
+}
+
+/**
+ * The match row again, for a tree rebuilt from its stored row (ADR 0072): the
+ * row keeps the name arrival matched. The count is today's, and only while the
+ * store still names the same program; otherwise the row claims no count.
+ */
+export function addMatchRow(
+  layers: ProtocolLayer[],
+  fields: Record<string, unknown> | undefined,
+  store: ClientFingerprintStore,
+): void {
+  const name = fields?.['inwire.process.ja4_match'];
+  if (typeof name !== 'string' || !name) return;
+  const ja4 = fields?.['tls.handshake.ja4'];
+  const now = typeof ja4 === 'string' ? store.match(ja4) : null;
+  addFingerprintRow(layers, name, now?.name === name ? now.frames : undefined);
 }

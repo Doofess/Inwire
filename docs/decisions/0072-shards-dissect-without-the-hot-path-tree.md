@@ -66,8 +66,8 @@ tree, not from it.
   carry an `expertInfo`, without children, in the depth-first order the full
   tree would have them. So `collectExpert`, the protocol chain, `nestLayers`
   and the row codec are unchanged, and the expert list keeps its order. The
-  Frame layer also keeps the three generated rows `decodeRawEthernetPacket`
-  appends to it.
+  Frame layer's tree-only rows (`[Protocols in frame]`, the size-limited
+  marker, `Character encoding`) are not built; Info still carries the marker.
 - **The tree-on branch is the reference.** For every frame, the packed row,
   the record and the expert list are byte-identical between the two modes.
   `scripts/pipeline/tree-free-rows.ts` holds that on the fixtures, on a
@@ -83,6 +83,13 @@ tree, not from it.
 - A click on a recent shard frame costs a store round trip and one record
   rebuild, where it used to cost nothing. The same is already true of every
   other frame below the cache.
+- The shard's cache gave its trees two things a rebuilt tree must now get
+  elsewhere (`src/services/pipeline/rebuiltTrees.ts`,
+  `scripts/pipeline/rebuilt-trees.ts`): links a later frame writes in (a
+  rebuilt tree one lands on, even mid-rebuild, is dropped and rebuilt with
+  it), and the JA4 "Matches process" row, which comes back from the stored
+  row's `inwire.process.ja4_match` with today's count, or none if the store
+  no longer names that program.
 - Removed: the shard's tree cache (`SHARD_CACHE_FRAMES`, about 2,000 trees,
   ~20 MB per shard), its `detail` message both ways, `treeFromShard`, and the
   coordinator's tree rows and patches for shard lanes.
