@@ -40,7 +40,8 @@ import { rechoosesWindow, revealStep } from '../../src/components/ladder/ladderF
 import { flowSummaryIsTarget, summaryIsTarget, type StreamTarget } from '../../src/services/followStream';
 import type { QuicSummary, UdpSummary } from '../../src/services/conversation/flowSummary';
 import { foldRuns, itemTime, type LadderItem } from '../../src/components/ladder/ladderRuns';
-import { layoutLadder, MIN_ROW_GAP, revealScroll, rowMeta, type LadderLayout } from '../../src/components/ladder/ladderLayout';
+import { layoutLadder, MIN_ROW_GAP, rowMeta, type LadderLayout } from '../../src/components/ladder/ladderLayout';
+import { revealScroll } from '../../src/lib/revealScroll';
 import {
   lanePills, markLadder, MARK_ROW, ROW_ABOVE, ROW_BELOW,
 } from '../../src/components/ladder/ladderMarks';

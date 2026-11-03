@@ -344,20 +344,6 @@ export function panWindow(
 }
 
 /**
- * The scroll that shows a row from `top` to `bottom`, moving as little as it
- * can - or not at all when the row is already in view.
- *
- * The window is time, but the drawing can be taller than the viewport: nudging
- * a burst apart pushes rows below it, so a frame inside the window can still be
- * off screen. A row taller than the viewport shows its top, where its chip is.
- */
-export function revealScroll(scrollTop: number, viewport: number, top: number, bottom: number): number {
-  if (top < scrollTop || bottom - top > viewport) return top;
-  if (bottom > scrollTop + viewport) return bottom - viewport;
-  return scrollTop;
-}
-
-/**
  * The line under an arrow: its frame number and size, and on a crowded row a
  * note that its place is not to scale. The note goes first when the line would
  * overrun the lanes, because the number is what the row is found by.

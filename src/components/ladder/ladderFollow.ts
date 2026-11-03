@@ -3,7 +3,7 @@
  * (ADR 0055; final review I4 and I5). Pure, so a script can hold the decisions
  * `LadderView` makes in effects a test cannot reach.
  */
-import { revealScroll } from './ladderLayout';
+import { revealScroll } from '../../lib/revealScroll';
 
 /**
  * What asks the ladder to choose its time window again.

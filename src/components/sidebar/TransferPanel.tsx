@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check, CircleAlert, Download, FileCode, FileSpreadsheet, FileText,
   Image as ImageIcon, LoaderCircle, RefreshCw, X,
@@ -9,6 +9,7 @@ import { Switch } from '../ui/switch';
 import { ImportPanel } from '../export/ImportPanel';
 import { ImportErrorDialog } from '../export/ImportErrorDialog';
 import { useRovingFocus } from '../common/useRovingFocus';
+import { revealInScroller } from '../../lib/revealScroll';
 import { FilterEngine } from '../../services/filterEngine';
 import { keyLog } from '../../services/tls/keyLog';
 import { captureStore } from '../../services/capture/captureClient';
@@ -224,11 +225,25 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
    */
   const [rejected, setRejected] = useState<{ filename: string; failure: ImportFailure } | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  /**
+   * Import is the column's last section, so at the minimum window (1024x700)
+   * it sits below the export formats, and its progress bar with it. The column
+   * keeps its order - an export reads top to bottom - and scrolls to Import
+   * when Import is what is happening: the welcome's request, and a running
+   * import.
+   */
+  const importRef = useRef<HTMLDivElement>(null);
+  const revealImport = () => {
+    if (importRef.current !== null) revealInScroller(importRef.current);
+  };
   // The same token the retry button bumps, so `ImportPanel`'s one effect opens
   // the picker for both. Runs on mount too: the welcome shows the panel and asks
   // in one batch, so the panel can arrive with the request already made.
   useEffect(() => {
-    if (pickRequest > 0) setRetryToken((n) => n + 1);
+    if (pickRequest > 0) {
+      revealImport();
+      setRetryToken((n) => n + 1);
+    }
   }, [pickRequest]);
   const onKeyDown = useRovingFocus('vertical');
   /** What the last "As captured" save came to, said under its row. */
@@ -266,6 +281,11 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
   const busy = job.status === 'running';
   // An import replaces the frames an export reads, so it shuts every export row.
   const importing = useImportJob().status === 'running';
+  // Mount counts too: an import outlives this panel (`importJob.ts`), and
+  // coming back to it mid-import should land on the bar, not on the formats.
+  useEffect(() => {
+    if (importing) revealImport();
+  }, [importing]);
   const canExport = captureRowCount > 0 && filterValid && !busy && !importing
     && (effectiveScope === 'capture'
       || (effectiveScope === 'filter' && filtered.ready)
@@ -588,30 +608,32 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
 
       <JobStatus job={job} />
 
-      <Section title="Import">
-        {/* **The consequence is stated ABOVE the target, not after it**, and it
-            matters in a way it did not before: the modal had to be OPENED to
-            arm a drop zone, and this panel is persisted - so the target sits
-            armed beside a running capture for as long as the panel is left on.
-            `handleImportPackets` stops the capture, prunes the previous capture
-            directory, resets the pipeline's id counter and adopts the new
-            frames. None of that is discoverable from a dashed rectangle. */}
-        <p className="px-3 py-2 text-[11px] leading-tight text-warning">
-          An import stops the capture and replaces everything in the buffer.
-        </p>
-        <div className="px-3 py-2">
-          <ImportPanel
-            onImportPackets={onImportPackets}
-            onImportBatch={onImportBatch}
-            onImportBegin={onImportBegin}
-            onImportFailed={onImportFailed}
-            bytesStoredThrough={bytesStoredThrough}
-            onFailure={(filename, failure) => setRejected({ filename, failure })}
-            retryToken={retryToken}
-            blockedBy={busy ? 'Not while an export is running - an import would replace the frames it is reading.' : importBlockedBy}
-          />
-        </div>
-      </Section>
+      <div ref={importRef}>
+        <Section title="Import">
+          {/* **The consequence is stated ABOVE the target, not after it**, and it
+              matters in a way it did not before: the modal had to be OPENED to
+              arm a drop zone, and this panel is persisted - so the target sits
+              armed beside a running capture for as long as the panel is left on.
+              `handleImportPackets` stops the capture, prunes the previous capture
+              directory, resets the pipeline's id counter and adopts the new
+              frames. None of that is discoverable from a dashed rectangle. */}
+          <p className="px-3 py-2 text-[11px] leading-tight text-warning">
+            An import stops the capture and replaces everything in the buffer.
+          </p>
+          <div className="px-3 py-2">
+            <ImportPanel
+              onImportPackets={onImportPackets}
+              onImportBatch={onImportBatch}
+              onImportBegin={onImportBegin}
+              onImportFailed={onImportFailed}
+              bytesStoredThrough={bytesStoredThrough}
+              onFailure={(filename, failure) => setRejected({ filename, failure })}
+              retryToken={retryToken}
+              blockedBy={busy ? 'Not while an export is running - an import would replace the frames it is reading.' : importBlockedBy}
+            />
+          </div>
+        </Section>
+      </div>
 
       {rejected !== null && (
         <ImportErrorDialog
