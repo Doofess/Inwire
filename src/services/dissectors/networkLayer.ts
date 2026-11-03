@@ -26,7 +26,7 @@ import type {
   TcpTrackerApi, IcmpTrackerApi, QuicTrackerApi, DnsTrackerApi, L3TrackerApi,
 } from '../dissect/trackerApi';
 import type { InfoPatch } from '../dissect/types';
-import { treeWanted } from '../dissect/treeMode';
+import { findingsOf, treeWanted } from '../dissect/treeMode';
 import { formatIpv6Address } from '../addressFormat';
 import { ETHERNET_MAX_FRAME } from '../direction';
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './ipv4';
@@ -179,6 +179,25 @@ function ttlNotes(ttl: number, bytes: Uint8Array, dstAt: number, protocol: numbe
 }
 
 /**
+ * The status row under an IPv4 header checksum. The row's value is the status
+ * the field carries, not prose: a row with an abbrev is one right-click from
+ * becoming a filter, and `ip.checksum.status == "Correct"` would match nothing.
+ * A wrong checksum is the finding, and the only row of the layer a tree-free
+ * layer (ADR 0072) keeps.
+ */
+function ipChecksumStatusRow(status: string, computed: number): ProtocolField {
+  return {
+    name: '[Header checksum status]',
+    value: status,
+    generated: true,
+    abbrev: 'ip.checksum.status',
+    ...(status === 'Bad'
+      ? { expertInfo: { category: 'Broken' as const, message: `Bad checksum, should be 0x${computed.toString(16).padStart(4, '0')}` } }
+      : {}),
+  };
+}
+
+/**
  * Under an IPv6 address: what kind of address it is (`ipv6Address.ts`), then
  * the either-end names, with the same detail again beneath `ipv6.addr` - which
  * is where the reference hangs its `ipv6.addr_*` twins.
@@ -211,6 +230,8 @@ function ipStreamRow(
     ? context.l3Tracker.ipStream(src, dst, context.tsUs)
     : context.l3Tracker.ipv6Stream(src, dst, context.tsUs);
   filterFields[`${family}.stream`] = facts.index;
+  // The row is the tree's; the tracker has been asked and the filter answered (ADR 0072).
+  if (!treeWanted()) return [];
   return [{ name: '[Stream index]', value: facts.index, generated: true, abbrev: `${family}.stream` }];
 }
 
@@ -396,10 +417,12 @@ export function decodeNetworkLayer(
     const link = dissectEmbeddedEthernet(bytes, start, bytes.length);
     if (link === null || link.truncated || link.srcMac === undefined || link.dstMac === undefined) return null;
     if (!context.quoted && context.l3Tracker !== undefined && link.layers.length > 0) {
-      link.layers[0].fields.push({
-        name: '[Stream index]', value: context.l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs).index,
-        generated: true, abbrev: 'eth.stream',
-      });
+      // The tracker is asked either way: it numbers the conversations that
+      // later frames are counted in. Only the row is the tree's (ADR 0072).
+      const ethStream = context.l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs).index;
+      if (treeWanted()) {
+        link.layers[0].fields.push({ name: '[Stream index]', value: ethStream, generated: true, abbrev: 'eth.stream' });
+      }
     }
     layers.push(...link.layers);
     for (const [key, value] of Object.entries(link.fields)) if (!(key in filterFields)) filterFields[key] = value;
@@ -590,15 +613,19 @@ export function decodeNetworkLayer(
         : checksumCorrect ? 'Good'
           : sentByUs === undefined ? 'Unverified'
             : 'Bad';
-    const ttlGuess = inferTtl(ttl);
     srcIp = `${rawBytes[l3Offset + 12]}.${rawBytes[l3Offset + 13]}.${rawBytes[l3Offset + 14]}.${rawBytes[l3Offset + 15]}`;
     dstIp = `${rawBytes[l3Offset + 16]}.${rawBytes[l3Offset + 17]}.${rawBytes[l3Offset + 18]}.${rawBytes[l3Offset + 19]}`;
 
+    // A live shard keeps no tree (ADR 0072): without one the layer holds only
+    // its findings, in the tree's depth-first order - the checksum's status
+    // here, then the options', then the fragments' below.
+    const tree = treeWanted();
+    const ttlGuess = tree ? inferTtl(ttl) : undefined;
     const ipLayer: ProtocolLayer = {
       name: 'Internet Protocol Version 4',
       summary: `Internet Protocol Version 4, Src: ${srcIp}, Dst: ${dstIp}`,
       rawBytesRange: [l3Offset, l3Offset + ipHeaderLen - 1],
-      fields: [
+      fields: !tree ? (ipChecksumStatus === 'Bad' ? [ipChecksumStatusRow(ipChecksumStatus, headerChecksumComputed)] : []) : [
         { name: 'Version', value: '4', abbrev: 'ip.version', rawBytesRange: [l3Offset, l3Offset] },
         { name: 'Header Length', value: `${ipHeaderLen} bytes`, abbrev: 'ip.hdr_len', rawBytesRange: [l3Offset, l3Offset] },
         {
@@ -650,20 +677,7 @@ export function decodeNetworkLayer(
           value: `0x${headerChecksumActual.toString(16).padStart(4, '0')} [${checksumCorrect ? 'correct' : 'incorrect'}]`,
           rawBytesRange: [l3Offset + 10, l3Offset + 11],
           abbrev: 'ip.checksum',
-          children: [
-            // The row's value is the status the field carries, not prose:
-            // a row with an abbrev is one right-click from becoming a filter,
-            // and `ip.checksum.status == "Correct"` would match nothing.
-            {
-              name: '[Header checksum status]',
-              value: ipChecksumStatus,
-              generated: true,
-              abbrev: 'ip.checksum.status',
-              ...(ipChecksumStatus === 'Bad'
-                ? { expertInfo: { category: 'Broken' as const, message: `Bad checksum, should be 0x${headerChecksumComputed.toString(16).padStart(4, '0')}` } }
-                : {}),
-            },
-          ],
+          children: [ipChecksumStatusRow(ipChecksumStatus, headerChecksumComputed)],
         },
         // **`_host` beside `addr`, and it is not the same row twice.** Both
         // hold this address, but they answer different questions once name
@@ -684,16 +698,21 @@ export function decodeNetworkLayer(
     if (ipHeaderLen > 20) {
       const options = dissectIpv4Options(rawBytes, l3Offset + 20, l3Offset + ipHeaderLen);
       if (options.length > 0) {
-        // The reference names every option it has a dissector for after the
-        // byte count: "Options: (4 bytes), Router Alert".
-        const named = options.map((o) => /^IP Option - (.*) \(\d+ bytes?\)$/.exec(o.name)?.[1])
-          .filter((n): n is string => n !== undefined && !/\((EOL|NOP)\)$/.test(n));
-        ipLayer.fields.push({
-          name: 'Options',
-          value: `(${ipHeaderLen - 20} bytes)${named.map((n) => `, ${n}`).join('')}`,
-          rawBytesRange: [l3Offset + 20, l3Offset + ipHeaderLen - 1],
-          children: options,
-        });
+        if (tree) {
+          // The reference names every option it has a dissector for after the
+          // byte count: "Options: (4 bytes), Router Alert".
+          const named = options.map((o) => /^IP Option - (.*) \(\d+ bytes?\)$/.exec(o.name)?.[1])
+            .filter((n): n is string => n !== undefined && !/\((EOL|NOP)\)$/.test(n));
+          ipLayer.fields.push({
+            name: 'Options',
+            value: `(${ipHeaderLen - 20} bytes)${named.map((n) => `, ${n}`).join('')}`,
+            rawBytesRange: [l3Offset + 20, l3Offset + ipHeaderLen - 1],
+            children: options,
+          });
+        } else {
+          // A header with options is rare; the walker's findings, thinned.
+          ipLayer.fields.push(...findingsOf(options));
+        }
         filterFields['ip.opt.type'] = rawBytes[l3Offset + 20];
       }
     }
@@ -738,7 +757,10 @@ export function decodeNetworkLayer(
     const reassembled = datagram?.reassembled ?? null;
 
     if (isFragment) {
-      ipLayer.fields.push({
+      // Fragments are rare, so the rows are built and then thinned to their
+      // findings when no tree is wanted (ADR 0072), not built twice.
+      const addRows = (row: ProtocolField) => { ipLayer.fields.push(...(tree ? [row] : findingsOf([row]))); };
+      addRows({
         name: '[Fragment]',
         value: `offset ${fragmentBytes}, ${fragmentPayloadLen} byte${fragmentPayloadLen === 1 ? '' : 's'}`,
         generated: true,
@@ -746,7 +768,7 @@ export function decodeNetworkLayer(
       if (datagram) {
         if (reassembled && datagram.contributions) {
           const parts = datagram.contributions.map((c) => `#${c.frame}(${c.bytes})`).join(', ');
-          ipLayer.fields.push({
+          addRows({
             name: `[${datagram.contributions.length} Reassembled IPv4 fragments (${reassembled.length} bytes)]`,
             value: parts,
             generated: true,
@@ -765,7 +787,7 @@ export function decodeNetworkLayer(
             } : {}),
           });
         } else {
-          ipLayer.fields.push({
+          addRows({
             name: '[Fragments so far]',
             value: `${datagram.frames.length} frame${datagram.frames.length === 1 ? '' : 's'}, ${datagram.bytesSoFar} bytes`,
             generated: true,
@@ -778,7 +800,7 @@ export function decodeNetworkLayer(
             // rather than declaring a failure. Handing the transport dissector
             // a buffer with the gap quietly zero-filled is the one thing that
             // is not an option.
-            ipLayer.fields.push({
+            addRows({
               name: '[Datagram incomplete]',
               value: `${datagram.totalLength} bytes expected, ${datagram.bytesSoFar} captured - waiting for a missing fragment`,
               generated: true,
@@ -899,7 +921,9 @@ export function decodeNetworkLayer(
       name: 'Internet Protocol Version 6',
       summary: `Internet Protocol Version 6, Src: ${srcIp}, Dst: ${dstIp}`,
       rawBytesRange: [l3Offset, l3Offset + 39],
-      fields: [
+      // The fixed header raises no finding of its own, so a shard, which keeps
+      // no tree (ADR 0072), gets it empty (an extension header's are its layer's).
+      fields: !treeWanted() ? [] : [
         // The first 4 bytes are one word carrying three fields at three
         // different render widths - 8, 32 and 24 bits. That is why totalBits
         // is dissector-supplied: nothing about the fields themselves implies

@@ -15,6 +15,31 @@
  */
 let wanted = true;
 
+import type { ProtocolField } from '../../types/packet';
+
+/**
+ * The rows of `rows` that carry a finding, flattened depth-first (a row before
+ * its children, which is the order `collectExpert` walks) and stripped of
+ * their children. What a tree-free layer holds in place of rows built for the
+ * tree, for a layer whose rows come from a helper that builds the whole tree
+ * anyway - IPv4 options, a reassembled-fragment row - and are rare enough that
+ * building and then thinning them is cheaper than a second builder.
+ */
+export function findingsOf(rows: readonly ProtocolField[]): ProtocolField[] {
+  const out: ProtocolField[] = [];
+  const walk = (list: readonly ProtocolField[]) => {
+    for (const row of list) {
+      if (row.expertInfo !== undefined) {
+        const { children: _children, ...flat } = row;
+        out.push(flat);
+      }
+      if (row.children !== undefined) walk(row.children);
+    }
+  };
+  walk(rows);
+  return out;
+}
+
 /** True unless a `withoutTree` scope is open. */
 export function treeWanted(): boolean {
   return wanted;

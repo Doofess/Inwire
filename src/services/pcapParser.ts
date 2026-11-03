@@ -44,6 +44,7 @@ import type { FrameRecorder } from './dissect/frameRecord';
 export interface FrameRecordEntry { id: number; record: Uint8Array; derived?: Uint8Array | null }
 import { poolExpert, poolTokens } from './dissect/tokenPool';
 import { SIZE_LIMITED, bytesNotCaptured } from './dissect/captureShort';
+import { treeWanted } from './dissect/treeMode';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 import { protocolsInFrame } from './dissect/protocolsInFrame';
 
@@ -1251,6 +1252,27 @@ export function decodeRawEthernetPacket(
   let transportLayerIndex = -1;
   let resolvedNames: { name: string; addresses: string[] }[] | undefined;
 
+  // A live shard keeps no tree (ADR 0072): the hot-path layers hold only their
+  // findings, and a row that is only the tree's is not built at all. Asked once;
+  // the Frame layer's one finding is built once and shared by both branches.
+  const tree = treeWanted();
+  // A frame longer than the Ethernet MTU was never on the wire in this
+  // shape: the adapter's segmentation offload split it, and the capture
+  // was taken before that happened. It is why the checksum in it is
+  // often zero, and saying so here is what stops that reading as damage.
+  const mtuRows: ProtocolField[] = (origLen || rawBytes.length) > ETHERNET_MAX_FRAME ? [{
+    name: '[Frame exceeds MTU]',
+    value: 'Segmentation offloaded to the adapter; this frame was never sent in this form',
+    generated: true,
+    expertInfo: {
+      // Unverifiable rather than a protocol note: a frame this large was
+      // handed to the sniffer above segmentation offload, so its size is
+      // an artefact of where we are standing, not of the wire.
+      category: 'Unverifiable' as const,
+      message: `Frame is ${origLen || rawBytes.length} bytes, past the ${ETHERNET_MAX_FRAME}-byte Ethernet MTU - segmentation offload`,
+    },
+  }] : [];
+
   const layers: ProtocolLayer[] = [
     {
       name: 'Frame',
@@ -1261,7 +1283,7 @@ export function decodeRawEthernetPacket(
       // row carries the reference's name, so it can be copied, made a column, or -
       // where `filter/fields.ts` can answer it from the frame - applied as a filter;
       // `tree-coverage.ts` holds the layer to tshark's like any other.
-      fields: [
+      fields: !tree ? mtuRows : [
         { name: 'Section number', value: 1, generated: true, abbrev: 'frame.section_number' },
         {
           name: 'Interface id',
@@ -1306,22 +1328,7 @@ export function decodeRawEthernetPacket(
         { name: 'Capture Length', value: `${rawBytes.length} bytes (${rawBytes.length * 8} bits)`, abbrev: 'frame.cap_len' },
         { name: '[Frame is marked]', value: 'False', generated: true, abbrev: 'frame.marked' },
         { name: '[Frame is ignored]', value: 'False', generated: true, abbrev: 'frame.ignored' },
-        // A frame longer than the Ethernet MTU was never on the wire in this
-        // shape: the adapter's segmentation offload split it, and the capture
-        // was taken before that happened. It is why the checksum in it is
-        // often zero, and saying so here is what stops that reading as damage.
-        ...((origLen || rawBytes.length) > ETHERNET_MAX_FRAME ? [{
-          name: '[Frame exceeds MTU]',
-          value: 'Segmentation offloaded to the adapter; this frame was never sent in this form',
-          generated: true,
-          expertInfo: {
-            // Unverifiable rather than a protocol note: a frame this large was
-            // handed to the sniffer above segmentation offload, so its size is
-            // an artefact of where we are standing, not of the wire.
-            category: 'Unverifiable' as const,
-            message: `Frame is ${origLen || rawBytes.length} bytes, past the ${ETHERNET_MAX_FRAME}-byte Ethernet MTU - segmentation offload`,
-          },
-        }] : []),
+        ...mtuRows,
       ],
     },
     ...link.layers,
@@ -1337,9 +1344,12 @@ export function decodeRawEthernetPacket(
   if (link.srcMac !== undefined && link.dstMac !== undefined
     && l3Tracker !== undefined && link.layers.length > 0) {
     const ethFacts = l3Tracker.ethStream(link.srcMac, link.dstMac, tsUs);
-    link.layers[0].fields.push({
-      name: '[Stream index]', value: ethFacts.index, generated: true, abbrev: 'eth.stream',
-    });
+    // The row is the tree's; the tracker has been asked and the filter answered.
+    if (tree) {
+      link.layers[0].fields.push({
+        name: '[Stream index]', value: ethFacts.index, generated: true, abbrev: 'eth.stream',
+      });
+    }
     filterFields['eth.stream'] = ethFacts.index;
   }
 
@@ -1351,7 +1361,7 @@ export function decodeRawEthernetPacket(
   // rather than in `dissectLinkLayer` because the length that decides where
   // the payload stops belongs to the layer above, and the link layer has not
   // looked at it yet.
-  if (link.layers.length > 0) {
+  if (tree && link.layers.length > 0) {
     link.layers[0].fields.push(
       ...ethernetTrailerRows(rawBytes, declaredPayloadEnd(rawBytes, l3Offset, currentEtherType)),
     );
@@ -1487,11 +1497,15 @@ export function decodeRawEthernetPacket(
   const notCaptured = bytesNotCaptured(rawBytes, l3Offset, currentEtherType, origLen);
   if (notCaptured > 0) {
     info = `${info}${SIZE_LIMITED}`;
-    layers[layers.length - 1].fields.push({
-      name: SIZE_LIMITED,
-      value: `${notCaptured} byte${notCaptured === 1 ? '' : 's'} of this frame were not captured`,
-      generated: true,
-    });
+    // The row is a note, no finding and read by nothing flat: the Info column
+    // above carries the marker, so a shard keeps no tree row for it (ADR 0072).
+    if (tree) {
+      layers[layers.length - 1].fields.push({
+        name: SIZE_LIMITED,
+        value: `${notCaptured} byte${notCaptured === 1 ? '' : 's'} of this frame were not captured`,
+        generated: true,
+      });
+    }
   }
 
   const { expert, strongest } = collectExpert(layers);
@@ -1506,10 +1520,14 @@ export function decodeRawEthernetPacket(
   for (const token of extensionTokens) if (!frameProtocols.includes(token)) frameProtocols.push(token);
   nestLayers(layers);
   nestQuotedLayers(layers);
-  layers[0].fields.push(
-    { name: '[Protocols in frame]', value: protocolsInFrame(frameProtocols), generated: true, abbrev: 'frame.protocols' },
-    { name: 'Character encoding', value: 'ASCII (0)', abbrev: 'frame.encoding' },
-  );
+  // Both rows are the tree's alone (`treeOnly` in the field registry); the
+  // protocol chain itself is `frameProtocols` above.
+  if (tree) {
+    layers[0].fields.push(
+      { name: '[Protocols in frame]', value: protocolsInFrame(frameProtocols), generated: true, abbrev: 'frame.protocols' },
+      { name: 'Character encoding', value: 'ASCII (0)', abbrev: 'frame.encoding' },
+    );
+  }
 
   return {
     packet: {

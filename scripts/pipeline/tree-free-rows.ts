@@ -22,7 +22,6 @@
 import { existsSync, openAsBlob } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
 import { FrameClock } from '../../src/services/dissect/sequencer';
-import { SIZE_LIMITED } from '../../src/services/dissect/captureShort';
 import { FrameDissector, type DissectInput } from '../../src/services/pipeline/frameDissector';
 import { packRows } from '../../src/services/pipeline/rowPack';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
@@ -32,7 +31,7 @@ import { DnsTracker } from '../../src/services/dnsTracker';
 import { L3Tracker } from '../../src/services/l3Tracker';
 import type { HostIdentity } from '../../src/services/direction';
 import type { Packet } from '../../src/types/packet';
-import { Bytes, check, ethernet, finish, ipv4, udp, udpFrame } from '../parity/synthetic';
+import { Bytes, check, ethernet, finish, internetChecksum, ipv4, udp, udpFrame } from '../parity/synthetic';
 import { FIXED_ENV } from './virtualShards';
 import { FIXTURES } from './arrival';
 
@@ -44,15 +43,17 @@ export const HOT_PATH_LAYERS: ReadonlySet<string> = new Set([
 
 /** The layers that are tree-free so far: each holds findings only. */
 export const TREE_FREE_NOW: ReadonlySet<string> = new Set<string>([
+  'Frame', 'Ethernet II', 'Internet Protocol Version 4', 'Internet Protocol Version 6',
   'Transmission Control Protocol', 'User Datagram Protocol',
 ]);
 
-/** Field names a tree-free layer may hold without an `expertInfo`, by layer. */
-export const ALLOWED_PLAIN: Record<string, ReadonlySet<string>> = {
-  // `decodeRawEthernetPacket` hangs the size-limited marker on the deepest layer, which a cut frame makes one of these.
-  'Transmission Control Protocol': new Set([SIZE_LIMITED]),
-  'User Datagram Protocol': new Set([SIZE_LIMITED]),
-};
+/**
+ * Field names a tree-free layer may hold without an `expertInfo`, by layer.
+ * None: the size-limited note and the Frame's generated rows are not built
+ * without a tree (the Info column carries the marker; `treeOnly` fields), so a
+ * layer holds findings and nothing else.
+ */
+export const ALLOWED_PLAIN: Record<string, ReadonlySet<string>> = {};
 
 const BURST_FRAMES = 100_000;
 const MAX_FAILURES_SHOWN = 30;
@@ -167,6 +168,36 @@ function segment(
   ]);
 }
 
+/** An IPv4 header with `options` (a multiple of four bytes), a correct checksum, and `payload`. */
+function ipv4WithOptions(protocol: number, options: number[], payload: Uint8Array): Uint8Array {
+  const header = new Bytes()
+    .u8(0x40 | (5 + options.length / 4), 0)
+    .u16(20 + options.length + payload.length)
+    .u16(0x0002, 0x0000)
+    .u8(64, protocol).u16(0)
+    .ipv4(CLIENT).ipv4(SERVER).raw(options).build();
+  const sum = internetChecksum(header);
+  header[10] = sum >> 8; header[11] = sum & 0xff;
+  return Uint8Array.from([...header, ...payload]);
+}
+
+/** An IPv4 fragment: `offset` in 8-byte units, `more` the More Fragments flag. */
+function ipv4Fragment(id: number, offset: number, more: boolean, payload: Uint8Array): Uint8Array {
+  const header = new Bytes()
+    .u8(0x45, 0).u16(20 + payload.length).u16(id).u16((more ? 0x2000 : 0) | offset)
+    .u8(64, 253).u16(0).ipv4(CLIENT).ipv4(SERVER).build();
+  const sum = internetChecksum(header);
+  header[10] = sum >> 8; header[11] = sum & 0xff;
+  return Uint8Array.from([...ethernet(0x0800).build(), ...header, ...payload]);
+}
+
+/** A UDP-in-IPv4 datagram whose header checksum is wrong: the finding a tunnel's inner layer carries. */
+function badInnerIpv4(): Uint8Array {
+  const inner = ipv4(17, udp(6000, 6001, new Uint8Array(8).fill(3)));
+  inner[10] ^= 0xff;
+  return inner;
+}
+
 function syntheticFrames(): { bytes: Uint8Array; origLen?: number }[] {
   const c: [string, number] = [CLIENT, 40000];
   const s: [string, number] = [SERVER, 80];
@@ -216,6 +247,37 @@ function syntheticFrames(): { bytes: Uint8Array; origLen?: number }[] {
   // Cut mid-IPv4 header, and a runt Ethernet frame.
   add(whole.slice(0, 14 + 12), whole.length);
   add(whole.slice(0, 9), whole.length);
+
+  // IPv4 options: Record Route with a pointer before its first slot, an option
+  // whose length cannot fit, and a Router Alert that raises nothing.
+  const none20 = udp(5006, 5007, new Uint8Array(4));
+  add(Uint8Array.from([...ethernet(0x0800).build(),
+    ...ipv4WithOptions(17, [0x07, 0x07, 0x02, 0, 0, 0, 0, 0x01], none20)]));               // #21
+  add(Uint8Array.from([...ethernet(0x0800).build(),
+    ...ipv4WithOptions(17, [0x07, 0x01, 0, 0], none20)]));                                  // #22
+  add(Uint8Array.from([...ethernet(0x0800).build(),
+    ...ipv4WithOptions(17, [0x94, 0x04, 0, 0], none20)]));                                  // #23
+
+  // IPv4 fragments: the last one first (a hole is left), then two that overlap.
+  add(ipv4Fragment(0x0077, 2, false, new Uint8Array(16).fill(5)));                          // #24
+  add(ipv4Fragment(0x0078, 0, true, new Uint8Array(16).fill(6)));                           // #25
+  add(ipv4Fragment(0x0078, 1, false, new Uint8Array(16).fill(7)));                          // #26
+
+  // A bad inner IPv4 header inside GRE, and inside ERSPAN type I (whose mirrored
+  // frame is a whole Ethernet frame); and an ERSPAN whose mirrored frame is cut.
+  const gre = new Bytes().u16(0x0000, 0x0800).build();
+  add(Uint8Array.from([...ethernet(0x0800).build(), ...ipv4(47, Uint8Array.from([...gre, ...badInnerIpv4()]))])); // #27
+  const erspan = new Bytes().u16(0x0000, 0x88be).build();
+  const mirrored = Uint8Array.from([...ethernet(0x0800).build(), ...badInnerIpv4()]);
+  add(Uint8Array.from([...ethernet(0x0800).build(), ...ipv4(47, Uint8Array.from([...erspan, ...mirrored]))])); // #28
+  add(Uint8Array.from([...ethernet(0x0800).build(), ...ipv4(47, Uint8Array.from([...erspan, 1, 2, 3, 4, 5]))])); // #29
+
+  // IPv6 with a Hop-by-Hop header (PadN) in front of the TCP header.
+  const tcp6 = new Bytes().u16(40002, 443).u32(1).u32(0).u8(0x50, FLAG.SYN).u16(8192, 0, 0).build();
+  const hopByHop = new Bytes().u8(6, 0, 1, 4, 0, 0, 0, 0).build();
+  const v6 = new Bytes().u32(0x60000000).u16(hopByHop.length + tcp6.length).u8(0, 64)
+    .u16(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1).u16(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2).build();
+  add(Uint8Array.from([...ethernet(0x86dd).build(), ...v6, ...hopByHop, ...tcp6]));         // #30
   return frames;
 }
 
@@ -243,7 +305,17 @@ const INTENDED: [number, string, RegExp[]][] = [
   [14, 'a bad IPv4 header checksum', [/bad checksum/i]],
   [15, 'the MTU finding', [/MTU/]],
   [17, 'a bad IPv6/TCP checksum', [/bad checksum/i]],
+  [21, 'an IPv4 option with a bad pointer', [/pointer points before first address/i]],
+  [22, 'an IPv4 option with an impossible length', [/declares a length/i]],
+  [24, 'an IPv4 datagram with a hole', [/not reassembled/i]],
+  [26, 'overlapping IPv4 fragments', [/fragments overlap/i]],
+  [27, 'a bad IPv4 header checksum inside GRE', [/bad checksum/i]],
+  [28, 'a bad IPv4 header checksum inside ERSPAN', [/bad checksum/i]],
+  [29, 'a cut mirrored frame in ERSPAN', [/malformed packet/i]],
 ];
+
+/** What the synthetic set must NOT raise: a frame that is clean by design. */
+const CLEAN: [number, string][] = [[23, 'a Router Alert option'], [30, 'IPv6 with a Hop-by-Hop header']];
 
 /**
  * A host identity that matches none of the synthetic frames' MACs: with no
@@ -284,6 +356,7 @@ for (const [id, what, patterns] of INTENDED) {
     check(`synthetic #${id} raises ${what}: ${pattern}`, found.some((m) => pattern.test(m)), true);
   }
 }
+for (const [id, what] of CLEAN) check(`synthetic #${id} (${what}) raises no finding`, messagesOf.get(id)?.length, 0);
 for (const source of sources) report(source.name, runSource(source.name, source.inputs));
 
 finish('tree-free rows');

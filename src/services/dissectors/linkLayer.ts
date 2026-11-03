@@ -30,6 +30,7 @@ import type { ProtocolField, ProtocolLayer } from '../../types/packet';
 import { formatMac, formatMacAt } from '../addressFormat';
 import { resolveMacVendor } from '../macVendors';
 import { LINKTYPE } from '../dissect/types';
+import { treeWanted } from '../dissect/treeMode';
 import { ieee1905MessageEnd } from './ieee1905';
 import { labelForEtherType } from './l2';
 
@@ -351,7 +352,9 @@ function dissectEthernet(rawBytes: Uint8Array, encapsulation: string): LinkLayer
     name: 'Ethernet II',
     summary: `Ethernet II, Src: ${srcMac}, Dst: ${dstMac}`,
     rawBytesRange: [0, 13],
-    fields: [
+    // The layer raises no finding of its own, so a shard, which keeps no tree
+    // (ADR 0072), gets it empty and formats none of the rows below.
+    fields: !treeWanted() ? [] : [
       { name: 'Destination', value: resolveMacVendor(dstMac), abbrev: 'eth.dst', rawBytesRange: [0, 5], children: macAddressFields(dstMac, 0, true) },
       { name: 'Source', value: resolveMacVendor(srcMac), abbrev: 'eth.src', rawBytesRange: [6, 11], children: macAddressFields(srcMac, 6) },
       etherType <= MAX_802_3_LENGTH
