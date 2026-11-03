@@ -21,16 +21,25 @@
  *   gate's and not a missing adapter's);
  * - a second import is refused: the input is disabled, and a file dropped on
  *   the zone changes nothing and raises no dialog;
- * - the zone is as tall busy as idle, so nothing below it jumps.
+ * - the zone is as tall busy as idle, so nothing below it jumps;
+ * - the Import section is in view, in a column too short to hold it: the
+ *   panel scrolls itself there when the import starts, and again when it is
+ *   opened mid-import.
+ *
+ * The panel is opened the way the welcome opens it, by "Open a capture
+ * file…", which must also land on Import and ask for the picker once (the
+ * input's click is caught in the page, so no native dialog opens).
  *
  * After it, the panel's own line must read `Imported N packets from <file>`
  * with exactly the N written, above the help card. The welcome's Reopen is
  * checked if the profile offers one; a fresh profile does not, and the drive
  * says so (`import-gate.ts` reads its source).
  *
- * `--shots <dir>` also photographs the Export / Import side bar mid-import and
- * after it, light and dark, at window widths 1024 and 1600 (one launch and one
- * import per width). For looking at, not asserting.
+ * Every run is at 1024x700, the minimum window, where Import is below the
+ * export formats. `--shots <dir>` also photographs the Export / Import side
+ * bar mid-import and after it, light and dark, at
+ * window widths 1024 and 1600 (one launch and one import per width). For
+ * looking at, not asserting.
  *
  * In `check.ts`'s NOT_TESTS: it needs a build, writes a ~200 MB file, and its
  * assertions are made inside a window of seconds that the import's speed on the
@@ -52,8 +61,8 @@ const SHOTS = arg('shots', '');
 const FRAMES = Number(arg('frames', SHOTS === '' ? '150000' : '400000'));
 const FRAME_BYTES = Number(arg('frame-bytes', '1400'));
 const FILE_NAME = 'gate-drive-synthetic.pcap';
-/** The window widths of the shots; a plain run uses the app's own size, once. */
-const WIDTHS = SHOTS === '' ? [null] : [1024, 1600];
+/** The minimum window always, where Import is below the fold; a wide one too for the shots. */
+const WIDTHS = SHOTS === '' ? [1024] : [1024, 1600];
 const THEMES = ['light', 'dark'];
 
 let failures = 0;
@@ -149,6 +158,25 @@ interface Seen {
   zoneHeight: number;
   done: { n: string; file: string } | null;
   dialog: boolean;
+  /** The zone is wholly inside the side bar's scroller. */
+  inView: boolean;
+}
+
+/**
+ * Whether the drop zone is wholly inside its scroller, how far that scroller
+ * has moved, and whether it has anywhere to move. No named helpers inside:
+ * tsx's `__name` is not defined in the page.
+ */
+function zoneView(p: Page): Promise<{ inView: boolean; scrollTop: number; overflows: boolean } | null> {
+  return p.evaluate((zoneSelector) => {
+    const z = document.querySelector<HTMLElement>(zoneSelector);
+    let s = z?.parentElement ?? null;
+    while (s !== null && !['auto', 'scroll'].includes(getComputedStyle(s).overflowY)) s = s.parentElement;
+    if (z === null || s === null) return null;
+    const a = z.getBoundingClientRect();
+    const b = s.getBoundingClientRect();
+    return { inView: a.top >= b.top - 1 && a.bottom <= b.bottom + 1, scrollTop: s.scrollTop, overflows: s.scrollHeight > s.clientHeight };
+  }, ZONE);
 }
 
 async function session(width: number | null): Promise<void> {
@@ -186,14 +214,6 @@ async function session(width: number | null): Promise<void> {
     };
     const shoot = async (name: string) => {
       if (SHOTS === '') return;
-      // Import is the panel's last section and sits below the fold at 1024x700.
-      // The panel's own scroller only: scrollIntoView also moves every
-      // overflow-hidden ancestor and shifts the whole shell.
-      await p.locator(ZONE).first().evaluate((el) => {
-        const scroller = el.closest('.overflow-y-auto');
-        if (scroller !== null) scroller.scrollTop = scroller.scrollHeight;
-      }).catch(() => {});
-      await sleep(150);
       for (const theme of THEMES) {
         await setTheme(theme);
         await p.screenshot({ path: path.join(SHOTS, `${theme}-${width}-${name}.png`) });
@@ -213,9 +233,29 @@ async function session(width: number | null): Promise<void> {
     });
     check('before the import: Start is enabled with an adapter chosen', await startButton.isEnabled());
 
-    await p.getByLabel('Export or import a capture').click();
+    // The welcome's way in, with the picker it asks for caught in the page.
+    await p.evaluate('window.__name = (f) => f');
+    await p.evaluate(() => {
+      const w = window as unknown as { __picks: number };
+      w.__picks = 0;
+      const click = HTMLInputElement.prototype.click;
+      HTMLInputElement.prototype.click = function (this: HTMLInputElement) {
+        if (this.type === 'file') { w.__picks += 1; return; }
+        click.call(this);
+      };
+    });
+    await p.getByRole('button', { name: /Open a capture file/ }).click();
     const zone = p.locator(ZONE).first();
     await zone.waitFor();
+    await sleep(300);
+    check('the welcome\'s "Open a capture file…" asks for the picker once',
+      await p.evaluate(() => (window as unknown as { __picks: number }).__picks) === 1);
+    const opened = await zoneView(p);
+    if (width === 1024) {
+      check('at 1024x700 the column overflows and was scrolled (else the next check proves nothing)',
+        opened?.overflows === true && (opened?.scrollTop ?? 0) > 0, JSON.stringify(opened));
+    }
+    check('...and the panel opens scrolled to Import', opened?.inView === true, JSON.stringify(opened));
     const idleText = await zone.innerText();
     const idleHeight = (await zone.boundingBox())?.height ?? 0;
     check('idle: the zone invites a file and lists the formats',
@@ -229,13 +269,19 @@ async function session(width: number | null): Promise<void> {
       const m = document.body.innerText.match(/Imported ([\d,]+) packets from ([^\n]+)/);
       const dialog = [...document.querySelectorAll<HTMLElement>('[role="alertdialog"]')]
         .some((el) => el.getClientRects().length > 0);
+      // As `zoneView`, inline: one evaluate, so the reading is of one moment.
+      let s = z?.parentElement ?? null;
+      while (s !== null && !['auto', 'scroll'].includes(getComputedStyle(s).overflowY)) s = s.parentElement;
+      const a = z?.getBoundingClientRect();
+      const b = s?.getBoundingClientRect();
       return {
         busy: bar !== null,
         valueNow: bar === null ? null : Number(bar.getAttribute('aria-valuenow')),
         zoneText: z?.innerText ?? '',
-        zoneHeight: z?.getBoundingClientRect().height ?? 0,
+        zoneHeight: a?.height ?? 0,
         done: m === null ? null : { n: m[1], file: m[2].trim() },
         dialog,
+        inView: a !== undefined && b !== undefined && a.top >= b.top - 1 && a.bottom <= b.bottom + 1,
       };
     }, ZONE);
 
@@ -252,6 +298,16 @@ async function session(width: number | null): Promise<void> {
         if (w.__series[w.__series.length - 1] !== value) w.__series.push(value);
       }).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-valuenow', 'role'] });
     }, ZONE);
+
+    // Back to the top, as somebody reading the export options would leave the
+    // column, so that what the checks below see is the import's own reveal.
+    await zone.evaluate((el) => {
+      let s = el.parentElement;
+      while (s !== null && !['auto', 'scroll'].includes(getComputedStyle(s).overflowY)) s = s.parentElement;
+      if (s !== null) s.scrollTop = 0;
+    });
+    await sleep(150);
+    if (width === 1024) check('scrolled back up, Import is out of view again', (await zoneView(p))?.inView === false);
 
     const startedAt = Date.now();
     await p.locator('input[type="file"][accept]').first().setInputFiles(FILE);
@@ -275,6 +331,13 @@ async function session(width: number | null): Promise<void> {
           assertedDuring = true;
           // Read again: the zone's text and height are what is asserted.
           await assertWhileRunning(p, agent, startButton, await read(), idleHeight, startsBefore);
+          // Away and back mid-import: the panel remounts at the top of its
+          // column and must find the bar again by itself.
+          await p.getByRole('button', { name: 'Interfaces' }).click();
+          await p.getByLabel('Export or import a capture').click();
+          await zone.waitFor();
+          await sleep(200);
+          check('busy: opened again mid-import, the panel lands on Import', (await zoneView(p))?.inView === true);
           // The pressed controls took a turn of the renderer each; the import
           // must have outlived them.
           if (!(await read()).busy) overBeforeDone = true;
@@ -349,6 +412,7 @@ async function assertWhileRunning(
   startsBefore: number,
 ): Promise<void> {
   const text = seen.zoneText;
+  check('busy: the import scrolled the panel to its progress', seen.inView);
   check('busy: the zone names the file being imported', /Importing\s+gate-drive-synthetic\.pcap/.test(text), JSON.stringify(text));
   check('busy: ...with the sizes line, e.g. "64 of 210 MB (30%)"', /\d+ of \d+(\.\d)? (MB|GB) \(\d+%\)/.test(text), JSON.stringify(text));
   check('busy: ...and neither the invitation nor the format list',
