@@ -26,6 +26,7 @@ import type {
   TcpTrackerApi, IcmpTrackerApi, QuicTrackerApi, DnsTrackerApi, L3TrackerApi,
 } from '../dissect/trackerApi';
 import type { InfoPatch } from '../dissect/types';
+import { treeWanted } from '../dissect/treeMode';
 import { formatIpv6Address } from '../addressFormat';
 import { ETHERNET_MAX_FRAME } from '../direction';
 import { dissectIpv4Options, dscpName, ecnName, inferTtl } from './ipv4';
@@ -244,6 +245,8 @@ function udpConversationRows(
   if (facts === undefined) return [];
 
   filterFields['udp.stream'] = facts.index;
+  // The rows are the tree's; the tracker has been asked and the filter answered (ADR 0072).
+  if (!treeWanted()) return [];
   return [
     { name: '[Stream index]', value: facts.index, generated: true, abbrev: 'udp.stream' },
     { name: '[Stream Packet Number]', value: facts.pnum, generated: true, abbrev: 'udp.stream.pnum' },
@@ -1295,10 +1298,11 @@ function partialTcpHeader(rawBytes: Uint8Array, transportOffset: number): Transp
     layer: {
       name: 'Transmission Control Protocol',
       summary: `Transmission Control Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
-      fields: [
+      // No finding is possible here, so a layer with no tree is empty (ADR 0072).
+      fields: treeWanted() ? [
         { name: 'Source Port', value: srcPort, abbrev: 'tcp.srcport' },
         { name: 'Destination Port', value: dstPort, abbrev: 'tcp.dstport' },
-      ],
+      ] : [],
     },
     fields: { 'tcp.srcport': srcPort, 'tcp.dstport': dstPort },
   };

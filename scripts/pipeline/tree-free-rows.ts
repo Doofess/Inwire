@@ -22,6 +22,7 @@
 import { existsSync, openAsBlob } from 'node:fs';
 import { PcapService } from '../../src/services/pcapParser';
 import { FrameClock } from '../../src/services/dissect/sequencer';
+import { SIZE_LIMITED } from '../../src/services/dissect/captureShort';
 import { FrameDissector, type DissectInput } from '../../src/services/pipeline/frameDissector';
 import { packRows } from '../../src/services/pipeline/rowPack';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
@@ -42,10 +43,16 @@ export const HOT_PATH_LAYERS: ReadonlySet<string> = new Set([
 ]);
 
 /** The layers that are tree-free so far: each holds findings only. */
-export const TREE_FREE_NOW: ReadonlySet<string> = new Set<string>([]);
+export const TREE_FREE_NOW: ReadonlySet<string> = new Set<string>([
+  'Transmission Control Protocol', 'User Datagram Protocol',
+]);
 
 /** Field names a tree-free layer may hold without an `expertInfo`, by layer. */
-export const ALLOWED_PLAIN: Record<string, ReadonlySet<string>> = {};
+export const ALLOWED_PLAIN: Record<string, ReadonlySet<string>> = {
+  // `decodeRawEthernetPacket` hangs the size-limited marker on the deepest layer, which a cut frame makes one of these.
+  'Transmission Control Protocol': new Set([SIZE_LIMITED]),
+  'User Datagram Protocol': new Set([SIZE_LIMITED]),
+};
 
 const BURST_FRAMES = 100_000;
 const MAX_FAILURES_SHOWN = 30;

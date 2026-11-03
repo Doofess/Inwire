@@ -12,7 +12,7 @@
  * `udpDispatch.ts`, by content through `heuristics.ts` when no port did, or to
  * one of the four that return more than a label (DHCP, DNS, NBNS, QUIC).
  */
-import type { Packet, ProtocolLayer } from '../../types/packet';
+import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
 import type { TransportResult } from '../dissect/types';
 import type { QuicHandshakeFacts } from '../quicFlowTracker';
 import type { QuicTrackerApi, DnsTrackerApi, L3TrackerApi } from '../dissect/trackerApi';
@@ -23,6 +23,7 @@ import { dissectDtls, freshDtlsConversation, looksLikeDtls } from './dtls';
 import { dissectLdap, freshLdapConversation } from './ldap';
 import { dissectEnv } from '../dissect/dissectEnv';
 import { checksumVerdict, extractLiteralUrlOrHost } from '../dissect/transportShared';
+import { treeWanted } from '../dissect/treeMode';
 import { dissectDhcp, dissectDhcpv6 } from './dhcp';
 import { buildDnsLayer, dnsInfoLine, parseDnsMessage } from './dns';
 import { detectUdpPayload } from './heuristics';
@@ -582,6 +583,14 @@ export function dissectUdpTransport(
     info = `${srcPort} → ${dstPort} Len=${udpPayloadLen}${udpHost ? ' ' + udpHost : ''}`;
   }
 
+  // A live shard keeps no tree (ADR 0072): without one the layer holds only its
+  // finding. The tree hangs it on the Checksum row's status child; flattened, it
+  // is that child alone, from the same verdict.
+  const checksumExpert = udpVerdict.status === 'Bad' ? { category: 'Broken' as const, message: 'Bad checksum' } : undefined;
+  const findings: ProtocolField[] | undefined = treeWanted() ? undefined : checksumExpert
+    ? [{ name: '[Checksum Status]', value: udpVerdict.status, generated: true, abbrev: 'udp.checksum.status', expertInfo: checksumExpert }]
+    : [];
+
   return {
     proto,
     protocolLabel,
@@ -625,7 +634,7 @@ export function dissectUdpTransport(
       name: 'User Datagram Protocol',
       summary: `User Datagram Protocol, Src Port: ${srcPort}, Dst Port: ${dstPort}`,
       rawBytesRange: [transportOffset, transportOffset + 7],
-      fields: [
+      fields: findings ?? [
         { name: 'Source Port', value: srcPort, abbrev: 'udp.srcport', rawBytesRange: [transportOffset, transportOffset + 1], children: [{ name: 'Source or Destination Port', value: srcPort, abbrev: 'udp.port', rawBytesRange: [transportOffset, transportOffset + 1] }] },
         { name: 'Destination Port', value: dstPort, abbrev: 'udp.dstport', rawBytesRange: [transportOffset + 2, transportOffset + 3], children: [{ name: 'Source or Destination Port', value: dstPort, abbrev: 'udp.port', rawBytesRange: [transportOffset + 2, transportOffset + 3] }] },
         { name: 'Length', value: udpLen, abbrev: 'udp.length', rawBytesRange: [transportOffset + 4, transportOffset + 5] },
@@ -639,7 +648,7 @@ export function dissectUdpTransport(
           // the category. Same verdict function and so the same offload
           // policy: a frame this machine sent is `Unverified`, never `Bad`.
           children: [{ name: '[Checksum Status]', value: udpVerdict.status, generated: true, abbrev: 'udp.checksum.status',
-            ...(udpVerdict.status === 'Bad' ? { expertInfo: { category: 'Broken' as const, message: 'Bad checksum' } } : {}) }],
+            ...(checksumExpert ? { expertInfo: checksumExpert } : {}) }],
         },
         { name: 'UDP payload', value: `${Math.max(0, udpLen - 8)} bytes`, abbrev: 'udp.payload', rawBytesRange: [transportOffset + 8, transportOffset + Math.max(8, udpLen - 1)] },
       ],
