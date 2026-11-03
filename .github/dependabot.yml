@@ -38,3 +38,10 @@ updates:
       # the engines floor and Electron's Node.
       - dependency-name: "@types/node"
         update-types: [version-update:semver-major]
+      # 1.0 is an ESM + WASM rewrite meant to be bundled into Mapbox GL JS and
+      # "no longer works as a setRTLTextPlugin plugin" (its release notes); its
+      # UMD file, which vite.config.ts copies to assets/ for maplibre's
+      # setRTLTextPlugin, is gone. 0.4 is the last loadable build. Revisit if
+      # maplibre takes the 1.x API.
+      - dependency-name: "@mapbox/mapbox-gl-rtl-text"
+        update-types: [version-update:semver-major]
