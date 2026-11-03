@@ -61,19 +61,35 @@ probes them **lazily**, so a build that needed them would fall back to a
 software rasterizer rather than fail: the symptom is a slower map and a screen
 that looks entirely normal.
 
-**Playwright cannot drive the packed exe**, and that is the fuses working:
-`enableNodeCliInspectArguments` is off, and Playwright's Electron support
-attaches through the Node inspector. A launch against `release/win-unpacked/`
-times out. So this one stays here.
+**Playwright's `_electron.launch` cannot drive the packed exe**, and that is
+the fuses working: `enableNodeCliInspectArguments` is off, and Playwright's
+Electron support attaches through the Node inspector. A launch against
+`release/win-unpacked/` times out.
+
+**Chromium's own debugging port still works**, because no fuse covers it.
+Start the exe with `--remote-debugging-port=<port>`, plus `INWIRE_USER_DATA`
+for a throwaway profile and `INWIRE_BACKGROUND_WINDOW=1`, and attach with
+`chromium.connectOverCDP('http://127.0.0.1:<port>')`. That reaches the
+`app://` page and nothing in main. It drove the installed app on 2026-11-03.
+Do not close it with the page's own `window.close()`: Electron closes a
+window the page closes without emitting `BrowserWindow`'s `close`, so the
+quit confirm never runs. Press the app's ✕ instead. The same port works for
+anyone who starts Inwire, as the same Windows user. Nothing blocks the
+switch, and the inspect fuse does not cover it: undecided, listed in §7.
 
 - [ ] `npm run pack`, then run `release\win-unpacked\Inwire.exe`. The pack log
       should read `webgpu pruned removed=dxcompiler.dll,dxil.dll freed=27.3MB`.
 - [ ] Turn on location lookup and open the **Routing Map**. The globe draws, pins
       appear, arcs draw between them.
-- [ ] **Settings -> Diagnostics** reports a GPU rather than a software
-      renderer. `src/components/analytics/renderTier.ts` is what classifies it,
-      and `Microsoft Basic Render Driver`, `SwiftShader` or `llvmpipe` in that
-      string is the failure this check exists for.
+- [ ] **The page reports a GPU rather than a software renderer.** Nothing in
+      the UI shows it, Diagnostics included, so read it over the debugging port
+      above: `WEBGL_debug_renderer_info`'s `UNMASKED_RENDERER_WEBGL` on a
+      throwaway WebGL context, which is what
+      `src/components/analytics/renderTier.ts` classifies.
+      `Microsoft Basic Render Driver`, `SwiftShader` or `llvmpipe` in that
+      string is the failure this check exists for. **Measured on the installed
+      app 2026-11-03:** `ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 (0x00002704)
+      Direct3D11 vs_5_0 ps_5_0, D3D11)`.
 
 Measured once, automatically, against the same Chromium `dist/` runs on - both
 DLLs moved out of `node_modules/electron/dist` and the renderer string read back
@@ -276,9 +292,9 @@ flyout on a maximise-button hover (it needs `WM_NCHITTEST` to answer
       and start a capture: it reads `Ethernet - capturing - Inwire`. That string
       is what the wordmark was duplicating, and it is the thing to check is still
       working, because nothing in the window shows it.
-- [ ] The corner block is still **138px** and the packet counter is still centred
-      in the **window**, not in the space left beside the mark. Maximize and
-      restore: the counter stays on the window's centre line.
+- [ ] The corner block is still **138px** and the display filter is still
+      centred in the **window**, not in the space left beside the mark. Maximize
+      and restore: the field stays on the window's centre line.
 - [ ] **Drag the window by the mark.** It moves: the corner block is inside the
       drag region and carries no `app-no-drag`.
 - [ ] **Double-click the empty title row** → maximizes; again → restores. **Check
@@ -572,27 +588,26 @@ New). Both look like fonts rather than like bugs, which is why this is here.
 - [ ] Maximize and restore, and look at the padding along the top edge in both.
       A maximized window has no rounded corners to avoid; a restored one must not
       paint into them.
-- [ ] The title row's **centre is the packet counter**, not the window's name —
-      `2,224 / 2,224` and a percentage badge, in the app's mono face. It is the
-      only copy of those figures in the app now; the filter bar's badge and the
-      counts widget are both gone.
+- [ ] The title row's **centre is the display filter**, not the window's name
+      or a packet count: placeholder `e.g. tcp.port == 443`, at most 26rem
+      wide. The packet counter is the status bar's right end (§3), and its
+      `+N UNSEARCHED` rescan went with it.
 - [ ] **The window name still exists and is the OS's.** Check the **taskbar** and
       **Alt-Tab**, not the row: `<adapter> - capturing - Inwire` while capturing,
       `Inwire` otherwise. It is set from the renderer, which is the only side
-      that knows the adapter's name. A row that shows the counter and a taskbar
-      that shows nothing means `useWindowTitle` stopped being called.
-- [ ] **The counter is legible against the row's dim.** Blur the window: the
-      whole row goes to `opacity-60`, including the figures. They must still be
-      readable, and the badge must not become the brightest thing in a blurred
-      window.
-- [ ] **Drag the window by the row, starting on the counter's figures.** It must
-      move — the numbers are inside the drag region and carry no `app-no-drag`.
-- [ ] **Then drag starting on the `+N UNSEARCHED` button**, with one on screen
-      (see the disk section). It must **not** move the window, and a click must
-      re-run the scan. That button is the one control in the title row and the
-      only rescan affordance in the app; if it drags instead of firing, its
-      `app-no-drag` has been lost and the only symptom is a click that does
-      nothing.
+      that knows the adapter's name. A taskbar entry that shows no adapter while
+      capturing means `useWindowTitle` stopped being called. **Seen on the
+      installed app 2026-11-03:** `Ethernet - capturing - Inwire`.
+- [ ] **The row is legible against its dim.** Blur the window during a capture:
+      the whole row goes to `opacity-60`, the filter field and the live pill
+      included. Both must still be readable.
+- [ ] **Drag the window by the row, starting on the empty stretch beside the
+      filter.** It must move.
+- [ ] **Then drag starting on the filter field.** It must **not** move the
+      window, and a click must focus the field. Its wrapper carries
+      `app-no-drag` (`TitleRow.tsx`); if the field drags instead of focusing,
+      that class has been lost and the only symptom is a field that cannot be
+      typed into.
 
 ---
 
@@ -849,8 +864,8 @@ performance fix could have broken a behaviour:
 
 **The right group:**
 
-- [ ] The **packet counter is here, not in the title row**, and the title row's
-      centre is empty. The `+N UNSEARCHED` rescan button came with it and still
+- [ ] The **packet counter is here, not in the title row**, whose centre is the
+      display filter. The `+N UNSEARCHED` rescan button came with it and still
       re-runs a whole-capture scan.
 - [ ] The **outbound indicator** sits between the byte readout and the counter,
       and it is words rather than a glyph. With geo-IP and reverse DNS both off
@@ -1873,8 +1888,13 @@ Not checkable yet, recorded so it is not mistaken for done.
 - **The update feed.** `updates.inwire.app` does not resolve, so the Inwire row
   reads "Not checked" and every check is a quiet no-op.
 - **`crossOriginIsolated` in the packaged app.** Set via `ISOLATION_HEADERS` and
-  verified by hand once; nothing depends on it, and an assertion must exist before
-  anything does.
+  read `true` on the installed app over the debugging port (2026-11-03, §0);
+  nothing depends on it, and an assertion must exist before anything does.
+- **`--remote-debugging-port` on the packaged app.** No fuse covers it, so
+  anyone who starts Inwire, as the same Windows user, can drive the `app://`
+  page and its bridge (§0, "The packed app still gets a real GPU"). That stays
+  inside one user's own session, so it crosses no privilege boundary. Whether
+  main should refuse the switch in a packaged build is not decided.
 - ~~**`scripts/electron/smoke.ts` on a machine that has the real agent.**~~
   **Fixed (ADR 0035).** It used to **skip** — "something else is already serving
   `\\.\pipe\inwire-agent`" — because the installed InwireAgent service owns that
