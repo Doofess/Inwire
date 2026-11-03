@@ -1,8 +1,8 @@
 {
-  "note": "Ceilings for the built renderer, in bytes. They may only FALL, with one exception whose shape scripts/perf/bundle-size.ts enforces: a raise is allowed only when the build actually outgrew the previous ceiling, and only to exactly that build - never in advance, never past it. Read against git HEAD. eagerJs is the entry chunk that must parse before React's first commit; total is every emitted asset including lazily-fetched ones.",
-  "measured": "2026-11-02",
+  "note": "Ceilings for the built renderer, in bytes. They may only FALL, with one exception whose shape scripts/perf/bundle-size.ts enforces: a raise is allowed only when the build actually outgrew the previous ceiling, and only to exactly that build - never in advance, never past it. Read against git HEAD. eagerJs is what dist/index.html loads before React's first commit (its entry script and every modulepreload); eagerCss is the stylesheets it links; total is every emitted asset including lazily-fetched ones.",
+  "measured": "2026-11-03",
   "bundle": {
-    "eagerJs": 3105363,
+    "eagerJs": 3748278,
     "eagerCss": 103609,
     "total": 10114077
   }
