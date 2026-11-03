@@ -47,16 +47,18 @@ import { scanPercentage, usePacketCounts } from '../../services/packetCounts';
  * whole-capture pass the two numbers cannot describe, and `+N UNSEARCHED` is a
  * button.
  *
- * ## The one control in the title row
+ * ## The one control in the status bar
  *
- * `TitleRow`'s comment used to say it holds no control at all. It holds one
- * now: the rescan button below, which is the **only** way to re-run a
- * whole-capture filter scan over frames that arrived after it started. Deleting
- * the widget without bringing that with it would have made it unreachable.
+ * The readout lives at the status bar's right end (`status/StatusBar.tsx`),
+ * where nothing else is pressable. The rescan button below is the exception,
+ * and the reason is that it is the **only** way to re-run a whole-capture
+ * filter scan over frames that arrived after it started: moving the readout
+ * without bringing it along would have made that unreachable.
+ * `scripts/session/status-bar.ts` names it as the exception it allows.
  *
- * It therefore carries `app-no-drag`, and that is load-bearing rather than
- * tidy: the row is `app-drag`, so a control without it moves the window instead
- * of being pressed and the only symptom is a click that does nothing.
+ * It carries no `app-no-drag`, because the bar is not a drag region at all -
+ * by never opting in, which the same script asserts. It needed the class while
+ * the readout sat in the title row, which is `app-drag`.
  */
 const BADGE = 'text-[10px] leading-none px-1.5 py-0.5 rounded font-bold shrink-0';
 
@@ -83,10 +85,10 @@ export const PacketCountsReadout: React.FC = () => {
     // that this attribute is here AND that every driver queries it, so the two
     // cannot drift apart again in silence.
     <div className="min-w-0 flex items-center gap-2">
-      {/* 11px, matching the title this replaced - the row is 32px and these
-          numbers are read at a glance rather than studied. The card version was
-          20px because a card is a place you look ON PURPOSE; this one has to
-          sit in the chrome without becoming the loudest thing in the window. */}
+      {/* 11px - the bar is 24px and these numbers are read at a glance rather
+          than studied. The card version was 20px because a card is a place you
+          look ON PURPOSE; this one has to sit in the chrome without becoming the
+          loudest thing in the window. */}
       {/* The hook is on THIS span and not on the row above it: the row also
           holds the scan badges, and its `textContent` runs them straight on to
           the total with no separator - "44 / 178,200" "SCANNING" reads back as
@@ -131,16 +133,12 @@ export const PacketCountsReadout: React.FC = () => {
       {/* A capture that grew after the scan started, which while one is running
           it always does. Clickable rather than automatic: a scan that re-ran
           itself would be a whole-capture pass about once a second, competing
-          with the frames still arriving.
-
-          `app-no-drag` because the row around it is the window's drag region.
-          Without it this button moves the window and never fires, and nothing
-          reports that - see the class rule in `index.css`. */}
+          with the frames still arriving. */}
       {counts.uncovered > 0 && counts.onRescan !== undefined && (
         <button
           type="button"
           onClick={counts.onRescan}
-          className={`${BADGE} app-no-drag bg-warning/20 text-warning
+          className={`${BADGE} bg-warning/20 text-warning
             hover:bg-warning/30 transition-colors cursor-pointer
             focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring`}
           title={`${counts.uncovered.toLocaleString()} stored frames arrived after this filter was `
