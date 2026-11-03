@@ -110,7 +110,7 @@ async function main(): Promise<void> {
     const workers = Array.from({ length: shards }, () => new Worker(new URL('./parallelShard.ts', import.meta.url), {
       execArgv: process.env.SHARD_PROFILE ? ['--import', 'tsx', '--cpu-prof', `--cpu-prof-dir=${process.env.SHARD_PROFILE}`] : ['--import', 'tsx'],
     }));
-    for (const worker of workers) worker.postMessage({ type: 'init', shards, cacheFrames: 2000 } satisfies ToShard);
+    for (const worker of workers) worker.postMessage({ type: 'init', shards } satisfies ToShard);
     let merged = 0;
     let wake: (() => void) | null = null;
     const sequencer = coordinatorSequencer();

@@ -32,7 +32,7 @@ parentPort!.on('message', (message: ToShard | { type: 'stats' }) => {
       const p0 = performance.now();
       parentPort!.postMessage(out, transfer as ArrayBuffer[]);
       postMs += performance.now() - p0;
-    }, { shards: message.shards, cacheFrames: message.cacheFrames });
+    }, { shards: message.shards });
     return;
   }
   const h0 = performance.now();

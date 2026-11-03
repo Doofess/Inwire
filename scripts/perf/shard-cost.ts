@@ -53,7 +53,6 @@ const reps = Number(arg('--reps') ?? 7);
 const allocProf = arg('--alloc-prof');
 /** Frames handed to the coordinator at a time, as `parallel-threads.ts` does. */
 const DISPATCH = 2048;
-const CACHE_FRAMES = 2000;
 const gc = (globalThis as { gc?: () => void }).gc;
 
 function trackers(sequencer: Sequencer) {
@@ -82,7 +81,7 @@ async function main(): Promise<void> {
   const toCoordinator: FromShard[] = [];
   const live = new Shard((message, transfer) => {
     toCoordinator.push(structuredClone(message, { transfer: transfer as ArrayBuffer[] }));
-  }, { shards: 1, cacheFrames: CACHE_FRAMES });
+  }, { shards: 1 });
   const sequencer = coordinatorSequencer();
   let merged = 0;
   const coordinator = new Coordinator({
@@ -117,7 +116,7 @@ async function main(): Promise<void> {
   const times: number[] = [];
   for (let rep = 0; rep < reps; rep++) {
     const messages = recorded.map((m) => structuredClone(m));
-    const shard = new Shard(() => { /* the answers are not the measurement */ }, { shards: 1, cacheFrames: CACHE_FRAMES });
+    const shard = new Shard(() => { /* the answers are not the measurement */ }, { shards: 1 });
     gc?.();
     const t0 = performance.now();
     for (const message of messages) shard.handle(message);
@@ -144,7 +143,7 @@ async function allocations(recorded: ToShard[], onShard: number, out: string): P
     session.post(method, params ?? {}, (err, result) => (err ? reject(err) : resolve(result)));
   });
   const messages = recorded.map((m) => structuredClone(m));
-  const shard = new Shard(() => { /* not the measurement */ }, { shards: 1, cacheFrames: CACHE_FRAMES });
+  const shard = new Shard(() => { /* not the measurement */ }, { shards: 1 });
   await post('HeapProfiler.enable');
   await post('HeapProfiler.startSampling', {
     samplingInterval: 4096, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true,

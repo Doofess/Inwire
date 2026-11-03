@@ -43,7 +43,7 @@ function rig() {
   const toCoordinator: FromShard[] = [];
   const shard = new Shard((message, transfer) => {
     toCoordinator.push(structuredClone(message, { transfer: transfer as ArrayBuffer[] }));
-  }, { shards: 1, cacheFrames: 64, env: FIXED_ENV, withTrees: false });
+  }, { shards: 1, env: FIXED_ENV, withTrees: false });
   const merged: number[] = [];
   const sequencer = coordinatorSequencer();
   const coordinator = new Coordinator({

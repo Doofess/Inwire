@@ -5,7 +5,7 @@
  * Everything numbered across connections arrives with each frame, already
  * decided by the coordinator, and is handed to these trackers through
  * `ShardSequencer` - so the dissector code is the single Worker's, unchanged,
- * and a frame's row, record and tree are what one core would have built. For
+ * and a frame's row and record are what one core would have built. For
  * QUIC that is the answers to the order's questions (`OP_QUIC`) and the flows it
  * forgot (`OP_QUIC_FORGET`), which this shard drops from its own tracker.
  * `scripts/pipeline/parallel.ts` holds that, frame for frame.
@@ -14,9 +14,10 @@
  * (`workers/pipeline.worker.ts`, in its shard role) is a thin adapter, and the
  * equality test drives this class directly.
  *
- * **The trees stay here.** A tree is ten times a frame's row, so the cache a
- * click on a recent frame is answered from is kept by the shard that built it,
- * and the coordinator asks for one tree when one is wanted (`detail`).
+ * **No trees here.** A shard dissects without the hot-path tree (ADR 0072): the
+ * Frame, Ethernet, IP, TCP and UDP layers hold only their findings, enough for
+ * the row and the record, and the shard keeps no tree cache. A click on a shard
+ * frame rebuilds its tree from the frame's record (ADR 0049), in the Worker.
  */
 import { TcpStreamTracker } from '../tcpStreamTracker';
 import { IcmpEchoTracker } from '../icmpEchoTracker';
@@ -24,28 +25,27 @@ import { QuicFlowTracker, quicLimits } from '../quicFlowTracker';
 import { DnsTracker } from '../dnsTracker';
 import { L3Tracker } from '../l3Tracker';
 import { LIVE_ENV, MAX_TOTAL_BODY_BYTES, type DissectEnv } from '../dissect/dissectEnv';
-import { ShardSequencer, settleTreeTls } from '../dissect/shardNumbering';
-import { applyInfoPatch } from '../dissect/infoPatch';
+import { ShardSequencer } from '../dissect/shardNumbering';
 import { keyLog } from '../tls/keyLog';
 import { FlowAnnotationStore } from '../flowAnnotations';
 import { FrameDissector } from './frameDissector';
-import { FifoMap } from './fifoMap';
 import { packRows } from './rowPack';
 import { rowSide, shardRowSteps } from './rowSteps';
 import {
   OP_FORGET, OP_FRAGMENT, OP_QUIC, OP_QUIC_FORGET, OP_TCP, readOps,
   type FromShard, type ShardInterface, type ShardResult, type ToShard, type WireFrame,
 } from './shardProtocol';
-import type { Packet, ProtocolLayer } from '../../types/packet';
+import type { Packet } from '../../types/packet';
 
 export interface ShardOptions {
   /** How many shards share the capture: HTTP/1's body budget is split between them. */
   shards: number;
-  /** Trees kept for the detail pane. */
-  cacheFrames: number;
   /** The environment arrival reads; the live one when absent. */
   env?: DissectEnv;
-  /** Send each frame's tree back with its row - the equality test only. */
+  /**
+   * Build each frame's whole tree and send it back with its row - the equality
+   * test only. Off, the dissector builds no hot-path tree (ADR 0072).
+   */
   withTrees?: boolean;
 }
 
@@ -68,7 +68,6 @@ export class Shard {
   private sequencer = new ShardSequencer();
   private dissector: FrameDissector;
   private epoch = 0;
-  private readonly trees: FifoMap<ProtocolLayer[]>;
   private interfaces = new Map<number, ShardInterface>();
   /** Each adapter's clock, where the Worker knows it (`ShardInterface.tsPrecision`). */
   private precision = new Map<number, number>();
@@ -86,7 +85,6 @@ export class Shard {
     private readonly options: ShardOptions,
   ) {
     this.env = shardEnv(options.env ?? LIVE_ENV, options.shards);
-    this.trees = new FifoMap(Math.max(1, options.cacheFrames));
     this.dissector = this.build();
   }
 
@@ -98,7 +96,7 @@ export class Shard {
       quic: new QuicFlowTracker(sequencer, quicLimits(this.options.shards)),
       dns: new DnsTracker(),
       l3: new L3Tracker(sequencer),
-    }, this.env, sequencer.tcp.tls);
+    }, this.env, sequencer.tcp.tls, { tree: this.options.withTrees === true });
   }
 
   handle(message: ToShard): void {
@@ -120,7 +118,6 @@ export class Shard {
         const host = this.dissector.host;
         this.dissector = this.build();
         this.dissector.host = host;
-        this.trees.clear();
         return;
       }
       case 'host':
@@ -141,8 +138,6 @@ export class Shard {
         return;
       case 'keylogClear':
         keyLog.clear();
-        // A cached tree can hold what the key log opened.
-        this.trees.clear();
         return;
       case 'flows':
         // The Worker's clock, not this thread's: lives are stamped by it.
@@ -151,23 +146,12 @@ export class Shard {
       case 'flowsClear':
         this.annotations.clear();
         return;
-      case 'detail': {
-        const tree = this.trees.get(message.id) ?? null;
-        if (tree !== null) settleTreeTls(tree, (p) => this.sequencer.tcp.tls.resolve(p));
-        this.post({ type: 'detail', requestId: message.requestId, layers: tree }, []);
-        return;
-      }
     }
   }
 
   private batch(message: Extract<ToShard, { type: 'batch' }>): void {
     const tls = this.sequencer.tcp.tls;
     for (const [placeholder, real] of message.settle ?? []) tls.settle(placeholder, real);
-    for (const [id, rows] of message.rows ?? []) {
-      const frame = this.trees.get(id)?.find((layer) => layer.name === 'Frame');
-      if (frame) frame.fields.push(...rows);
-    }
-    for (const patch of message.patches ?? []) this.patchTree(patch);
 
     const results: ShardResult[] = [];
     // The batch's rows, in result order, and how long each one's bytes were
@@ -238,7 +222,6 @@ export class Shard {
         facts: frame.facts,
       });
       const packet = d.packet;
-      const layers = packet.layers;
       // The clock `emitMerged` writes, by its rule - the adapter's, or 6 where
       // the Worker did not say (a miss in its table, and a frame with no
       // adapter, are both 6) - written here so it rides in the pack rather than
@@ -246,8 +229,8 @@ export class Shard {
       const precision = (frame.iface === undefined ? undefined : this.precision.get(frame.iface)) ?? 6;
       packet.tsPrecision = precision;
       if (precision > 6) packet.tsNanos = BigInt(frame.tsUs) * 1000n + BigInt(frame.facts?.nanosRemainder ?? 0);
-      // What `ingest` does next, on the tree still in hand: the process row and
-      // a gap mark land in the cached tree and in the row about to be packed.
+      // What `ingest` does next: the process row and a gap mark land in the row
+      // about to be packed (and in the tree, when `withTrees` asked for one).
       shardRowSteps(packet, this.annotations, frame.facts?.holeBefore);
       const side = rowSide(packet, this.dissector.host);
       result = {
@@ -257,14 +240,10 @@ export class Shard {
         ...(d.icmpMatchedRequestFrameId !== undefined ? { icmpMatchedRequestFrameId: d.icmpMatchedRequestFrameId } : {}),
         ...(d.infoPatches ? { infoPatches: d.infoPatches } : {}),
         // After the steps, so the copy holds the rows they wrote.
-        ...(this.options.withTrees ? { layers: structuredClone(layers) } : {}),
+        ...(this.options.withTrees ? { layers: structuredClone(packet.layers) } : {}),
       };
-      this.cache(id, layers);
       packet.layers = [];
       row = packet;
-      // A tree still cached here gains the links this frame wrote, as the
-      // single Worker's cache does.
-      for (const patch of d.infoPatches ?? []) this.patchTree(patch);
     } catch (err) {
       result = { id, error: `failed to dissect a captured frame: ${String(err)}` };
     }
@@ -273,16 +252,6 @@ export class Shard {
     return [result, row];
   }
 
-  private patchTree(patch: { frameId: number; links?: Record<string, number>; responseInFrame?: number }): void {
-    const cached = this.trees.get(patch.frameId);
-    if (cached !== undefined && (patch.links !== undefined || patch.responseInFrame !== undefined)) {
-      applyInfoPatch({ layers: cached, info: '', fields: {} } as unknown as Packet, { ...patch, suffix: undefined });
-    }
-  }
-
-  private cache(id: number, layers: ProtocolLayer[]): void {
-    this.trees.set(id, layers);
-  }
 }
 
 /** A result's buffers, for the transfer list: never one twice, never a view into a bigger one. */

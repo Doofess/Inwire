@@ -92,12 +92,12 @@ const workerCase = worker.slice(worker.indexOf("case 'keylog-clear':"), worker.i
 checkTrue('the Worker clears its store on that message', workerCase.includes('keyLog.clear()'));
 checkTrue('...and its cached trees, the other place plaintext lives',
   workerCase.includes('treeCache.clear()'));
-// Each TCP shard holds a key log and trees of its own (ADR 0053 phase 3).
+// Each TCP shard holds a key log of its own (ADR 0053 phase 3), and no trees (ADR 0072).
 const shard = readFileSync('src/services/pipeline/shard.ts', 'utf8');
-const shardCase = shard.slice(shard.indexOf("case 'keylogClear':"), shard.indexOf("case 'detail':"));
+const shardCase = shard.slice(shard.indexOf("case 'keylogClear':"), shard.indexOf("case 'flows':"));
 checkTrue('...and tells every dissection shard', workerCase.includes("broadcast({ type: 'keylogClear' })"));
-checkTrue('...which clears its key log and its cached trees',
-  shardCase.includes('keyLog.clear()') && shardCase.includes('this.trees.clear()'));
+checkTrue('...which clears its key log', shardCase.includes('keyLog.clear()'));
+checkTrue('...and keeps no cached tree for plaintext to outlive it in', !/this\.trees\b/.test(shard));
 
 keyLog.clear();
 console.log();

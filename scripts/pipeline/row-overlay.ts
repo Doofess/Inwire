@@ -128,7 +128,7 @@ await (async () => {
   const { frames } = await PcapService.extractFrames(new File([evictionCapture()], 'e.pcap'), 1);
   const frame = frames[0];
   let posted: FromShard | null = null;
-  const shard = new Shard((message) => { posted = message; }, { shards: 1, cacheFrames: 8 });
+  const shard = new Shard((message) => { posted = message; }, { shards: 1 });
   shard.handle({ type: 'interfaces', interfaces: [[0, { name: 'eth', label: 'Ethernet', tsPrecision: 9 }]] });
   const writer = new OpWriter();
   const tsUs = Number(frame.tsNanos / 1000n);

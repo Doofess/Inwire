@@ -67,7 +67,7 @@ import { unpackRows, type RowPack } from './rowPack';
 import { overlayMark, type OverlayMark, type RowOverlay } from './rowOverlay';
 import type { RowSide } from './rowSteps';
 import type { InfoPatch } from '../dissect/types';
-import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
+import type { Packet, ProtocolLayer } from '../../types/packet';
 
 /** A frame handed to the coordinator, in id order. */
 export interface CoordFrame extends WireFrame {
@@ -143,7 +143,7 @@ export interface CoordinatorOptions {
   emit: (merged: Merged) => void;
   /** Batches a shard may hold at once (ADR 0053: two). */
   maxInFlight?: number;
-  /** Ask shards for each frame's tree as it was dissected - the equality test. */
+  /** The shards send each frame's tree back (`ShardOptions.withTrees`) - the equality test; the coordinator does not read it. */
   withTrees?: boolean;
 }
 
@@ -422,8 +422,6 @@ export class Coordinator {
   private ready: (OpBatch | ToShard)[][];
   private inFlight: number[];
   private settles: [number, number][][];
-  private rows: [number, ProtocolField[]][][];
-  private patches: InfoPatch[][];
   private readonly dead = new Set<number>();
   /** Which lane holds each connection: 0, or a shard's lane (shard + 1). */
   private readonly keyHome = new Map<string, number>();
@@ -455,8 +453,6 @@ export class Coordinator {
   private nextTls = 0;
   /** The next pack's key; never reset, so no two packs of one coordinator share one. */
   private nextPackKey = 0;
-  /** Which shard lane holds a recent frame's tree, for `detail`. */
-  private readonly treeLane: IdRing;
   private idleWaiters: (() => void)[] = [];
   private waitingCost = 0;
   /** `inFlightCost` summed over frames dispatched and not yet merged. */
@@ -491,11 +487,8 @@ export class Coordinator {
     this.ready = Array.from({ length: this.shards }, () => []);
     this.inFlight = new Array(this.shards).fill(0);
     this.settles = Array.from({ length: this.shards }, () => []);
-    this.rows = Array.from({ length: this.shards }, () => []);
-    this.patches = Array.from({ length: this.shards }, () => []);
     this.tlsMaps = Array.from({ length: this.shards + 1 }, () => new Map());
     this.perLane = new Array(this.shards + 1).fill(0);
-    this.treeLane = new IdRing(8192 * (this.shards + 1));
   }
 
   /** Lane 0's trackers and the Sequencer they share, hooked up. */
@@ -662,8 +655,6 @@ export class Coordinator {
       this.inFlight[s] = 0;
       this.recent[s] = 0;
       this.settles[s] = [];
-      this.rows[s] = [];
-      this.patches[s] = [];
       if (!this.dead.has(s)) this.options.send(s, { type: 'reset', epoch: this.epoch }, []);
     }
     this.keyHome.clear();
@@ -674,7 +665,6 @@ export class Coordinator {
     this.datagramShard.clear();
     this.tlsMaps = Array.from({ length: this.shards + 1 }, () => new Map());
     this.nextTls = 0;
-    this.treeLane.clear();
     this.lane0Tls.reset();
     this.crossLane = 0;
     this.barrierMismatch = 0;
@@ -705,38 +695,6 @@ export class Coordinator {
       if (!this.writers[s].empty) this.sealWriter(s);
       if (this.ready[s].length === 0) this.options.send(s, message, []);
       else this.ready[s].push(message);
-    }
-  }
-
-  /** The shard (0-based) holding a recent frame's tree, or null for lane 0 or a frame no longer known. */
-  treeShard(id: number): number | null {
-    const lane = this.treeLane.get(id);
-    return lane === undefined ? null : lane - 1;
-  }
-
-  /** Before a request to a shard that must see what the merge has sent it. */
-  flushSide(shard: number): void {
-    this.sendBatch(shard, null);
-  }
-
-  /** Rows the merge added to a shard frame's Frame layer. */
-  frameRows(lane: number, id: number, rows: ProtocolField[]): void {
-    if (lane === 0 || rows.length === 0) return;
-    this.rows[lane - 1].push([id, rows]);
-  }
-
-  /**
-   * Later frames' links into earlier trees, sent to whichever lane caches the
-   * earlier one. A shard has already applied its own frames' links to its own
-   * trees; lane 0's are applied by `local`.
-   */
-  routePatches(fromLane: number, patches: readonly InfoPatch[], local: (patch: InfoPatch) => void): void {
-    for (const patch of patches) {
-      if (patch.links === undefined && patch.responseInFrame === undefined) continue;
-      const lane = this.treeLane.get(patch.frameId) ?? 0;
-      if (lane === fromLane && lane !== 0) continue;
-      if (lane === 0) local(patch);
-      else this.patches[lane - 1].push({ ...patch, suffix: undefined });
     }
   }
 
@@ -1090,9 +1048,7 @@ export class Coordinator {
   /** `batch` null: only what the merge owes the shard, and only if there is any. */
   private sendBatch(shard: number, batch: OpBatch | null): void {
     const settle = this.settles[shard];
-    const rows = this.rows[shard];
-    const patches = this.patches[shard];
-    if (batch === null && settle.length === 0 && rows.length === 0 && patches.length === 0) return;
+    if (batch === null && settle.length === 0) return;
     if (this.dead.has(shard)) return;
     // A batch is three buffers, each its own: the slab is a copy of the frames,
     // which this thread still holds (`Entry.bytes`). An empty slab is a legal
@@ -1102,14 +1058,10 @@ export class Coordinator {
       transfer.push(batch.nums.buffer as ArrayBuffer, batch.bytes.buffer as ArrayBuffer, batch.ends.buffer as ArrayBuffer);
     }
     this.settles[shard] = [];
-    this.rows[shard] = [];
-    this.patches[shard] = [];
     this.inFlight[shard] += 1;
     this.options.send(shard, {
       type: 'batch', epoch: this.epoch, ops: batch,
       ...(settle.length > 0 ? { settle } : {}),
-      ...(rows.length > 0 ? { rows } : {}),
-      ...(patches.length > 0 ? { patches } : {}),
     }, transfer);
   }
 
@@ -1185,7 +1137,6 @@ export class Coordinator {
         settleTreeTls(result.layers, resolve);
         merged.layers = result.layers;
       }
-      this.treeLane.set(id, lane);
     }
     this.options.emit(merged);
   }
@@ -1209,6 +1160,9 @@ export class Coordinator {
  * on every insert spends a scan of up to its whole capacity per frame. At the
  * 40,960 entries this holds it was 11 us a frame - more than the coordinator's
  * whole job - measured by `scripts/perf/parallel-threads.ts`.
+ *
+ * Nothing in the app uses it now: it was the coordinator's map from a frame to
+ * the shard holding its tree, which ADR 0072 removed. `scripts/pipeline/fifo-map.ts` still asserts it.
  */
 export class IdRing {
   private readonly ids: Float64Array;

@@ -20,7 +20,7 @@
 import type { ConversationFacts } from '../dissect/sequencer';
 import type { BarrierHint, BarrierReport, QuicNumbering } from '../dissect/shardNumbering';
 import type { InfoPatch } from '../dissect/types';
-import type { ProtocolField, ProtocolLayer } from '../../types/packet';
+import type { ProtocolLayer } from '../../types/packet';
 import type { RowPack } from './rowPack';
 import type { RowSide } from './rowSteps';
 import type { FlowAnnotationStore } from '../flowAnnotations';
@@ -342,7 +342,7 @@ export interface ShardInterface { name: string; label: string; tsPrecision?: num
 
 export type ToShard =
   /** The first message a shard Worker is sent. */
-  | { type: 'init'; shards: number; cacheFrames: number }
+  | { type: 'init'; shards: number }
   | {
     type: 'batch';
     epoch: number;
@@ -350,10 +350,6 @@ export type ToShard =
     ops: OpBatch | null;
     /** `tls.stream` placeholders the merge has numbered. */
     settle?: [number, number][];
-    /** Rows the merge added to a frame's Frame layer: the process, a live gap, a fingerprint. */
-    rows?: [number, ProtocolField[]][];
-    /** Later frames' links into cached trees this shard holds. */
-    patches?: InfoPatch[];
   }
   | { type: 'reset'; epoch: number }
   | {
@@ -372,8 +368,7 @@ export type ToShard =
    */
   | { type: 'flows'; table: Parameters<FlowAnnotationStore['apply']>[0]; nowUs: number }
   /** The Worker's annotation store was cleared: a new capture, or a lost link. */
-  | { type: 'flowsClear' }
-  | { type: 'detail'; requestId: number; id: number };
+  | { type: 'flowsClear' };
 
 /** What one frame's dissection on a shard produced. */
 export interface ShardResult {
@@ -409,5 +404,4 @@ export type FromShard =
     /** Every result's row, encoded once; null when no frame of the batch dissected. */
     pack: RowPack | null;
   }
-  | { type: 'detail'; requestId: number; layers: ProtocolLayer[] | null }
   | { type: 'failure'; message: string };

@@ -76,6 +76,7 @@ const hex = (bytes: Uint8Array | null | undefined) => (bytes == null ? '-' : Buf
 function digest(
   packet: Packet | undefined, layers: ProtocolLayer[] | undefined, record: Uint8Array | undefined,
   derived: Uint8Array | null | undefined, icmp: number | undefined, patches: InfoPatch[] | undefined, error?: string,
+  trees = true,
 ): string {
   if (packet === undefined) return `error ${error}`;
   const fields = packet.fields ?? {};
@@ -85,7 +86,8 @@ function digest(
       packet.protocol, packet.protocolLabel, packet.info, packet.status, packet.length,
       packet.frameProtocols, packet.analysisFlags, Object.keys(fields).map((k) => [k, fields[k]]),
     ]),
-    render(layers ?? []),
+    // A rows-only run (`withTrees: false`) compares no tree: the shards send none.
+    trees ? render(layers ?? []) : '-',
     VERBOSE && record !== undefined
       ? recordEntries(record).map(([name, value]) => `${name} ${JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? `${v}n` : v instanceof Uint8Array ? hex(v) : v))}`).join('\n')
       : hex(record),
@@ -103,7 +105,7 @@ function digest(
  * The single Worker: one Sequencer, one recorder, every frame in order. Each
  * row is annotated as `ingest` does, with the table as it stood at its index.
  */
-function sequential(capture: Capture, table?: TableAt): string[] {
+function sequential(capture: Capture, table?: TableAt, trees = true): string[] {
   const dissector = new FrameDissector(trackers(new Sequencer()), FIXED_ENV, null);
   dissector.host = capture.host ?? dissector.host;
   const annotations = new FlowAnnotationStore();
@@ -114,7 +116,7 @@ function sequential(capture: Capture, table?: TableAt): string[] {
     try {
       const d = dissector.dissect({ ...input, bytes });
       annotatePacket(d.packet, annotations);
-      out = digest(d.packet, d.packet.layers, d.record, d.derived, d.icmpMatchedRequestFrameId, d.infoPatches);
+      out = digest(d.packet, d.packet.layers, d.record, d.derived, d.icmpMatchedRequestFrameId, d.infoPatches, undefined, trees);
     } catch (err) {
       out = `error failed to dissect a captured frame: ${String(err)}`;
     }
@@ -142,6 +144,8 @@ interface RunOptions {
   table?: TableAt;
   /** Broadcast a table and then `flowsClear` before any frame. */
   clearTable?: Table;
+  /** Shards send their trees back (default). Off, only rows, records and patches are compared. */
+  withTrees?: boolean;
 }
 
 /** The coordinator and its shards (`virtualShards.ts`), each merged frame hashed. */
@@ -171,7 +175,9 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
     if (m.overlay !== undefined) applyOverlay(row, m.overlay);
     return row;
   };
+  const trees = options.withTrees ?? true;
   const stats = drive(capture, config, {
+    withTrees: trees,
     ...(options.decodeRows !== undefined ? { decodeRows: options.decodeRows } : {}),
     ...(options.table !== undefined ? { table: options.table } : {}),
     ...(options.clearTable !== undefined ? { clearTable: options.clearTable } : {}),
@@ -198,7 +204,7 @@ function parallel(capture: Capture, config: Config, options: RunOptions = {}): R
       // the frame, and they must be the frame the capture holds.
       const sent = capture.inputs[m.id - 1].bytes;
       const bytesAgree = packet === undefined || Buffer.from(packet.rawBytes).equals(sent);
-      digests[m.id - 1] = digest(packet, layers, m.record, m.derived, m.icmpMatchedRequestFrameId, m.infoPatches, m.error)
+      digests[m.id - 1] = digest(packet, layers, m.record, m.derived, m.icmpMatchedRequestFrameId, m.infoPatches, m.error, trees)
         + (bytesAgree ? '' : '\nbytes differ from the frame');
       if (keep) merged.push({ ...m, layers });
       const bytes = packet?.rawBytes;
@@ -317,6 +323,16 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
       console.log(`        ${run.packsDecoded.toLocaleString()} of ${run.packs.toLocaleString()} packs decoded,`
         + ` ${run.needsRowResults.toLocaleString()} needsRow results`);
     }
+    // What the app runs: the shards send no tree, so only rows, records, decrypted
+    // answers and patches are compared (ADR 0072).
+    const rowsOnly: Config = { label: 'N=7 by connection, rows only (no trees)', shards: 7, route: 'connection' };
+    const wantRows = sequential(capture, undefined, false);
+    const rows = parallel(capture, rowsOnly, { withTrees: false });
+    const rowsAt = firstDiff(wantRows, rows.digests);
+    check(`${capture.name}, ${rowsOnly.label}: all ${wantRows.length.toLocaleString()} rows, records and patches as one core dissects them`,
+      rowsAt === -1 && rows.crossLane === 0 && rows.barrierMismatch === 0 && rows.quicMismatch === 0,
+      rowsAt !== -1 ? `frame ${rowsAt + 1} differs${VERBOSE ? `: ${lineDiff(wantRows[rowsAt], rows.digests[rowsAt])}` : ''}`
+        : `crossLane ${rows.crossLane}, barrierMismatch ${rows.barrierMismatch}, quicMismatch ${rows.quicMismatch}`);
     if (capture.name === 'burst') {
       await tableRuns(capture, want, false);
     } else {

@@ -125,7 +125,7 @@ export function drive(capture: Capture, config: Config, options: DriveOptions): 
       for (const result of message.results) if (result.side?.needsRow) needsRowResults++;
     }
     coordInbox.push({ shard: s, message: structuredClone(message, { transfer: transfer as ArrayBuffer[] }) });
-  }, { shards: config.shards, cacheFrames: 64, env: FIXED_ENV, withTrees: options.withTrees ?? true }));
+  }, { shards: config.shards, env: FIXED_ENV, withTrees: options.withTrees ?? true }));
 
   const sequencer = coordinatorSequencer();
   const coordinator = new Coordinator({

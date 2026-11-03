@@ -431,9 +431,6 @@ let parallel: {
 } | null = null;
 /** Every key log text loaded, for a shard started after it arrived. */
 const keyLogTexts: string[] = [];
-/** Detail requests a shard is answering, by request id. */
-const shardDetails = new Map<number, (layers: ProtocolLayer[] | null) => void>();
-let nextShardDetail = 1;
 /**
  * The last socket table, and the time it was applied at, since the annotations
  * were last cleared: for shards started after it arrived, which would
@@ -442,8 +439,6 @@ let nextShardDetail = 1;
  * lost to those shards.
  */
 let lastFlows: Extract<ToShard, { type: 'flows' }> | null = null;
-/** Trees each shard keeps for the detail pane: lane 0 keeps its own `DETAIL_CACHE_FRAMES`. */
-const SHARD_CACHE_FRAMES = 2_000;
 /** When rows were last posted to the app, for `afterMerge`'s cadence. */
 let lastPostedAt = 0;
 
@@ -468,8 +463,6 @@ function interfacesMessage(): ToShard {
 function stopParallel(): void {
   if (parallel === null) return;
   for (const worker of parallel.workers) worker.terminate();
-  for (const answer of shardDetails.values()) answer(null);
-  shardDetails.clear();
   parallel = null;
 }
 
@@ -505,7 +498,7 @@ function startParallel(shards: number): void {
       event.preventDefault();
       shardDown(s, event.message || 'it stopped');
     };
-    worker.postMessage({ type: 'init', shards, cacheFrames: SHARD_CACHE_FRAMES } satisfies ToShard);
+    worker.postMessage({ type: 'init', shards } satisfies ToShard);
     workers.push(worker);
   }
   parallel = { coordinator, workers };
@@ -523,42 +516,23 @@ function shardDown(shard: number, reason: string): void {
 
 function receiveFromShard(shard: number, message: FromShard): void {
   if (parallel === null) return;
-  // Not a `switch`: `scripts/tls/key-log.ts` reads the app's command cases out
-  // of this file's source by their labels, and a second case labelled with the
-  // detail message above them would be the one it found.
   if (message.type === 'results') {
     parallel.coordinator.receive(shard, message);
     afterMerge();
-  } else if (message.type === 'detail') {
-    const answer = shardDetails.get(message.requestId);
-    shardDetails.delete(message.requestId);
-    answer?.(message.layers);
   } else {
     shardDown(shard, message.message);
   }
 }
 
-/** A recent frame's tree from the shard that dissected it, or null when it has gone. */
-function treeFromShard(shard: number, id: number): Promise<ProtocolLayer[] | null> {
-  const current = parallel;
-  if (current === null) return Promise.resolve(null);
-  const requestId = nextShardDetail++;
-  return new Promise((resolve) => {
-    shardDetails.set(requestId, resolve);
-    // What the merge owes the shard - rows, links - first, so the tree is whole.
-    current.coordinator.flushSide(shard);
-    current.workers[shard].postMessage({ type: 'detail', requestId, id } satisfies ToShard);
-  });
-}
-
 /**
  * One frame merged back into order - what `ingest` does after its dissection,
  * for a frame any lane dissected. The rows the process, a live gap and a
- * fingerprint add go to the Frame layer of whichever tree the frame has: here
- * for lane 0, on the shard for the others. A shard annotates and marks its
- * own rows, so only lane 0's are done here; the order-dependent steps -
- * fingerprints, network facts - run here for all of them, from the packet
- * when it was decoded and from the shard's side record when it was not.
+ * fingerprint add go to the Frame layer of the tree lane 0 keeps; a shard
+ * frame has no tree here, and a click on it is rebuilt from its record. A shard
+ * annotates and marks its own rows, so only lane 0's are done here; the
+ * order-dependent steps - fingerprints, network facts - run here for all of
+ * them, from the packet when it was decoded and from the shard's side record
+ * when it was not.
  */
 function emitMerged(merged: Merged): void {
   const frame = merged.meta as LiveFrame;
@@ -576,10 +550,9 @@ function emitMerged(merged: Merged): void {
     // A light row: it stays in the pack the shard made, and the overlay says
     // what the merge adds to it. The shard has put the clock in the pack by the
     // same rule as below.
-    const { overlay, frameRows } = mergeRowSide(
+    const { overlay } = mergeRowSide(
       merged.side, { fingerprints: clientFingerprints, facts: networkFacts, host }, merged.overlay ?? null,
     );
-    if (frameRows.length > 0) parallel?.coordinator.frameRows(merged.lane, id, frameRows);
     queueRow({ id, rawBytes: merged.bytes ?? NO_ROW_BYTES }, merged.packed ?? null, overlay);
   } else {
     const precision = tsPrecisionById.get(frame.iface) ?? 6;
@@ -598,7 +571,6 @@ function emitMerged(merged: Merged): void {
     learnOrLabelFingerprint(packet.fields, clientFingerprints, packet.layers);
     networkFacts.observe(packet, host);
     if (tree !== null) cacheTree(id, tree);
-    else parallel?.coordinator.frameRows(merged.lane, id, stub.fields);
     packet.layers = [];
 
     // After the last write to the row, so the overlay carries every one of them.
@@ -610,12 +582,14 @@ function emitMerged(merged: Merged): void {
   }
   if (merged.infoPatches) {
     pendingInfoPatches.push(...merged.infoPatches);
-    parallel?.coordinator.routePatches(merged.lane, merged.infoPatches, (patch) => {
+    // Links into a tree lane 0 still caches; a shard frame has no tree to patch.
+    for (const patch of merged.infoPatches) {
+      if (patch.links === undefined && patch.responseInFrame === undefined) continue;
       const cached = treeCache.get(patch.frameId);
       if (cached !== undefined) {
         applyInfoPatch({ layers: cached, info: '', fields: {} } as unknown as Packet, { ...patch, suffix: undefined });
       }
-    });
+    }
   }
 }
 
@@ -1732,7 +1706,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       // `clear` also flushes the derived AES schedules; see its comment.
       keyLog.clear();
       keyLogTexts.length = 0;
-      // A shard's cached trees are a fourth place, cleared with its key log.
+      // A shard keeps a key log of its own, cleared here; it keeps no trees.
       parallel?.coordinator.broadcast({ type: 'keylogClear' });
       // And the cached trees, which are the other place a decrypted payload
       // lives: without this a recent frame would keep showing plaintext after
@@ -1763,11 +1737,9 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       // store holds for every frame of the capture (ADR 0049). Only a frame
       // with no record - a capture older than records, a frame that failed to
       // dissect - falls back to replaying its conversation. A frame a shard
-      // dissected recently is asked of the shard first, which still has it.
+      // dissected is always rebuilt this way: shards keep no tree (ADR 0072).
       const id = command.id;
-      const shard = parallel?.coordinator.treeShard(id) ?? null;
-      const fromShard = shard === null ? Promise.resolve(null) : treeFromShard(shard, id);
-      void fromShard.then((cached) => cached ?? revisitFromStore(id)).then((rebuilt) => {
+      void revisitFromStore(id).then((rebuilt) => {
         if (rebuilt !== null) post({ type: 'detail', id, layers: rebuilt });
         else post({ type: 'needReplay', id });
       });

@@ -129,7 +129,7 @@ function rig(shards: number, assign?: (key: string, shards: number) => number): 
   const toCoordinator: { shard: number; message: FromShard }[] = [];
   const workers = Array.from({ length: shards }, (_, s) => new Shard((message, transfer) => {
     toCoordinator.push({ shard: s, message: structuredClone(message, { transfer: transfer as ArrayBuffer[] }) });
-  }, { shards, cacheFrames: 64, env: FIXED_ENV, withTrees: true }));
+  }, { shards, env: FIXED_ENV, withTrees: true }));
   const sequencer = coordinatorSequencer();
   const lane = trackers(sequencer);
   const forgot: string[] = [];

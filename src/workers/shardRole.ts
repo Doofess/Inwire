@@ -28,9 +28,7 @@ export function runShard(ctx: DedicatedWorkerGlobalScope): void {
   ctx.onmessage = (event: MessageEvent<ToShard>) => {
     const message = event.data;
     if (message.type === 'init') {
-      shard = new Shard((out, transfer) => ctx.postMessage(out, transfer), {
-        shards: message.shards, cacheFrames: message.cacheFrames,
-      });
+      shard = new Shard((out, transfer) => ctx.postMessage(out, transfer), { shards: message.shards });
       for (const early of pending.splice(0)) shard.handle(early);
       return;
     }
