@@ -1540,7 +1540,9 @@ about this machine.
       should read "Verified publisher: Inwire Code Signing (this PC)".
       "Unknown publisher" means `trust-cert.ps1` has not run on this machine
       (or was undone with `-Remove`), or the installer was compiled without
-      `/DSIGN`.
+      `/DSIGN`. **Seen 2026-11-03** (the owner, at the prompt): verified
+      publisher, on the install that brought this PC from the 2026-09-28 build
+      to `f1c9fcb3`. That install's payload check read 8 of 8 `ok`.
 - [ ] **Smart App Control.** Check the state with
       `(Get-MpComputerStatus).SmartAppControlState`, or read
       `VerifiedAndReputablePolicyState` under
