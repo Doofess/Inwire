@@ -91,10 +91,10 @@ import { WindowControls } from './WindowControls';
  * that already exists. Adding a button back here means taking it from the rail,
  * where it is one of fourteen in a strip built to hold exactly that.
  *
- * It does hold exactly one control, and only because deleting the counts widget
- * would otherwise have deleted it: the `+N UNSEARCHED` rescan button inside the
- * readout, which is the only way to re-run a whole-capture filter scan. It
- * carries `app-no-drag` itself.
+ * What it does hold is the app's own chrome, not navigation: the side bar's
+ * toggle, a back step, the display filter, the live pill, the panes toggle and
+ * the caption buttons. The packet counter and its `+N UNSEARCHED` rescan were
+ * here once and are in the status bar now.
  *
  * ## What makes this read as native rather than as a web page in a frame
  *
@@ -265,9 +265,10 @@ export const TitleRow: React.FC<TitleRowProps> = ({
         slides left and the mark loses the corner it exists to occupy.
         `scripts/electron/window-chrome.ts` asserts that 138.
 
-        The row now holds no control at all, which makes the drag-region rule
-        below vacuous here rather than delicate: there is nothing inside it that
-        needs `app-no-drag`. */}
+        The spacer holds nothing, so nothing in it needs `app-no-drag`, and it
+        stays part of the drag region. The controls the row does hold
+        carry it themselves or sit inside a wrapper that does, the filter
+        included (below). */}
     {/* **The centre, and the display filter is in it.**
 
         It was empty, and before that it held the packet counter - which
