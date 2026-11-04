@@ -13,8 +13,9 @@
 import v8 from 'node:v8';
 import { MAX_CAPLEN, type SeqFrame } from '../../src/services/pipeline/catchUp';
 import { PcapngTail, STALL_LIMIT, startState, type TailFrame, type TailState } from '../../src/services/pipeline/pcapngTail';
+import { ParsedTail } from '../../src/services/pipeline/parsedTail';
 import { SLAB_BYTES, answerParse, parseRead, parseTransfer, type ReadParse } from '../../src/services/pipeline/readParse';
-import { concat, epb, fileHeader, idbBlock, madeFrames, shbBlock } from './madePcapng';
+import { concat, customBlock, epb, fileHeader, idbBlock, madeFrames, rng, shbBlock } from './madePcapng';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -284,6 +285,187 @@ const ref = reference(file);
   const failed = answerParse({ type: 'parse', requestId: 42, state: null as unknown as TailState, bytes: file });
   check('answerParse: a request it cannot parse is answered with a failure, not a throw',
     failed.reply.type === 'failure' && failed.reply.message.length > 0 && failed.transfer.length === 0);
+}
+
+// --- ParsedTail: what CatchUp reads a file through, over the reader's parses -----
+
+/** One read as the coordinator gets it: parsed from where the tail says, across a thread. */
+function read(t: ParsedTail, bytes: Uint8Array): boolean {
+  return t.take(across(parseRead(t.nextRead(), bytes)));
+}
+
+interface Seen { key: string; bytes: Uint8Array }
+
+/** A frame and where the tail it came from stands after it. */
+function seen(f: TailFrame, t: { position: number; blockAt: number; idbNames: readonly (string | null)[] }): Seen {
+  return { key: [f.idb, f.tsUs, f.tsNsRem, f.origLen, f.capLen, t.position, t.blockAt, t.idbNames.join()].join('|'), bytes: f.bytes };
+}
+
+/** The first way two runs differ, or ''. */
+function seenDiffers(a: Seen[], b: Seen[]): string {
+  if (a.length !== b.length) return `${a.length} frames vs ${b.length}`;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].key !== b[i].key) return `frame ${i}: ${a[i].key} vs ${b[i].key}`;
+    if (!sameBytes(a[i].bytes, b[i].bytes)) return `frame ${i}: bytes differ`;
+  }
+  return '';
+}
+
+// A file with a second IDB half way, and a block no one reads between it and the next frame.
+const twoFrames = madeFrames(3000);
+const twoIdb = concat([shbBlock(), idbBlock('A'), ...twoFrames.slice(0, 1500).map(epb), idbBlock('B'), customBlock(), ...twoFrames.slice(1500).map(epb)]);
+/** What PcapngTail gives for `twoIdb` in one push, with where it stands after each frame. */
+const twoRef: Seen[] = (() => {
+  const tail = new PcapngTail(0);
+  tail.push(twoIdb);
+  const out: Seen[] = [];
+  let f;
+  while ((f = tail.next()) !== null) out.push(seen(f, tail));
+  return out;
+})();
+
+{
+  const few = madeFrames(50);
+  const f = concat([fileHeader(), ...few.map(epb)]);
+  const t = new ParsedTail();
+  const got: number[] = [];
+  for (let written = 7; written < f.length + 7; written += 7) {
+    read(t, f.subarray(t.readOffset, Math.min(f.length, written)));
+    let x;
+    while ((x = t.next()) !== null) got.push(x.tsUs);
+  }
+  check('ParsedTail: a file growing seven bytes at a time - every frame, in order; the offset to read next is the end of the file; the adapter\'s name',
+    got.length === 50 && got.every((ts, i) => ts === few[i].tsUs) && t.readOffset === f.length && t.position === f.length && t.idbNames[0] === DEVICE,
+    `${got.length} frames, readOffset ${t.readOffset}/${f.length}, name ${t.idbNames[0]}`);
+}
+
+{
+  const random = rng(5);
+  const p = new PcapngTail(0);
+  const q = new ParsedTail();
+  const fromP: Seen[] = [];
+  const fromQ: Seen[] = [];
+  let f;
+  for (let round = 0; round < 400; round++) {
+    const n = 1 + Math.floor(random() * 65_536);
+    const pull = Math.floor(random() * 61);
+    p.push(twoIdb.subarray(p.readOffset, Math.min(twoIdb.length, p.readOffset + n)));
+    read(q, twoIdb.subarray(q.readOffset, Math.min(twoIdb.length, q.readOffset + n)));
+    for (let i = 0; i < pull && (f = p.next()) !== null; i++) fromP.push(seen(f, p));
+    for (let i = 0; i < pull && (f = q.next()) !== null; i++) fromQ.push(seen(f, q));
+  }
+  p.push(twoIdb.subarray(p.readOffset));
+  read(q, twoIdb.subarray(q.readOffset));
+  while ((f = p.next()) !== null) fromP.push(seen(f, p));
+  while ((f = q.next()) !== null) fromQ.push(seen(f, q));
+  check('ParsedTail: read and taken as PcapngTail is - the same frames, and the same position, blockAt and names after each',
+    seenDiffers(fromP, fromQ) === '' && seenDiffers(fromQ, twoRef) === '' && fromQ.length === 3000
+      && q.position === twoIdb.length && q.idbNames.join() === 'A,B',
+    `${seenDiffers(fromP, fromQ)} / ${seenDiffers(fromQ, twoRef)}`);
+}
+
+{
+  const forty = madeFrames(40);
+  const f = concat([fileHeader(), ...forty.map(epb)]);
+  const cut = fileHeader().length + forty.slice(0, 20).reduce((n, x) => n + epb(x).length, 0) + 37;
+  const blockStart = cut - 37;
+  const early = f.slice();
+  early.fill(0, cut);
+  const t = new ParsedTail();
+  const got: Uint8Array[] = [];
+  let x;
+  read(t, early);
+  while ((x = t.next()) !== null) got.push(x.bytes);
+  const afterEarly = got.length;
+  const atStall = t.save();
+  read(t, f.subarray(t.readOffset));
+  while ((x = t.next()) !== null) got.push(x.bytes);
+  check('ParsedTail: zeros a writer had not filled yet are read again, not taken - every frame once, as written',
+    afterEarly === 20 && got.length === 40 && got.every((b, i) => sameBytes(b, forty[i].bytes)),
+    `${afterEarly} then ${got.length}`);
+  check('...and save() where it stalled is that block, with the stall counted',
+    atStall.offset === blockStart && atStall.stalled === 1, JSON.stringify({ offset: atStall.offset, blockStart, stalled: atStall.stalled }));
+
+  const stuck = new ParsedTail();
+  let threw = false;
+  let reads = 0;
+  try {
+    for (; reads < 100; reads++) { read(stuck, early.subarray(stuck.readOffset)); while (stuck.next() !== null) { /* frames */ } }
+  } catch { threw = true; }
+  const refusedAfter = !read(stuck, f.subarray(stuck.readOffset));
+  check('...and a block that never closes throws in the end, on the read after STALL_LIMIT, and nothing is taken after it',
+    threw && reads === STALL_LIMIT && refusedAfter, `threw ${threw} on read ${reads + 1}, refused after ${refusedAfter}`);
+}
+
+{
+  const header = fileHeader().length;
+  const epbAt = ref[100].blockAt;
+  let same = true;
+  let nullBefore = true;
+  const heads: string[] = [];
+  for (const at of [epbAt, epbAt + 12]) {
+    const p = new PcapngTail(0);
+    const q = new ParsedTail();
+    p.push(file.subarray(0, header));
+    read(q, file.subarray(0, header));
+    while (p.next() !== null) { /* the header */ }
+    while (q.next() !== null) { /* the header */ }
+    p.jump(at);
+    q.jump(at);
+    nullBefore = nullBefore && p.blockHead() === null && q.blockHead() === null && q.readOffset === at && q.position === at;
+    p.push(file.subarray(at, at + 4096));
+    read(q, file.subarray(at, at + 4096));
+    const a = JSON.stringify(p.blockHead());
+    const b = JSON.stringify(q.blockHead());
+    heads.push(`${a} vs ${b}`);
+    same = same && a === b && a !== 'null';
+  }
+  check('ParsedTail: blockHead where a jump landed is PcapngTail\'s, at an EPB and twelve bytes inside one; null before bytes arrive',
+    same && nullBefore, heads.join('; '));
+}
+
+{
+  const t = new ParsedTail();
+  read(t, file.subarray(0, 100_000));
+  for (let i = 0; i < 10; i++) t.next();
+  const position = t.position;
+  const readOffset = t.readOffset;
+  const elsewhere = across(parseRead({ ...t.nextRead(), offset: readOffset + 4 }, file.subarray(readOffset + 4, readOffset + 50_000)));
+  const refused = !t.take(elsewhere);
+  const unmoved = t.position === position && t.readOffset === readOffset;
+  const after = t.next();
+  check('ParsedTail: a parse that does not begin where the next read does is refused, and changes nothing',
+    refused && unmoved && after !== null && after.tsUs === ref[10].tsUs && sameBytes(after.bytes, ref[10].bytes),
+    `refused ${refused}, unmoved ${unmoved}, next ${after?.tsUs} vs ${ref[10].tsUs}`);
+}
+
+{
+  let ok = true;
+  const details: string[] = [];
+  for (const at of [700, 1600]) {
+    // PcapngTail's save into a ParsedTail.
+    const p = new PcapngTail(0);
+    p.push(twoIdb);
+    for (let i = 0; i < at; i++) p.next();
+    const q = new ParsedTail(across(p.save()));
+    read(q, twoIdb.subarray(q.readOffset));
+    const fromQ: Seen[] = [];
+    let f;
+    while ((f = q.next()) !== null) fromQ.push(seen(f, q));
+    // ParsedTail's save into a PcapngTail.
+    const q2 = new ParsedTail();
+    read(q2, twoIdb);
+    for (let i = 0; i < at; i++) q2.next();
+    const p2 = PcapngTail.restore(across(q2.save()));
+    p2.push(twoIdb.subarray(p2.readOffset));
+    const fromP: Seen[] = [];
+    while ((f = p2.next()) !== null) fromP.push(seen(f, p2));
+    const a = seenDiffers(fromQ, twoRef.slice(at));
+    const b = seenDiffers(fromP, twoRef.slice(at));
+    ok = ok && a === '' && b === '' && fromQ.length === 3000 - at;
+    details.push(`at ${at}: ${a} / ${b}`);
+  }
+  check('ParsedTail and PcapngTail: each restored from the other\'s save() reads on with the same frames', ok, details.join('; '));
 }
 
 console.log(failures === 0 ? '\nAll read-parse checks passed.' : `\n${failures} read-parse check(s) FAILED.`);
