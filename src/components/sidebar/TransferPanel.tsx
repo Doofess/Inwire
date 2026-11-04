@@ -327,7 +327,7 @@ export const TransferPanel: React.FC<TransferPanelProps> = ({
         includeRawBytes,
         compress,
         anonymise,
-        secrets: attachSecrets && !anonymise ? new TextDecoder('latin1').decode(keyLog.serialise()) : undefined,
+        secrets: attachSecrets && !anonymise ? keyLog.serialise() : undefined,
         source: captureSource,
         // Each count as the agent reported it. `droppedKernel` is null when
         // the driver's counters could not be read, and `droppedPipe` when the
