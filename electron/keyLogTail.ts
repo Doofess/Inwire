@@ -22,6 +22,7 @@
  * looks exactly like decryption being broken. The fixtures never showed it,
  * because a key log handed to an import is complete before the import starts.
  */
+import { KEYLOG_CAP_BYTES } from '../src/services/tls/keyLogLimits';
 
 /** What to read next, given the file's size now and how far we have read. */
 export type ReadPlan =
@@ -42,6 +43,26 @@ export type ReadPlan =
     restart: boolean;
   };
 
+/** Where a read from the top begins: the newest `cap` bytes of a larger file. */
+export function startOffset(size: number, cap: number): number {
+  return Math.max(0, size - cap);
+}
+
+/** The cap on a read from the top: `INWIRE_KEYLOG_CAP_BYTES` (a test hook), else the default. */
+export function keyLogCap(env: string | undefined): number {
+  if (env !== undefined && /^\d+$/.test(env)) {
+    const value = Number(env);
+    if (Number.isSafeInteger(value) && value > 0) return value;
+  }
+  return KEYLOG_CAP_BYTES;
+}
+
+/** A read from the top: where it starts, and whether it starts mid-line. */
+export function planFromTop(size: number, cap: number): { from: number; skipPartial: boolean } {
+  const from = startOffset(size, cap);
+  return { from, skipPartial: from > 0 };
+}
+
 export function planRead(size: number, offset: number): ReadPlan {
   if (size < offset) return { kind: 'read', from: 0, to: size, restart: true };
   if (size === offset) return { kind: 'none' };
@@ -59,9 +80,16 @@ export function planRead(size: number, offset: number): ReadPlan {
  */
 export class LineAssembler {
   private partial = '';
+  private skipping = false;
 
   /** Returns everything up to and including the last newline; keeps the rest. */
   push(text: string): string {
+    if (this.skipping) {
+      const nl = text.indexOf('\n');
+      if (nl < 0) return '';
+      this.skipping = false;
+      text = text.slice(nl + 1);
+    }
     const all = this.partial + text;
     const cut = all.lastIndexOf('\n');
     if (cut < 0) {
@@ -72,8 +100,13 @@ export class LineAssembler {
     return all.slice(0, cut + 1);
   }
 
-  reset(): void {
+  /**
+   * Drops what is held. With `skipPartial`, the read starts mid-line, so
+   * everything up to and including the first newline pushed is discarded too.
+   */
+  reset(skipPartial = false): void {
     this.partial = '';
+    this.skipping = skipPartial;
   }
 
   /** For tests: what is being held back. */
@@ -140,6 +173,8 @@ export interface KeyLogFollowStatus {
   state: 'off' | 'following' | 'missing' | 'unreadable';
   /** Bytes read so far. */
   bytes: number;
+  /** Bytes at the top of the file not read because it is over the cap; 0 when none. */
+  skippedBytes: number;
   /**
    * `SSLKEYLOGFILE` from main's environment, offered as a one-click choice.
    *

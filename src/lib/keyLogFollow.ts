@@ -28,6 +28,7 @@ export interface KeyLogFollowStatus {
   path: string | null;
   state: 'off' | 'following' | 'missing' | 'unreadable';
   bytes: number;
+  skippedBytes: number;
   suggested: string | null;
   error?: string;
 }
@@ -42,6 +43,8 @@ export function narrowStatus(value: unknown): KeyLogFollowStatus | null {
     path: typeof v.path === 'string' ? v.path : null,
     state: v.state as KeyLogFollowStatus['state'],
     bytes: typeof v.bytes === 'number' ? v.bytes : 0,
+    skippedBytes: typeof v.skippedBytes === 'number' && Number.isFinite(v.skippedBytes) && v.skippedBytes >= 0
+      ? v.skippedBytes : 0,
     suggested: typeof v.suggested === 'string' ? v.suggested : null,
     ...(typeof v.error === 'string' ? { error: v.error } : {}),
   };

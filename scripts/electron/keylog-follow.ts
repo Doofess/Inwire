@@ -18,8 +18,11 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  LineAssembler, MAX_READ_BYTES, parseKeyLogSettings, planRead, POLL_MS, readSpans, REARM_TICKS,
+  keyLogCap, LineAssembler, MAX_READ_BYTES, parseKeyLogSettings, planFromTop, planRead, POLL_MS,
+  readSpans, REARM_TICKS, startOffset,
 } from '../../electron/keyLogTail';
+import { narrowStatus } from '../../src/lib/keyLogFollow';
+import { KEYLOG_CAP_BYTES } from '../../src/services/tls/keyLogLimits';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -68,6 +71,52 @@ console.log('\n--- where a line ends ---\n');
   check('several lines and a fragment in one read',
     lines.push('1\n2\n3'), '1\n2\n');
 }
+
+console.log('\n--- the cap on a read from the top ---\n');
+
+check('a file under the cap is read from the top', startOffset(1000, 4096), 0);
+check('a file over the cap is read from size - cap', startOffset(10_000, 4096), 5904);
+check('the env hook takes a positive integer', keyLogCap('65536'), 65536);
+check('...and falls back on anything else',
+  [keyLogCap(undefined), keyLogCap('0'), keyLogCap('-5'), keyLogCap('x')],
+  [KEYLOG_CAP_BYTES, KEYLOG_CAP_BYTES, KEYLOG_CAP_BYTES, KEYLOG_CAP_BYTES]);
+{
+  const a = new LineAssembler();
+  a.reset(true);
+  check('a mid-line start drops the partial first line',
+    a.push('tail-of-line\nLABEL r s\nLAB'), 'LABEL r s\n');
+  check('...and holds the next partial as before', a.push('EL r2 s2\n'), 'LABEL r2 s2\n');
+  const b = new LineAssembler();
+  b.reset(true);
+  check('the skipped partial may span pushes: nothing yet', b.push('half of a'), '');
+  check('...and the first newline, in a later push, ends the skip',
+    b.push(' line\nLABEL x y\n'), 'LABEL x y\n');
+  const c = new LineAssembler();
+  c.reset();
+  check('a plain reset skips nothing', c.push('LABEL a b\n'), 'LABEL a b\n');
+}
+// The follower reads from `planFromTop` at the top and wherever `planRead`
+// says restart, so a file truncated to under its old size is re-read from
+// `startOffset`, not 0.
+{
+  const shrunk = planRead(9_000, 20_000);
+  check('a shrunken file is a restart', shrunk.kind === 'read' && shrunk.restart, true);
+  check('...which a cap smaller than it reads from size - cap, skipping the partial line',
+    planFromTop(9_000, 4096), { from: 4904, skipPartial: true });
+  check('...and a file under the cap reads from 0 with nothing skipped',
+    planFromTop(1000, 4096), { from: 0, skipPartial: false });
+  const src = readFileSync('electron/keyLogFollower.ts', 'utf8');
+  checkTrue('the follower plans every top read through planFromTop', /planFromTop\(/.test(src));
+  checkTrue('...and reports skippedBytes', /skippedBytes/.test(src));
+}
+
+console.log('\n--- the renderer narrows skippedBytes ---\n');
+
+check('skippedBytes is passed on', narrowStatus({ state: 'following', skippedBytes: 123 })?.skippedBytes, 123);
+check('...absent is 0', narrowStatus({ state: 'following' })?.skippedBytes, 0);
+check('...invalid is 0',
+  [-1, NaN, Infinity, '5'].map((s) => narrowStatus({ state: 'following', skippedBytes: s })?.skippedBytes),
+  [0, 0, 0, 0]);
 
 console.log('\n--- no single read is unbounded ---\n');
 
