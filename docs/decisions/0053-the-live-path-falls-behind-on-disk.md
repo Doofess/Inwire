@@ -885,6 +885,59 @@ the coordinator. By the same arithmetic the view should catch up at about
 at least 75,000 at 120,000 offered, nothing skipped, with 60,000 keeping up
 3 of 3.
 
+### The reader Worker, as built
+
+**What moved.** The parse. With shards, the coordinator starts one more
+Worker beside them, the same script under its own name (`src/workers/readerRole.ts`).
+Each read main answers goes to it with the tail's state, a plain `TailState`,
+and the bytes, transferred. It comes back as frames: slabs of at most 256 kB
+and a column per fixed field, transferred too (`parseRead`,
+`src/services/pipeline/readParse.ts`). The reader holds nothing between
+reads. On the coordinator a `ParsedTail` (`parsedTail.ts`) gives `CatchUp`
+the members `PcapngTail` does, so the logic reads one kind of tail or the
+other.
+
+**What did not.** One read in flight, the numbering, the seek, the checks
+against live frames and the rejoin all stay on the coordinator, unchanged.
+`scripts/pipeline/catch-up.ts` runs every case both ways, and the fixtures
+frame for frame. One threads setting parses in place, as before.
+
+**A file's end.** A read of no bytes ends a file only if the file had closed
+when the read was asked (`askedClosed`). A file that closed since is read
+again at once. Main's read is asynchronous, so the agent's `closed` can
+overtake its reply. The in-place path had this race too, but only the
+reader's extra hop made `catch-up.ts` lose it: a ring edge read as the end
+ended catch-up 'misaligned'.
+
+**When something goes wrong.**
+
+- A parse that does not start at the tail's read offset is refused and the
+  read asked again.
+- When the reader comes or goes (started, stopped with the shards, or
+  failed), the cursor is converted where it stands (`save`/`restore`) and
+  the read in flight is dropped and asked again.
+- A reader that fails or errors is terminated, the failure is said once,
+  and the file is parsed on the coordinator from where it was.
+
+**The gate, met.** Each run was on a fresh build, at 6 threads and a 1024 MB
+buffer.
+
+| Offered | Sent (a second) | Advanced (a second) | Skipped | Level | Worker ArrayBuffers |
+|---|---|---|---|---|---|
+| 120,000 | 112,661 | 80,016 | 0 | 10.1 s | 32-160 MB |
+| 120,000 | 112,079 | 78,325 | 0 | 9.6 s | 32-160 MB |
+| 120,000 | 112,054 | 80,671 | 0 | 10.7 s | 32-160 MB |
+| 60,000 | ~59,850 | kept up, 3 of 3 | 0 | 0.5 s | 27-109 MB |
+
+- **ArrayBuffers.** The 120,000 ranges leave out each run's first two
+  samples, 400-626 MB. Those are the burst's opening, not the reader:
+  before this change, the same drive back to back read 428 and 569 MB there.
+- **Run to run.** The variation is wide. That back-to-back run before the
+  change advanced 74,100 a second, against 80,200 for this one. An earlier
+  run of this build, on a busier machine (106,000 sent), advanced 57,600.
+- **What holds it now.** The coordinator's profile is about 25% idle at
+  120,000 (21% before), and that has not been measured further.
+
 ## What came first
 
 Measured before any of the above, because the rule in CLAUDE.md §7 is that no
