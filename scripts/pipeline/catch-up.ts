@@ -22,11 +22,13 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import v8 from 'node:v8';
 import {
   CatchUp, CatchUpRouter, CaptureFiles, HEADER_READ, HOLD_MAX_FRAMES, MAX_CAPLEN, REJOIN_WITHIN, type FileFrame,
   type SeqFrame,
 } from '../../src/services/pipeline/catchUp';
 import { PcapngTail } from '../../src/services/pipeline/pcapngTail';
+import { parseRead, type ReadParse } from '../../src/services/pipeline/readParse';
 import { HOLE_MIN_FRAMES, LiveFlow } from '../../src/services/pipeline/liveFlow';
 import { MAX_SNAPLEN } from '../../src/services/captureOptions';
 import { PcapService } from '../../src/services/pcapParser';
@@ -41,6 +43,15 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 check('the landing bound is the agent\'s own snaplen bound',MAX_CAPLEN === MAX_SNAPLEN, `${MAX_CAPLEN} vs ${MAX_SNAPLEN}`);
+
+/**
+ * Whether a run's reads are parsed as the catch-up reader parses them, beside
+ * the coordinator (ADR 0053, "Catch-up past the ceiling, 2026-11-04"), rather
+ * than in place. Every case runs both ways; a parse crosses a thread, so it is
+ * serialised as the reader's reply would be.
+ */
+let parsedReads = false;
+const across = <T>(x: T): T => v8.deserialize(v8.serialize(x)) as T;
 
 // --- frames and files ------------------------------------------------------------
 
@@ -93,6 +104,12 @@ interface Plan {
   capturingLate?: boolean;
   /** Each file's boundary arrives before the agent says it is open. */
   boundaryFirst?: boolean;
+  /**
+   * Before this batch is handled, the file's reader changes: on to the reader
+   * Worker, or off it - its Worker stopped, or Multi Threaded Capture changed
+   * and was applied at a clear - with a read in flight dropped.
+   */
+  flipReaderAtBatch?: number;
 }
 
 interface Run {
@@ -113,6 +130,8 @@ interface Run {
   fileBytes: Map<string, number>;
   /** Where frame `seq` begins in its file. */
   startOf: (seq: number) => number;
+  /** With `flipReaderAtBatch`: whether a catch-up was reading when the reader changed. */
+  flippedWhileActive: boolean;
 }
 
 function run(frames: Frame[], plan: Plan): Run {
@@ -158,6 +177,9 @@ function run(frames: Frame[], plan: Plan): Run {
   const known = new CaptureFiles();
   const flow = new LiveFlow();
   const catchUp = new CatchUp<Frame>(known);
+  catchUp.useReader(parsedReads);
+  let readerOn = parsedReads;
+  let flippedWhileActive = false;
   const delivered: Frame[] = [];
   const holes: { at: number; size: number }[] = [];
   let released = 0;
@@ -200,8 +222,19 @@ function run(frames: Frame[], plan: Plan): Run {
   };
   let pendingRetry = 0;
   const reads: { name: string; offset: number }[] = [];
+  // A read the reader is parsing: answered on the next turn, so live batches
+  // arrive while it is in flight - and dropped, as the Worker drops its reply,
+  // at a clear, a new capture, a change of reader and the Stop.
+  let pendingParse: ReadParse | null = null;
   const serve = (budget: number) => {
     for (let r = 0; r < budget; r++) {
+      if (pendingParse !== null) {
+        const parse = pendingParse;
+        pendingParse = null;
+        const out = router.read({ parse, gone: false });
+        if (out.ended) ended.push(out.ended);
+        if (out.retryMs !== undefined && out.retryMs > 0) pendingRetry = 1;
+      }
       if (pendingRetry > 0) { pendingRetry--; return; }
       const want = catchUp.wantRead();
       if (want === null) return;
@@ -219,7 +252,14 @@ function run(frames: Frame[], plan: Plan): Run {
       const room = Math.max(0, visible - want.offset);
       const take = Math.min(room, want.length, 1 + Math.floor(random() * 65_536));
       if (take > 0) reads.push({ name: want.name, offset: want.offset });
-      const out = router.read({ bytes: file.bytes.slice(want.offset, want.offset + take), gone: false });
+      const bytes = file.bytes.slice(want.offset, want.offset + take);
+      // As the Worker decides: to the reader only while there is one.
+      const state = readerOn ? catchUp.tailState() : null;
+      if (state !== null) {
+        pendingParse = across(parseRead(across(state), bytes));
+        continue;
+      }
+      const out = router.read({ bytes, gone: false });
       if (out.ended) ended.push(out.ended);
       if (out.retryMs !== undefined && out.retryMs > 0) pendingRetry = 1;
     }
@@ -230,8 +270,15 @@ function run(frames: Frame[], plan: Plan): Run {
   const port: { no: number; group: Frame[] }[] = [];
   let capturingHeard = false;
   const handle = ({ no: batchNo, group }: { no: number; group: Frame[] }) => {
+    // `readerChanged` in the Worker: the reader came or went, and a read in flight is dropped.
+    if (plan.flipReaderAtBatch === batchNo) {
+      flippedWhileActive = catchUp.active;
+      readerOn = !readerOn;
+      if (catchUp.useReader(readerOn)) pendingParse = null;
+    }
     // `resetPipeline` in the Worker: a clear while catching up.
     if (plan.clearAtBatch === batchNo && catchUp.active) {
+      pendingParse = null;
       router.stop();
       flow.startCapture();
       router.clear();
@@ -240,7 +287,7 @@ function run(frames: Frame[], plan: Plan): Run {
     if (plan.startDrops) group = group.filter((f) => f.seq >= plan.startDrops!);
     if (group.length === 0) return;
     // `capturing` in the Worker: a new run of the numbering, the router reset.
-    if (plan.capturingLate && !capturingHeard) { capturingHeard = true; flow.startCapture(); router.reset(); }
+    if (plan.capturingLate && !capturingHeard) { capturingHeard = true; pendingParse = null; flow.startCapture(); router.reset(); }
     if (plan.mainShed?.has(batchNo)) {
       router.shed(group[0].seq, group.length);
     } else if (!plan.agentShed?.has(batchNo)) {
@@ -281,6 +328,7 @@ function run(frames: Frame[], plan: Plan): Run {
   announce();
   if (!plan.stopAtEnd) for (let i = 0; i < 20_000 && catchUp.active; i++) serve(4);
   const activeAtEnd = catchUp.active;
+  pendingParse = null;
   router.stop();
   const fileBytes = new Map([...files].map(([name, file]) => [name, file.bytes.length]));
   const startOf = (seq: number) => {
@@ -289,7 +337,7 @@ function run(frames: Frame[], plan: Plan): Run {
   };
   return {
     delivered, holes, released, liveArrived, liveDelivered, catchUp, ended, skipped: flow.skippedFrames, activeAtEnd, reads, fileBytes,
-    startOf,
+    startOf, flippedWhileActive,
   };
 }
 
@@ -372,6 +420,17 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     check(`${label}: ...every live frame dissected or given back to main, once`, holdsEveryLiveFrameOnce(r),
       `${r.liveDelivered} + ${r.released} vs ${r.liveArrived}`);
     caughtUp = r.delivered;
+  }
+  {
+    // The reader changes mid catch-up: its Worker stopped, or Multi Threaded
+    // Capture changed and was applied at a clear. The cursor goes on in the
+    // other kind from where it was, and the read in flight is dropped.
+    const shed = new Set([mid, mid + 1, mid + 2, mid + 3, mid + 4]);
+    const r = run(frames, { mainShed: shed, flipReaderAtBatch: mid + 3 });
+    const diff = sameFrames(frames, r.delivered);
+    check(`${label}: the file's reader changes mid catch-up (its Worker stopped, or the setting changed at a clear) - the straight run, no recount`,
+      diff === null && r.holes.length === 0 && holdsEveryLiveFrameOnce(r) && r.catchUp.stats.seekMisses === 0 && r.flippedWhileActive,
+      diff ?? JSON.stringify({ stats: r.catchUp.stats, holes: r.holes, flippedWhileActive: r.flippedWhileActive }));
   }
   {
     const r = run(frames, { agentShed: new Set([mid - 3, mid - 2]) });
@@ -515,7 +574,8 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     const r = run(frames, { perFile, mainShed: new Set([edgeBatch - 1, edgeBatch, edgeBatch + 1]) });
     const diff = sameFrames(frames, r.delivered);
     check(`${label}: a hole across a ring file's edge - read on into the next file`,
-      diff === null && r.catchUp.stats.rejoined >= 1 && r.holes.length === 0, diff ?? JSON.stringify(r.catchUp.stats));
+      diff === null && r.catchUp.stats.rejoined >= 1 && r.holes.length === 0,
+      `${diff ?? ''} ${JSON.stringify({ stats: r.catchUp.stats, ended: r.ended, holes: r.holes })}`);
   }
   {
     // A file slower than live - one read a batch - holds frames until the
@@ -670,6 +730,9 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
 
 check('the bounds are what the rejoin was sized by', REJOIN_WITHIN < HOLD_MAX_FRAMES);
 await cases('made', madeFrames(30_000));
+parsedReads = true;
+await cases('made (reader)', madeFrames(30_000));
+parsedReads = false;
 
 const scratch = mkdtempSync(path.join(tmpdir(), 'inwire-catchup-'));
 try {
@@ -681,7 +744,12 @@ try {
       seq, tsUs: Number(f.tsNanos / 1000n), tsNsRem: Number(f.tsNanos % 1000n), origLen: f.origLen, bytes: f.rawBytes.slice(),
     }));
     const caughtUp = await cases(fixture.name, frames);
-    if (caughtUp === null) continue;
+    parsedReads = true;
+    const caughtUpReader = await cases(`${fixture.name} (reader)`, frames);
+    parsedReads = false;
+    if (caughtUp === null || caughtUpReader === null) continue;
+    const readerDiff = sameFrames(caughtUp, caughtUpReader);
+    check(`${fixture.name} (reader): caught up as in place, frame for frame`, readerDiff === null, readerDiff ?? '');
     // The same frames, dissected: the straight run against the one caught up.
     const straight = path.join(scratch, `${fixture.name}-straight.pcapng`);
     const after = path.join(scratch, `${fixture.name}-caughtup.pcapng`);
