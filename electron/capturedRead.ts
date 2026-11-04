@@ -21,7 +21,7 @@ import { open } from 'node:fs/promises';
 import { isCaptureId } from '../src/services/capture/captureDirectory';
 import { CAPTURED_FILE_PATTERN, capturedFilePath } from './capturedFiles';
 
-/** The most one read hands over, and what the Worker asks for (`READ_BYTES` in `catchUp.ts`). */
+/** The most one read hands over: the Worker asks for 4 MB. */
 export const MAX_CAPTURED_READ = 16 * 1024 * 1024;
 
 export interface CapturedRead {
