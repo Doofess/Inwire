@@ -137,7 +137,8 @@ tree, not from it.
   | 92,300 | 60,700 | behind within ~5 s, then catching up |
   | 106,800-120,600 | 36,200-61,900 (five runs) | behind within 2-4 s, then catching up |
 
-  So the live ceiling is about **90,000 frames a second sent**. At ~1,080
+  So the live ceiling is about **90,000 frames a second sent** (with the
+  drive's 2 MB batches; agent-sized ones put it lower, see below). At ~1,080
   bytes a frame that is about 780 Mbit/s. What shuts first is the
   coordinator's in-flight bytes cap (`PARALLEL_BACKLOG_BYTES`, shut 42% of
   the five seconds before main began shedding, 148,000 frames dispatched
@@ -164,3 +165,26 @@ tree, not from it.
   request took 60-150 ms just to reach it. With agent-sized batches main
   was 47% idle at ~107,000 a second, though deframing still took 22% of
   it.
+- **Re-measured with the agent's batches** (2026-11-04, `59eff79a`: the
+  drive now cuts batches as `session.rs` does, 512 records or 256 kB).
+
+  | asked | sent a second | advanced a second | what happened |
+  |---|---|---|---|
+  | 60,000 (3 runs) | 55,500 / 58,000 / 57,400 | 56,300 / 57,900 / 57,600 | kept up: lag flat at 14,000-36,000, long tasks 0-3%, level 0.5 s after stop |
+  | 90,000 (2 runs) | 81,800 / 83,400 | 77,200 / 76,500 | behind: lag climbing to 233,000 / 253,000, the second run catching up by the end |
+
+  So with the batches the real agent sends, the live ceiling is about
+  **77,000-80,000 frames a second**: the "about 90,000" above was the
+  drive's 2 MB batches. At a 90,000 ask the coordinator was 21.9% idle and
+  main used 0.39-0.58 of a core. No run skipped a frame.
+
+  The sentence above that put catch-up's wait on the coordinator receiving
+  and dropping the live stream was wrong. A profile of an unminified build
+  catching up at a 120,000 ask showed the live drop under 1% of the
+  coordinator. The coordinator was idle 21.3% of the time, waiting for its
+  one read, and reading the file cost 11.9%: `PcapngTail.next` 9.2%, and
+  its compaction 2.1%. What changed and what catch-up drains at now is
+  0053's amendment to phase 4. After that change, catching up is bound by
+  the same thing as live: the busiest connection's shard. It is the known
+  ceiling and was left there on 2026-11-04, because about 80,000 frames a
+  second on one connection is far past ordinary traffic.

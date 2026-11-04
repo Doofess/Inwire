@@ -342,7 +342,8 @@ read), and the Worker's half in `pipeline.worker.ts`.
   past what the stream owes, or main's `shed`, starts a catch-up from the first
   frame missing; while it runs, live frames from there on are dropped - which
   answers main's credit, so main stops shedding - and the Worker pulls the
-  capture's pcapng from main 4 MB at a time, only while fewer than 40,000
+  capture's pcapng from main 16 MB at a time (4 MB until the amendment
+  below), only while fewer than 40,000
   frames wait to be dissected, and dissects what it reads through the
   ordinary path: ordering window, ids, bytes to the store, Sequencer, shards.
   A dropped live frame never had an id, so nothing is stored twice.
@@ -395,6 +396,59 @@ gate - and buys every frame. `scripts/pipeline/catch-up.ts` plays every fixture 
 made frames through the router with holes of every kind and holds the result
 to an uninterrupted run, frame for frame and, dissected, hash for hash.
 
+**Amended 2026-11-04: 16 MB reads, frames as views.** Past the live ceiling
+(ADR 0072: about 77,000-80,000 frames a second with the agent's batches),
+catching up drained slower than live had: at a 120,000 ask (about 105,000
+sent) the view advanced 51,000-67,000 a second. A profile put the coordinator
+waiting for its one read 21% of the time and reading the file 12%:
+`PcapngTail.next` copied every frame, and its compaction copied what was left
+of the buffer every megabyte. Three changes, measured together:
+
+- **A read is main's whole read**, 16 MB, about 15,000 frames
+  (`READ_BYTES` equals `MAX_CAPTURED_READ`, `scripts/electron/captured-read.ts`).
+  Still one read in flight.
+- **A file frame's bytes are a view into its read**, as a live frame's are
+  into its batch. The reader no longer compacts: it lets a read go only when
+  the next is pushed (`scripts/pipeline/pcapng-tail.ts`).
+- **The agent's two clocks**, microseconds and nanoseconds, are decoded in
+  Numbers rather than BigInt.
+
+The gate, set before measuring: at a 120,000 ask, three runs each advance at
+least 75,000 frames a second while catching up with nothing skipped, and
+60,000 keeps up 3 of 3.
+
+| `ui-burst-drive.ts`, 120,000 ask | advanced a second while catching up | level after stop |
+|---|---|---|
+| before (`59eff79a`, 3 runs) | 51,200 / 66,900 / 66,200 | 23.8 / 14.9 / 14.9 s |
+| after (`09a2f2bd`, the 3 gate runs) | 67,300 / 58,900 / 77,500 | 17.1 / 15.6 / 10.2 s |
+
+**The gate is not met, and stands as set.**
+
+- Across six runs after the change, the mean rose from about 61,000 to about
+  70,000.
+- No run skipped a frame. 60,000 kept up 3 of 3, live in every sample.
+- Reading the file now costs 3.4% of the coordinator.
+
+What bounds catching up now is what bounds live: the busiest connection's
+shard, through the in-flight bytes cap, which was shut 21-40% of the time
+while catching up. The coordinator waited for a read with nothing else to
+do about 8% of the time. A read's reply took 83-131 ms, queued behind the
+live batches main still forwards on the same port. Read-ahead or shedding
+live could win back at most that 8-12%, under the same ceiling, so neither
+was built.
+
+**Memory.** Catching up now keeps the pipeline as full as live keeps it at
+that rate:
+
+- The Worker's ArrayBuffers were 250-680 MB while catching up. Before the
+  change they were 60-160 MB while catching up, and 420-530 MB in the live
+  phase of the same runs.
+- The renderer process peaked at 4.6-5.0 GB, against 3.5-4.5 GB before.
+
+The views are not why: copying every frame instead held the same, 266-640
+MB. The owner accepted the cost, which is bounded by the caps the pipeline
+already has.
+
 **What phase 4 leaves for later.**
 
 - **The *Pause live view* offer** (Decision 3), past about two minutes behind.
@@ -405,6 +459,10 @@ to an uninterrupted run, frame for frame and, dissected, hash for hash.
   Stop button for as long as the backlog.
 - **A hole's mark says the frames are in the capture file**, which is not
   true of a ring file deleted before it was read.
+- **Main forwards live batches while catching up**, and the Worker drops them.
+  This costs the coordinator about 4% and delays each read's reply by 83-131
+  ms. Deferred 2026-11-04: it is worth at most a few percent under the
+  shard ceiling.
 
 5. **QUIC and UDP sharding** - the CID-to-connection map into the Sequencer,
    QUIC sharded by server; SDP handed out in frame order. *Landed for QUIC,
