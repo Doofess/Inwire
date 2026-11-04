@@ -851,6 +851,40 @@ one shard. (**Moved by [0072](0072-shards-dissect-without-the-hot-path-tree.md)*
 TCP's reassembly and analysis state is per connection and ordered, and
 splitting it would mean handing that state between threads mid-stream.
 
+### Catch-up past the ceiling, 2026-11-04
+
+Past the live ceiling (about 90,000 sent, [0072](0072-shards-dissect-without-the-hot-path-tree.md))
+the view catches up from the agent's file, and catching up is slower than
+live: at 120,000 offered (~107,000 sent) the view advanced 67,400, 68,300
+and 72,300 a second, skipped nothing, and was level 13-18 s after the
+agent stopped. The drive sends the agent's own batches here
+(`scripts/perf/agent-batches.ts`). A first version restarted each batch's
+capture times at the tick's start, so the ordering window interleaved the
+batches, and its numbers were discarded.
+
+What holds it, from a temporary sampler in the Worker, a profile and two
+probes, none committed:
+
+- **The coordinator is busy, about 95%.** A read is always out, and no
+  in-flight cap, renderer or store gate shuts.
+- **Not the one read in flight.** With 16 MB reads, frames kept as views
+  into them and timestamps in Numbers, the catch-up backlog was full 16-72%
+  of the time and the view advanced 71,000, against 72,300 at 4 MB. Three
+  gate runs of that change gave 60,800-69,800, and the Worker held 120-670
+  MB of ArrayBuffers against 60-150. It was dropped.
+- **Reading the file.** `PcapngTail` (push, next and compaction) is 11% of
+  the coordinator's profile. Parsing every read a second time cut the view
+  from 69,300 to 61,300 a second (means of three runs and two), so the
+  parse costs about 1.9 µs of the coordinator's ~14.4 µs a frame. The live
+  stream main still forwards while catching up costs under 1%.
+
+**Decided (2026-11-04):** the parse moves into a Worker of its own.
+Numbering, the seek, the checks against live frames and the rejoin stay on
+the coordinator. By the same arithmetic the view should catch up at about
+80,000 a second, still short of live. The gate: three runs each advancing
+at least 75,000 at 120,000 offered, nothing skipped, with 60,000 keeping up
+3 of 3.
+
 ## What came first
 
 Measured before any of the above, because the rule in CLAUDE.md §7 is that no

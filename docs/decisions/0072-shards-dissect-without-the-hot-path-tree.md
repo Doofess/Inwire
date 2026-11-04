@@ -149,18 +149,20 @@ tree, not from it.
   Past the ceiling the view falls behind **faster** than the excess. It
   catches up from the agent's file (0053 phase 4), which drains slower than
   live: 55,000-62,000 frames a second while the burst runs, ~72,000 after
-  it stops. A temporary sampler in the Worker, not committed, found
-  catch-up waiting on its one 4 MB read 97-100% of the time. With
-  agent-sized batches that wait is the coordinator itself, which goes on
-  receiving and dropping the live stream main still forwards. No run
-  skipped a frame. Every run was level with live 17-42 s after the agent
-  stopped.
+  it stops. No run skipped a frame. Every run was level with live 17-42 s
+  after the agent stopped.
 
-  A caveat on every drive number here: the drive's agent sends batches of
-  up to 2,000 frames (~2 MB), and the real one caps a batch at 512 records
-  and 256 kB (`agent-rs/src/session.rs`). Main's `FrameReader` re-copies
-  its partial buffer on each pipe read, so its copying grows with the
-  square of the batch. With the drive's batches it congested main: a read
-  request took 60-150 ms just to reach it. With agent-sized batches main
-  was 47% idle at ~107,000 a second, though deframing still took 22% of
-  it.
+  Those runs had the drive's agent send batches of up to 2,000 frames
+  (~2 MB), where the real one caps a batch at 512 records and 256 kB
+  (`agent-rs/src/session.rs`). Main's `FrameReader` re-copies its partial
+  buffer on each pipe read, so its copying grows with the square of the
+  batch, and the big batches congested main: a read request took 60-150 ms
+  just to reach it. The drive now cuts the agent's batches, with capture
+  times rising across them (`scripts/perf/agent-batches.ts`). Re-measured
+  that way (2026-11-04): 90,000 offered sent 85,600 / 86,100 and kept up,
+  level 0.5-0.6 s after the stop; 100,000 offered sent 94,100 and fell
+  behind; 120,000 offered (~107,000 sent) advanced 67,400 / 68,300 /
+  72,300. The ceiling stands at about 90,000 sent. What holds catch-up
+  below it is the coordinator reading the file itself, not its one read
+  in flight nor the live stream it receives meanwhile (under 1%): 0053's
+  **Catch-up past the ceiling**.
