@@ -5,9 +5,10 @@
  * The importer's reader (`pcapParser.ts`) takes a whole file in one buffer.
  * Catching the live view up needs the opposite: a file that is still growing,
  * read in chunks main hands over as they are asked for, from wherever the last
- * catch-up stopped - so this keeps what it has not consumed, and gives frames
- * back one at a time, so a caller can stop at an exact frame and resume from
- * it later without re-reading the file.
+ * catch-up stopped. So this keeps the chunk it is reading until the next is
+ * pushed, carrying over only what it has not consumed. It gives frames back
+ * one at a time, as views into that chunk, so a caller can stop at an exact
+ * frame and resume from it later without re-reading the file.
  *
  * Only what the agent writes is understood: SHB, IDB (its `if_name` and
  * `if_tsresol`), EPB. Every other block is skipped by its length. A block
@@ -28,7 +29,7 @@ export interface TailFrame {
    * copies them. Empty when the frame was skipped rather than read.
    */
   bytes: Uint8Array;
-  /** The frame's captured length, also when its bytes were not copied. */
+  /** The frame's captured length, also when its bytes were skipped. */
   capLen: number;
 }
 
@@ -121,7 +122,7 @@ export class PcapngTail {
 
   /**
    * The next packet in the file, or null when the next block is not all here.
-   * `copy` false skips the bytes - the frame is counted, not read.
+   * `copy` false skips the bytes (no view is made): the frame is counted, not read.
    */
   next(copy = true): TailFrame | null {
     for (;;) {

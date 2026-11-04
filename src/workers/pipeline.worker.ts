@@ -265,8 +265,12 @@ let catchUpRetry: ReturnType<typeof setTimeout> | null = null;
  * Frames waiting to be dissected past which the file is not read further:
  * a read is about 15,000 frames (`READ_BYTES`), so up to ~55,000 wait, which
  * is under a second of the Worker's work - enough to keep it busy, not enough
- * to be a heap of its own. The frames are views into their read, so this
- * holds about four reads alive.
+ * to be a heap of its own. The frames are views into their read, so the
+ * waiting ones hold about four reads alive. Every frame still referenced holds
+ * its read too: one in flight on a shard, until its merge, and one dissected
+ * but still in `released`, until that array is trimmed. Measured, that comes
+ * to as much as copying each frame did (ADR 0053's phase 4 amendment).
+ * The bound counts frames, not bytes.
  */
 const CATCH_UP_BACKLOG = 40_000;
 /** The adapter of the newest live frame, for a file frame whose IDB names none this list has. */
