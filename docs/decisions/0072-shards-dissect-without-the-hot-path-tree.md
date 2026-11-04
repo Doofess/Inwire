@@ -127,3 +127,40 @@ tree, not from it.
   build fell behind exactly as 0053 recorded, because the hot connection's
   shard was the limit. The tree-free shard keeps up with everything the
   drive's agent sent. Where the new ceiling is has not been measured.
+- **The new ceiling** (2026-11-04, on `2c391a94`, same drive and settings,
+  one rate a run so no backlog carries over). The drive's agent is not the
+  limit: it sent 107,000-150,000 a second when asked.
+
+  | sent a second | advanced a second | what happened |
+  |---|---|---|
+  | ~86,000 (above) | 84,800 / 85,100 | kept up |
+  | 92,300 | 60,700 | behind within ~5 s, then catching up |
+  | 106,800-120,600 | 36,200-61,900 (five runs) | behind within 2-4 s, then catching up |
+
+  So the live ceiling is about **90,000 frames a second sent**. At ~1,080
+  bytes a frame that is about 780 Mbit/s. What shuts first is the
+  coordinator's in-flight bytes cap (`PARALLEL_BACKLOG_BYTES`, shut 42% of
+  the five seconds before main began shedding, 148,000 frames dispatched
+  and unmerged). Frames merge in id order, so everything waits on the
+  shard that holds the connection carrying 22% of the burst, and the other
+  five shards sit 66-84% idle. It is the same one-connection ceiling as
+  before this ADR, moved from ~65,000 to ~90,000.
+
+  Past the ceiling the view falls behind **faster** than the excess. It
+  catches up from the agent's file (0053 phase 4), which drains slower than
+  live: 55,000-62,000 frames a second while the burst runs, ~72,000 after
+  it stops. A temporary sampler in the Worker, not committed, found
+  catch-up waiting on its one 4 MB read 97-100% of the time. With
+  agent-sized batches that wait is the coordinator itself, which goes on
+  receiving and dropping the live stream main still forwards. No run
+  skipped a frame. Every run was level with live 17-42 s after the agent
+  stopped.
+
+  A caveat on every drive number here: the drive's agent sends batches of
+  up to 2,000 frames (~2 MB), and the real one caps a batch at 512 records
+  and 256 kB (`agent-rs/src/session.rs`). Main's `FrameReader` re-copies
+  its partial buffer on each pipe read, so its copying grows with the
+  square of the batch. With the drive's batches it congested main: a read
+  request took 60-150 ms just to reach it. With agent-sized batches main
+  was 47% idle at ~107,000 a second, though deframing still took 22% of
+  it.
