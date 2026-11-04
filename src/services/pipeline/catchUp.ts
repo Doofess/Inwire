@@ -61,7 +61,9 @@
  * `scripts/pipeline/catch-up.ts` drives every path here with no Worker.
  */
 import { FrameSizes, type SizedPoint } from './frameSizes';
-import { PcapngTail, type TailFrame } from './pcapngTail';
+import { ParsedTail } from './parsedTail';
+import { PcapngTail, type TailFrame, type TailState } from './pcapngTail';
+import type { ReadParse } from './readParse';
 import { LATE_WINDOW } from './liveFlow';
 
 /**
@@ -238,6 +240,18 @@ export interface ReadRequest {
   length: number;
 }
 
+/**
+ * Main's answer to a read: the bytes, parsed in place - or, beside the
+ * coordinator, what the catch-up reader made of them (ADR 0053, "Catch-up past
+ * the ceiling, 2026-11-04") - or that the file is gone, or could not be read.
+ */
+export interface ReadAnswer {
+  bytes?: Uint8Array | null;
+  parse?: ReadParse;
+  gone: boolean;
+  error?: string;
+}
+
 export interface ReadResult<F> {
   /** Frames to dissect, in file order. */
   frames: FileFrame[];
@@ -255,7 +269,8 @@ export interface ReadResult<F> {
 interface Cursor {
   index: number;
   name: string;
-  tail: PcapngTail;
+  /** The file in place, or as the catch-up reader parses it: the same members, the same frames. */
+  tail: PcapngTail | ParsedTail;
   /** The number of the next packet `tail` will give. */
   next: number;
   /** Where the file's first EPB is, once its header has been read. */
@@ -271,12 +286,10 @@ interface Cursor {
   landing: { at: number; zeros: number; length: number | null } | null;
 }
 
-function freshCursor(index: number, name: string, firstSeq: number): Cursor {
-  return { index, name, tail: new PcapngTail(0), next: firstSeq, headerEnd: null, seek: null, landing: null };
-}
-
 export class CatchUp<F extends SeqFrame> {
   private on = false;
+  /** Whether files are read through the catch-up reader's parses; kept across captures and clears. */
+  private reader = false;
   private disabled: CatchUpEnd | null = null;
   private cursor: Cursor | null = null;
   private anchor: Anchor | null = null;
@@ -285,6 +298,13 @@ export class CatchUp<F extends SeqFrame> {
   /** Where this catch-up's hole began: live frames before it are still dissected live. */
   private sessionFrom = 0;
   private inFlight = false;
+  /**
+   * Whether the agent had finished the file when the read in flight was asked
+   * for. Its answer comes later - main reads asynchronously, and the reader
+   * adds a hop - and the agent's `closed` can overtake it, so only a read asked
+   * of a finished file can find its end.
+   */
+  private askedClosed = false;
   /** One past the newest live frame seen while catching up, and its time. */
   private edge = 0;
   private edgeUs = 0;
@@ -328,6 +348,34 @@ export class CatchUp<F extends SeqFrame> {
   /** Why catch-up is off for the rest of this capture, if it is. */
   get off(): CatchUpEnd | null {
     return this.disabled;
+  }
+
+  /**
+   * Read files through the catch-up reader's parses, or in place. A change
+   * goes on from where the cursor is, in the other kind, and forgets the read
+   * in flight: true when it changed, and the caller drops that read's answer.
+   */
+  useReader(on: boolean): boolean {
+    if (on === this.reader) return false;
+    this.reader = on;
+    const cursor = this.cursor;
+    if (cursor !== null) {
+      const state = cursor.tail.save();
+      cursor.tail = on ? new ParsedTail(state) : PcapngTail.restore(state);
+    }
+    this.inFlight = false;
+    return true;
+  }
+
+  /** What the read just asked for is parsed from, when the reader parses it; null when it is parsed in place. */
+  tailState(): TailState | null {
+    const tail = this.cursor?.tail;
+    return tail instanceof ParsedTail ? tail.nextRead() : null;
+  }
+
+  private freshCursor(index: number, name: string, firstSeq: number): Cursor {
+    const tail = this.reader ? new ParsedTail() : new PcapngTail(0);
+    return { index, name, tail, next: firstSeq, headerEnd: null, seek: null, landing: null };
   }
 
   /** A new capture: numbering, files and the cursor start again. */
@@ -452,7 +500,7 @@ export class CatchUp<F extends SeqFrame> {
     this.stats.seekMisses++;
     this.seekOff = true;
     const facts = this.files.get(cursor.index);
-    this.cursor = freshCursor(cursor.index, cursor.name, facts?.firstSeq ?? cursor.next);
+    this.cursor = this.freshCursor(cursor.index, cursor.name, facts?.firstSeq ?? cursor.next);
     // Read again from the start, with the rest.
     if (this.lateRead.length > 0) {
       this.late = [...this.late, ...this.lateRead.map((f) => f.seq)].sort((a, b) => a - b);
@@ -488,7 +536,7 @@ export class CatchUp<F extends SeqFrame> {
     // at the frame before it, which it checked - is carried on with no anchor.
     const resume = late.length === 0 && this.cursor !== null && this.cursor.index === file.index && this.cursor.next === fromSeq;
     if (!resume && (this.cursor === null || this.cursor.index !== file.index || this.cursor.next > want)) {
-      this.cursor = freshCursor(file.index, file.name, file.firstSeq!);
+      this.cursor = this.freshCursor(file.index, file.name, file.firstSeq!);
     }
     this.on = true;
     this.from = fromSeq;
@@ -578,6 +626,7 @@ export class CatchUp<F extends SeqFrame> {
   wantRead(): ReadRequest | null {
     if (!this.on || this.inFlight || this.cursor === null) return null;
     this.inFlight = true;
+    this.askedClosed = this.files.get(this.cursor.index)?.closed ?? false;
     const length = this.cursor.seek !== null && this.cursor.headerEnd === null ? HEADER_READ : READ_BYTES;
     return { name: this.cursor.name, offset: this.cursor.tail.readOffset, length };
   }
@@ -586,7 +635,7 @@ export class CatchUp<F extends SeqFrame> {
    * Main's answer to the last read: the bytes, or that the file is gone, or
    * that it could not be read at all.
    */
-  readDone(result: { bytes: Uint8Array | null; gone: boolean; error?: string }): ReadResult<F> {
+  readDone(result: ReadAnswer): ReadResult<F> {
     this.inFlight = false;
     const out: ReadResult<F> = { frames: [], rejoin: null, ended: null };
     if (!this.on || this.cursor === null) return out;
@@ -598,13 +647,25 @@ export class CatchUp<F extends SeqFrame> {
       this.files.gone(cursor.index);
       const next = this.files.after(cursor.index);
       if (next === undefined || next.name === null) return this.end('noFile', out);
-      this.cursor = freshCursor(next.index, next.name, next.firstSeq!);
+      this.cursor = this.freshCursor(next.index, next.name, next.firstSeq!);
       out.retryMs = 0;
       return out;
     }
-    const bytes = result.bytes ?? new Uint8Array(0);
-    const before = cursor.tail.readOffset;
-    cursor.tail.push(bytes);
+    const tail = cursor.tail;
+    const before = tail.readOffset;
+    // How many bytes main read: none, from a file that has finished, is its end.
+    let length: number;
+    if (tail instanceof ParsedTail) {
+      // A parse of some other read - asked before a jump, or of the other
+      // kind - is read again.
+      if (result.parse === undefined || !tail.take(result.parse)) { out.retryMs = 0; return out; }
+      length = result.parse.length;
+    } else {
+      if (result.parse !== undefined) { out.retryMs = 0; return out; }
+      const bytes = result.bytes ?? new Uint8Array(0);
+      tail.push(bytes);
+      length = bytes.length;
+    }
     const landing = cursor.landing;
     if (landing !== null && cursor.tail.position === landing.at) {
       // Where the seek landed must be an EPB - the anchor's, by its length,
@@ -707,20 +768,21 @@ export class CatchUp<F extends SeqFrame> {
       // Nothing new - no bytes, or only the start of a block still being
       // written: the end of a file the agent has finished moves on to the
       // next one, and the end of the one it is writing waits for its next
-      // flush.
+      // flush. One it finished after this read was asked is read again now:
+      // its last flush may have come after the read.
       const facts = this.files.get(cursor.index);
       const next = this.files.after(cursor.index);
-      if (facts?.closed && bytes.length === 0 && next !== undefined && next.name !== null) {
+      if (this.askedClosed && length === 0 && next !== undefined && next.name !== null) {
         if (next.firstSeq !== cursor.next) {
           // The finished file did not hold every frame up to where the next
           // begins - it stopped early, or a frame was refused - so counting
           // into the next would be off; a hole is marked rather than guessed.
           return this.end('misaligned', out);
         }
-        this.cursor = freshCursor(next.index, next.name, next.firstSeq);
+        this.cursor = this.freshCursor(next.index, next.name, next.firstSeq);
         out.retryMs = 0;
       } else {
-        out.retryMs = RETRY_MS;
+        out.retryMs = facts?.closed && !this.askedClosed ? 0 : RETRY_MS;
       }
     }
     return out;
@@ -922,7 +984,7 @@ export class CatchUpRouter<F extends SeqFrame> {
   }
 
   /** Main's answer to a read. */
-  read(result: { bytes: Uint8Array | null; gone: boolean; error?: string }): { retryMs?: number; ended?: CatchUpEnd } {
+  read(result: ReadAnswer): { retryMs?: number; ended?: CatchUpEnd } {
     const out = this.catchUp.readDone(result);
     for (const frame of out.frames) this.pass(this.fromFile(frame));
     if (out.lost !== undefined) this.flow.noteLost(out.lost);

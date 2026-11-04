@@ -25,6 +25,7 @@ flowchart TD
   pipeline -->|batched summaries and bytes| ui["Renderer: React / bounded buffer"]
   ui <-->|client port: queries and lifecycle| store
   pipeline <-->|TCP conversations| shards["Nested shard Workers"]
+  pipeline <-->|catch-up reads to parse| reader["Nested reader Worker"]
   store -->|derived indexed capture| disk["Local capture files"]
   main -.->|forks when the sheet first opens; binds on Start; brokers ports| mon["Monitoring utilityProcess: UDP socket + journal"]
   mon <-->|runtime port: journal and rollup sidecar| mw["Monitoring Worker: decode, rollups, queries"]
@@ -140,7 +141,9 @@ With dissection threads set to `auto` or above one, the pipeline becomes a
 coordinator. One Sequencer numbers frames; plain TCP conversations are assigned
 to nested shard Workers, other traffic stays with the coordinator, and results
 merge back into ID order. Shards use the same Worker script in a distinct role;
-they must not start the coordinator's timers. `services/pipeline/coordinator.ts`,
+they must not start the coordinator's timers. A reader Worker, the same script
+in a third role (`src/workers/readerRole.ts`), is started and stopped with them
+and parses catch-up's reads. `services/pipeline/coordinator.ts`,
 `threads.ts`, `shard.ts` and `shardProtocol.ts` define this path. A shard
 annotates its rows and sends them packed (`rowPack.ts`). The coordinator adds
 its merge's writes as an overlay and forwards the packs to the window and the
@@ -169,8 +172,11 @@ live in those modules, not in this reference.
 
 Sequence gaps or shed-batch notifications trigger `pipeline/catchUp.ts`.
 Main's `capturedRead.ts` accepts a capture ID, original filename and bounded
-range, and reads the agent's pcapng for the Worker. Recovery counts from file
-boundaries and checks sequence alignment against adjacent live frames.
+range, and reads the agent's pcapng for the Worker. With shards the reader
+Worker parses each read, statelessly, into slabs and columns (`readParse.ts`,
+`parsedTail.ts`); without them, or if it fails, the coordinator parses in place.
+Recovery counts from file boundaries and checks sequence alignment against
+adjacent live frames.
 Live-path gaps remain distinct from driver loss and ring eviction.
 See [ADR 0053](decisions/0053-the-live-path-falls-behind-on-disk.md).
 

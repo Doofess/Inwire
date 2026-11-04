@@ -22,16 +22,19 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import v8 from 'node:v8';
 import {
   CatchUp, CatchUpRouter, CaptureFiles, HEADER_READ, HOLD_MAX_FRAMES, MAX_CAPLEN, REJOIN_WITHIN, type FileFrame,
   type SeqFrame,
 } from '../../src/services/pipeline/catchUp';
 import { PcapngTail } from '../../src/services/pipeline/pcapngTail';
+import { parseRead, type ReadParse } from '../../src/services/pipeline/readParse';
 import { HOLE_MIN_FRAMES, LiveFlow } from '../../src/services/pipeline/liveFlow';
 import { MAX_SNAPLEN } from '../../src/services/captureOptions';
 import { PcapService } from '../../src/services/pcapParser';
 import { FIXTURES } from './arrival';
 import { digestCapture } from './frameDigest';
+import { fileHeader, epb, customBlock, concat, rng, madeFrames } from './madePcapng';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -41,81 +44,18 @@ function check(name: string, ok: boolean, detail = ''): void {
 
 check('the landing bound is the agent\'s own snaplen bound',MAX_CAPLEN === MAX_SNAPLEN, `${MAX_CAPLEN} vs ${MAX_SNAPLEN}`);
 
+/**
+ * Whether a run's reads are parsed as the catch-up reader parses them, beside
+ * the coordinator (ADR 0053, "Catch-up past the ceiling, 2026-11-04"), rather
+ * than in place. Every case runs both ways; a parse crosses a thread, so it is
+ * serialised as the reader's reply would be.
+ */
+let parsedReads = false;
+const across = <T>(x: T): T => v8.deserialize(v8.serialize(x)) as T;
+
 // --- frames and files ------------------------------------------------------------
 
 interface Frame extends SeqFrame { live?: boolean }
-
-/** The agent's layout: SHB, one IDB with a name and nanosecond stamps, EPBs. */
-function fileHeader(): Uint8Array {
-  const name = new TextEncoder().encode('\\Device\\NPF_{TEST}');
-  const namePad = (4 - (name.length % 4)) % 4;
-  const idbOptions = 4 + name.length + namePad + 4 + 4 + 4;
-  const idbLength = 16 + idbOptions + 4;
-  const out = new Uint8Array(28 + idbLength);
-  const v = new DataView(out.buffer);
-  v.setUint32(0, 0x0a0d0d0a, true); v.setUint32(4, 28, true); v.setUint32(8, 0x1a2b3c4d, true);
-  v.setUint16(12, 1, true); v.setUint16(14, 0, true);
-  v.setBigInt64(16, -1n, true); v.setUint32(24, 28, true);
-  let at = 28;
-  v.setUint32(at, 1, true); v.setUint32(at + 4, idbLength, true);
-  v.setUint16(at + 8, 1, true); v.setUint32(at + 12, 0, true);
-  let o = at + 16;
-  v.setUint16(o, 2, true); v.setUint16(o + 2, name.length, true); out.set(name, o + 4); o += 4 + name.length + namePad;
-  v.setUint16(o, 9, true); v.setUint16(o + 2, 1, true); v.setUint8(o + 4, 9); o += 8;
-  v.setUint16(o, 0, true); v.setUint16(o + 2, 0, true); o += 4;
-  v.setUint32(o, idbLength, true);
-  return out;
-}
-
-function epb(frame: SeqFrame): Uint8Array {
-  const pad = (4 - (frame.bytes.length % 4)) % 4;
-  const length = 32 + frame.bytes.length + pad;
-  const out = new Uint8Array(length);
-  const v = new DataView(out.buffer);
-  const ns = BigInt(frame.tsUs) * 1000n + BigInt(frame.tsNsRem);
-  v.setUint32(0, 6, true); v.setUint32(4, length, true);
-  v.setUint32(8, 0, true);
-  v.setUint32(12, Number(ns >> 32n), true); v.setUint32(16, Number(ns & 0xffffffffn), true);
-  v.setUint32(20, frame.bytes.length, true); v.setUint32(24, frame.origLen, true);
-  out.set(frame.bytes, 28);
-  v.setUint32(length - 4, length, true);
-  return out;
-}
-
-/** A Custom Block: no frame, skipped by every reader, and 32 bytes no frame's size includes. */
-function customBlock(): Uint8Array {
-  const out = new Uint8Array(32);
-  const v = new DataView(out.buffer);
-  v.setUint32(0, 0x00000bad, true); v.setUint32(4, 32, true); v.setUint32(8, 32473, true);
-  v.setUint32(28, 32, true);
-  return out;
-}
-
-function concat(parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let at = 0;
-  for (const p of parts) { out.set(p, at); at += p.length; }
-  return out;
-}
-
-function rng(seed: number): () => number {
-  let s = seed >>> 0 || 1;
-  return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 0x1_0000_0000; };
-}
-
-/** Frames made here: varied lengths and bytes, a nanosecond clock. */
-function madeFrames(n: number): Frame[] {
-  const random = rng(7);
-  const out: Frame[] = [];
-  let ns = 1_790_000_000_000_000_000n;
-  for (let seq = 0; seq < n; seq++) {
-    const bytes = new Uint8Array(60 + Math.floor(random() * 1400));
-    for (let i = 0; i < bytes.length; i++) bytes[i] = (seq * 31 + i * 7) & 0xff;
-    ns += BigInt(1 + Math.floor(random() * 20_000));
-    out.push({ seq, tsUs: Number(ns / 1000n), tsNsRem: Number(ns % 1000n), origLen: bytes.length + (seq % 5 === 0 ? 100 : 0), bytes });
-  }
-  return out;
-}
 
 // --- one run -------------------------------------------------------------------
 
@@ -164,6 +104,12 @@ interface Plan {
   capturingLate?: boolean;
   /** Each file's boundary arrives before the agent says it is open. */
   boundaryFirst?: boolean;
+  /**
+   * Before this batch is handled, the file's reader changes: on to the reader
+   * Worker, or off it - its Worker stopped, or Multi Threaded Capture changed
+   * and was applied at a clear - with a read in flight dropped.
+   */
+  flipReaderAtBatch?: number;
 }
 
 interface Run {
@@ -184,6 +130,8 @@ interface Run {
   fileBytes: Map<string, number>;
   /** Where frame `seq` begins in its file. */
   startOf: (seq: number) => number;
+  /** With `flipReaderAtBatch`: whether a catch-up was reading when the reader changed. */
+  flippedWhileActive: boolean;
 }
 
 function run(frames: Frame[], plan: Plan): Run {
@@ -229,6 +177,9 @@ function run(frames: Frame[], plan: Plan): Run {
   const known = new CaptureFiles();
   const flow = new LiveFlow();
   const catchUp = new CatchUp<Frame>(known);
+  catchUp.useReader(parsedReads);
+  let readerOn = parsedReads;
+  let flippedWhileActive = false;
   const delivered: Frame[] = [];
   const holes: { at: number; size: number }[] = [];
   let released = 0;
@@ -271,8 +222,19 @@ function run(frames: Frame[], plan: Plan): Run {
   };
   let pendingRetry = 0;
   const reads: { name: string; offset: number }[] = [];
+  // A read the reader is parsing: answered on the next turn, so live batches
+  // arrive while it is in flight - and dropped, as the Worker drops its reply,
+  // at a clear, a new capture, a change of reader and the Stop.
+  let pendingParse: ReadParse | null = null;
   const serve = (budget: number) => {
     for (let r = 0; r < budget; r++) {
+      if (pendingParse !== null) {
+        const parse = pendingParse;
+        pendingParse = null;
+        const out = router.read({ parse, gone: false });
+        if (out.ended) ended.push(out.ended);
+        if (out.retryMs !== undefined && out.retryMs > 0) pendingRetry = 1;
+      }
       if (pendingRetry > 0) { pendingRetry--; return; }
       const want = catchUp.wantRead();
       if (want === null) return;
@@ -290,7 +252,14 @@ function run(frames: Frame[], plan: Plan): Run {
       const room = Math.max(0, visible - want.offset);
       const take = Math.min(room, want.length, 1 + Math.floor(random() * 65_536));
       if (take > 0) reads.push({ name: want.name, offset: want.offset });
-      const out = router.read({ bytes: file.bytes.slice(want.offset, want.offset + take), gone: false });
+      const bytes = file.bytes.slice(want.offset, want.offset + take);
+      // As the Worker decides: to the reader only while there is one.
+      const state = readerOn ? catchUp.tailState() : null;
+      if (state !== null) {
+        pendingParse = across(parseRead(across(state), bytes));
+        continue;
+      }
+      const out = router.read({ bytes, gone: false });
       if (out.ended) ended.push(out.ended);
       if (out.retryMs !== undefined && out.retryMs > 0) pendingRetry = 1;
     }
@@ -301,8 +270,15 @@ function run(frames: Frame[], plan: Plan): Run {
   const port: { no: number; group: Frame[] }[] = [];
   let capturingHeard = false;
   const handle = ({ no: batchNo, group }: { no: number; group: Frame[] }) => {
+    // `readerChanged` in the Worker: the reader came or went, and a read in flight is dropped.
+    if (plan.flipReaderAtBatch === batchNo) {
+      flippedWhileActive = catchUp.active;
+      readerOn = !readerOn;
+      if (catchUp.useReader(readerOn)) pendingParse = null;
+    }
     // `resetPipeline` in the Worker: a clear while catching up.
     if (plan.clearAtBatch === batchNo && catchUp.active) {
+      pendingParse = null;
       router.stop();
       flow.startCapture();
       router.clear();
@@ -311,7 +287,7 @@ function run(frames: Frame[], plan: Plan): Run {
     if (plan.startDrops) group = group.filter((f) => f.seq >= plan.startDrops!);
     if (group.length === 0) return;
     // `capturing` in the Worker: a new run of the numbering, the router reset.
-    if (plan.capturingLate && !capturingHeard) { capturingHeard = true; flow.startCapture(); router.reset(); }
+    if (plan.capturingLate && !capturingHeard) { capturingHeard = true; pendingParse = null; flow.startCapture(); router.reset(); }
     if (plan.mainShed?.has(batchNo)) {
       router.shed(group[0].seq, group.length);
     } else if (!plan.agentShed?.has(batchNo)) {
@@ -352,6 +328,7 @@ function run(frames: Frame[], plan: Plan): Run {
   announce();
   if (!plan.stopAtEnd) for (let i = 0; i < 20_000 && catchUp.active; i++) serve(4);
   const activeAtEnd = catchUp.active;
+  pendingParse = null;
   router.stop();
   const fileBytes = new Map([...files].map(([name, file]) => [name, file.bytes.length]));
   const startOf = (seq: number) => {
@@ -360,7 +337,7 @@ function run(frames: Frame[], plan: Plan): Run {
   };
   return {
     delivered, holes, released, liveArrived, liveDelivered, catchUp, ended, skipped: flow.skippedFrames, activeAtEnd, reads, fileBytes,
-    startOf,
+    startOf, flippedWhileActive,
   };
 }
 
@@ -443,6 +420,17 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     check(`${label}: ...every live frame dissected or given back to main, once`, holdsEveryLiveFrameOnce(r),
       `${r.liveDelivered} + ${r.released} vs ${r.liveArrived}`);
     caughtUp = r.delivered;
+  }
+  {
+    // The reader changes mid catch-up: its Worker stopped, or Multi Threaded
+    // Capture changed and was applied at a clear. The cursor goes on in the
+    // other kind from where it was, and the read in flight is dropped.
+    const shed = new Set([mid, mid + 1, mid + 2, mid + 3, mid + 4]);
+    const r = run(frames, { mainShed: shed, flipReaderAtBatch: mid + 3 });
+    const diff = sameFrames(frames, r.delivered);
+    check(`${label}: the file's reader changes mid catch-up (its Worker stopped, or the setting changed at a clear) - the straight run, no recount`,
+      diff === null && r.holes.length === 0 && holdsEveryLiveFrameOnce(r) && r.catchUp.stats.seekMisses === 0 && r.flippedWhileActive,
+      diff ?? JSON.stringify({ stats: r.catchUp.stats, holes: r.holes, flippedWhileActive: r.flippedWhileActive }));
   }
   {
     const r = run(frames, { agentShed: new Set([mid - 3, mid - 2]) });
@@ -586,7 +574,8 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     const r = run(frames, { perFile, mainShed: new Set([edgeBatch - 1, edgeBatch, edgeBatch + 1]) });
     const diff = sameFrames(frames, r.delivered);
     check(`${label}: a hole across a ring file's edge - read on into the next file`,
-      diff === null && r.catchUp.stats.rejoined >= 1 && r.holes.length === 0, diff ?? JSON.stringify(r.catchUp.stats));
+      diff === null && r.catchUp.stats.rejoined >= 1 && r.holes.length === 0,
+      `${diff ?? ''} ${JSON.stringify({ stats: r.catchUp.stats, ended: r.ended, holes: r.holes })}`);
   }
   {
     // A file slower than live - one read a batch - holds frames until the
@@ -741,6 +730,63 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
 
 check('the bounds are what the rejoin was sized by', REJOIN_WITHIN < HOLD_MAX_FRAMES);
 await cases('made', madeFrames(30_000));
+parsedReads = true;
+await cases('made (reader)', madeFrames(30_000));
+parsedReads = false;
+
+// A block the file holds corrupt - its packet longer than the block, its
+// trailing length right - in the same read as a rejoin. In place, the next
+// catch-up gives the frames before it and ends 'unreadable'. Through the
+// reader it must do the same, never asking for one read for ever; and when
+// the rejoin is the frame just before it and the reader then goes, the
+// cursor converted to read in place must meet the corrupt block, not start
+// past it and number every later frame one too low.
+{
+  const made = madeFrames(40);
+  const bad = epb(made[10]);
+  new DataView(bad.buffer, bad.byteOffset, bad.byteLength).setUint32(20, bad.length, true);
+  const corrupt = concat([fileHeader(), ...made.slice(0, 10).map(epb), bad, ...made.slice(11).map(epb)]);
+  type Mode = 'in place' | 'reader' | 'reader, then in place';
+  const corruptRun = (mode: Mode, rejoinAt: number) => {
+    const files = new CaptureFiles();
+    files.boundary(1, 0);
+    files.file(1, 'a', 'open', 0);
+    const c = new CatchUp<SeqFrame>(files);
+    c.useReader(mode !== 'in place');
+    const answer = (want: { offset: number; length: number }) => {
+      const bytes = corrupt.subarray(want.offset, want.offset + want.length);
+      const state = c.tailState();
+      return state !== null ? c.readDone({ parse: parseRead(state, bytes), gone: false }) : c.readDone({ bytes, gone: false });
+    };
+    c.start(3, null);
+    c.live(made[rejoinAt]);
+    const first = answer(c.wantRead()!);
+    if (mode === 'reader, then in place') c.useReader(false);
+    c.start(rejoinAt + 1, null);
+    c.live(made[12]);
+    const delivered: number[] = [];
+    let ended: string | null = null;
+    let reads = 0;
+    for (let want; reads < 50 && (want = c.wantRead()) !== null;) {
+      reads++;
+      const out = answer(want);
+      delivered.push(...out.frames.map((f) => f.seq));
+      if (out.ended) { ended = out.ended.why; break; }
+    }
+    return { first: `${first.frames.map((f) => f.seq).join(',')} rejoin ${first.rejoin?.map((f) => f.seq).join(',')}`, delivered, ended, reads };
+  };
+  for (const rejoinAt of [5, 9]) {
+    const ref = corruptRun('in place', rejoinAt);
+    const before = Array.from({ length: 10 - rejoinAt - 1 }, (_, i) => rejoinAt + 1 + i).join();
+    check(`a corrupt block after a rejoin at ${rejoinAt}, in place: the frames before it, then unreadable`,
+      ref.ended === 'unreadable' && ref.delivered.join() === before, JSON.stringify(ref));
+    for (const mode of ['reader', 'reader, then in place'] as const) {
+      const got = corruptRun(mode, rejoinAt);
+      check(`...${mode}: the same frames and the same end, in a read or two`,
+        got.first === ref.first && got.ended === 'unreadable' && got.delivered.join() === before && got.reads <= 2, JSON.stringify(got));
+    }
+  }
+}
 
 const scratch = mkdtempSync(path.join(tmpdir(), 'inwire-catchup-'));
 try {
@@ -752,7 +798,12 @@ try {
       seq, tsUs: Number(f.tsNanos / 1000n), tsNsRem: Number(f.tsNanos % 1000n), origLen: f.origLen, bytes: f.rawBytes.slice(),
     }));
     const caughtUp = await cases(fixture.name, frames);
-    if (caughtUp === null) continue;
+    parsedReads = true;
+    const caughtUpReader = await cases(`${fixture.name} (reader)`, frames);
+    parsedReads = false;
+    if (caughtUp === null || caughtUpReader === null) continue;
+    const readerDiff = sameFrames(caughtUp, caughtUpReader);
+    check(`${fixture.name} (reader): caught up as in place, frame for frame`, readerDiff === null, readerDiff ?? '');
     // The same frames, dissected: the straight run against the one caught up.
     const straight = path.join(scratch, `${fixture.name}-straight.pcapng`);
     const after = path.join(scratch, `${fixture.name}-caughtup.pcapng`);
