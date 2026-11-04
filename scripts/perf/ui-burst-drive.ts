@@ -506,10 +506,17 @@ const heap = async () => {
   const m = (await cdp.send('Performance.getMetrics')).metrics as { name: string; value: number }[];
   const page = (m.find((x) => x.name === 'JSHeapUsedSize')?.value ?? 0) / 1048576;
   let worker = NaN;
+  // The Worker's ArrayBuffers, outside its JS heap: where a kept view of a
+  // batch or of a catch-up read would hold memory (NaN where CDP says none).
+  let workerBuffers = NaN;
   if (raw && workerSession) {
-    try { worker = (await raw.send<{ usedSize: number }>('Runtime.getHeapUsage', {}, workerSession)).usedSize / 1048576; } catch { /* gone */ }
+    try {
+      const usage = await raw.send<{ usedSize: number; backingStorageSize?: number }>('Runtime.getHeapUsage', {}, workerSession);
+      worker = usage.usedSize / 1048576;
+      workerBuffers = (usage.backingStorageSize ?? NaN) / 1048576;
+    } catch { /* gone */ }
   }
-  return { page, worker };
+  return { page, worker, workerBuffers };
 };
 
 // Start a capture the way smoke.ts does.
@@ -624,6 +631,7 @@ for (const [phaseIndex, phase] of phases.entries()) {
   const t0 = Date.now();
   const lagSamples: number[] = [];
   const workerHeapSamples: number[] = [];
+  const workerBufferSamples: number[] = [];
   // What the renderer's heap guard reads (rendererHeapGuard.ts readHeap).
   const guardHeapSamples: number[] = [];
   let guardLimit = 0;
@@ -654,7 +662,9 @@ for (const [phaseIndex, phase] of phases.entries()) {
       await sleep(2000);
       await cpu();
       lagSamples.push(await behindLive());
-      workerHeapSamples.push((await heap()).worker);
+      const workerNow = await heap();
+      workerHeapSamples.push(workerNow.worker);
+      workerBufferSamples.push(workerNow.workerBuffers);
       const g = await page.evaluate(() => {
         const m = (performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }).memory;
         return m ? { used: m.usedJSHeapSize, limit: m.jsHeapSizeLimit } : null;
@@ -697,6 +707,7 @@ for (const [phaseIndex, phase] of phases.entries()) {
   say(`  lag behind live (sent - shown - skipped), every 2 s: ${lagSamples.map((n) => n.toLocaleString()).join(', ')}`);
   say(`  skipped by the live view this phase: ${((await skipped()) - skippedStart).toLocaleString()} frames`);
   say(`  Worker heap every 2 s: ${workerHeapSamples.map((n) => n.toFixed(0)).join(', ')} MB`);
+  say(`  Worker ArrayBuffers every 2 s: ${workerBufferSamples.map((n) => n.toFixed(0)).join(', ')} MB`);
   say(`  window heap as the guard reads it, every 2 s: ${guardHeapSamples.map((n) => n.toFixed(0)).join(', ')} MB; `
     + `limit ${guardLimit.toFixed(0)} MB, stops at ${(guardLimit * 0.9).toFixed(0)} MB`);
   say(`  status bar every 2 s: ${statusSamples.join(' | ')}`);
