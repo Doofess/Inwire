@@ -132,6 +132,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | A replay bundle built from window rows sends each frame as exactly its own buffer, never the flush slab its row is a view into (#17) | `scripts/pipeline/replay-bytes.ts` |
 | A flush's frames reach the store as one columnar slab and come back out frame for frame: ids, times, rings and bytes, empty frames and none (#17) | `scripts/capture/frame-slab.ts` |
 | Catch-up from the agent's file equals an uninterrupted run | `scripts/pipeline/catch-up.ts` |
+| The catch-up reader gives every frame of the agent's pcapng as written - stamps on both clocks, blocks across reads - as views into its read, with no per-frame copy | `scripts/pipeline/pcapng-tail.ts` |
 | A hole late in a file is reached by the frames' sizes: nothing read between the header and the frame before the hole, in one file or a ring's second; a landing the sizes put wrong is caught and counted from the start; a gap that never fills, a clear while catching up and a ring file that never passed do not turn the seek off (#17) | `scripts/pipeline/catch-up.ts` |
 | Every place the frames' sizes give is exactly the frame's offset, through skew, gaps and runs learned while frames still pass (#17) | `scripts/pipeline/frame-sizes.ts` |
 | Parallel dissection equals the single Worker | `scripts/pipeline/parallel.ts` |

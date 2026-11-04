@@ -21,14 +21,17 @@ export interface TailFrame {
   tsUs: number;
   tsNsRem: number;
   origLen: number;
-  /** The captured bytes. Empty when the frame was skipped rather than read. */
+  /**
+   * The captured bytes: a view into the read they came in, shared with every
+   * frame read with them - as a live frame's are a view into its batch. Kept
+   * past the frame, they keep the whole read alive, so whoever keeps them
+   * copies them. Empty when the frame was skipped rather than read.
+   */
   bytes: Uint8Array;
   /** The frame's captured length, also when its bytes were not copied. */
   capLen: number;
 }
 
-/** Bytes of carry past which consumed space is reclaimed rather than kept. */
-const COMPACT_AT = 1 << 20;
 /**
  * Reads of a block that does not close before it is called corrupt - at the
  * catch-up's 150 ms between reads of a file with nothing new, about ten
@@ -93,7 +96,12 @@ export class PcapngTail {
     return { type: view.getUint32(0, this.little), length: view.getUint32(4, this.little) };
   }
 
-  /** A chunk read from `readOffset` on. */
+  /**
+   * A chunk read from `readOffset` on, copied, so the caller may reuse it.
+   * What the last chunk's frames consumed is let go here and only here: the
+   * frames are views into it, and copying what was left of a 16 MB read every
+   * megabyte, as frames were read, was most of what catch-up cost.
+   */
   push(chunk: Uint8Array): void {
     if (chunk.length === 0) return;
     const keep = this.buf.length - this.at;
@@ -161,20 +169,29 @@ export class PcapngTail {
         const capLen = view.getUint32(20, this.little);
         const origLen = view.getUint32(24, this.little);
         if (28 + capLen > length) throw new Error(`pcapng packet longer than its block at offset ${this.base + this.at - length}`);
-        const ns = ((BigInt(high) << 32n) | BigInt(low)) * BigInt(this.nsPerTick[idb] ?? 1000);
-        const start = this.buf.byteOffset + this.at - length + 28;
-        const frame: TailFrame = {
-          idb,
-          tsUs: Number(ns / 1000n),
-          tsNsRem: Number(ns % 1000n),
-          origLen,
-          capLen,
-          bytes: copy ? new Uint8Array(this.buf.buffer.slice(start, start + capLen)) : EMPTY,
-        };
-        this.compact();
-        return frame;
+        const nsPerTick = this.nsPerTick[idb] ?? 1000;
+        let tsUs: number;
+        let tsNsRem: number;
+        // The agent's two clocks in Numbers, exact for any time a Number of
+        // microseconds holds (2^53, the year 2255): 2^32 is 4,294,967
+        // thousands and 296, so a nanosecond count splits into whole
+        // microseconds and the rest with no product past 2^53. Any other
+        // clock, which the agent never writes, is worked out in BigInt.
+        if (nsPerTick === 1000) {
+          tsUs = high * 0x1_0000_0000 + low;
+          tsNsRem = 0;
+        } else if (nsPerTick === 1) {
+          const rest = high * 296 + low;
+          tsUs = high * 4_294_967 + Math.floor(rest / 1000);
+          tsNsRem = rest % 1000;
+        } else {
+          const ns = ((BigInt(high) << 32n) | BigInt(low)) * BigInt(nsPerTick);
+          tsUs = Number(ns / 1000n);
+          tsNsRem = Number(ns % 1000n);
+        }
+        const start = this.at - length + 28;
+        return { idb, tsUs, tsNsRem, origLen, capLen, bytes: copy ? this.buf.subarray(start, start + capLen) : EMPTY };
       }
-      this.compact();
     }
   }
 
@@ -199,13 +216,6 @@ export class PcapngTail {
     }
     this.nsPerTick.push(nsPerTick);
     this.idbNames.push(name);
-  }
-
-  private compact(): void {
-    if (this.at < COMPACT_AT) return;
-    this.base += this.at;
-    this.buf = this.buf.slice(this.at);
-    this.at = 0;
   }
 }
 
