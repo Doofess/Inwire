@@ -171,6 +171,7 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | A ring file that cannot be deleted stays on disk and the capture keeps rotating | `agent-rs/src/capture_file.rs` tests (Rust only: the Python agent writes no capture files) |
 | One version number, derived from `package.json` | `scripts/agent/version.ts` |
 | The renderer's weight only falls | `scripts/perf/bundle-size.ts` against `test/perf/ceilings.json`; skips without `dist/` |
+| The burst drive sends what the agent sends: batches cut at `session.rs`'s bounds, capture times rising across a tick's batches | `scripts/perf/agent-batches.ts` |
 | Dissection matches tshark; floors only rise, ceilings only fall | `scripts/parity/parity-check.ts` (not in `check`), `scripts/parity/tree-coverage.ts`, `scripts/parity/snaplen.ts`, `scripts/parity/acceptance.ts` (compares with `HEAD`) |
 | Registry abbreviations exist in Wireshark | `scripts/dissect/wireshark-abbrevs.ts` |
 | The filter engine holds its 50,000-frame budget | `scripts/filter/engine.ts` |

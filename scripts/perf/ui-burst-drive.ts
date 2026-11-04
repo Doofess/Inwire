@@ -44,6 +44,7 @@ import { BATCH_HEADER_BYTES, BATCH_RECORD_BYTES, BATCH_VERSION } from '../../src
 import { FRAME_BINARY, FRAME_JSON, FrameReader, encodeFrame, encodeJsonFrame, frameText } from '../../src/services/agentFraming';
 import { REQUIRED_AGENT_VERSION } from '../../src/services/agentProtocol';
 import { launchApp } from '../electron/launchApp';
+import { agentBatchBounds, cutTick } from './agentBatches';
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf('--' + name);
@@ -151,24 +152,8 @@ function encodeBatch(frames: { seq: number; tsNs: bigint; bytes: Uint8Array }[])
   return out;
 }
 
-/**
- * The real agent's batch bounds, read out of `agent-rs/src/session.rs` rather
- * than repeated, so this replay cannot drift from them. It used to send up to
- * 2,000 frames (~2 MB) a batch against the agent's 512 records and 256 kB, and
- * main's deframing made 120,000 a second look like a main-process limit when
- * it was this drive's.
- */
-const AGENT_BATCH = (() => {
-  const source = readFileSync(path.join(import.meta.dirname, '../../agent-rs/src/session.rs'), 'utf8');
-  const found = new Map<string, number>();
-  for (const [, name, value] of source.matchAll(/pub const (MAX_BATCH_RECORDS|MAX_BATCH_BYTES): usize = ([\d_ *]+);/g)) {
-    found.set(name, value.split('*').reduce((product, factor) => product * Number(factor.replace(/[_ ]/g, '')), 1));
-  }
-  const records = found.get('MAX_BATCH_RECORDS');
-  const bytes = found.get('MAX_BATCH_BYTES');
-  if (!records || !bytes) throw new Error('ui-burst-drive: MAX_BATCH_RECORDS or MAX_BATCH_BYTES not found in agent-rs/src/session.rs');
-  return { records, bytes };
-})();
+/** The real agent's batch bounds (`agentBatches.ts`). */
+const AGENT_BATCH = agentBatchBounds();
 
 const PIPE = `\\\\.\\pipe\\inwire-uiburst-${process.pid}`;
 const INTERFACES = [{ id: 0, name: '\\Device\\NPF_{STUB-0}', label: 'Ethernet (stub)' }];
@@ -284,21 +269,14 @@ async function startAgent(frames: Uint8Array[]): Promise<Agent> {
             let n = Math.floor(owed);
             owed -= n;
             const base = BigInt(Date.now()) * 1_000_000n;
-            while (n > 0) {
-              const batch: { seq: number; tsNs: bigint; bytes: Uint8Array }[] = [];
-              let size = 0;
-              // `session.rs`'s `drain`: add while under both bounds, so a
-              // batch can overrun the byte bound by its last record.
-              while (n > 0 && batch.length < AGENT_BATCH.records && size < AGENT_BATCH.bytes) {
-                seq++;
-                const bytes = shiftTcp(frames[cursor], pass * 0x1000_0000);
-                const frame = { seq, tsNs: base + BigInt(batch.length * 1000), bytes };
-                writer?.add(frame);
-                batch.push(frame);
-                size += bytes.length;
-                n--;
-                if (++cursor === frames.length) { cursor = 0; pass++; }
-              }
+            const batches = cutTick(n, base, seq + 1, () => {
+              const bytes = shiftTcp(frames[cursor], pass * 0x1000_0000);
+              if (++cursor === frames.length) { cursor = 0; pass++; }
+              return bytes;
+            }, AGENT_BATCH);
+            seq += n;
+            for (const batch of batches) {
+              for (const frame of batch) writer?.add(frame);
               send(encodeFrame(FRAME_BINARY, encodeBatch(batch)));
             }
           }, 10);
