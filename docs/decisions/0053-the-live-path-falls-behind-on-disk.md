@@ -845,7 +845,9 @@ installed agent.
 
 **The single-connection ceiling stands.** At 90,000 both builds advance the
 same, because the hot connection's shard is the limit and one connection is
-one shard. Splitting a connection across shards is the option not taken:
+one shard. (**Moved by [0072](0072-shards-dissect-without-the-hot-path-tree.md)**,
+2026-11-04: with a shard frame 40% cheaper, 90,000 offered keeps up, at
+85,000 advanced a second with lag flat.) Splitting a connection across shards is the option not taken:
 TCP's reassembly and analysis state is per connection and ordered, and
 splitting it would mean handing that state between threads mid-stream.
 

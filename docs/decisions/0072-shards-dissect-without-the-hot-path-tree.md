@@ -113,3 +113,17 @@ tree, not from it.
   `decodeNetworkLayer`, `analyzeTcpSegment`, `dissectTcpTransport` and
   `decodeRawEthernetPacket`: the summary's own work and the tracker's, not
   tree rows.
+- **The gate moved** (2026-11-04). `ui-burst-drive.ts --follow-only`, six
+  shards, 1 GB buffer, `burst300k`, against `a1691dd9` built the same way and
+  alternated run for run on a quiet machine:
+
+  | | `a1691dd9` | tree-free shards |
+  |---|---|---|
+  | 60,000 offered (3 runs) | 59,000 / 58,300 / 59,000 advanced a second; lag 16,000-32,000 | 59,600 / 59,200 / 59,500; lag 14,000-27,000 |
+  | 90,000 offered, ~86,000 sent (2 runs) | 65,500 / 63,900; lag climbing to 608,000 / 634,000 | **84,800 / 85,100**; lag flat at 33,000-97,000 |
+  | Worker heap, every 2 s | 14-116 MB | 11-54 MB |
+
+  No run skipped a frame or logged a pipeline warning. At 90,000 the old
+  build fell behind exactly as 0053 recorded, because the hot connection's
+  shard was the limit. The tree-free shard keeps up with everything the
+  drive's agent sent. Where the new ceiling is has not been measured.
