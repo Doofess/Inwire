@@ -263,8 +263,10 @@ let nextCatchUpRequest = 1;
 let catchUpRetry: ReturnType<typeof setTimeout> | null = null;
 /**
  * Frames waiting to be dissected past which the file is not read further:
- * a read is about 3,600 frames, and this is a second or so of the Worker's
- * work - enough to keep it busy, not enough to be a heap of its own.
+ * a read is about 15,000 frames (`READ_BYTES`), so up to ~55,000 wait, which
+ * is under a second of the Worker's work - enough to keep it busy, not enough
+ * to be a heap of its own. The frames are views into their read, so this
+ * holds about four reads alive.
  */
 const CATCH_UP_BACKLOG = 40_000;
 /** The adapter of the newest live frame, for a file frame whose IDB names none this list has. */

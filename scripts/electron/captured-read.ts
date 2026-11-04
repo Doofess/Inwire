@@ -15,6 +15,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSy
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MAX_CAPTURED_READ, readCaptured } from '../../electron/capturedRead';
+import { READ_BYTES } from '../../src/services/pipeline/catchUp';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -57,6 +58,10 @@ try {
 
   const big = await readCaptured(root, id, 'capture.pcapng', 0, MAX_CAPTURED_READ * 4);
   check('no more than the most one read hands over', big.bytes !== null && big.bytes.length <= MAX_CAPTURED_READ);
+  // Asking for more would be clipped without a word; asking for less pays a
+  // round trip to main for every part of a read it could have had at once.
+  check('the Worker asks for main\'s whole read, and no more than it hands over', READ_BYTES === MAX_CAPTURED_READ,
+    `${READ_BYTES} vs ${MAX_CAPTURED_READ}`);
 
   const refused: [string, string, string, number, number][] = [
     ['a capture id this app would not make', '..', 'capture.pcapng', 0, 10],

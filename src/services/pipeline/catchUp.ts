@@ -78,8 +78,13 @@ export const REJOIN_WITHIN = 20_000;
 export const HOLD_MAX_FRAMES = 100_000;
 /** ...and the most bytes, which main's credit also counts (256 MB). */
 export const HOLD_MAX_BYTES = 96 * 1024 * 1024;
-/** One read of the file. */
-export const READ_BYTES = 4 * 1024 * 1024;
+/**
+ * One read of the file: the most main hands over (`MAX_CAPTURED_READ`), about
+ * 15,000 frames of ~1,080 bytes. One read is out at a time, so its size is
+ * how much a round trip to main brings back; at 4 MB the coordinator spent a
+ * fifth of catching up waiting for the next.
+ */
+export const READ_BYTES = 16 * 1024 * 1024;
 /** How long to wait before reading a file again that had nothing new. */
 export const RETRY_MS = 150;
 /**
