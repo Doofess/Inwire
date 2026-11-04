@@ -27,6 +27,30 @@ export interface TailFrame {
   capLen: number;
 }
 
+/** What a section's header and IDBs said, which every frame after them is read by. */
+export interface TailSection {
+  little: boolean;
+  /** Nanoseconds per tick, per IDB of the section. */
+  nsPerTick: number[];
+  /** `if_name` per IDB, null where none was written. */
+  idbNames: (string | null)[];
+}
+
+/**
+ * Everything a tail needs to go on reading from a block boundary with nothing
+ * held: where it is, the section's description, and how many reads in a row
+ * ended inside a block that did not close. Plain data, so it crosses a thread.
+ */
+export interface TailState extends TailSection {
+  offset: number;
+  stalled: number;
+}
+
+/** A tail at the start of a file: little endian until a section header says otherwise. */
+export function startState(): TailState {
+  return { offset: 0, little: true, nsPerTick: [], idbNames: [], stalled: 0 };
+}
+
 /** Bytes of carry past which consumed space is reclaimed rather than kept. */
 const COMPACT_AT = 1 << 20;
 /**
@@ -54,8 +78,37 @@ export class PcapngTail {
   /** File offset of the block `next` last gave back. */
   blockAt = 0;
 
+  /**
+   * How many section headers and IDBs `next` has passed. A caller that sees it
+   * move between two frames knows the section's description changed.
+   */
+  sectionNo = 0;
+
   constructor(startOffset = 0) {
     this.base = startOffset;
+  }
+
+  /** A tail that reads on from `state.offset`, holding nothing, with copies of what `state` carries. */
+  static restore(state: TailState): PcapngTail {
+    const tail = new PcapngTail(state.offset);
+    tail.little = state.little;
+    tail.nsPerTick = state.nsPerTick.slice();
+    tail.idbNames.push(...state.idbNames);
+    tail.stalled = state.stalled;
+    return tail;
+  }
+
+  /**
+   * The tail as it is at `position`, with copies. Bytes held past that point
+   * are not part of it: whoever restores it reads them again.
+   */
+  save(): TailState {
+    return { offset: this.position, ...this.section(), stalled: this.stalled };
+  }
+
+  /** The section's description as it is now, copied. */
+  section(): TailSection {
+    return { little: this.little, nsPerTick: this.nsPerTick.slice(), idbNames: this.idbNames.slice() };
   }
 
   /** The file offset of the next block to be read: everything before it is consumed. */
@@ -113,9 +166,12 @@ export class PcapngTail {
 
   /**
    * The next packet in the file, or null when the next block is not all here.
-   * `copy` false skips the bytes - the frame is counted, not read.
+   * `copy` false skips the bytes - the frame is counted, not read. `'view'`
+   * gives them as a view of the held buffer: nothing here writes a buffer in
+   * place (`push` makes a new one, `compact` slices), so a view stays what it
+   * was, and keeps the whole buffer alive for as long as it is held.
    */
-  next(copy = true): TailFrame | null {
+  next(copy: boolean | 'view' = true): TailFrame | null {
     for (;;) {
       if (this.buf.length - this.at < 12) {
         this.buf = this.buf.subarray(0, this.at);
@@ -152,6 +208,7 @@ export class PcapngTail {
       if (type === 0x0a0d0d0a) {
         this.nsPerTick = [];
         this.idbNames.length = 0;
+        this.sectionNo++;
       } else if (type === 0x00000001) {
         this.readIdb(view, length);
       } else if (type === 0x00000006) {
@@ -169,7 +226,8 @@ export class PcapngTail {
           tsNsRem: Number(ns % 1000n),
           origLen,
           capLen,
-          bytes: copy ? new Uint8Array(this.buf.buffer.slice(start, start + capLen)) : EMPTY,
+          bytes: copy === 'view' ? new Uint8Array(this.buf.buffer, start, capLen)
+            : copy ? new Uint8Array(this.buf.buffer.slice(start, start + capLen)) : EMPTY,
         };
         this.compact();
         return frame;
@@ -199,6 +257,7 @@ export class PcapngTail {
     }
     this.nsPerTick.push(nsPerTick);
     this.idbNames.push(name);
+    this.sectionNo++;
   }
 
   private compact(): void {
