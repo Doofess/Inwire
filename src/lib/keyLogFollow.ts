@@ -3,17 +3,16 @@
  *
  * Main reads the file and sends complete lines as text
  * (`electron/keyLogFollower.ts`, which carries the reason a key log is
- * followed rather than read once). This hands each chunk to BOTH stores, for
- * the reason `DecryptionSettingsPanel` already gives: live capture is
- * dissected in the pipeline Worker with its own module instance of `keyLog`,
- * and an import is dissected here.
+ * followed rather than read once). This hands each chunk to the page's store,
+ * the only one that is written: the pipeline Worker and its shards read the
+ * same buffer in place (`pipelineClient.ts`, ADR 0073), and an import is
+ * dissected here.
  *
  * Started once from `App`'s mount rather than from the panel, because the
  * panel only exists while Settings is open - and a follow that only ran while
  * somebody was looking at it would decrypt nothing.
  */
 import { keyLog } from '../services/tls/keyLog';
-import { pipeline } from '../services/pipelineClient';
 
 /**
  * `KeyLogFollowStatus` from `electron/keyLogTail.ts`, restated.
@@ -78,8 +77,9 @@ export function startKeyLogFollow(): void {
   // Subscribed BEFORE attaching, because attaching is what makes main send the
   // whole file from the top - a listener registered after would miss it.
   bridge.onKeyLogText((text) => {
+    // The page is the store's only writer; the Worker and its shards read the
+    // same buffer, so there is nothing more to send.
     keyLog.add(text);
-    pipeline.addKeyLog(text);
     notify();
   });
   bridge.onKeyLogStatus((value) => {

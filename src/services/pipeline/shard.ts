@@ -133,11 +133,9 @@ export class Shard {
         this.precision = new Map(message.interfaces.flatMap(([id, { tsPrecision }]) =>
           (tsPrecision === undefined ? [] : [[id, tsPrecision] as const])));
         return;
-      case 'keylog':
-        keyLog.add(message.text);
-        return;
-      case 'keylogClear':
-        keyLog.clear();
+      case 'keylogShared':
+        // A reader: appends to a shared buffer arrive with no message.
+        keyLog.adopt(message.snapshot);
         return;
       case 'flows':
         // The Worker's clock, not this thread's: lives are stamped by it.

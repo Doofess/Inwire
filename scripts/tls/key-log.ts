@@ -20,7 +20,7 @@
  * Worker's, which is the one live capture decrypts with.
  */
 import { readFileSync } from 'node:fs';
-import { keyLog } from '../../src/services/tls/keyLog';
+import { keyLog, KeyLogStore, type KeyLogShared } from '../../src/services/tls/keyLog';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -85,19 +85,48 @@ console.log('\n--- Clear reaches the copy live capture uses ---\n');
 const panel = readFileSync('src/components/common/DecryptionSettingsPanel.tsx', 'utf8');
 const worker = readFileSync('src/workers/pipeline.worker.ts', 'utf8');
 const clearBody = panel.slice(panel.indexOf('const clear = ()'), panel.indexOf('const following ='));
-checkTrue('the panel\'s Clear tells the Worker', clearBody.includes('pipeline.clearKeyLog()'));
+checkTrue('the panel\'s Clear clears the page\'s store', clearBody.includes('keyLog.clear()'));
 checkTrue('...and stops following, or the next appended line would decrypt again',
   clearBody.includes('forgetKeyLog()'));
-const workerCase = worker.slice(worker.indexOf("case 'keylog-clear':"), worker.indexOf("case 'detail':"));
-checkTrue('the Worker clears its store on that message', workerCase.includes('keyLog.clear()'));
-checkTrue('...and its cached trees, the other place plaintext lives',
-  workerCase.includes('treeCache.clear()'));
-// Each TCP shard holds a key log of its own (ADR 0053 phase 3), and no trees (ADR 0072).
+checkTrue('...and no longer sends text to the Worker',
+  !panel.includes('pipeline.addKeyLog') && !panel.includes('pipeline.clearKeyLog'));
+const sharedCase = worker.slice(worker.indexOf("case 'keylog-shared':"), worker.indexOf("case 'detail':"));
+checkTrue('the Worker adopts the page\'s buffer', sharedCase.includes('keyLog.adopt(command.snapshot)'));
+checkTrue('...and on a cleared one drops its cached trees and derived answers',
+  sharedCase.includes('treeCache.clear()') && sharedCase.includes('derivedStore.clear()'));
+checkTrue('...and hands every shard the same buffer',
+  sharedCase.includes("broadcast({ type: 'keylogShared', snapshot: command.snapshot })"));
+checkTrue('a shard started later is given it too',
+  /startParallel[\s\S]*keylogShared[\s\S]*keyLogSnapshot/.test(worker));
+checkTrue('no copy of the key log text is kept in the Worker', !worker.includes('keyLogTexts'));
+// Each TCP shard adopts the same buffer (ADR 0053 phase 3), and keeps no trees (ADR 0072).
 const shard = readFileSync('src/services/pipeline/shard.ts', 'utf8');
-const shardCase = shard.slice(shard.indexOf("case 'keylogClear':"), shard.indexOf("case 'flows':"));
-checkTrue('...and tells every dissection shard', workerCase.includes("broadcast({ type: 'keylogClear' })"));
-checkTrue('...which clears its key log', shardCase.includes('keyLog.clear()'));
+const shardCase = shard.slice(shard.indexOf("case 'keylogShared':"), shard.indexOf("case 'flows':"));
+checkTrue('the shard adopts it', shardCase.includes('keyLog.adopt(message.snapshot)'));
 checkTrue('...and keeps no cached tree for plaintext to outlive it in', !/this\.trees\b/.test(shard));
+
+console.log('\n--- a reader follows the writer\'s Clear ---\n');
+
+{
+  // The writer is the page; the reader is a Worker. Clear replaces the buffer and
+  // sends a cleared snapshot, which is all the reader is told.
+  const writer = new KeyLogStore();
+  const reader = new KeyLogStore();
+  const seen: KeyLogShared[] = [];
+  writer.onSnapshot((s) => seen.push(s));
+  writer.add(`${A}\n`);
+  reader.adopt(writer.share());
+  const random = new Uint8Array(32).fill(0xa1);
+  checkTrue('the reader finds what the writer added', reader.secretsFor(random) !== undefined);
+  writer.add(`${C}\n`);
+  checkTrue('...and a later append with no message', reader.secretsFor(new Uint8Array(32).fill(0xb2)) !== undefined);
+  writer.clear();
+  const last = seen[seen.length - 1];
+  checkTrue('the writer announces its Clear with a cleared snapshot', last !== undefined && last.cleared === true);
+  reader.adopt(last!);
+  checkTrue('adopting it leaves the reader empty', reader.isEmpty === true);
+  check('...and the old secrets are not found', reader.secretsFor(random), undefined);
+}
 
 keyLog.clear();
 console.log();

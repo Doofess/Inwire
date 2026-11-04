@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FileSearch, Key, Radio, Square, Trash, Upload } from 'lucide-react';
 import { keyLog, type KeyLogStats } from '../../services/tls/keyLog';
-import { pipeline } from '../../services/pipelineClient';
 import {
   chooseKeyLog,
   followSuggestedKeyLog,
@@ -19,10 +18,10 @@ import {
  * browser that made the connections, and it only writes them out when asked
  * to before it starts.
  *
- * Two stores are fed, not one. Dissection of live capture runs in a Worker
- * with its own module instances; an imported file is dissected on the main
- * thread. A key log loaded here goes to both, which is why this calls
- * `pipeline.addKeyLog` as well as `keyLog.add`.
+ * One store is fed: the page's. Dissection of live capture runs in a Worker
+ * that reads the same buffer in place (an append needs no message and a Clear
+ * reaches it as a cleared snapshot from `pipelineClient.ts`); an imported file
+ * is dissected on the main thread against the same store.
  */
 export const DecryptionSettingsPanel: React.FC = () => {
   const [stats, setStats] = useState<KeyLogStats>(() => keyLog.stats());
@@ -42,7 +41,6 @@ export const DecryptionSettingsPanel: React.FC = () => {
     const text = await file.text();
     const before = keyLog.stats();
     const after = keyLog.add(text);
-    pipeline.addKeyLog(text);
     setStats(after);
     const added = after.secrets - before.secrets;
     setMessage(added === 0
@@ -52,9 +50,9 @@ export const DecryptionSettingsPanel: React.FC = () => {
 
   const clear = (): void => {
     keyLog.clear();
-    // The Worker's copy, which is the one live capture actually decrypts with.
-    // This line did not exist, so "Cleared" left every secret in use.
-    pipeline.clearKeyLog();
+    // The Worker reads the page's buffer, which is the one live capture
+    // decrypts with: the cleared snapshot reaches it by itself. When it was a
+    // separate copy, "Cleared" left every secret in use.
     const wasFollowing = follow !== null && follow.path !== null;
     // And stop following, or the next line Chrome writes would quietly start
     // decrypting again under a panel that just said it would not.
