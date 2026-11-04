@@ -748,7 +748,7 @@ try {
   checkTrue('lines appended while it runs are picked up as they are written', grew);
   if (grew) {
     console.log(`      appended to the file -> counted in the panel: ${followMs} ms`
-      + ' (a measurement: the Worker gets it one postMessage after this)');
+      + ' (a measurement: the Worker and its shards read the same buffer, ADR 0073)');
   } else {
     console.log(`        the panel shows ${await secretsShown()} secret(s), expected 3`);
   }
