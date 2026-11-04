@@ -32,18 +32,8 @@
  */
 import { clearDerivedKeys } from '../crypto/aes';
 import { toHex } from '../addressFormat';
-
-/** The labels a line may carry. Anything else is counted and ignored. */
-const KNOWN_LABELS = new Set([
-  'CLIENT_RANDOM',
-  'CLIENT_EARLY_TRAFFIC_SECRET',
-  'CLIENT_HANDSHAKE_TRAFFIC_SECRET',
-  'SERVER_HANDSHAKE_TRAFFIC_SECRET',
-  'CLIENT_TRAFFIC_SECRET_0',
-  'SERVER_TRAFFIC_SECRET_0',
-  'EXPORTER_SECRET',
-  'EARLY_EXPORTER_SECRET',
-]);
+import { KeyLogTable } from './keyLogTable';
+import { MAX_KEYLOG_SECRETS } from './keyLogLimits';
 
 export interface KeyLogStats {
   /** Connections (distinct client randoms) the log covers. */
@@ -52,42 +42,68 @@ export interface KeyLogStats {
   secrets: number;
   /** Lines that were neither blank, a comment, nor a label we know. */
   ignored: number;
+  /** Valid lines left out because the store already held `MAX_KEYLOG_SECRETS`. */
+  dropped: number;
 }
 
-function fromHex(text: string): Uint8Array | null {
-  if (text.length === 0 || text.length % 2 !== 0) return null;
-  const out = new Uint8Array(text.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    const byte = Number.parseInt(text.substr(i * 2, 2), 16);
-    if (Number.isNaN(byte)) return null;
-    out[i] = byte;
-  }
-  return out;
+/** One state of the store, in a form that can be posted to a Worker. */
+export interface KeyLogShared {
+  buffer: SharedArrayBuffer | ArrayBuffer;
+  /** True: shared memory, so later adds are visible without a new snapshot. False: a frozen copy. */
+  live: boolean;
+  /** The first snapshot after a clear; a reader flushes its derived AES keys on adopting it. */
+  cleared: boolean;
 }
+
+export interface KeyLogStoreOptions {
+  /** Test seam: force shared memory on or off. Default: on where the context allows it. */
+  shared?: boolean;
+  /** Test seam: the bound on stored secrets. Default `MAX_KEYLOG_SECRETS`. */
+  maxSecrets?: number;
+}
+
+/** The longest a copy-mode writer waits before posting what it has learned. */
+export const COPY_SNAPSHOT_MS = 250;
 
 // Re-exported rather than moved out of reach: `toHex` reads as part of this
-// module's surface at every call site that pairs it with `fromHex` above.
+// module's surface at every call site that pairs it with a key log lookup.
 export { toHex };
+
+function canShareMemory(): boolean {
+  return typeof SharedArrayBuffer === 'function'
+    && (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated !== false;
+}
 
 /**
  * Secrets indexed by client random.
  *
- * One instance per JavaScript context: the dissection pipeline runs in a
- * Worker and imports run on the main thread, so a key log the user loads is
- * pushed to both rather than shared.
+ * One writer per renderer, the page: the follower, the panel's Load and a
+ * pcapng's Decryption Secrets Block all call `add` there. The pipeline Worker
+ * and its shards `adopt` the page's buffer and read it in place, so the log is
+ * held once (ADR 0073). A store that has adopted a buffer is a reader: `add`
+ * and `clear` throw.
+ *
+ * The buffer is replaced when it fills and when the log is cleared. A
+ * replacement is announced through `onSnapshot`; adds to a shared buffer are
+ * not, because the readers already see them. Where memory cannot be shared
+ * (`npm run dev` sends no COOP/COEP) the same protocol carries copies, at most
+ * one per `COPY_SNAPSHOT_MS` after something changed.
  */
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
 export class KeyLogStore {
-  private byRandom = new Map<string, Map<string, Uint8Array>>();
-  private ignoredLines = 0;
-  private acceptedLines = 0;
-  /** Every line accepted, in order, so an export can write back what was read. */
-  private lines: string[] = [];
+  private table: KeyLogTable | null = null;
+  private reader = false;
+  private readonly live: boolean;
+  private readonly maxSecrets: number;
+  private readonly listeners = new Set<(snapshot: KeyLogShared) => void>();
+  /** True from a clear until the buffer is next replaced (or, in copy mode, copied). */
+  private clearedFlag = false;
+  private copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+  public constructor(options: KeyLogStoreOptions = {}) {
+    this.live = (options.shared ?? true) && canShareMemory();
+    this.maxSecrets = options.maxSecrets ?? MAX_KEYLOG_SECRETS;
+  }
+
   /**
    * Bumped by every `add` that learned something. A dissector that concluded
    * "no secret for this connection" records the generation it concluded it
@@ -99,68 +115,58 @@ export class KeyLogStore {
    * followed: `keyLogFollow` feeds every append Chrome makes, and a bump is
    * an instruction to every live TLS and QUIC conversation to re-derive its
    * keys on its next packet. A chunk that taught nothing must not cost that.
+   *
+   * It lives in the buffer, so a reader sees the writer's bumps, and it never
+   * goes backwards across a replacement.
    */
-  public generation = 0;
+  public get generation(): number {
+    return this.table === null ? 0 : this.table.generation;
+  }
+
+  private create(generation: number): KeyLogTable {
+    return KeyLogTable.create({ shared: this.live, maxSecrets: this.maxSecrets, generation });
+  }
 
   /**
    * Adds a key log's text. Callable repeatedly - a capture may pick up secrets
    * from a pcapng's own Decryption Secrets Blocks *and* a file the user
    * supplies, and a later line for the same label wins because a key log is
    * append-only and a repeated label means the connection was resumed.
+   *
+   * A line already held is not a new secret: loading the same file twice
+   * changes nothing, which matters because a followed file is re-sent whole
+   * whenever a renderer attaches.
    */
   public add(text: string): KeyLogStats {
-    let changed = false;
-    for (const rawLine of text.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (line.length === 0 || line.startsWith('#')) continue;
-
-      const parts = line.split(/\s+/);
-      if (parts.length !== 3 || !KNOWN_LABELS.has(parts[0])) { this.ignoredLines++; continue; }
-
-      const [label, randomHex, secretHex] = parts;
-      // 32 bytes, always: the client random is a fixed-width field in the
-      // ClientHello, and a line whose join key is the wrong width could not
-      // match any connection anyway.
-      if (randomHex.length !== 64) { this.ignoredLines++; continue; }
-      const secret = fromHex(secretHex);
-      if (secret === null) { this.ignoredLines++; continue; }
-
-      const key = randomHex.toLowerCase();
-      let entry = this.byRandom.get(key);
-      if (entry === undefined) { entry = new Map(); this.byRandom.set(key, entry); }
-      // **A line already held is not a new secret.** This counted and stored
-      // every line every time, so loading the same file twice doubled
-      // `secrets` and `lines`, and the panel's own "added no new secrets -
-      // every line was already loaded" could never be shown. It matters more
-      // now: a followed file is re-sent whole whenever a renderer attaches.
-      const held = entry.get(label);
-      if (held !== undefined && sameBytes(held, secret)) continue;
-      entry.set(label, secret);
-      this.acceptedLines++;
-      this.lines.push(`${label} ${key} ${secretHex.toLowerCase()}`);
-      changed = true;
+    if (this.reader) throw new Error('key log is read-only in this context');
+    const table = this.table ?? (this.table = this.create(0));
+    const before = table.buffer;
+    const { changed } = table.addText(text);
+    if (table.buffer !== before) this.clearedFlag = false;
+    if (this.live) {
+      if (table.buffer !== before) this.emit(this.snapshot(table));
+    } else if (changed) {
+      this.scheduleCopy();
     }
-
-    if (changed) this.generation++;
-    return this.stats();
+    return table.stats();
   }
 
   public stats(): KeyLogStats {
-    return { connections: this.byRandom.size, secrets: this.acceptedLines, ignored: this.ignoredLines };
+    return this.table === null ? { connections: 0, secrets: 0, ignored: 0, dropped: 0 } : this.table.stats();
   }
 
-  /** The secrets for one connection, or undefined when the log does not cover it. */
+  /** The secrets for one connection, or undefined when the log does not cover it. Fresh copies. */
   public secretsFor(clientRandom: Uint8Array): Map<string, Uint8Array> | undefined {
-    return this.byRandom.get(toHex(clientRandom));
+    return this.table?.lookup(clientRandom);
   }
 
   public get isEmpty(): boolean {
-    return this.byRandom.size === 0;
+    return this.table === null || this.table.isEmpty;
   }
 
-  /** The log as text, for writing a pcapng Decryption Secrets Block. */
-  public serialise(): string {
-    return this.lines.length === 0 ? '' : `${this.lines.join('\n')}\n`;
+  /** The log as ASCII text, one `LABEL random secret` line each, for a pcapng Decryption Secrets Block. */
+  public serialise(): Uint8Array {
+    return this.table === null ? new Uint8Array(0) : this.table.serialise();
   }
 
   /**
@@ -173,14 +179,71 @@ export class KeyLogStore {
    * schedules stayed in memory for the life of the page. ADR 0008's position
    * is that key material is transient, and a clear that leaves it behind is
    * the one place that was not true.
+   *
+   * The old buffer is retired, not zeroed: a reader still on it goes on
+   * answering until it adopts the cleared snapshot, which is why that snapshot
+   * is posted at once.
    */
   public clear(): void {
-    this.generation++;
-    this.byRandom.clear();
+    if (this.reader) throw new Error('key log is read-only in this context');
+    this.cancelCopy();
+    this.table = this.create(this.generation + 1);
+    this.clearedFlag = true;
     clearDerivedKeys();
-    this.lines = [];
-    this.ignoredLines = 0;
-    this.acceptedLines = 0;
+    this.emit(this.snapshot(this.table));
+  }
+
+  /** The current buffer, allocated on first use. */
+  public share(): KeyLogShared {
+    if (this.table === null) this.table = this.create(0);
+    return this.snapshot(this.table);
+  }
+
+  /**
+   * Becomes a reader of a writer's buffer. A no-op when that buffer is this
+   * store's own current one. Adopting a cleared snapshot flushes the derived
+   * AES keys, as the writer's `clear` did.
+   */
+  public adopt(snapshot: KeyLogShared): void {
+    if (this.table !== null && this.table.buffer === snapshot.buffer) return;
+    const table = KeyLogTable.open(snapshot.buffer);
+    this.cancelCopy();
+    this.table = table;
+    this.reader = true;
+    if (snapshot.cleared) clearDerivedKeys();
+  }
+
+  /**
+   * Hears of the writer's buffer being replaced (growth, clear) and, in copy
+   * mode, of every change worth a copy. Returns the unsubscribe.
+   */
+  public onSnapshot(listener: (snapshot: KeyLogShared) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private snapshot(table: KeyLogTable): KeyLogShared {
+    return this.live
+      ? { buffer: table.buffer, live: true, cleared: this.clearedFlag }
+      : { buffer: table.copy(), live: false, cleared: this.clearedFlag };
+  }
+
+  private emit(snapshot: KeyLogShared): void {
+    if (!this.live) this.clearedFlag = false;
+    for (const listener of [...this.listeners]) listener(snapshot);
+  }
+
+  private scheduleCopy(): void {
+    if (this.copyTimer !== undefined || this.listeners.size === 0) return;
+    this.copyTimer = setTimeout(() => {
+      this.copyTimer = undefined;
+      if (this.table !== null) this.emit(this.snapshot(this.table));
+    }, COPY_SNAPSHOT_MS);
+  }
+
+  private cancelCopy(): void {
+    if (this.copyTimer !== undefined) clearTimeout(this.copyTimer);
+    this.copyTimer = undefined;
   }
 }
 

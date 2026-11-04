@@ -51,7 +51,7 @@ keyLog.add(`${A}\n${B}\n`);
 const twice = keyLog.stats();
 check('loading a file twice does not double the count', twice.secrets, once.secrets);
 check('...or the lines an export would write back',
-  keyLog.serialise().split('\n').filter(Boolean).length, 2);
+  new TextDecoder('latin1').decode(keyLog.serialise()).split('\n').filter(Boolean).length, 2);
 check('...and the connection count is unchanged', twice.connections, once.connections);
 
 console.log('\n--- generation moves only when something was learned ---\n');
