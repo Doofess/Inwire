@@ -632,11 +632,23 @@ for (const [phaseIndex, phase] of phases.entries()) {
   // Each process's CPU in cores: the store and main are outside what a profile
   // here can see. Electron divides `percentCPUUsage` by the machine's cores.
   const cpuSamples = new Map<string, number[]>();
+  // Each process's largest working set, in MB. The pipeline Worker and the
+  // shards are Workers of the renderer, so bytes a Worker keeps - a read of
+  // the agent's file that a kept view holds alive - are the renderer's.
+  const memoryPeaks = new Map<string, number>();
   const cpu = async () => (await app.evaluate(({ app: electronApp }) => electronApp.getAppMetrics()
-    .map((m) => ({ name: `${m.type}${m.serviceName ? ` ${m.serviceName}` : m.name ? ` ${m.name}` : ''}`, cpu: m.cpu.percentCPUUsage }))))
-    .forEach(({ name, cpu: used }) => cpuSamples.set(name, [...(cpuSamples.get(name) ?? []), used]));
+    .map((m) => ({
+      name: `${m.type}${m.serviceName ? ` ${m.serviceName}` : m.name ? ` ${m.name}` : ''}`,
+      cpu: m.cpu.percentCPUUsage,
+      workingSetKb: m.memory.workingSetSize,
+    }))))
+    .forEach(({ name, cpu: used, workingSetKb }) => {
+      cpuSamples.set(name, [...(cpuSamples.get(name) ?? []), used]);
+      memoryPeaks.set(name, Math.max(memoryPeaks.get(name) ?? 0, workingSetKb / 1024));
+    });
   await cpu();
   cpuSamples.clear();
+  memoryPeaks.clear();
   const sampler = (async () => {
     while (Date.now() - t0 < SECONDS * 1000) {
       await sleep(2000);
@@ -690,6 +702,7 @@ for (const [phaseIndex, phase] of phases.entries()) {
   say(`  status bar every 2 s: ${statusSamples.join(' | ')}`);
   say(`  process CPU, mean cores: ${[...cpuSamples].filter(([, v]) => v.length > 0)
     .map(([name, v]) => `${name} ${(v.reduce((a, c) => a + c, 0) / v.length * availableParallelism() / 100).toFixed(2)}`).join(', ')}`);
+  say(`  process memory, peak working set: ${[...memoryPeaks].map(([name, mb]) => `${name} ${mb.toFixed(0)} MB`).join(', ')}`);
   say(`  animation frames: ${(b.frames / elapsed).toFixed(1)} fps`);
   say(`  long tasks: ${(long.length / elapsed).toFixed(1)}/s, ${(longMs / elapsed / 10).toFixed(0)}% of wall time; `
     + `p50 ${long[Math.floor(long.length / 2)]?.toFixed(0) ?? '-'} ms, max ${long[0]?.toFixed(0) ?? '-'} ms`);
