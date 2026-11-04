@@ -392,9 +392,49 @@ const twoRef: Seen[] = (() => {
   try {
     for (; reads < 100; reads++) { read(stuck, early.subarray(stuck.readOffset)); while (stuck.next() !== null) { /* frames */ } }
   } catch { threw = true; }
-  const refusedAfter = !read(stuck, f.subarray(stuck.readOffset));
-  check('...and a block that never closes throws in the end, on the read after STALL_LIMIT, and nothing is taken after it',
-    threw && reads === STALL_LIMIT && refusedAfter, `threw ${threw} on read ${reads + 1}, refused after ${refusedAfter}`);
+  // Not taken, and answered all the same: a refusal is read again at once,
+  // which here would be for ever. The caller reads on to the error instead.
+  const stuckAt = stuck.readOffset;
+  const answered = read(stuck, f.subarray(stuck.readOffset));
+  let threwAgain = false;
+  try { stuck.next(); } catch { threwAgain = true; }
+  check('...and a block that never closes throws in the end, on the read after STALL_LIMIT; a read after it is not taken, but answered, and next() throws again',
+    threw && reads === STALL_LIMIT && answered && stuck.readOffset === stuckAt && threwAgain,
+    `threw ${threw} on read ${reads + 1}, answered ${answered}, readOffset ${stuck.readOffset} vs ${stuckAt}, threw again ${threwAgain}`);
+}
+
+{
+  // A packet longer than its block, the trailing length right, is corrupt.
+  // The tail throws there and stays there, so whatever reads on from its state
+  // meets the same block, never the frames after it.
+  const twelve = madeFrames(12);
+  const bad = epb(twelve[5]);
+  new DataView(bad.buffer, bad.byteOffset, bad.byteLength).setUint32(20, bad.length, true);
+  const f = concat([fileHeader(), ...twelve.slice(0, 5).map(epb), bad, ...twelve.slice(6).map(epb)]);
+  const blockStart = fileHeader().length + twelve.slice(0, 5).reduce((n, x) => n + epb(x).length, 0);
+  const tail = new PcapngTail(0);
+  tail.push(f);
+  let got = 0;
+  let threw = 0;
+  try { while (tail.next() !== null) got++; } catch { threw++; }
+  try { tail.next(); } catch { threw++; }
+  const at = tail.save();
+  check('PcapngTail: a packet longer than its block throws there, and again, with its state still at the block',
+    got === 5 && threw === 2 && at.offset === blockStart, JSON.stringify({ got, threw, offset: at.offset, blockStart }));
+  const p = parseRead(startState(), f);
+  check('parseRead: ...so a parse that meets it ends at the block, with the error',
+    p.count === 5 && p.error !== null && p.end.offset === blockStart, JSON.stringify({ count: p.count, error: p.error, end: p.end.offset, blockStart }));
+  const t = new ParsedTail();
+  read(t, f);
+  const before: number[] = [];
+  let x;
+  try { while ((x = t.next()) !== null) before.push(x.tsUs); } catch { /* the corrupt block */ }
+  const restored = PcapngTail.restore(t.save());
+  restored.push(f.subarray(t.save().offset));
+  let restoredThrew = false;
+  try { restored.next(); } catch { restoredThrew = true; }
+  check('ParsedTail: ...and a PcapngTail restored from it, nothing waiting, meets the corrupt block again',
+    before.length === 5 && restoredThrew, `${before.length} frames, restored threw ${restoredThrew}`);
 }
 
 {

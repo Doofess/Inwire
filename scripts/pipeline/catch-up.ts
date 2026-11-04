@@ -734,6 +734,60 @@ parsedReads = true;
 await cases('made (reader)', madeFrames(30_000));
 parsedReads = false;
 
+// A block the file holds corrupt - its packet longer than the block, its
+// trailing length right - in the same read as a rejoin. In place, the next
+// catch-up gives the frames before it and ends 'unreadable'. Through the
+// reader it must do the same, never asking for one read for ever; and when
+// the rejoin is the frame just before it and the reader then goes, the
+// cursor converted to read in place must meet the corrupt block, not start
+// past it and number every later frame one too low.
+{
+  const made = madeFrames(40);
+  const bad = epb(made[10]);
+  new DataView(bad.buffer, bad.byteOffset, bad.byteLength).setUint32(20, bad.length, true);
+  const corrupt = concat([fileHeader(), ...made.slice(0, 10).map(epb), bad, ...made.slice(11).map(epb)]);
+  type Mode = 'in place' | 'reader' | 'reader, then in place';
+  const corruptRun = (mode: Mode, rejoinAt: number) => {
+    const files = new CaptureFiles();
+    files.boundary(1, 0);
+    files.file(1, 'a', 'open', 0);
+    const c = new CatchUp<SeqFrame>(files);
+    c.useReader(mode !== 'in place');
+    const answer = (want: { offset: number; length: number }) => {
+      const bytes = corrupt.subarray(want.offset, want.offset + want.length);
+      const state = c.tailState();
+      return state !== null ? c.readDone({ parse: parseRead(state, bytes), gone: false }) : c.readDone({ bytes, gone: false });
+    };
+    c.start(3, null);
+    c.live(made[rejoinAt]);
+    const first = answer(c.wantRead()!);
+    if (mode === 'reader, then in place') c.useReader(false);
+    c.start(rejoinAt + 1, null);
+    c.live(made[12]);
+    const delivered: number[] = [];
+    let ended: string | null = null;
+    let reads = 0;
+    for (let want; reads < 50 && (want = c.wantRead()) !== null;) {
+      reads++;
+      const out = answer(want);
+      delivered.push(...out.frames.map((f) => f.seq));
+      if (out.ended) { ended = out.ended.why; break; }
+    }
+    return { first: `${first.frames.map((f) => f.seq).join(',')} rejoin ${first.rejoin?.map((f) => f.seq).join(',')}`, delivered, ended, reads };
+  };
+  for (const rejoinAt of [5, 9]) {
+    const ref = corruptRun('in place', rejoinAt);
+    const before = Array.from({ length: 10 - rejoinAt - 1 }, (_, i) => rejoinAt + 1 + i).join();
+    check(`a corrupt block after a rejoin at ${rejoinAt}, in place: the frames before it, then unreadable`,
+      ref.ended === 'unreadable' && ref.delivered.join() === before, JSON.stringify(ref));
+    for (const mode of ['reader', 'reader, then in place'] as const) {
+      const got = corruptRun(mode, rejoinAt);
+      check(`...${mode}: the same frames and the same end, in a read or two`,
+        got.first === ref.first && got.ended === 'unreadable' && got.delivered.join() === before && got.reads <= 2, JSON.stringify(got));
+    }
+  }
+}
+
 const scratch = mkdtempSync(path.join(tmpdir(), 'inwire-catchup-'));
 try {
   for (const fixture of FIXTURES.filter((f) => f.name === 'inwire' || f.name === 'bulk')) {

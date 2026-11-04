@@ -202,6 +202,12 @@ export class PcapngTail {
         this.buf = this.buf.subarray(0, this.at);
         return null;
       }
+      // A packet longer than its block is a corrupt file, not one still being
+      // written: thrown before the block is passed, so the tail - and any state
+      // saved from it - stays at the block and meets it again.
+      if (type === 0x00000006 && (length < 28 || 28 + view.getUint32(20, this.little) > length)) {
+        throw new Error(`pcapng packet longer than its block at offset ${this.base + this.at}`);
+      }
       this.stalled = 0;
       this.blockAt = this.base + this.at;
       this.at += length;
@@ -217,7 +223,6 @@ export class PcapngTail {
         const low = view.getUint32(16, this.little);
         const capLen = view.getUint32(20, this.little);
         const origLen = view.getUint32(24, this.little);
-        if (28 + capLen > length) throw new Error(`pcapng packet longer than its block at offset ${this.base + this.at - length}`);
         const ns = ((BigInt(high) << 32n) | BigInt(low)) * BigInt(this.nsPerTick[idb] ?? 1000);
         const start = this.buf.byteOffset + this.at - length + 28;
         const frame: TailFrame = {

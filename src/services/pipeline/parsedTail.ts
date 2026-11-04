@@ -82,10 +82,16 @@ export class ParsedTail {
   /**
    * A parse of the read `nextRead()` asked for. Refused, changing nothing,
    * when it did not begin where the next read does - it was asked for before a
-   * jump or a clear - or once a parse has found the file corrupt.
+   * jump or a clear.
+   *
+   * Once a parse has found the file corrupt, that is where the tail ends:
+   * nothing after it is taken, and the answer is yes all the same, so the
+   * caller reads on through what waits to the error, as `PcapngTail` reads on
+   * to the corrupt block. A refusal is read again at once - here, for ever.
    */
   take(parse: ReadParse): boolean {
-    if (this.error !== null || parse.start !== this.end.offset) return false;
+    if (this.error !== null) return true;
+    if (parse.start !== this.end.offset) return false;
     if (parse.count > 0) this.queue.push(parse);
     this.end = parse.end;
     this.head = parse.head;
