@@ -175,6 +175,8 @@ export interface KeyLogFollowStatus {
   bytes: number;
   /** Bytes at the top of the file not read because it is over the cap; 0 when none. */
   skippedBytes: number;
+  /** The cap applied: `KEYLOG_CAP_BYTES`, or what `INWIRE_KEYLOG_CAP_BYTES` set it to for a test. */
+  capBytes: number;
   /**
    * `SSLKEYLOGFILE` from main's environment, offered as a one-click choice.
    *

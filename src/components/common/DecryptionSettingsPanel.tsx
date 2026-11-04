@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FileSearch, Key, Radio, Square, Trash, Upload } from 'lucide-react';
 import { keyLog, type KeyLogStats } from '../../services/tls/keyLog';
+import { KEYLOG_CAP_BYTES } from '../../services/tls/keyLogLimits';
+import { formatBytes } from '../../lib/formatBytes';
+import { readKeyLogFile } from '../../lib/keyLogFile';
 import {
   chooseKeyLog,
   followSuggestedKeyLog,
@@ -23,6 +26,9 @@ import {
  * reaches it as a cleared snapshot from `pipelineClient.ts`); an imported file
  * is dissected on the main thread against the same store.
  */
+/** A file this big takes long enough to read that the panel says it is reading. */
+const LOADING_NOTICE_BYTES = 16 * 1024 * 1024;
+
 export const DecryptionSettingsPanel: React.FC = () => {
   const [stats, setStats] = useState<KeyLogStats>(() => keyLog.stats());
   const [follow, setFollow] = useState<KeyLogFollowStatus | null>(() => keyLogFollowStatus());
@@ -38,14 +44,26 @@ export const DecryptionSettingsPanel: React.FC = () => {
   }), []);
 
   const load = async (file: File): Promise<void> => {
-    const text = await file.text();
+    // In chunks from the newest `KEYLOG_CAP_BYTES`, never as one string: a log
+    // at the cap is longer than V8's longest (`keyLogFile.ts`, ADR 0073).
+    if (file.size > LOADING_NOTICE_BYTES) setMessage(`Loading ${file.name} (${formatBytes(file.size)})…`);
     const before = keyLog.stats();
-    const after = keyLog.add(text);
+    let skippedBytes: number;
+    try {
+      ({ skippedBytes } = await readKeyLogFile(file, (text) => { keyLog.add(text); }));
+    } catch (error) {
+      // Moved or deleted since it was picked; what was read before the error stays loaded.
+      setStats(keyLog.stats());
+      setMessage(`Could not read ${file.name}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const after = keyLog.stats();
     setStats(after);
     const added = after.secrets - before.secrets;
-    setMessage(added === 0
+    const cut = skippedBytes > 0 ? `${file.name} is ${formatBytes(file.size)}; loaded its newest ${formatBytes(KEYLOG_CAP_BYTES)}. ` : '';
+    setMessage(cut + (added === 0
       ? `${file.name} added no new secrets - every line was already loaded, or none was a key log line.`
-      : `${file.name}: ${added} secret${added === 1 ? '' : 's'} for ${after.connections - before.connections} new connection${after.connections - before.connections === 1 ? '' : 's'}.`);
+      : `${file.name}: ${added.toLocaleString()} secret${added === 1 ? '' : 's'} for ${(after.connections - before.connections).toLocaleString()} new connection${after.connections - before.connections === 1 ? '' : 's'}.`));
   };
 
   const clear = (): void => {
@@ -96,7 +114,11 @@ export const DecryptionSettingsPanel: React.FC = () => {
           leave live QUIC reading `Protected Payload`. Following reads what is
           appended as it is appended, and the choice is remembered, so it
           resumes on the next launch without being loaded again. */}
-      <div className="rounded-lg border border-border p-3 flex flex-col gap-2" data-keylog-follow={follow?.state ?? 'off'}>
+      <div
+        className="rounded-lg border border-border p-3 flex flex-col gap-2"
+        data-keylog-follow={follow?.state ?? 'off'}
+        data-keylog-skipped={following ? follow!.skippedBytes : 0}
+      >
         <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
           <Radio className="w-3.5 h-3.5 text-muted-foreground" />
           Follow a key log
@@ -113,6 +135,15 @@ export const DecryptionSettingsPanel: React.FC = () => {
             <>Could not read <code className="font-mono text-foreground break-all">{follow!.path}</code>{follow!.error ? `: ${follow!.error}` : '.'}</>
           )}
         </p>
+        {/* Past the cap, main read only the newest part (ADR 0073). The file's
+            size is the cut plus the cap: what it was when it was read from the
+            top, before the browser appended more. */}
+        {following && follow!.skippedBytes > 0 && (
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            Loaded the newest {formatBytes(follow!.capBytes)} of this {formatBytes(follow!.skippedBytes + follow!.capBytes)} file;
+            the oldest {formatBytes(follow!.skippedBytes)} were skipped.
+          </p>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           {follow?.suggested != null && !suggestedIsFollowed && (
             <button
@@ -196,6 +227,14 @@ export const DecryptionSettingsPanel: React.FC = () => {
           <>
             <dt className="text-muted-foreground">Lines ignored</dt>
             <dd className="">{stats.ignored.toLocaleString()}</dd>
+          </>
+        )}
+        {stats.dropped > 0 && (
+          <>
+            <dt className="text-muted-foreground">Not loaded</dt>
+            <dd className="" data-keylog-dropped={stats.dropped}>
+              {stats.dropped.toLocaleString()} secrets: the key log store is full. Restart Inwire to load the newest part of the file.
+            </dd>
           </>
         )}
       </dl>

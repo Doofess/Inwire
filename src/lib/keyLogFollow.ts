@@ -13,6 +13,7 @@
  * somebody was looking at it would decrypt nothing.
  */
 import { keyLog } from '../services/tls/keyLog';
+import { KEYLOG_CAP_BYTES } from '../services/tls/keyLogLimits';
 
 /**
  * `KeyLogFollowStatus` from `electron/keyLogTail.ts`, restated.
@@ -28,6 +29,7 @@ export interface KeyLogFollowStatus {
   state: 'off' | 'following' | 'missing' | 'unreadable';
   bytes: number;
   skippedBytes: number;
+  capBytes: number;
   suggested: string | null;
   error?: string;
 }
@@ -44,6 +46,8 @@ export function narrowStatus(value: unknown): KeyLogFollowStatus | null {
     bytes: typeof v.bytes === 'number' ? v.bytes : 0,
     skippedBytes: typeof v.skippedBytes === 'number' && Number.isFinite(v.skippedBytes) && v.skippedBytes >= 0
       ? v.skippedBytes : 0,
+    capBytes: typeof v.capBytes === 'number' && Number.isFinite(v.capBytes) && v.capBytes > 0
+      ? v.capBytes : KEYLOG_CAP_BYTES,
     suggested: typeof v.suggested === 'string' ? v.suggested : null,
     ...(typeof v.error === 'string' ? { error: v.error } : {}),
   };

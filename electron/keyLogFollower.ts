@@ -85,6 +85,7 @@ export class KeyLogFollower {
       state: this.file === null ? 'off' : this.state,
       bytes: this.offset,
       skippedBytes: this.skipped,
+      capBytes: KEYLOG_CAP,
       suggested: suggestedKeyLog(),
       ...(this.error !== undefined ? { error: this.error } : {}),
     };

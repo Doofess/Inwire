@@ -117,6 +117,16 @@ check('...absent is 0', narrowStatus({ state: 'following' })?.skippedBytes, 0);
 check('...invalid is 0',
   [-1, NaN, Infinity, '5'].map((s) => narrowStatus({ state: 'following', skippedBytes: s })?.skippedBytes),
   [0, 0, 0, 0]);
+// The cap main applied, which a test hook can lower: the follow card names it,
+// so it comes from main rather than from the renderer's constant.
+check('capBytes is passed on', narrowStatus({ state: 'following', capBytes: 65_536 })?.capBytes, 65_536);
+check('...absent or invalid is KEYLOG_CAP_BYTES',
+  [undefined, 0, -1, NaN, Infinity, '5'].map((c) => narrowStatus({ state: 'following', capBytes: c })?.capBytes),
+  new Array(6).fill(KEYLOG_CAP_BYTES));
+{
+  const src = readFileSync('electron/keyLogFollower.ts', 'utf8');
+  checkTrue('the follower reports the cap it applies', /capBytes: KEYLOG_CAP\b/.test(src));
+}
 
 console.log('\n--- no single read is unbounded ---\n');
 
