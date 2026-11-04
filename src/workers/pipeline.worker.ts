@@ -69,6 +69,8 @@ import { LIVE_ENV } from '../services/dissect/dissectEnv';
 import { settleTreeTls } from '../services/dissect/shardNumbering';
 import { shardsFor, type DissectionThreads } from '../services/pipeline/threads';
 import { isShardRole, runShard, SHARD_NAME } from './shardRole';
+import { isReaderRole, READER_NAME, runReader } from './readerRole';
+import type { FromReader, ToReader } from '../services/pipeline/readParse';
 
 /** Matches the main thread's old flush cadence, which the packet list is tuned to. */
 const FLUSH_MS = 100;
@@ -309,12 +311,56 @@ function pumpCatchUp(): void {
   tellAgent({ type: 'readCaptured', requestId: catchUpRequest, captureId, ...want });
 }
 
-/** Main's answer to a read. */
+/**
+ * Main's answer to a read. Beside the coordinator its bytes go on to the
+ * reader to be parsed, and the read is still out until the parse comes back;
+ * a file gone or unreadable has nothing to parse.
+ */
 function receiveCaptured(message: Extract<FromAgentLink, { type: 'capturedBytes' }>): void {
+  if (message.requestId !== catchUpRequest) return;
+  if (!capturing) { catchUpRequest = null; return; }
+  const reader = parallel?.reader ?? null;
+  const state = reader !== null && !message.gone && message.error === undefined ? catchUp.tailState() : null;
+  if (reader !== null && state !== null) {
+    const bytes = new Uint8Array(asArrayBuffer(message.bytes ?? new Uint8Array(0)));
+    reader.postMessage({ type: 'parse', requestId: message.requestId, state, bytes } satisfies ToReader, [bytes.buffer]);
+    return;
+  }
+  catchUpRequest = null;
+  afterRead(router.read(message));
+}
+
+/** The reader's parse of the read out, or word that it failed. */
+function receiveFromReader(message: FromReader): void {
+  if (message.type === 'failure') { readerDown(message.message); return; }
   if (message.requestId !== catchUpRequest) return;
   catchUpRequest = null;
   if (!capturing) return;
-  const outcome = router.read(message);
+  afterRead(router.read({ parse: message.parse, gone: false }));
+}
+
+/**
+ * The reader failed or stopped: let it go, say so, and read the file here,
+ * from where the cursor is. The read it held is asked for again.
+ */
+function readerDown(reason: string): void {
+  if (parallel === null || parallel.reader === null) return;
+  parallel.reader.terminate();
+  parallel.reader = null;
+  post({ type: 'failure', message: `catch-up's file reader stopped: ${reason}; the file is read on the pipeline Worker` });
+  readerChanged();
+}
+
+/** The reader came or went: catch-up reads through it or in place from here, and a read out is asked for again. */
+function readerChanged(): void {
+  if (catchUp.useReader(parallel?.reader != null)) {
+    catchUpRequest = null;
+    pumpCatchUp();
+  }
+}
+
+/** What a read came to: the end said, its frames flushed, and the next read asked for. */
+function afterRead(outcome: { retryMs?: number; ended?: CatchUpEnd }): void {
   if (outcome.ended !== undefined) reportCatchUpEnd(outcome.ended);
   if (!flushSoon) {
     flushSoon = true;
@@ -429,6 +475,8 @@ let threadsWanted: DissectionThreads = 1;
 let parallel: {
   coordinator: Coordinator;
   workers: Worker[];
+  /** Catch-up's file reader (`readerRole.ts`): null once it has failed, and the file is read here. */
+  reader: Worker | null;
 } | null = null;
 /** Every key log text loaded, for a shard started after it arrived. */
 const keyLogTexts: string[] = [];
@@ -464,7 +512,9 @@ function interfacesMessage(): ToShard {
 function stopParallel(): void {
   if (parallel === null) return;
   for (const worker of parallel.workers) worker.terminate();
+  parallel.reader?.terminate();
   parallel = null;
+  readerChanged();
 }
 
 /** The shards the setting asks for, started - or none, and the single Worker. */
@@ -502,11 +552,19 @@ function startParallel(shards: number): void {
     worker.postMessage({ type: 'init', shards } satisfies ToShard);
     workers.push(worker);
   }
-  parallel = { coordinator, workers };
+  // Catch-up's file reader, the same script in its reader role (`readerRole.ts`).
+  const reader = new Worker(self.location.href, { type: 'module', name: READER_NAME });
+  reader.onmessage = (event: MessageEvent<FromReader>) => receiveFromReader(event.data);
+  reader.onerror = (event) => {
+    event.preventDefault();
+    readerDown(event.message || 'it stopped');
+  };
+  parallel = { coordinator, workers, reader };
   coordinator.broadcast(hostMessage());
   coordinator.broadcast(interfacesMessage());
   for (const text of keyLogTexts) coordinator.broadcast({ type: 'keylog', text });
   if (lastFlows !== null) coordinator.broadcast(lastFlows);
+  readerChanged();
 }
 
 function shardDown(shard: number, reason: string): void {
@@ -1787,12 +1845,14 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
 
 // --- start ---------------------------------------------------------------------
 //
-// One script, two roles. The app starts it as the pipeline; the pipeline starts
-// it again, by its own URL, for each TCP shard it dissects on (ADR 0053 phase 3,
-// `shardRole.ts`) - and a shard must never run the pipeline's timer or answer
-// the app.
+// One script, three roles. The app starts it as the pipeline; the pipeline
+// starts it again, by its own URL, for each TCP shard it dissects on (ADR 0053
+// phase 3, `shardRole.ts`) and for catch-up's file reader (`readerRole.ts`) -
+// and neither must ever run the pipeline's timer or answer the app.
 if (isShardRole(ctx)) {
   runShard(ctx);
+} else if (isReaderRole(ctx)) {
+  runReader(ctx);
 } else {
   setInterval(flush, FLUSH_MS);
   ctx.onmessage = handleCommand;
