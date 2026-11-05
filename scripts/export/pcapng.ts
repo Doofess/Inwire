@@ -62,6 +62,9 @@ const DSB = 0x0000000a;
 
 interface Block { type: number; length: number; body: Uint8Array }
 
+/** A one-line key log, 30 bytes, so the DSB needs two bytes of padding. */
+const secretsBytes = new TextEncoder().encode('CLIENT_RANDOM 001122 aabbccdd\n');
+
 /** Walks the file the way a reader does, and fails loudly if it cannot. */
 function walk(bytes: Uint8Array): Block[] {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -143,8 +146,9 @@ async function captureChecks(capture: RealCapture, tools: Tools, dir: string): P
     meta, os: 'Windows 11 Pro 10.0.26200', names,
     statistics: { received: null, drops: meta.drops },
     // A key log is not traffic; it is what the DSB carries, and a one-line log
-    // is enough to find it in the file.
-    secrets: 'CLIENT_RANDOM 001122 aabbccdd\n',
+    // is enough to find it in the file. Bytes, as the store serialises them
+    // (ADR 0073): a log near the cap is past V8's longest string.
+    secrets: secretsBytes,
   };
   const bytes = new Uint8Array(await generatePcapNg(capture.packets, writeOptions).arrayBuffer());
 
@@ -161,6 +165,16 @@ async function captureChecks(capture: RealCapture, tools: Tools, dir: string): P
 
   check(`${name}: it opens with a Section Header Block`, types[0], SHB);
   check(`${name}: ...then the secrets, ahead of every frame`, [types[1], types.indexOf(DSB) < types.indexOf(EPB)], [DSB, true]);
+  {
+    // SecretsType(4) SecretsLength(4) Secrets, padded to 4, then the end of options.
+    const body = blocks[types.indexOf(DSB)].body;
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const length = view.getUint32(4, true);
+    check(`${name}: the DSB carries the secrets bytes unchanged`,
+      [length, [...body.subarray(8, 8 + length)]], [secretsBytes.length, [...secretsBytes]]);
+    check(`${name}: ...padded to four bytes with zeros`,
+      [...body.subarray(8 + length, 8 + Math.ceil(length / 4) * 4)], new Array(Math.ceil(length / 4) * 4 - length).fill(0));
+  }
   check(`${name}: one IDB per adapter in the file`, types.filter((t) => t === IDB).length, adapters.length);
   checkTrue(`${name}: ...each ahead of the first frame that names it`, types.indexOf(IDB) < types.indexOf(EPB));
   check(`${name}: an EPB per frame`, types.filter((t) => t === EPB).length, ordered.length);
@@ -454,7 +468,7 @@ async function edgeChecks(capture: RealCapture, allCaptures: RealCapture[], tool
     let refusedNames = false;
     try { new PcapngWriter({ meta: anonymisedMeta, names: [{ address: frames[0].source, names: ['host'] }] }); } catch { refusedNames = true; }
     let refusedSecrets = false;
-    try { new PcapngWriter({ meta: anonymisedMeta, secrets: 'CLIENT_RANDOM 00 11\n' }); } catch { refusedSecrets = true; }
+    try { new PcapngWriter({ meta: anonymisedMeta, secrets: new TextEncoder().encode('CLIENT_RANDOM 00 11\n') }); } catch { refusedSecrets = true; }
     check('...and refuses a name table or a key log', [refusedNames, refusedSecrets], [true, true]);
   }
 }

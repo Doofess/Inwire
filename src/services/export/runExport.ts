@@ -99,7 +99,7 @@ export interface ExportRequest {
   compress: boolean;
   anonymise: boolean;
   /** An NSS key log to attach to a pcapng. Never written alongside anonymisation. */
-  secrets?: string;
+  secrets?: Uint8Array;
   source: CaptureSource;
   /** What the capture lost. `null` counts stay null, everywhere. */
   drops: DropCounts;
@@ -232,7 +232,7 @@ export async function runExport(request: ExportRequest, runtime: ExportRuntime =
           anonymised: anonymiser !== null,
           rawBytes: format === 'pcap' || format === 'pcapng' || (tabular && request.includeRawBytes),
           fields: tabular && anonymiser === null,
-          secrets: format === 'pcapng' && anonymiser === null && !!request.secrets,
+          secrets: format === 'pcapng' && anonymiser === null && (request.secrets?.length ?? 0) > 0,
         },
       };
       return meta;

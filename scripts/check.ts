@@ -63,6 +63,8 @@ const NOT_TESTS: Record<string, string> = {
   'electron/import-drive.ts': 'imports a 400,000-frame file to reach the disk path; ~1 minute, run by hand',
   'electron/import-gate-drive.ts': 'driver; imports a generated ~200 MB pcap into the built app and presses Start, Ctrl+E and a second import while it runs; its assertions sit inside a window the import\'s speed sets, so a slow or fast machine flakes it - needs a build, run by hand (`--shots <dir>` photographs the side bar)',
   'electron/import-heap-drive.ts': 'driver; imports a large capture file into the built app and fails if the renderer dies or the heap ends past the buffer budget (#19) - needs a big file, minutes per run',
+  'electron/keylog-heap-drive.ts': 'driver; launches the built app following a generated ~215 MB key log at Auto and 16 threads, then capped by INWIRE_KEYLOG_CAP_BYTES (ADR 0073) - needs a build, run by hand, minutes per run',
+  'electron/keylog-live-drive.ts': 'driver; streams the private key-log fixture through the stub agent with its .keys followed and counts decrypted frames at 1 and Auto threads (ADR 0073) - needs a build and the fixture',
   'electron/revisit-drive.ts':
     'launches the built app, imports the real inwire fixture and opens frames whose trees '
     + 'are rebuilt from their records (ADR 0049); needs a build and the fixture, run by hand',

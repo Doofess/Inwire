@@ -21,7 +21,7 @@
 /// <reference lib="webworker" />
 
 import { OrderingWindow, type Orderable } from '../services/dissect/orderingWindow';
-import { keyLog } from '../services/tls/keyLog';
+import { keyLog, type KeyLogShared } from '../services/tls/keyLog';
 import { decodePacketBatch, isPacketBatch } from '../services/agentBinary';
 import { encodeAgentCommand, parseAgentMessage } from '../services/agentProtocol';
 import type { FromAgentLink, ToAgentLink } from '../services/agentLink';
@@ -478,8 +478,11 @@ let parallel: {
   /** Catch-up's file reader (`readerRole.ts`): null once it has failed, and the file is read here. */
   reader: Worker | null;
 } | null = null;
-/** Every key log text loaded, for a shard started after it arrived. */
-const keyLogTexts: string[] = [];
+/**
+ * The page's key log buffer as last posted (`keylog-shared`), for a shard
+ * started after it arrived. The Worker holds no copy of the log's text.
+ */
+let keyLogSnapshot: KeyLogShared | null = null;
 /**
  * The last socket table, and the time it was applied at, since the annotations
  * were last cleared: for shards started after it arrived, which would
@@ -562,7 +565,7 @@ function startParallel(shards: number): void {
   parallel = { coordinator, workers, reader };
   coordinator.broadcast(hostMessage());
   coordinator.broadcast(interfacesMessage());
-  for (const text of keyLogTexts) coordinator.broadcast({ type: 'keylog', text });
+  if (keyLogSnapshot !== null) coordinator.broadcast({ type: 'keylogShared', snapshot: keyLogSnapshot });
   if (lastFlows !== null) coordinator.broadcast(lastFlows);
   readerChanged();
 }
@@ -734,7 +737,7 @@ function resetPipeline(startId: number, startUs?: number | null, lastUs?: number
   networkFacts.reset();
   duplicates.reset();
   treeCache.clear();
-  rebuiltTrees.clear();
+  clearRebuiltTrees();
   derivedStore.clear();
   clearPendingRows();
   pendingIcmpReplies = [];
@@ -949,6 +952,23 @@ const REVISITED_TREES = 64;
 const kitWaiters = new Map<number, (kit: RevisitKit | null) => void>();
 let nextKitRequest = 1;
 const rebuiltTrees = new RebuiltTrees(REVISITED_TREES);
+/** `keyLog.generation` when `rebuiltTrees` was last cleared. */
+let rebuiltGeneration = 0;
+
+function clearRebuiltTrees(): void {
+  rebuiltTrees.clear();
+  rebuiltGeneration = keyLog.generation;
+}
+
+/**
+ * Appends to the page's key log reach this Worker with no message, so a
+ * rebuilt tree is dropped when the log's generation has moved since the last
+ * clear. Asked wherever a rebuilt tree is read or kept: a tree rebuilt before
+ * a key arrived could not decrypt, and one rebuilt after could.
+ */
+function syncRebuiltTrees(): void {
+  if (keyLog.generation !== rebuiltGeneration) clearRebuiltTrees();
+}
 
 function requestKit(id: number): Promise<RevisitKit | null> {
   if (storePort === null) return Promise.resolve(null);
@@ -982,13 +1002,16 @@ function processOfRow(row: Packet): ProcessInfo | null {
  * record or the record cannot give the tree back - the caller then replays.
  */
 async function revisitFromStore(id: number): Promise<ProtocolLayer[] | null> {
+  syncRebuiltTrees();
   rebuiltTrees.begin(id);
   let layers: ProtocolLayer[] | null = null;
   try {
     layers = await rebuildFromStore(id);
   } finally {
     // Kept for a second click, unless a later frame linked into it, or the key
-    // log went, while the store was answering.
+    // log changed, while the store was answering: the check marks a rebuild
+    // still under way as stale.
+    syncRebuiltTrees();
     rebuiltTrees.keep(id, layers);
   }
   return layers;
@@ -1496,8 +1519,7 @@ function receiveControl(text: string): void {
     // Applied here because this is where dissection happens, so every frame
     // from now on is annotated as it is built. It is forwarded as well: the
     // main thread keeps its own copy of the store to re-annotate frames that
-    // were already dissected before this table arrived - the same split
-    // `keyLog` has, for the same reason. The shards get it too, ahead of any
+    // were already dissected before this table arrived. The shards get it too, ahead of any
     // frame dispatched after this point.
     const nowUs = Date.now() * 1000;
     flowAnnotations.apply(message, nowUs);
@@ -1765,29 +1787,26 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       clientFingerprints.clear();
       break;
 
-    case 'keylog':
-      keyLog.add(command.text);
-      // Every shard holds the key log too, and one started later is given it whole.
-      keyLogTexts.push(command.text);
-      parallel?.coordinator.broadcast({ type: 'keylog', text: command.text });
+    case 'keylog-shared':
+      // The page's buffer, read in place from here on: this context never
+      // writes it. Sent when the page replaces its buffer, so an append to a
+      // shared one arrives with no message (`syncRebuiltTrees` is what notices).
+      keyLog.adopt(command.snapshot);
+      // A shard started later is given the same buffer.
+      keyLogSnapshot = command.snapshot;
+      if (command.snapshot.cleared) {
+        // The cached trees are the other place a decrypted payload lives:
+        // without this a recent frame would keep showing plaintext after the
+        // panel said the secrets were gone. The decrypted answers kept for
+        // revisits are the third.
+        treeCache.clear();
+        derivedStore.clear();
+      }
       // A rebuilt tree read the key log as it was; with more keys, the same
       // frame may now decrypt. Arrival's cache stays, as ADR 0045 records.
-      rebuiltTrees.clear();
-      break;
-
-    case 'keylog-clear':
-      // `clear` also flushes the derived AES schedules; see its comment.
-      keyLog.clear();
-      keyLogTexts.length = 0;
-      // A shard keeps a key log of its own, cleared here; it keeps no trees.
-      parallel?.coordinator.broadcast({ type: 'keylogClear' });
-      // And the cached trees, which are the other place a decrypted payload
-      // lives: without this a recent frame would keep showing plaintext after
-      // the panel said the secrets were gone. The decrypted answers kept for
-      // revisits are the third.
-      treeCache.clear();
-      rebuiltTrees.clear();
-      derivedStore.clear();
+      clearRebuiltTrees();
+      // Every shard adopts it too (it keeps no trees).
+      parallel?.coordinator.broadcast({ type: 'keylogShared', snapshot: command.snapshot });
       break;
 
     case 'derived':
@@ -1799,6 +1818,7 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
       break;
 
     case 'detail': {
+      syncRebuiltTrees();
       const layers = treeCache.get(command.id) ?? rebuiltTrees.get(command.id);
       if (layers) {
         // Lane 0's tree, its `tls.stream` placeholders numbered by now.

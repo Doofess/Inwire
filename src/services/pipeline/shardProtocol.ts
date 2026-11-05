@@ -24,6 +24,7 @@ import type { ProtocolLayer } from '../../types/packet';
 import type { RowPack } from './rowPack';
 import type { RowSide } from './rowSteps';
 import type { FlowAnnotationStore } from '../flowAnnotations';
+import type { KeyLogShared } from '../tls/keyLog';
 
 /** A frame, as a lane dissects it. */
 export interface WireFrame {
@@ -357,8 +358,8 @@ export type ToShard =
     inferred: boolean; confidence: number; basis?: string;
   }
   | { type: 'interfaces'; interfaces: [number, ShardInterface][] }
-  | { type: 'keylog'; text: string }
-  | { type: 'keylogClear' }
+  /** The page's key log buffer, adopted and read in place; see `keylog-shared` in the protocol. */
+  | { type: 'keylogShared'; snapshot: KeyLogShared }
   /**
    * A `socket_table` message, applied to the shard's own annotation store with
    * the Worker's clock (`nowUs`), never the shard's: a shard annotates every

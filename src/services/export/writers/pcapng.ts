@@ -154,11 +154,13 @@ export interface PcapngOptions {
    */
   statistics?: { received?: number | null; drops: DropCounts };
   /**
-   * An NSS key log, written as a Decryption Secrets Block. The file then opens
-   * itself - which is exactly why it is off by default and asked for
-   * explicitly: a capture with its secrets attached has no confidentiality.
+   * An NSS key log's ASCII bytes, written unchanged as a Decryption Secrets
+   * Block - bytes, not a string, because a log near the cap is longer than
+   * V8's longest string (ADR 0073). The file then opens itself, which is
+   * exactly why it is off by default and asked for explicitly: a capture with
+   * its secrets attached has no confidentiality.
    */
-  secrets?: string;
+  secrets?: Uint8Array;
   /**
    * For an anonymised export (`meta.flags.anonymised`): the job's anonymiser
    * and the adapters' real labels, so `if_name` says what the metadata says -
@@ -398,8 +400,7 @@ function enhancedPacket(packet: Packet, iface: OpenInterface, anonymised: boolea
  * Decryption Secrets Block. The length field counts the real bytes, not the
  * padding, so a reader that trusts it does not hand NULs to its parser.
  */
-function decryptionSecrets(secrets: string): Uint8Array | null {
-  const payload = utf8(secrets);
+function decryptionSecrets(payload: Uint8Array): Uint8Array | null {
   if (payload.length === 0) return null;
   const w = new Bytes();
   w.u32(DSB_SECRETS_TYPE_TLS_KEY_LOG);
@@ -528,7 +529,7 @@ export class PcapngWriter implements ExportWriter {
       if (options.names && options.names.length > 0) {
         throw new Error('an anonymised pcapng cannot carry a name resolution table');
       }
-      if (options.secrets) throw new Error('an anonymised pcapng cannot carry decryption secrets');
+      if (options.secrets && options.secrets.length > 0) throw new Error('an anonymised pcapng cannot carry decryption secrets');
     }
     for (const iface of options.interfaces ?? []) {
       if (!this.given.has(iface.name)) this.given.set(iface.name, iface);

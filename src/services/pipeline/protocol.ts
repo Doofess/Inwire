@@ -26,6 +26,7 @@ import type { StreamSeeds } from './replay';
 import type { InfoPatch } from '../pcapParser';
 import type { DissectionThreads } from './threads';
 import type { PackedRows } from './rowPack';
+import type { KeyLogShared } from '../tls/keyLog';
 
 /** Where a connection stands, in the terms `agentHealth.ts` diagnoses from. */
 export type PipelineStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -101,29 +102,31 @@ export type ToPipeline =
    */
   | { type: 'reset'; nextId: number; captureStartUs?: number | null; lastPacketUs?: number | null }
   /**
-   * A TLS key log, appended to the Worker's own store.
+   * The page's TLS key log, to be read in place (ADR 0073).
    *
-   * The store cannot be shared: the Worker is a separate JavaScript context
-   * with its own module instances, and an import runs on the main thread
-   * against the main thread's copy. So the text is pushed to both, and pushed
-   * again for every key log the user loads.
+   * The page is the only writer of the store: the follower, the panel's Load
+   * and an import's Decryption Secrets Block all `add` there. The Worker
+   * `adopt`s the buffer in this snapshot and so does every shard. Sent when a
+   * Worker is created and whenever the page replaces its buffer (growth or a
+   * clear), never per append: an append to a shared buffer reaches every reader
+   * with no message. Where memory cannot be shared (`npm run dev`), the
+   * snapshot is a frozen copy and the page posts a fresh one, at most every
+   * 250 ms after a change. Posted with no transfer list, so the page keeps its
+   * buffer.
    *
-   * Sent as text rather than as parsed secrets because the parser is one
-   * function and the wire is then one string, and because the same text is
-   * what a pcapng Decryption Secrets Block wants back out.
+   * A `cleared` snapshot also means: forget every secret. **It once did not
+   * exist.** Settings -> Decryption -> Clear cleared the main thread's store
+   * and said "new ones will not be decrypted" - while the Worker, which does
+   * every live decryption, kept every secret and kept decrypting. ADR 0008's
+   * whole position is that key material is transient, and a clear that leaves
+   * the copy that is actually used is the one place that was not true. The
+   * Worker drops its cached trees and derived answers on one.
+   *
+   * Before ADR 0073 this was the key log's text, parsed again by the Worker and
+   * each shard, and the Worker kept all of it to replay to shards started later.
+   * At 217 MB that was 715 MB a copy and a crash at every launch.
    */
-  | { type: 'keylog'; text: string }
-  /**
-   * Forget every secret the Worker holds.
-   *
-   * **It did not exist.** Settings -> Decryption -> Clear cleared the main
-   * thread's store and said "new ones will not be decrypted" - while the
-   * Worker, which does every live decryption, kept every secret and kept
-   * decrypting. ADR 0008's whole position is that key material is transient,
-   * and a clear that leaves the copy that is actually used is the one place
-   * that was not true.
-   */
-  | { type: 'keylog-clear' }
+  | { type: 'keylog-shared'; snapshot: KeyLogShared }
   /**
    * An import's decrypted answers (ADR 0049), which the import made on the
    * renderer's thread and the Worker holds in memory so a revisit of those

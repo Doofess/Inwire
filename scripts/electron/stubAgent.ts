@@ -153,6 +153,12 @@ export async function startStubAgent(
    * would otherwise take seven minutes - see `serveStub.ts --burst`.
    */
   perTick = 40,
+  /**
+   * Real frames to send instead of the DNS query, in order, `perTick` a tick,
+   * stamped now; nothing more once they run out. `keylog-live-drive.ts` uses
+   * it to stream a capture whose TLS the app can only read with its key log.
+   */
+  replay?: Uint8Array[],
 ): Promise<StubAgent> {
   const received: string[] = [];
   let seq = 0;
@@ -202,10 +208,14 @@ export async function startStubAgent(
           pump = setInterval(() => {
             const batch = [];
             for (let i = 0; i < rate; i++) {
+              if (replay !== undefined && seq >= replay.length) break;
               seq++;
-              batch.push({ seq, tsUs: Date.now() * 1000, bytes: dnsQuery(seq & 0xffff) });
+              batch.push({
+                seq, tsUs: Date.now() * 1000 + (replay !== undefined ? i : 0),
+                bytes: replay !== undefined ? replay[seq - 1] : dnsQuery(seq & 0xffff),
+              });
             }
-            send(encodeFrame(FRAME_BINARY, encodeBatch(batch)));
+            if (batch.length > 0) send(encodeFrame(FRAME_BINARY, encodeBatch(batch)));
           }, 100);
         }
         if (message.type === 'stop_capture') stop();

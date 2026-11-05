@@ -17,6 +17,7 @@ import type { HostIdentity } from './direction';
 import type { NetworkFacts } from './networkFacts';
 import type { AgentServiceFacts } from './agentLink';
 import { publishLiveLag } from './liveLag';
+import { keyLog } from './tls/keyLog';
 import type { DissectionThreads } from './pipeline/threads';
 import { PackReader } from './pipeline/rowPack';
 import { FieldBlockWriter } from './dissect/fieldSplit';
@@ -115,6 +116,8 @@ const DRAIN_TIMEOUT_MS = 3000;
 
 export class PipelineClient {
   private worker: Worker | null = null;
+  /** `keyLog.onSnapshot` is subscribed once, by the first Worker made. */
+  private followingKeyLog = false;
   /** Detail requests waiting on the Worker, by frame number. */
   /** Drains in flight, by request id. */
   private pendingDrain = new Map<number, () => void>();
@@ -159,6 +162,20 @@ export class PipelineClient {
     worker.onmessage = (event: MessageEvent<FromPipeline>) => this.receive(event.data);
     worker.onerror = (event) => this.onFailure(event.message || 'the packet pipeline failed');
     this.worker = worker;
+    // The first thing any Worker hears, ahead of whatever `send` posts next:
+    // the page's key log buffer, which it reads in place from then on. No
+    // transfer list - a SharedArrayBuffer is shared by cloning it, and a
+    // copy-mode ArrayBuffer must stay attached to the page.
+    worker.postMessage({ type: 'keylog-shared', snapshot: keyLog.share() } satisfies ToPipeline);
+    if (!this.followingKeyLog) {
+      this.followingKeyLog = true;
+      // Once for the page's life, however many Workers it has. A replacement
+      // (growth, Clear) goes to the Worker there is when it happens; one made
+      // later is given the current buffer above.
+      keyLog.onSnapshot((snapshot) => {
+        this.worker?.postMessage({ type: 'keylog-shared', snapshot } satisfies ToPipeline);
+      });
+    }
     return worker;
   }
 
@@ -362,21 +379,6 @@ export class PipelineClient {
 
   setInterfaces(interfaces: PipelineInterface[]) {
     this.send({ type: 'interfaces', interfaces });
-  }
-
-  /**
-   * Hand the Worker a TLS key log. Only affects connections dissected from
-   * here on: the frames already in the buffer were dissected without it, and
-   * re-dissecting a live capture's history would renumber nothing but would
-   * mean replaying every tracker.
-   */
-  addKeyLog(text: string) {
-    this.send({ type: 'keylog', text });
-  }
-
-  /** Forget every secret the Worker holds. See `keylog-clear` in the protocol. */
-  clearKeyLog() {
-    this.send({ type: 'keylog-clear' });
   }
 
   /**

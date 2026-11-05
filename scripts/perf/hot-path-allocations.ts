@@ -41,10 +41,16 @@ const EXPENSIVE = /new\s+(Intl\.[A-Za-z]+|TextDecoder|TextEncoder)\s*\(/;
  * Lines that may construct one anywhere.
  *
  * Only for a construction that genuinely cannot be hoisted - one whose
- * arguments are not known until the call. Add with a reason, never to silence
- * the check.
+ * arguments are not known until the call, or one that holds state for the
+ * length of the call (a streaming decoder). Add with a reason, never to
+ * silence the check.
  */
-const ALLOWED: { file: string; reason: string }[] = [];
+const ALLOWED: { file: string; reason: string }[] = [
+  {
+    file: 'src/lib/keyLogFile.ts',
+    reason: 'one streaming TextDecoder per file loaded, not per frame: it carries a split character from one chunk to the next, so two Loads at once cannot share one (ADR 0073)',
+  },
+];
 
 function walk(dir: string): string[] {
   const out: string[] = [];

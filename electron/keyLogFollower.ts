@@ -51,13 +51,17 @@ import path from 'node:path';
 import { KEYLOG_STATUS_CHANNEL, KEYLOG_TEXT_CHANNEL } from './channels';
 import { canSend } from './rendererLife';
 import {
-  LineAssembler, parseKeyLogSettings, planRead, POLL_MS, readSpans, REARM_TICKS,
-  type KeyLogFollowStatus,
+  keyLogCap, LineAssembler, parseKeyLogSettings, planFromTop, planRead, POLL_MS, readSpans,
+  REARM_TICKS, type KeyLogFollowStatus,
 } from './keyLogTail';
+
+/** Read once: `INWIRE_KEYLOG_CAP_BYTES` is a test hook. */
+const KEYLOG_CAP = keyLogCap(process.env.INWIRE_KEYLOG_CAP_BYTES);
 
 export class KeyLogFollower {
   private file: string | null;
   private offset = 0;
+  private skipped = 0;
   private readonly lines = new LineAssembler();
   private watcher: FSWatcher | null = null;
   private poll: ReturnType<typeof setInterval> | null = null;
@@ -80,6 +84,8 @@ export class KeyLogFollower {
       path: this.file,
       state: this.file === null ? 'off' : this.state,
       bytes: this.offset,
+      skippedBytes: this.skipped,
+      capBytes: KEYLOG_CAP,
       suggested: suggestedKeyLog(),
       ...(this.error !== undefined ? { error: this.error } : {}),
     };
@@ -148,6 +154,7 @@ export class KeyLogFollower {
     this.stopWatching();
     this.file = null;
     this.offset = 0;
+    this.skipped = 0;
     this.lines.reset();
     this.state = 'off';
     this.error = undefined;
@@ -169,6 +176,7 @@ export class KeyLogFollower {
   private restart(): void {
     this.stopWatching();
     this.offset = 0;
+    this.skipped = 0;
     this.lines.reset();
     this.error = undefined;
     if (this.file === null || this.target === null) {
@@ -225,8 +233,16 @@ export class KeyLogFollower {
       const size = fstatSync(fd).size;
       const plan = planRead(size, this.offset);
       if (plan.kind === 'read') {
-        if (plan.restart) this.lines.reset();
-        for (const [from, to] of readSpans(plan.from, plan.to)) {
+        let readFrom = plan.from;
+        // Every read from the top (attach, follow, shrink or replace) is capped
+        // to the newest bytes and drops the partial line it lands in.
+        if (plan.restart || plan.from === 0) {
+          const top = planFromTop(size, KEYLOG_CAP);
+          readFrom = top.from;
+          this.skipped = top.from;
+          this.lines.reset(top.skipPartial);
+        }
+        for (const [from, to] of readSpans(readFrom, plan.to)) {
           const buffer = Buffer.alloc(to - from);
           let got = 0;
           // Looped, for `nodeBlockFile.ts`'s reason: a short read is not an
