@@ -26,6 +26,14 @@
  * hands the app. `--app` launches another checkout's build, to record the
  * failure this replaces.
  *
+ * It also prints the main thread's long tasks from the file's selection until
+ * the page settles after the import (max, sum and share of the wall time), the
+ * renderer process's private-bytes peak (the page and its Workers) and the RAM
+ * tail's size. `--gate` asserts them (ADR 0074): no task over 200 ms, under 10%
+ * of the wall time in long tasks, and, when given, wall time within 10% of
+ * `--baseline-s`, the tail equal to `--expect-resident` and the peak under
+ * `--max-private-mb`. A run that saw no long task at all fails the gate as blind.
+ *
  * Not in `npm run check` (`check.ts`'s NOT_TESTS): it needs a big file and a
  * build, and takes minutes.
  */
@@ -43,12 +51,23 @@ const arg = (name: string, fallback: string): string => {
 const FILE = arg('pcap', '');
 const BUFFER_MB = arg('buffer-mb', 'auto');
 const APP = arg('app', '');
+// The import's gate (ADR 0074): main-thread long tasks, wall time against a
+// baseline, the RAM tail's size and the renderer process's private bytes.
+// Without `--gate` they are printed, not asserted.
+const GATE = process.argv.includes('--gate');
+const BASELINE_S = Number(arg('baseline-s', '0'));
+const EXPECT_RESIDENT = Number(arg('expect-resident', '0'));
+const MAX_PRIVATE_MB = Number(arg('max-private-mb', '0'));
+const LONG_TASK_LIMIT_MS = 200;
+const LONG_TASK_SHARE = 0.10;
+const WALL_SLACK = 1.10;
 const MIB = 1024 * 1024;
 const HEADROOM = 512 * MIB;
 const VIEWS = ['Packets', 'Frame Detail', 'Statistics', 'Routing Map', 'Packets'];
 
 if (!FILE || !existsSync(FILE)) {
-  console.error('usage: import-heap-drive.ts --pcap <file> [--buffer-mb <MB>] [--app <dir>]');
+  console.error('usage: import-heap-drive.ts --pcap <file> [--buffer-mb <MB>] [--app <dir>]' +
+    ' [--gate] [--baseline-s <s>] [--expect-resident <n>] [--max-private-mb <MB>]');
   process.exit(2);
 }
 
@@ -107,6 +126,21 @@ try {
   console.log(`start: ${mb(await liveHeap())} live`);
   await page.getByLabel('Export or import a capture').click();
   await page.getByRole('button', { name: /^import$/i }).click({ timeout: 2000 }).catch(() => {});
+  // Every main-thread task over 50 ms from here on, buffered so a task the
+  // observer's own callback waited behind is still counted. Long animation
+  // frames too, where the build has them; a background window may report none,
+  // which is printed as blindness rather than as a clean run.
+  await page.evaluate(() => {
+    const w = window as unknown as { __importLongTasks: { type: string; start: number; duration: number }[]; __importFrom: number };
+    w.__importLongTasks = [];
+    w.__importFrom = performance.now();
+    for (const type of ['longtask', 'long-animation-frame']) {
+      if (!PerformanceObserver.supportedEntryTypes.includes(type)) continue;
+      new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) w.__importLongTasks.push({ type, start: e.startTime, duration: e.duration });
+      }).observe({ type, buffered: true });
+    }
+  });
   const started = Date.now();
   await page.locator('input[type="file"]').first().setInputFiles(FILE);
   // Done is the panel's own "Imported N packets from" line, not a count that
@@ -114,12 +148,18 @@ try {
   // Every five seconds while it runs, from main, which answers while the
   // renderer's thread is busy dissecting: each process's private bytes, which
   // see memory the JS heap does not.
+  // The renderer process ('Tab') holds the page and every Worker it starts, so
+  // its peak is the number that sees memory a Worker took off the page's heap.
+  let tabPeak = 0;
   const sampler = setInterval(() => {
     void app.evaluate(({ app: electronApp }) => electronApp.getAppMetrics()
       .map((m) => ({ type: m.type, privateKb: m.memory.privateBytes ?? 0 })))
-      .then((metrics) => console.log(`  ${Math.round((Date.now() - started) / 1000)} s: ` +
-        metrics.filter((m) => m.privateKb > 100 * 1024)
-          .map((m) => `${m.type} ${mb(m.privateKb * 1024)}`).join(', ')), () => {});
+      .then((metrics) => {
+        for (const m of metrics) if (m.type === 'Tab') tabPeak = Math.max(tabPeak, m.privateKb * 1024);
+        console.log(`  ${Math.round((Date.now() - started) / 1000)} s: ` +
+          metrics.filter((m) => m.privateKb > 100 * 1024)
+            .map((m) => `${m.type} ${mb(m.privateKb * 1024)}`).join(', '));
+      }, () => {});
   }, 5000);
   // An import the app refuses ends in its error dialog, not the line above:
   // before #20 a file over 2 GB did, and the drive waited out its 15 minutes.
@@ -162,11 +202,43 @@ try {
   if (gone()) throw new Error('renderer gone during the import');
   if (refused) throw new Error(`the app refused the import: ${refused.heading} - ${refused.message.replace(/\s+/g, ' ')}`);
   if (!done) throw new Error('the import did not finish in 15 minutes');
-  const seconds = Math.round((Date.now() - started) / 1000);
+  const wallMs = Date.now() - started;
+  const seconds = Math.round(wallMs / 1000);
   console.log(`progress line: longest unchanged ${(longestHold / 1000).toFixed(1)} s (a hint, not asserted)`);
+  // The import's last main-thread work - adopting the tail, the render, the
+  // buffer's derivations - lands just after the line above, so the page is let
+  // settle (two frames and an idle callback) before the tasks are read, and they
+  // are read before the views below add tasks of their own.
+  const tasks = await page.evaluate(() => new Promise<{ type: string; start: number; duration: number }[]>((resolve) => {
+    const w = window as unknown as { __importLongTasks: { type: string; start: number; duration: number }[]; __importFrom: number };
+    requestAnimationFrame(() => requestAnimationFrame(() => requestIdleCallback(() => {
+      const until = performance.now();
+      resolve(w.__importLongTasks.filter((t) => t.start >= w.__importFrom && t.start <= until));
+    }, { timeout: 10_000 })));
+  }));
+  const longTasks = tasks.filter((t) => t.type === 'longtask');
+  const loafs = tasks.filter((t) => t.type === 'long-animation-frame');
+  const maxOf = (list: { duration: number }[]) => list.reduce((m, t) => Math.max(m, t.duration), 0);
+  const longSum = longTasks.reduce((s, t) => s + t.duration, 0);
+  const over = longTasks.filter((t) => t.duration > LONG_TASK_LIMIT_MS).length;
+  console.log(`longtasks: max ${Math.round(maxOf(longTasks))} ms, sum ${Math.round(longSum)} ms ` +
+    `(${(100 * longSum / wallMs).toFixed(1)}% of ${(wallMs / 1000).toFixed(1)} s), over ${LONG_TASK_LIMIT_MS} ms: ${over}`);
+  console.log(`loaf: max ${Math.round(maxOf(loafs))} ms`);
+  const blind = (n: number) => (n === 0 ? '0 (instrument blind)' : String(n));
+  console.log(`entries: longtask ${blind(longTasks.length)}, loaf ${blind(loafs.length)}`);
+  console.log(`tab private peak: ${mb(tabPeak)}`);
   const note = await page.evaluate(() =>
     (document.body.innerText.match(/All [\d,]+ frames were imported[^\n]*/) ?? [''])[0]).catch(() => '');
   if (note) console.log(`note: ${note}`);
+  const resident = Number((note.match(/newest ([\d,]+) are in memory/) ?? ['', '-1'])[1].replace(/,/g, ''));
+  if (GATE) {
+    if (longTasks.length === 0) failures.push('gate: no longtask entries, the instrument is blind');
+    if (maxOf(longTasks) > LONG_TASK_LIMIT_MS) failures.push(`gate: a main-thread task of ${Math.round(maxOf(longTasks))} ms (limit ${LONG_TASK_LIMIT_MS})`);
+    if (longSum / wallMs >= LONG_TASK_SHARE) failures.push(`gate: long tasks ${(100 * longSum / wallMs).toFixed(1)}% of the import (limit ${100 * LONG_TASK_SHARE}%)`);
+    if (BASELINE_S > 0 && wallMs / 1000 > BASELINE_S * WALL_SLACK) failures.push(`gate: ${(wallMs / 1000).toFixed(1)} s past ${(BASELINE_S * WALL_SLACK).toFixed(1)} s`);
+    if (EXPECT_RESIDENT > 0 && resident !== EXPECT_RESIDENT) failures.push(`gate: ${resident.toLocaleString()} frames in memory, expected ${EXPECT_RESIDENT.toLocaleString()}`);
+    if (MAX_PRIVATE_MB > 0 && tabPeak > MAX_PRIVATE_MB * MIB) failures.push(`gate: tab private peak ${mb(tabPeak)} past ${MAX_PRIVATE_MB.toLocaleString()} MB`);
+  }
   await page.keyboard.press('Escape').catch(() => {});
   const frames = await total();
   const after = await liveHeap();
