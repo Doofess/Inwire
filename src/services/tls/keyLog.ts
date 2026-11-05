@@ -152,6 +152,24 @@ export class KeyLogStore {
     return table.stats();
   }
 
+  /**
+   * Makes room for a key log of `textBytes` before its text arrives, so the
+   * buffer moves once instead of at every overflow: each move leaves the old
+   * buffer in every reader until that reader next collects, and an idle shard
+   * does not. Called with what main is about to send (`keyLogFollow`), a
+   * file's size (`loadKeyLogFile`), and a Decryption Secrets Block's length.
+   * Absolute, so a second call for the same length does nothing.
+   */
+  public reserve(textBytes: number): void {
+    if (this.reader) throw new Error('key log is read-only in this context');
+    const table = this.table ?? (this.table = this.create(0));
+    if (!table.reserve(textBytes)) return;
+    // As `add` after a growth: a new buffer is posted at once, and the
+    // cleared flag has already gone out with the snapshot `clear` posted.
+    this.clearedFlag = false;
+    if (this.live) this.emit(this.snapshot(table));
+  }
+
   public stats(): KeyLogStats {
     return this.table === null ? { connections: 0, secrets: 0, ignored: 0, dropped: 0 } : this.table.stats();
   }
