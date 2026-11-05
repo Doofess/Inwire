@@ -9,10 +9,11 @@
  */
 /// <reference lib="webworker" />
 import { createImportRun } from '../services/pipeline/importRun';
-import type { ToImport } from '../services/pipeline/importProtocol';
+import { IMPORT_NAME, type ToImport } from '../services/pipeline/importProtocol';
 
-/** The name the page gives an import Worker. Not a shard's or the reader's. */
-export const IMPORT_NAME = 'inwire-import';
+// Defined in the protocol so the page can name the Worker without importing the
+// role (and with it the whole walk) into its own chunk.
+export { IMPORT_NAME };
 
 export function isImportRole(scope: { name?: string }): boolean {
   return scope.name === IMPORT_NAME;

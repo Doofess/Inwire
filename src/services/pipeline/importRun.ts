@@ -23,7 +23,8 @@
  *   another frame; frames after the block decrypt, as they do in-process.
  * - **The end.** A final empty acked `appendBytes` is the barrier: `done` is
  *   posted only after the store has taken everything before it, so the page's
- *   seal cannot overtake a row. The tail goes back first, in chunks.
+ *   seal cannot overtake a row. The tail goes back first, in chunks, one in
+ *   flight (`tailTaken`), each chunk's rows dropped as it is posted.
  */
 import { PcapService } from '../pcapParser';
 import { ImportTail } from '../importTail';
@@ -31,6 +32,7 @@ import { storeMessagesFor } from '../capture/storePacket';
 import type { ToCapture } from '../capture/captureProtocol';
 import { packFrames } from '../capture/frameSlab';
 import { CHUNK_FRAMES } from '../capture/chunkCodec';
+import { estimateSummaryBytes } from '../bufferBudget';
 import { keyLog, type KeyLogShared } from '../tls/keyLog';
 import type { Packet } from '../../types/packet';
 import { DerivedStore } from './derivedStore';
@@ -66,6 +68,24 @@ function packedRowsViews(rows: PackedRows): ArrayBufferView[] {
   return views;
 }
 
+/**
+ * One tail chunk as it goes to the page: the rows packed (a pack is at most
+ * `CHUNK_FRAMES` rows, the codec's bound, so a message is several of them and one
+ * flush). `firstKey` numbers the packs; the next free key is returned.
+ */
+export function packTailChunk(
+  sender: PackSender, chunk: readonly Packet[], firstKey: number,
+): { packed: PackedRows; nextKey: number } {
+  const flush = new PackedFlush();
+  let key = firstKey;
+  for (let from = 0; from < chunk.length; from += CHUNK_FRAMES) {
+    const part = chunk.slice(from, from + CHUNK_FRAMES);
+    const pack = packRows(key++, part, part.map((row) => row.rawBytes.length));
+    part.forEach((row, i) => flush.packed(pack, i, row.rawBytes, null));
+  }
+  return { packed: sender.seal(flush), nextKey: key };
+}
+
 export function createImportRun(io: ImportIo): (message: ToImport, ports: readonly MessagePort[]) => void {
   let started = false;
   let storePort: MessagePort | null = null;
@@ -84,6 +104,8 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
   let secretSeq = 0;
   const waitingSecrets = new Map<number, () => void>();
   let storedThrough = 0;
+  // Set while a posted tail chunk waits for the page's `tailTaken`.
+  let tailAck: (() => void) | null = null;
   let derived: DerivedStore | null = null;
   let tail: ImportTail | null = null;
 
@@ -175,26 +197,23 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
     barrierAck = ack;
     if (owed.has(ack)) await new Promise<void>((resolve) => { barrier = resolve; });
 
-    // The tail, oldest first, a chunk at a time: the page decodes each in a task
-    // of its own.
-    const rows = importTail.rows();
-    const estimates = importTail.estimates();
+    // The tail, oldest first, one chunk in flight: the page decodes a chunk in a
+    // task of its own and says `tailTaken`, and only then is the next packed. A
+    // chunk's rows leave the tail as it is posted, so the Worker never holds the
+    // whole tail while the page is building its own copy of it.
     const chunkRows = options.tailChunkRows ?? TAIL_CHUNK_ROWS;
     const sender = new PackSender();
     let key = 0;
-    for (let at = 0; at < rows.length; at += chunkRows) {
-      const chunk = rows.slice(at, at + chunkRows);
-      const flush = new PackedFlush();
-      // A pack is at most `CHUNK_FRAMES` rows (the codec's bound): a message
-      // is several of them, one flush.
-      for (let from = 0; from < chunk.length; from += CHUNK_FRAMES) {
-        const part = chunk.slice(from, from + CHUNK_FRAMES);
-        const pack = packRows(key++, part, part.map((row) => row.rawBytes.length));
-        part.forEach((row, i) => flush.packed(pack, i, row.rawBytes, null));
-      }
-      const packed = sender.seal(flush);
-      io.post({ type: 'tail', pack: packed, estimates: estimates.slice(at, at + chunk.length) },
-        transferListOf(packedRowsViews(packed)));
+    while (importTail.length > 0) {
+      const chunk = importTail.take(chunkRows);
+      // Estimated now, on the finished rows: a late patch can change a row's size
+      // after it was pushed, and the page's accounting has always been taken from
+      // the rows as they end up (`adoptAccounting`).
+      const estimates = chunk.map(estimateSummaryBytes);
+      const { packed, nextKey } = packTailChunk(sender, chunk, key);
+      key = nextKey;
+      io.post({ type: 'tail', pack: packed, estimates }, transferListOf(packedRowsViews(packed)));
+      await new Promise<void>((resolve) => { tailAck = resolve; });
     }
 
     const entries = derived.entries();
@@ -253,6 +272,12 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
         storedThrough = Math.max(storedThrough, message.id);
         tail?.releaseBytesThrough(storedThrough);
         return;
+      case 'tailTaken': {
+        const ack = tailAck;
+        tailAck = null;
+        ack?.();
+        return;
+      }
     }
   };
 }

@@ -9,6 +9,7 @@ import { createCipheriv, randomBytes } from 'node:crypto';
 import type { MessagePort } from 'node:worker_threads';
 import { PcapService } from '../../src/services/pcapParser';
 import { ImportTail } from '../../src/services/importTail';
+import { estimateSummaryBytes } from '../../src/services/bufferBudget';
 import { storeMessagesFor } from '../../src/services/capture/storePacket';
 import { DerivedStore } from '../../src/services/pipeline/derivedStore';
 import { createImportRun } from '../../src/services/pipeline/importRun';
@@ -137,7 +138,8 @@ async function inProcess(blob: Blob, options: ImportRunOptions): Promise<RouteRe
   return {
     messages,
     rows: tail.rows().map(canonicalRow),
-    estimates: tail.estimates().slice(),
+    // As `adoptAccounting` takes them: the finished rows' own estimates.
+    estimates: tail.rows().map(estimateSummaryBytes),
     totalFrames: outcome.totalFrames,
     built: outcome.built,
     missedPatches: outcome.missedPatches,

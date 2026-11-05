@@ -59,7 +59,10 @@ import { CommandPalette } from "./components/common/CommandPalette";
 import { getPacketThemeForApp } from "./services/packetThemes";
 import { Capabilities, Packet } from "./types/packet";
 import { PacketGenerator } from "./services/packetGenerator";
-import { pipeline } from "./services/pipelineClient";
+import { pipeline, createPipelineScriptWorker, requestCaptureIngestPort } from "./services/pipelineClient";
+import { keyLog } from "./services/tls/keyLog";
+import type { ImportedInfo } from "./components/export/ImportPanel";
+import type { WorkerImportRoute } from "./services/tabularImport";
 import { usePacketDetail } from "./lib/usePacketDetail";
 import { bytesAreRecoverable } from './services/packetBytes';
 import { flowAnnotations } from './services/flowAnnotations';
@@ -132,8 +135,7 @@ import {
 } from "./services/preferences";
 import { useThrottledValue } from "./lib/useThrottledValue";
 import type { FilterPresetLibrary } from "./types/packet";
-import type { FrameRecordEntry } from "./services/pcapParser";
-import { DerivedStore, derivedBudgetFor } from "./services/pipeline/derivedStore";
+import { derivedBudgetFor } from "./services/pipeline/derivedStore";
 
 import { TriangleAlert } from "lucide-react";
 import { FieldBlockWriter } from './services/dissect/fieldSplit';
@@ -143,7 +145,6 @@ import { captureStore, newCaptureId } from './services/capture/captureClient';
 import { freshCaptureStorageState, type CaptureStorageState } from './services/capture/captureProtocol';
 import { shouldCheckOnLaunch, updateStore } from './services/updatePrefs';
 import type { CaptureSource } from './services/export/captureMeta';
-import type { CaptureFileFacts } from './services/captureFileFacts';
 import { cancelExportForChange, cancelExportJob } from './services/export/exportJob';
 import { getImportJob, IMPORT_RUNNING_REASON, IMPORT_RUNNING_START, useImportJob } from './services/importJob';
 import { beginCaptureStart, CAPTURE_STARTING_REASON, endCaptureStart, useCaptureStarting } from './services/captureStarting';
@@ -2799,11 +2800,12 @@ export default function App() {
   }, [streamToFollow, view, setView]);
 
   /**
-   * The import's decrypted answers (ADR 0049), held until the import's reset
-   * has emptied the Worker's and then handed over. Memory only, and never to
-   * the store.
+   * The import Worker's open of its capture: while `onImportOpening` runs the
+   * lifecycle, its `openStore` effect awaits the store's answer (`beginAwaited`)
+   * rather than posting and moving on, and leaves the pending answer here.
    */
-  const importDerivedRef = useRef<DerivedStore | null>(null);
+  const awaitedOpenRef = useRef(false);
+  const openedStoreRef = useRef<Promise<void> | null>(null);
 
   /**
    * What an import does, and in what order (`services/importLifecycle.ts`,
@@ -2851,13 +2853,11 @@ export default function App() {
       cancelExportJob('an import started');
       // An import is a new capture with no marks of its own.
       adoptMarks(EMPTY_MARKS);
-      // The Worker's budget, so an import keeps what a live capture would.
-      importDerivedRef.current = new DerivedStore(derivedBudgetRef.current);
-      captureStore.begin(captureId);
+      if (awaitedOpenRef.current) openedStoreRef.current = captureStore.beginAwaited(captureId);
+      else captureStore.begin(captureId);
     },
     discardStore: (captureId) => {
       captureStore.discard(captureId);
-      importDerivedRef.current = null;
     },
     sealStore: (captureId) => {
       captureStore.finish();
@@ -2884,28 +2884,59 @@ export default function App() {
   const bytesStoredThrough = (): number => captureStore.storedRange?.last ?? 0;
 
   /**
-   * Every frame an import produced, on its way to disk.
+   * The import Worker's first batch is built: open its capture, and say which.
    *
-   * This is what makes an import of a capture larger than memory possible at
-   * all: the importer used to build `maxFrames` frames and say the rest had
-   * been thrown away. Now the whole file goes to the store and `maxFrames` is
-   * only what stays resident, so the list scrolls into the rest the same way
-   * it scrolls into a live capture's history.
+   * Every frame of the file goes to the store, from the Worker over a port of
+   * its own, and `maxFrames` is only what stays resident, so the list scrolls
+   * into the rest the same way it scrolls into a live capture's history. The
+   * lifecycle opens the store the first time, as the first batch always did (the
+   * offered capture is pruned when this one is stored, as Start's is), and the
+   * open is awaited: the Worker holds its messages until the store has said
+   * which capture is open, so each is tagged with it.
    */
-  const handleImportBatch = useCallback((batch: Packet[], records: FrameRecordEntry[]) => {
-    // The first batch opens the store; the offered capture is pruned when this
-    // one is stored, as Start's is.
-    importLifecycle.onBatch();
-    // Records first, so each is in the store before its frame: a record that
-    // arrives after its frame's chunk has sealed is dropped (ADR 0049).
-    captureStore.appendRecords(records);
-    for (const { id, derived } of records) {
-      if (derived) importDerivedRef.current?.set(id, derived);
+  const handleImportOpening = async (): Promise<string> => {
+    awaitedOpenRef.current = true;
+    openedStoreRef.current = null;
+    try {
+      importLifecycle.onBatch();
+    } finally {
+      awaitedOpenRef.current = false;
     }
-    captureStore.append(batch);
-  }, []);
+    const captureId = importLifecycle.storeId();
+    // Widened by hand: `onBatch` sets the ref, which TypeScript's narrowing from
+    // the `null` above cannot see, so it would type this `null` and the await a no-op.
+    const opened = openedStoreRef.current as Promise<void> | null;
+    openedStoreRef.current = null;
+    if (captureId === null || opened === null) throw new Error('The import could not open its capture.');
+    await opened;
+    return captureId;
+  };
 
-  const handleImportPackets = (imported: Packet[], info?: { filename: string; facts?: CaptureFileFacts }) => {
+  /**
+   * A capture file's import in a Worker (`services/importClient.ts`, loaded here
+   * on first use so the eager bundle does not carry it). The budget it keeps
+   * decrypted answers within is what the pipeline Worker is given, so an import
+   * keeps what a live capture would.
+   */
+  const importWorkerRoute: WorkerImportRoute = async (file, run) => {
+    const { runWorkerImport, IMPORT_NAME } = await import("./services/importClient");
+    return runWorkerImport(file, {
+      spawn: () => createPipelineScriptWorker(IMPORT_NAME),
+      ingestPort: requestCaptureIngestPort,
+      keyLog,
+      onOpening: handleImportOpening,
+      storedThrough: bytesStoredThrough,
+      onProgress: run.onProgress,
+      options: {
+        record: true,
+        residentBytes: run.residentBytes,
+        maxFrames: run.maxFrames,
+        derivedBudget: derivedBudgetRef.current,
+      },
+    });
+  };
+
+  const handleImportPackets = (imported: Packet[], info?: ImportedInfo) => {
     setIsCapturing(false);
     setCaptureSource(info
       ? { kind: 'import', fileName: info.filename, ...(info.facts === undefined ? {} : { facts: info.facts }) }
@@ -2939,12 +2970,12 @@ export default function App() {
     // `null` keeps `persistedThroughId` where it was, which is right when the
     // import went nowhere; when it went to disk, everything up to `lastId` is
     // there and a later flush must not write it a second time.
-    adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId));
+    adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId), info?.estimates);
     pipeline.reset(Math.floor(lastId) + 1);
-    if (importDerivedRef.current !== null) {
-      pipeline.keepDerived(importDerivedRef.current.entries());
-      importDerivedRef.current = null;
-    }
+    // The import's decrypted answers (ADR 0049), from the Worker's `done`: handed
+    // to the pipeline only after its reset has emptied its own. Memory only, and
+    // never to the store.
+    if (info?.derived !== undefined) pipeline.keepDerived(info.derived);
     captureStartRef.current = null;
     lastPacketTimeRef.current = null;
     // Except that a stored import got frames, and `lastPacketMs` is how the
@@ -3379,10 +3410,9 @@ export default function App() {
                 agentInterfaces={agentInterfaces}
                 captureSource={captureSource}
                 onImportPackets={handleImportPackets}
-                onImportBatch={handleImportBatch}
+                onImportWorker={importWorkerRoute}
                 onImportBegin={handleImportBegin}
                 onImportFailed={handleImportFailed}
-                bytesStoredThrough={bytesStoredThrough}
                 captureId={captureStorage.captureId}
                 capturedFileCount={keptFiles(captureFiles).length}
                 capturing={isCapturing}

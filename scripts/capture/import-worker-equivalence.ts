@@ -100,6 +100,10 @@ interface WorkerRouteResult extends RouteResult {
   secretsSeen: number;
   /** The most frames the store held received and unanswered at once. */
   peakOutstanding: number;
+  /** The most tail chunks the page held un-acked at once: one is the rule. */
+  tailPeak: number;
+  /** `done` arrivals while a tail chunk was still un-acked. */
+  doneBeforeLastTailTaken: number;
 }
 
 /** `ackDelayMs`: how long the fake store sits on each answer, to let a pause show. */
@@ -119,8 +123,10 @@ async function workerRoute(
   const stored: string[] = [];
   const out = {
     untagged: 0, nonEmptySlabs: 0, appendBytesSeen: 0, secretsSeen: 0, peakOutstanding: 0,
+    tailPeak: 0, doneBeforeLastTailTaken: 0,
   };
   const CAPTURE = 'capture-under-test';
+  let tailOpen = 0;
   let outstanding = 0;
   let sinceAnswer = 0;
   port1.on('message', (m: { type: string; ack?: number; packets?: { id: number }[]; slab?: { ids: Float64Array }; captureId?: string }) => {
@@ -172,10 +178,21 @@ async function workerRoute(
             send({ kind: 'msg', msg: { type: 'storeOpen', captureId: CAPTURE } });
             return;
           case 'tail':
+            tailOpen++;
+            out.tailPeak = Math.max(out.tailPeak, tailOpen);
             for (const row of reader.read(msg.pack)) rows.push(canonicalRow(row));
             estimates.push(...msg.estimates);
+            // The page is a little slow to take it: a Worker that posts the next
+            // chunk without waiting would have two in flight by now.
+            setTimeout(() => {
+              tailOpen--;
+              send({ kind: 'msg', msg: { type: 'tailTaken' } });
+            }, 5);
             return;
-          case 'done': resolve(msg); return;
+          case 'done':
+            if (tailOpen > 0) out.doneBeforeLastTailTaken++;
+            resolve(msg);
+            return;
           case 'failed': reject(new Error(`the Worker failed: ${msg.message}`)); return;
           case 'progress': return;
         }
@@ -267,6 +284,9 @@ async function compare(
     base.totalFrames === worker.totalFrames && base.built === worker.built
     && base.missedPatches === worker.missedPatches && base.facts === worker.facts && base.totalFrames > 0,
     { base: [base.totalFrames, base.built, base.missedPatches], worker: [worker.totalFrames, worker.built, worker.missedPatches] });
+  pass(`${label}: one tail chunk in flight at a time, and done after the last is taken`,
+    worker.tailPeak === 1 && worker.doneBeforeLastTailTaken === 0,
+    { tailPeak: worker.tailPeak, doneBeforeLastTailTaken: worker.doneBeforeLastTailTaken });
   pass(`${label}: derived equal (${base.derived.length} entries)`,
     JSON.stringify(base.derived) === JSON.stringify(worker.derived));
   if (label.startsWith('tls')) {

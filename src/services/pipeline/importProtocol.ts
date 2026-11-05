@@ -15,9 +15,18 @@ import type { PackedRows } from './rowPack';
 /**
  * How many tail rows go back in one message. The page decodes a chunk in one
  * task, so this is the length of the longest main-thread task the handover
- * makes. A starting figure: the page client's measurement fixes it.
+ * makes, and only one chunk is in flight at a time.
+ *
+ * Measured under tsx on this machine (2026-11-05): `PackReader(new
+ * FieldBlockWriter()).read` takes 1.5-1.9 us per row on 40,000 synthetic DNS and
+ * TCP rows (5,000-row chunks 9.6 ms, 20,000-row chunks 30 ms, worst 33 ms). A
+ * row of a TLS or QUIC capture carries more fields, so the figure is sized for
+ * ~50 ms on these rows and the real ones stay well under the 200 ms gate.
  */
-export const TAIL_CHUNK_ROWS = 20_000;
+export const TAIL_CHUNK_ROWS = 30_000;
+
+/** The name the page gives an import Worker. Not a shard's or the reader's. */
+export const IMPORT_NAME = 'inwire-import';
 
 /** Frames the store has not yet acknowledged before the walk pauses (as `liveFlow`). */
 export const IMPORT_CREDIT_FRAMES = 50_000;
@@ -50,7 +59,13 @@ export type ToImport =
   /** The page has opened the capture (`opening` was the request). */
   | { type: 'storeOpen'; captureId: string }
   /** The store has these frames' bytes through `id`: the tail may let go of its own. */
-  | { type: 'storedThrough'; id: number };
+  | { type: 'storedThrough'; id: number }
+  /**
+   * The page has decoded the `tail` chunk it was sent. The Worker posts one chunk
+   * and waits for this before it packs the next, so at the handover the process
+   * holds at most one chunk's bytes twice (the Worker's and the page's).
+   */
+  | { type: 'tailTaken' };
 
 export type FromImport =
   | { type: 'progress'; readBytes: number; totalBytes: number }
@@ -58,7 +73,11 @@ export type FromImport =
   | { type: 'secrets'; seq: number; text: string }
   /** The first batch is built: open the capture, then say `storeOpen`. Sent once. */
   | { type: 'opening' }
-  /** A chunk of the tail, oldest first. The slab behind `pack` is transferred. */
+  /**
+   * A chunk of the tail, oldest first. The slab behind `pack` is transferred. One
+   * is in flight at a time: the next follows the page's `tailTaken`, and `done`
+   * follows the last one's.
+   */
   | { type: 'tail'; pack: PackedRows; estimates: number[] }
   | {
       type: 'done';

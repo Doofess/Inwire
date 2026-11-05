@@ -60,7 +60,11 @@ check('handleFile awaits the lifecycle\'s begin before it reads the file',
   && handleFile.indexOf('await onImportBegin?.()') < handleFile.indexOf('importAnyFile('));
 check('a refusal and a throw both undo a begun import, before the dialog',
   (handleFile.match(/if \(begun\) onImportFailed\?\.\(\);\s+onFailure\(/g) ?? []).length === 2);
-check('the import is handed the store\'s reach for its tail', handleFile.includes('bytesStoredThrough,'));
+// The tail's byte release used to be a callback handed down to the walk on this
+// thread; the Worker route writes to the store itself and learns the store's reach
+// from App's `storedThrough` (checked below), so the panel hands over the route.
+check('the import is handed the Worker route, which keeps the tail and its byte release',
+  handleFile.includes('worker: onImportWorker'));
 check('the last result is the job\'s, so a remounted panel still shows it',
   panel.includes('job.result?.message') && panel.includes('job.result?.notes') && !panel.includes('setStatus'));
 check('handleFile hands the progress callback to the import', handleFile.includes('onProgress: importJobProgress'));
@@ -143,7 +147,7 @@ check('stopCaptureAndSeal hands back the drain it started',
   app.includes('const stopCaptureAndSeal = (tellAgent: boolean): Promise<void> => {'));
 check('...resolved at once when the capture is already sealed',
   between(app, 'const stopCaptureAndSeal =', 'stopCaptureRef.current = stopCaptureAndSeal').includes('?? Promise.resolve()'));
-const lifecycleBegin = between(app, 'const importLifecycleEffects', 'const handleImportBatch');
+const lifecycleBegin = between(app, 'const importLifecycleEffects', 'const handleImportOpening');
 check('the lifecycle seals through stopCaptureAndSeal(true) and not the bare stop',
   /stopAndSeal: \(\) => \(isCapturingRef\.current\s+\? stopCaptureAndSeal\(true\)/.test(lifecycleBegin));
 check('...and empties the view with handleClearPackets, bypassing the Clear View gate',
@@ -152,11 +156,22 @@ check('...keeping the offer, so the view\'s offer stays null for the import',
   lifecycleBegin.includes('offeredCapture(sessionMetaNow())') && lifecycleBegin.includes('setLastCapture(null)'));
 check('a failure re-offers the kept capture as Clear View does',
   lifecycleBegin.includes('setLastCapture(kept)') && lifecycleBegin.includes('void saveSessionMeta(kept)'));
-check('a failure discards the import\'s directory and drops its derived answers',
-  lifecycleBegin.includes('captureStore.discard(captureId)') && lifecycleBegin.includes('importDerivedRef.current = null'));
-const batch = between(app, 'const handleImportBatch', 'const handleImportPackets');
-check('the first batch opens the store through the lifecycle, and no longer stops the capture itself',
-  batch.includes('importLifecycle.onBatch()') && !batch.includes('stopCaptureForImportRef'));
+// The decrypted answers used to wait in an App ref that a failure had to empty;
+// they now come back in the Worker's `done` and reach `handleImportPackets` only on
+// success, so a failure has nothing of them to drop.
+check('a failure discards the import\'s directory',
+  lifecycleBegin.includes('captureStore.discard(captureId)') && !lifecycleBegin.includes('importDerivedRef'));
+const batch = between(app, 'const handleImportOpening', 'const importWorkerRoute');
+check('the Worker\'s first batch opens the store through the lifecycle - awaited - and no longer stops the capture itself',
+  batch.includes('importLifecycle.onBatch()') && batch.includes('await opened') && !batch.includes('stopCaptureForImportRef'));
+check('the open is awaited from the lifecycle\'s own effect, not a second open',
+  lifecycleBegin.includes('captureStore.beginAwaited(captureId)') && lifecycleBegin.includes('captureStore.begin(captureId)'));
+check('the Worker route is given what the store holds (for the tail\'s byte release) and the pipeline\'s derived budget',
+  between(app, 'const importWorkerRoute', 'const handleImportPackets').includes('storedThrough: bytesStoredThrough')
+  && between(app, 'const importWorkerRoute', 'const handleImportPackets').includes('derivedBudget: derivedBudgetRef.current'));
+check('the import\'s derived answers come from the Worker\'s done, after the pipeline reset',
+  /pipeline\.reset\(.*\);[\s\S]*?pipeline\.keepDerived\(info\.derived\)/.test(between(app, 'const handleImportPackets', 'deriveForBuffer(imported)'))
+  && between(app, 'const handleImportPackets', 'deriveForBuffer(imported)').includes('info?.estimates'));
 check('the success path takes the capture id from the lifecycle',
   between(app, 'const handleImportPackets', 'adoptMarks(EMPTY_MARKS)').includes('importLifecycle.succeed()'));
 // The offer's "it got a frame" mark is `lastPacketMs`. An import that left it
@@ -167,9 +182,9 @@ check('a stored import records its last frame\'s time, so it can be offered agai
   /if \(storedImport !== null && imported\.length > 0\)\s*\{?\s*lastPacketTimeRef\.current = imported\[imported\.length - 1\]\.tsUs/
     .test(imported)
   && imported.lastIndexOf('lastPacketTimeRef.current = imported') > imported.lastIndexOf('lastPacketTimeRef.current = null'));
-check('App hands the panel the lifecycle and the store\'s reach',
+check('App hands the panel the lifecycle and the Worker route, and reads the store\'s reach',
   app.includes('onImportBegin={handleImportBegin}') && app.includes('onImportFailed={handleImportFailed}')
-  && app.includes('bytesStoredThrough={bytesStoredThrough}')
+  && app.includes('onImportWorker={importWorkerRoute}')
   && app.includes('captureStore.storedRange?.last ?? 0'));
 
 check('App reads the job for render-time reasons', app.includes('useImportJob()'));

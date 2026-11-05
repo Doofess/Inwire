@@ -3,7 +3,7 @@ import { Check, Info, LoaderCircle, Upload } from 'lucide-react';
 
 import { Packet } from '../../types/packet';
 import { ImportFailure } from '../../services/exportSchema';
-import { importAnyFile, IMPORT_ACCEPT, type ImportBatchSink } from '../../services/tabularImport';
+import { importAnyFile, IMPORT_ACCEPT, type WorkerImportRoute } from '../../services/tabularImport';
 import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
@@ -23,21 +23,32 @@ import { importRefusal, isCaptureStarting } from '../../services/captureStarting
  * a success with caveats and a dialog for a refusal.
  */
 
+/** What an import hands the app beside its frames. */
+export interface ImportedInfo {
+  filename: string;
+  facts?: CaptureFileFacts;
+  /** From the import Worker: each frame's `estimateSummaryBytes`, for the buffer's accounting. */
+  estimates?: number[];
+  /** From the import Worker: the decrypted answers its walk kept, by frame id. */
+  derived?: [number, Uint8Array][];
+}
+
 interface ImportPanelProps {
   /**
    * The frames to put in the buffer: everything for a small file, the newest
    * `maxFrames` when the import streamed to disk.
    */
-  onImportPackets: (packets: Packet[], info: { filename: string; facts?: CaptureFileFacts }) => void;
+  onImportPackets: (packets: Packet[], info: ImportedInfo) => void;
   /**
-   * Where every frame goes as it is dissected, if anywhere.
+   * How a capture file is imported: in a Worker, which writes every frame to the
+   * store and hands back the newest ones for the buffer (`importClient.ts`).
    *
    * With it, a capture file is imported whole and the buffer size stops being
    * a ceiling on what the file may contribute. Without it - which is what a
    * test or a caller with no store gets - the old cap applies and the note
    * below says so.
    */
-  onImportBatch?: ImportBatchSink;
+  onImportWorker?: WorkerImportRoute;
   /**
    * Called before the file is read, and awaited: a live capture is stopped and
    * sealed and the view emptied here, so nothing the renderer does between the
@@ -50,12 +61,6 @@ interface ImportPanelProps {
    * and give the previous capture back. Called before `onFailure`.
    */
   onImportFailed?: () => void;
-  /**
-   * The highest frame id the store can already supply bytes for (0 = none), so
-   * the import's RAM tail releases a row's raw bytes only when the store has
-   * them.
-   */
-  bytesStoredThrough?: () => number;
   onFailure: (filename: string, failure: ImportFailure) => void;
   /** Set when the error dialog's "Choose another file" reopens the picker. */
   retryToken: number;
@@ -70,10 +75,9 @@ interface ImportPanelProps {
 
 export const ImportPanel: React.FC<ImportPanelProps> = ({
   onImportPackets,
-  onImportBatch,
+  onImportWorker,
   onImportBegin,
   onImportFailed,
-  bytesStoredThrough,
   onFailure,
   retryToken,
   blockedBy = null,
@@ -125,9 +129,8 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
       const outcome = await importAnyFile(file, {
         maxFrames: framesForBudget(budget, AVERAGE_FRAME_BYTES),
         residentBytes: budget,
-        onBatch: onImportBatch,
+        worker: onImportWorker,
         onProgress: importJobProgress,
-        bytesStoredThrough,
       });
       if (outcome.ok === false) {
         if (begun) onImportFailed?.();
@@ -136,7 +139,9 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
       }
       // The name travels with the frames: it is the capture's source in
       // everything exported from them.
-      onImportPackets(outcome.packets, { filename: file.name, facts: outcome.facts });
+      onImportPackets(outcome.packets, {
+        filename: file.name, facts: outcome.facts, estimates: outcome.estimates, derived: outcome.derived,
+      });
       result = {
         message: `Imported ${outcome.packets.length.toLocaleString()} packets from ${file.name}`,
         notes: outcome.notes,

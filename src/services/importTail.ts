@@ -83,6 +83,22 @@ export class ImportTail {
   /** The tail's rows, oldest first: the live array, not a copy. */
   rows(): Packet[] { return this.tail; }
 
+  /** How many rows the tail holds. */
+  get length(): number { return this.tail.length; }
+
+  /**
+   * Hands over the oldest `count` rows and forgets them: the tail no longer
+   * holds a reference, so a Worker that has posted them can let them be
+   * collected while the page decodes. The one-shot `rows()` and `estimates()`
+   * are for a tail that is read whole.
+   */
+  take(count: number): Packet[] {
+    const rows = this.tail.splice(0, count);
+    for (const size of this.sizes.splice(0, count)) this.tailBytes -= size;
+    this.released = Math.max(0, this.released - rows.length);
+    return rows;
+  }
+
   /** Each row's `estimateSummaryBytes`, parallel to `rows()`. */
   estimates(): number[] { return this.sizes; }
 }
