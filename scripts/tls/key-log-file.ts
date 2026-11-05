@@ -7,7 +7,8 @@
  * reads in chunks and hands the store whole lines, from the file's newest
  * `cap` bytes, the way main's follower does.
  */
-import { readKeyLogFile } from '../../src/lib/keyLogFile';
+import { loadKeyLogFile, readKeyLogFile } from '../../src/lib/keyLogFile';
+import { KeyLogStore } from '../../src/services/tls/keyLog';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -19,7 +20,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 async function read(text: string | Uint8Array, options: Parameters<typeof readKeyLogFile>[2] = {}) {
   const adds: string[] = [];
-  const result = await readKeyLogFile(new Blob([text as BlobPart]), (t) => adds.push(t), options);
+  const result = await readKeyLogFile(new Blob([text as BlobPart]), (t) => { adds.push(t); }, options);
   return { adds, joined: adds.join(''), ...result };
 }
 
@@ -62,6 +63,59 @@ console.log('\n--- what a chunk boundary must not break ---\n');
   check('...and no add is longer than a chunk plus the bound', Math.max(...bounded.adds.map((t) => t.length)) <= 256 + 1024, true);
   const tail = await read(`${lines[0]}${'y'.repeat(5000)}`, { chunkBytes: 256, maxLineBytes: 1024 });
   check('...including one that runs to the end of the file', tail.joined, lines[0]);
+}
+
+console.log('\n--- the panel\'s Load, and a Clear pressed while it runs ---\n');
+{
+  /** A file whose chunks arrive one at a time, when the test lets them: a Clear can land between two. */
+  const gatedFile = (text: string) => {
+    const bytes = new TextEncoder().encode(text);
+    const waiting: (() => void)[] = [];
+    let reads = 0;
+    const file = {
+      size: bytes.length,
+      slice: (a: number, b: number) => ({
+        arrayBuffer: () => new Promise<ArrayBuffer>((resolve) => {
+          reads++;
+          waiting.push(() => resolve(bytes.slice(a, b).buffer));
+        }),
+      }),
+    } as unknown as Blob;
+    /** Lets the oldest pending read finish, and everything it sets off. */
+    const next = async () => {
+      waiting.shift()?.();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+    return { file, next, reads: () => reads };
+  };
+  const finish = async <T>(pending: Promise<T>, next: () => Promise<void>): Promise<T> => {
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    while (!settled) await next();
+    return pending;
+  };
+
+  const plain = new KeyLogStore();
+  const whole = await loadKeyLogFile(new Blob([log]), plain, { chunkBytes: 1024 });
+  check('a Load says what it added', whole, { kind: 'loaded', secrets: 40, connections: 40, skippedBytes: 0 });
+
+  const store = new KeyLogStore();
+  store.add(`CLIENT_RANDOM ${'f'.repeat(64)} ${'cd'.repeat(48)}\n`);
+  const gated = gatedFile(log);
+  const pending = loadKeyLogFile(gated.file, store, { chunkBytes: 1024 });
+  await gated.next();
+  const beforeClear = store.stats().secrets;
+  store.clear();
+  const result = await finish(pending, gated.next);
+  check('the Load had added secrets before the Clear', beforeClear > 1, true);
+  check('a Load the user clears ends as cleared, with no counts to show', result, { kind: 'cleared' });
+  check('...and nothing it reads after the Clear reaches the store', store.stats().secrets, 0);
+  check('...and it stops reading the file', gated.reads(), 2);
+
+  const early = new KeyLogStore();
+  early.clear();
+  const afterEarlyClear = await loadKeyLogFile(new Blob([log]), early, { chunkBytes: 1024 });
+  check('a Clear before a Load starts does not cancel it', afterEarlyClear.kind === 'loaded' && early.stats().secrets === 40, true);
 }
 
 console.log();

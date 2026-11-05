@@ -3,7 +3,7 @@ import { FileSearch, Key, Radio, Square, Trash, Upload } from 'lucide-react';
 import { keyLog, type KeyLogStats } from '../../services/tls/keyLog';
 import { KEYLOG_CAP_BYTES } from '../../services/tls/keyLogLimits';
 import { formatBytes } from '../../lib/formatBytes';
-import { readKeyLogFile } from '../../lib/keyLogFile';
+import { loadKeyLogFile } from '../../lib/keyLogFile';
 import {
   chooseKeyLog,
   followSuggestedKeyLog,
@@ -47,23 +47,19 @@ export const DecryptionSettingsPanel: React.FC = () => {
     // In chunks from the newest `KEYLOG_CAP_BYTES`, never as one string: a log
     // at the cap is longer than V8's longest (`keyLogFile.ts`, ADR 0073).
     if (file.size > LOADING_NOTICE_BYTES) setMessage(`Loading ${file.name} (${formatBytes(file.size)})…`);
-    const before = keyLog.stats();
-    let skippedBytes: number;
-    try {
-      ({ skippedBytes } = await readKeyLogFile(file, (text) => { keyLog.add(text); }));
-    } catch (error) {
-      // Moved or deleted since it was picked; what was read before the error stays loaded.
-      setStats(keyLog.stats());
-      setMessage(`Could not read ${file.name}: ${error instanceof Error ? error.message : String(error)}`);
+    const result = await loadKeyLogFile(file, keyLog);
+    setStats(keyLog.stats());
+    // Cleared while it read: it stopped, and Clear's message is the one to keep.
+    if (result.kind === 'cleared') return;
+    if (result.kind === 'failed') {
+      setMessage(`Could not read ${file.name}: ${result.error}`);
       return;
     }
-    const after = keyLog.stats();
-    setStats(after);
-    const added = after.secrets - before.secrets;
+    const { secrets: added, connections, skippedBytes } = result;
     const cut = skippedBytes > 0 ? `${file.name} is ${formatBytes(file.size)}; loaded its newest ${formatBytes(KEYLOG_CAP_BYTES)}. ` : '';
     setMessage(cut + (added === 0
       ? `${file.name} added no new secrets - every line was already loaded, or none was a key log line.`
-      : `${file.name}: ${added.toLocaleString()} secret${added === 1 ? '' : 's'} for ${(after.connections - before.connections).toLocaleString()} new connection${after.connections - before.connections === 1 ? '' : 's'}.`));
+      : `${file.name}: ${added.toLocaleString()} secret${added === 1 ? '' : 's'} for ${connections.toLocaleString()} new connection${connections === 1 ? '' : 's'}.`));
   };
 
   const clear = (): void => {

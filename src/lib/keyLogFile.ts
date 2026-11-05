@@ -8,6 +8,7 @@
  * `cap` bytes of the file: the same cut main's follower makes, dropping the
  * line the cut lands in (`planFromTop` in `electron/keyLogTail.ts`, ADR 0073).
  */
+import type { KeyLogStore } from '../services/tls/keyLog';
 import { KEYLOG_CAP_BYTES } from '../services/tls/keyLogLimits';
 
 /** What one `add` is handed at most, before the carried partial line. */
@@ -25,9 +26,10 @@ export interface ReadKeyLogOptions {
   maxLineBytes?: number;
 }
 
+/** `add` may return false to stop: nothing more is handed over and the rest of the file is not read. */
 export async function readKeyLogFile(
   file: Blob,
-  add: (text: string) => void,
+  add: (text: string) => boolean | void,
   options: ReadKeyLogOptions = {},
 ): Promise<{ skippedBytes: number }> {
   const cap = options.cap ?? KEYLOG_CAP_BYTES;
@@ -40,6 +42,10 @@ export async function readKeyLogFile(
   // True while discarding up to the next newline: the line the cut landed in,
   // or one that ran past `maxLine`.
   let skipping = from > 0;
+  let stopped = false;
+  const give = (text: string): void => {
+    if (!stopped && add(text) === false) stopped = true;
+  };
 
   const take = (decoded: string, last: boolean): void => {
     let text = carry + decoded;
@@ -52,11 +58,11 @@ export async function readKeyLogFile(
     }
     const end = text.lastIndexOf('\n');
     if (last) {
-      if (text.length > 0 && text.length - end - 1 <= maxLine) add(text);
-      else if (end >= 0) add(text.slice(0, end + 1));
+      if (text.length > 0 && text.length - end - 1 <= maxLine) give(text);
+      else if (end >= 0) give(text.slice(0, end + 1));
       return;
     }
-    if (end >= 0) add(text.slice(0, end + 1));
+    if (end >= 0) give(text.slice(0, end + 1));
     carry = text.slice(end + 1);
     if (carry.length > maxLine) {
       carry = '';
@@ -64,10 +70,49 @@ export async function readKeyLogFile(
     }
   };
 
-  for (let at = from; at < file.size; at += chunkBytes) {
+  for (let at = from; at < file.size && !stopped; at += chunkBytes) {
     const bytes = new Uint8Array(await file.slice(at, Math.min(file.size, at + chunkBytes)).arrayBuffer());
     take(decoder.decode(bytes, { stream: true }), false);
   }
-  take(decoder.decode(), true);
+  if (!stopped) take(decoder.decode(), true);
   return { skippedBytes: from };
+}
+
+/** What a Load through the Decryption panel came to. */
+export type KeyLogLoad =
+  | { kind: 'loaded'; secrets: number; connections: number; skippedBytes: number }
+  | { kind: 'failed'; error: string }
+  /** The user pressed Clear while it read: it stopped there, and Clear's message stands. */
+  | { kind: 'cleared' };
+
+/**
+ * The panel's Load: reads `file` into `store` and says what it added. Lifted
+ * out of `DecryptionSettingsPanel.tsx` so a script can drive it.
+ *
+ * A Clear while it reads ends it. Reading a large file takes seconds, and the
+ * rest of it used to go on loading under a panel that had just said "new
+ * frames will not be decrypted", then reported a count measured across the
+ * Clear, negative when the store had held more than the file brought back.
+ */
+export async function loadKeyLogFile(file: Blob, store: KeyLogStore, options: ReadKeyLogOptions = {}): Promise<KeyLogLoad> {
+  const clears = store.clears;
+  const before = store.stats();
+  try {
+    const { skippedBytes } = await readKeyLogFile(file, (text) => {
+      if (store.clears !== clears) return false;
+      store.add(text);
+    }, options);
+    if (store.clears !== clears) return { kind: 'cleared' };
+    const after = store.stats();
+    return {
+      kind: 'loaded',
+      secrets: after.secrets - before.secrets,
+      connections: after.connections - before.connections,
+      skippedBytes,
+    };
+  } catch (error) {
+    if (store.clears !== clears) return { kind: 'cleared' };
+    // Moved or deleted since it was picked; what was read before the error stays loaded.
+    return { kind: 'failed', error: error instanceof Error ? error.message : String(error) };
+  }
 }

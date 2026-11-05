@@ -97,6 +97,7 @@ export class KeyLogStore {
   private readonly listeners = new Set<(snapshot: KeyLogShared) => void>();
   /** True from a clear until the buffer is next replaced (or, in copy mode, copied). */
   private clearedFlag = false;
+  private clearCount = 0;
   private copyTimer: ReturnType<typeof setTimeout> | undefined;
 
   public constructor(options: KeyLogStoreOptions = {}) {
@@ -189,8 +190,18 @@ export class KeyLogStore {
     this.cancelCopy();
     this.table = this.create(this.generation + 1);
     this.clearedFlag = true;
+    this.clearCount++;
     clearDerivedKeys();
     this.emit(this.snapshot(this.table));
+  }
+
+  /**
+   * How many times this store has been cleared. A Load reads a file over many
+   * seconds; it compares this to stop when the user clears under it, so a
+   * Clear is not quietly undone by the rest of the file (`loadKeyLogFile`).
+   */
+  public get clears(): number {
+    return this.clearCount;
   }
 
   /** The current buffer, allocated on first use. */

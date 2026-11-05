@@ -70,7 +70,7 @@ Read each driver's prerequisites before starting it.
 | Dissection, display fields or colour rules | Column parity, tree coverage and relevant synthetic protocol scripts; snaplen for truncation changes |
 | Capture store, row space or import | `scripts/electron/disk-drive.ts` and `scripts/electron/import-drive.ts`; for import memory, `scripts/electron/import-heap-drive.ts --pcap <file>` with a file of millions of frames |
 | Live frame path or record reconstruction | `scripts/electron/live-revisit-drive.ts`; `scripts/electron/revisit-drive.ts` for imported/decrypted detail |
-| Key log store, its sharing or its cap (ADR 0073) | `scripts/tls/key-log-table.ts` and `scripts/tls/key-log.ts`; `scripts/electron/keylog-heap-drive.ts` (a ~200 MB synthetic log followed at Auto and 16 threads, then capped; `--app <dir>` runs another build); `scripts/electron/keylog-live-drive.ts` (the keylog fixture replayed live through the stub at 1 and Auto threads; skips without it) |
+| Key log store, its sharing or its cap (ADR 0073) | `scripts/tls/key-log-table.ts`, `scripts/tls/key-log.ts` and `scripts/tls/key-log-file.ts` (the panel's Load: chunks, the cap, and a Clear pressed while it reads); `scripts/electron/keylog-heap-drive.ts` (a ~200 MB synthetic log followed at Auto and 16 threads, then capped; `--app <dir>` runs another build); `scripts/electron/keylog-live-drive.ts` (the keylog fixture replayed live through the stub at 1 and Auto threads; skips without it) |
 | Capture-start options or agent open | `scripts/electron/capture-options-drive.ts` |
 | Agent capture-file writer or autostop | `scripts/electron/capture-file-drive.ts` |
 | Agent lifetime, health or connection | `scripts/electron/agent-live-drive.ts`; agent tests below |

@@ -75,7 +75,10 @@ there does not keep half-derived keys.
 **Clear retires the buffer.** `clear()` makes a new, empty table at the next
 generation and posts it at once with `cleared: true`; each context flushes its
 AES cache (`clearDerivedKeys`) on adopting it, and the Worker clears its
-trees, derived answers and rebuilt trees, as it did on `keylog-clear`.
+trees, derived answers and rebuilt trees, as it did on `keylog-clear`. A
+file the panel is still reading when Clear is pressed stops at its next
+chunk (`loadKeyLogFile` compares the store's count of clears), so the rest of
+the file does not refill the store Clear just emptied.
 
 **Bounds.** `KEYLOG_CAP_BYTES` is 512 MiB, 2.4 times the owner's file, so
 that file loads whole. A followed file larger than the cap is read from
