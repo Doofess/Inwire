@@ -36,7 +36,9 @@ const checkTrue = (name: string, condition: boolean) => check(name, condition, t
 async function main() {
   // Source-level, because `CaptureClient` needs the preload's bridge: whatever
   // an import's entry carries, the store is sent the id and the record alone.
-  const client = readFileSync('src/services/capture/captureClient.ts', 'utf8');
+  // The cut lives in `storeMessagesFor`, which the client sends through
+  // (`scripts/capture/import-seams.ts` asserts the posted messages).
+  const client = readFileSync('src/services/capture/storePacket.ts', 'utf8');
   checkTrue('the store is sent each record and its id, and nothing else an entry carries',
     /frames: records\.map\(\(\{ id, record \}\) => \(\{ id, record \}\)\)/.test(client));
 

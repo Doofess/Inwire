@@ -34,7 +34,7 @@ import type { InfoPatch } from '../dissect/types';
 import type { ToCapture, FromCapture, CaptureStorageState } from './captureProtocol';
 import { freshCaptureStorageState } from './captureProtocol';
 import { MatchSet } from './matchSet';
-import { plainForStore } from './storePacket';
+import { storeMessagesFor } from './storePacket';
 import type { StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import type { TlsSummary } from '../conversation/tlsSummary';
@@ -481,7 +481,7 @@ class CaptureClient {
     // dense columns and the store cannot have them, because a class instance
     // does not survive a structured clone. `storePacket.ts` says what that
     // cost when it was not done.
-    this.send({ type: 'append', packets: packets.map(plainForStore) });
+    for (const message of storeMessagesFor(packets, undefined)) this.send(message);
   }
 
   /**
@@ -494,7 +494,7 @@ class CaptureClient {
     // The record and the id, and nothing else a caller's entry carries: an
     // import's entries hold its decrypted answers too, which are never
     // written anywhere (ADR 0049), and a message clones every field it is given.
-    this.send({ type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })) });
+    for (const message of storeMessagesFor([], records)) this.send(message);
   }
 
   /**

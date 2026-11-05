@@ -1,5 +1,5 @@
 import { Packet } from '../types/packet';
-import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from './bufferBudget';
+import { ImportTail } from './importTail';
 import { DnsTracker } from './dnsTracker';
 import { ImportFailure, rowsToFrames } from './exportSchema';
 import { PcapService, type FrameRecordEntry } from './pcapParser';
@@ -326,59 +326,17 @@ async function readStreamedCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch: ImportBatchSink,
   onProgress?: ImportProgress, bytesStoredThrough?: () => number,
 ): Promise<CaptureRead> {
-  const tail: Packet[] = [];
-  // Each tail row's estimate, parallel to `tail`, so dropping a row subtracts
-  // what it added without estimating it again.
-  const sizes: number[] = [];
-  let tailBytes = 0;
-  // How many of the tail's oldest rows have let their bytes go. The budget does
-  // not count raw bytes; they stay for the newest BYTES_RESIDENT_FRAMES only, as
-  // in the live buffer, and older frames read theirs from the store. Kept on
-  // every row, a tail of full-size frames held a 2.7 GB file's bytes (#20).
-  let released = 0;
+  const tail = new ImportTail({ residentBytes, maxFrames });
   // Recorded, because every frame of a streamed import goes to the store, and
   // a frame's record there is what rebuilds its tree later (ADR 0049).
   const outcome = await PcapService.streamCaptureFile(file, (batch, records) => {
     onBatch(batch, records ?? []);
-    for (const packet of batch) {
-      const size = estimateSummaryBytes(packet);
-      tail.push(packet);
-      sizes.push(size);
-      tailBytes += size;
-    }
-    // Trimmed as it goes, not at the end: holding the whole capture to slice
-    // the last slab off it is the memory this route exists to avoid. Both
-    // bounds hold, one frame always stays, and the head goes in one splice.
-    let drop = 0;
-    while (
-      tail.length - drop > 1
-      && (tailBytes > residentBytes || tail.length - drop > maxFrames)
-    ) {
-      tailBytes -= sizes[drop];
-      drop++;
-    }
-    if (drop > 0) {
-      tail.splice(0, drop);
-      sizes.splice(0, drop);
-      released = Math.max(0, released - drop);
-    }
-    // After `onBatch`, which has handed each frame to the store: its append
-    // copies the packet object there and then, so this reaches only the tail's.
-    // Only a frame the store can supply is let go, as the live path's
-    // `evictOldBytes` does: rows are in id order, so the first one not yet
-    // stored ends the pass and the next batch tries again. With no way to ask,
-    // nothing is released - a tail that keeps every byte is safe, one that
-    // lets go of bytes held nowhere is not.
-    const storedThrough = bytesStoredThrough?.() ?? 0;
-    for (
-      ;
-      released < tail.length - BYTES_RESIDENT_FRAMES && tail[released].id <= storedThrough;
-      released++
-    ) {
-      tail[released].rawBytes = RELEASED_BYTES;
-    }
+    tail.push(batch);
+    // After `onBatch`, which has handed each frame to the store. With no way to
+    // ask what it holds, nothing is released.
+    tail.releaseBytesThrough(bytesStoredThrough?.() ?? 0);
   }, { record: true, onProgress });
-  return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
+  return { packets: tail.rows(), totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
 }
 
 /**
@@ -389,13 +347,6 @@ export type ImportBatchSink = (packets: Packet[], records: FrameRecordEntry[]) =
 
 /** How much of the file has been read, of its size; called as each window loads. */
 type ImportProgress = (readBytes: number, totalBytes: number) => void;
-
-/**
- * What a tail row holds once its bytes have gone: empty, which is all
- * `hasBytes` in `packetBytes.ts` asks. Not imported from there, so this module
- * does not pull the store client in.
- */
-const RELEASED_BYTES = new Uint8Array(0);
 
 export interface ImportOptions {
   /**
