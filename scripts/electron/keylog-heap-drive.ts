@@ -69,8 +69,10 @@ interface Run {
   rendererPrivateMB: number;
   /** The last sample taken while the renderer lived, near 30 s. */
   rendererPrivateEndMB: number;
-  /** One sample a second from the reload, MB, for where a peak falls. */
+  /** One sample a second from the launch, MB, for where a peak falls. */
   timeline: number[];
+  /** Workers Playwright saw at the end: the evidence the thread count took. */
+  workers: number;
   /**
    * After a forced GC in the page and every Worker: what is held rather than
    * waiting to be collected. An idle shard allocates nothing, so it never
@@ -82,15 +84,44 @@ interface Run {
   loadedMs: number;
 }
 
+/**
+ * Writes the thread count and a finished tour into a fresh profile from a
+ * launch that follows nothing, so the measured launch follows the key log from
+ * its first page and never reloads, as the owner's did. Setting them in the
+ * measured launch took a reload, and the first page's half-done load was still
+ * in the renderer while the second ran: a peak no real launch has.
+ */
+async function primeProfile(profile: string, threads: 'auto' | number): Promise<void> {
+  const app = await launchApp({
+    args: ['.'],
+    ...(APP ? { cwd: APP } : {}),
+    // A pipe nobody serves: this launch only writes settings.
+    env: { ...process.env, INWIRE_USER_DATA: profile, INWIRE_AGENT_PIPE: `\\\\.\\pipe\\inwire-keylog-prime-${process.pid}`, INWIRE_CRASH_ANSWER: 'quit' },
+  });
+  try {
+    const page = await app.firstWindow();
+    page.setDefaultTimeout(30_000);
+    await page.evaluate('window.__name = (f) => f');
+    await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
+    await page.evaluate((count) => {
+      localStorage.setItem('inwire.tour', JSON.stringify({ completed: true }));
+      localStorage.setItem('inwire.performance', JSON.stringify({ dashboardRefreshMs: 500, packetBufferBytes: 'auto', dissectionThreads: count }));
+    }, threads);
+  } finally {
+    await app.close().catch(() => {});
+  }
+}
+
 async function run(label: string, keyLogFile: string, expectSecrets: number, threads: 'auto' | number,
   env: Record<string, string> = {}): Promise<Run> {
   console.log(`\n--- ${label} ---\n`);
   const pipe = `\\\\.\\pipe\\inwire-keylog-heap-${process.pid}-${label.replace(/\W+/g, '-')}`;
   const agent = await startStubAgent(pipe, 40);
   const profile = mkdtempSync(path.join(tmpdir(), 'inwire-keylog-heap-'));
+  await primeProfile(profile, threads);
   writeFileSync(path.join(profile, 'keylog.json'), JSON.stringify({ path: keyLogFile }));
   const result: Run = {
-    alive: false, secrets: -1, skipped: -1, rendererPrivateMB: -1, rendererPrivateEndMB: -1, timeline: [],
+    alive: false, secrets: -1, skipped: -1, rendererPrivateMB: -1, rendererPrivateEndMB: -1, timeline: [], workers: -1,
     rendererPrivateHeldMB: -1, pageHeapMB: -1, loadedMs: -1,
   };
   const tabMB = async (): Promise<number> => {
@@ -99,6 +130,7 @@ async function run(label: string, keyLogFile: string, expectSecrets: number, thr
     const tab = metrics.find((m) => m.type === 'Tab');
     return tab ? Math.round(tab.privateKb / 1024) : -1;
   };
+  const launched = Date.now();
   const app = await launchApp({
     args: ['--js-flags=--expose-gc', '.'],
     ...(APP ? { cwd: APP } : {}),
@@ -123,14 +155,6 @@ async function run(label: string, keyLogFile: string, expectSecrets: number, thr
   try {
     const page = await app.firstWindow();
     page.setDefaultTimeout(30_000);
-    await page.evaluate('window.__name = (f) => f');
-    await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
-    await page.evaluate((count) => {
-      localStorage.setItem('inwire.tour', JSON.stringify({ completed: true }));
-      localStorage.setItem('inwire.performance', JSON.stringify({ dashboardRefreshMs: 500, packetBufferBytes: 'auto', dissectionThreads: count }));
-    }, threads);
-    await page.reload();
-    const launched = Date.now();
     await page.evaluate('window.__name = (f) => f');
     await page.waitForFunction(() => (document.getElementById('root')?.childElementCount ?? 0) > 0);
     await page.getByRole('button', { name: 'Skip' }).click({ timeout: 2000 }).catch(() => {});
@@ -170,6 +194,7 @@ async function run(label: string, keyLogFile: string, expectSecrets: number, thr
     // The timeline ends here; what follows is forced and would read as a drop.
     sampling = false;
     const workers = page.workers();
+    result.workers = workers.length;
     let collected = 0;
     for (const worker of workers) {
       const ran = await worker.evaluate(() => {
@@ -254,7 +279,7 @@ if (KEYLOG) {
     const empty = await run('an empty key log at auto threads', emptyFile, 0, 'auto');
     const r = await run('following the given key log at auto threads', KEYLOG, before.secrets, 'auto');
     const after = tableOf(KEYLOG);
-    checkTrue(`real log: the renderer is alive ${ALIVE_MS / 1000} s after the reload`, r.alive);
+    checkTrue(`real log: the renderer is alive ${ALIVE_MS / 1000} s after the launch`, r.alive);
     checkTrue(`real log: Decryption shows the secrets an in-process store counts (${before.secrets.toLocaleString()} to ${after.secrets.toLocaleString()})`,
       r.secrets >= before.secrets && r.secrets <= after.secrets);
     checkShare('real log', r, empty, after.tableMB);
@@ -273,13 +298,19 @@ try {
     `a ${tableMB} MB table${APP ? `; app ${APP}` : ''}`);
 
   const shares: Partial<Record<'auto' | 16, Share>> = {};
+  const workers: Partial<Record<'auto' | 16, number>> = {};
   for (const threads of ['auto', 16] as const) {
     const empty = await run(`an empty key log at ${threads} threads`, emptyFile, 0, threads);
     const r = await run(`following it at ${threads} threads`, file, made.lines, threads);
-    checkTrue(`${threads}: the renderer is alive ${ALIVE_MS / 1000} s after the reload`, r.alive);
+    checkTrue(`${threads}: the renderer is alive ${ALIVE_MS / 1000} s after the launch`, r.alive);
     check(`${threads}: Decryption shows every secret`, r.secrets, made.lines);
     shares[threads] = checkShare(String(threads), r, empty, tableMB);
+    workers[threads] = r.workers;
   }
+  // The setting is written by a launch before the measured one; a profile
+  // that lost it would run both at the default and compare nothing.
+  checkTrue(`16 threads ran more Workers than Auto (${workers[16]} against ${workers.auto}): the setting took`,
+    (workers[16] ?? -1) > (workers.auto ?? -1) && (workers.auto ?? -1) > 2);
   // The shards read the page's buffer: ten more of them hold nothing more. A
   // compact copy each would add a table apiece.
   const auto = shares.auto;
