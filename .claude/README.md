@@ -8,7 +8,7 @@ Per-machine choices go in settings.local.json beside it, which is gitignored.
 
 | File | What it does |
 |---|---|
-| `.claude/settings.json` | Turns off, for this repo only, the claude.ai connectors and the plugins sessions here never used (Playwright's browser MCP and the synced design and engineering skills). Pre-approves the project MCP server and wires the hooks |
+| `.claude/settings.json` | Switches on, for this repo only, the two language servers: `typescript-lsp` for the app and `rust-analyzer-lsp` for `agent-rs/`. The user level pins every other plugin off, so nothing else loads here. Turns off the claude.ai connectors, pre-approves the project MCP server and wires the hooks |
 | `.mcp.json` | One MCP server, Microsoft Learn (HTTP, no login), for Win32, named-pipe, service, ACL and signing documentation. Only search text leaves the machine. Never paste capture data into a query |
 | `.claude/hooks/guard-shell.mjs` | Before every Bash and PowerShell call: blocks Windows-side Python (the Store stub hangs the shell; WSL is fine), an `npm run check` held in the foreground without `run_in_background` or a 600000 ms timeout, and npm that writes `node_modules` where `node_modules` is a link |
 | `.claude/hooks/ensure-modules.mjs` | After a shell `worktree add`, after EnterWorktree, and as each subagent starts: junctions main's `node_modules` into every worktree under the repo's worktree folder that has none, so `tsx` and `tsc` work there at once. A worktree whose lockfile differs from main's is left for its own `npm ci`, because npm run through the junction would empty and rewrite main's copy. Removing the worktree unlinks the junction and leaves main's copy alone |
@@ -25,6 +25,12 @@ Per-machine choices go in settings.local.json beside it, which is gitignored.
   `claude plugin marketplace add`, `claude mcp add`, the `/mcp` toggle or
   the claude.ai sync switches. Each of those writes to user scope and would
   change every other project.
+- **A plugin is switched on here only when sessions here use it.** The
+  language servers need their commands on PATH: `typescript-language-server`
+  (npm, global) and `rust-analyzer` (`rustup component add rust-analyzer`, on
+  the default toolchain and on the GNU one `agent-rs/` builds with). The
+  owner's machine setup installs both; without them a session starts with a
+  plugin load error and no code intelligence, and nothing else breaks.
 - **This repo is public.** No personal paths, user names or email addresses
   in anything committed here. `scripts/claude/setup.ts` fails on them.
 - **Hooks are plain Node with no dependencies, and they fail open.** A hook
