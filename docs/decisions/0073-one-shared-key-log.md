@@ -47,8 +47,15 @@ frame can decrypt. Before, it never saw them.
 
 **Compact, outside the JS heap.** `src/services/tls/keyLogTable.ts` keeps the
 log in one buffer: a 128-byte header of Int32 fields, an open-addressed slot
-table keyed by FNV-1a over the client random's bytes 16 to 31, 36-byte
-connection entries, 16-byte record entries, then an arena of secret bytes.
+table, 36-byte connection entries, 16-byte record entries, then an arena of
+secret bytes. The slot is HalfSipHash-2-4 of all 32 bytes of the client
+random, keyed with 64 random bits drawn when the table is made and kept in
+its header. A key log and a pcapng's Decryption Secrets Block are input
+someone else can write, and the first version hashed bytes 16 to 31 with no
+key: 20,000 lines that differed only in bytes 0 to 15 sat in one run of
+20,000 slots and took 2.4 s to load against 38 ms, a cost that grows with the
+square of the count (40,000 took 9.3 s). The `Map` it replaced was safe from
+this because V8 seeds its string hash.
 `KeyLogStore` is a facade over it with the same surface
 (`add`, `stats`, `secretsFor`, `isEmpty`, `serialise`, `clear`) plus
 `share` / `adopt` / `onSnapshot`. `secretsFor` stays synchronous and returns
@@ -105,6 +112,8 @@ Task 1, in Node, against the old store as an oracle:
 | JS heap for 400,000 lines | 0.52 to 0.62 MiB more than empty (target ≤ 16 MiB) |
 | replacements while adding 1,000,000 lines | 18 |
 | a `worker_threads` reader, 1,000,000 lines, 19 adoptions | 0 wrong answers, 0 torn reads |
+| the keyed hash against the unkeyed one, 1,380,000 lines added in 1 MiB pieces | 1,059 to 1,258 ms against 951 to 1,066 ms (three runs each) |
+| 20,000 lines that differ only in bytes 0 to 15, or only 0 to 3 | 44 ms, longest run of slots 14 to 16 (ordinary lines: 39 ms, 13) |
 
 Task 5, in the built app (`scripts/electron/keylog-heap-drive.ts`): a
 synthetic log of the owner's shape, 205 MB and 1,380,000 lines for 260,000

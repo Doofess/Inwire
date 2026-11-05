@@ -13,7 +13,8 @@
  * buffer and its header alone. All integers are little-endian `Int32`.
  *
  *   header   32 ints (128 bytes): magic, version, the four capacities, the four
- *            region offsets, the total, GENERATION, the four counters.
+ *            region offsets, the total, GENERATION, the four counters, the
+ *            hash key's two halves.
  *   slots    `slotCap` ints, open addressing, linear probing. 0 is empty,
  *            otherwise connection index + 1. `slotCap` is a power of two and
  *            at least 2x `connCap`, so the load never passes 0.5.
@@ -26,8 +27,13 @@
  *            as `Map.set` did.
  *   arena    the secret bytes, appended.
  *
- * The hash reads bytes 16..31 of the client random, never 0..3: TLS 1.2 clients
- * put `gmt_unix_time` there.
+ * The hash is HalfSipHash-2-4 over all 32 bytes of the client random, keyed
+ * with 64 random bits the writer draws when it makes a table. A key log or a
+ * Decryption Secrets Block is input someone else can write; with an unkeyed
+ * hash, or one over part of the random, lines that differ only where the hash
+ * does not look all land in one run of slots, and each insert walks the run
+ * (40,000 such lines took 9.3 s against 41 ms). A grown buffer copies the key
+ * with the header; a cleared table draws a new one.
  *
  * ## Publication
  *
@@ -70,6 +76,7 @@ const H = {
   MAGIC: 0, VERSION: 1, SLOT_CAP: 2, CONN_CAP: 3, REC_CAP: 4, ARENA_CAP: 5,
   SLOTS_OFF: 6, CONNS_OFF: 7, RECS_OFF: 8, ARENA_OFF: 9, TOTAL: 10,
   GENERATION: 11, CONNS: 12, RECS: 13, ARENA_USED: 14, IGNORED: 15, DROPPED: 16,
+  KEY0: 17, KEY1: 18,
 } as const;
 const HEADER_INTS = 32;
 const HEADER_BYTES = HEADER_INTS * 4;
@@ -111,14 +118,43 @@ function decodeHex(text: string, out: Uint8Array, count: number): boolean {
   return true;
 }
 
-/** FNV-1a over bytes 16..31 of the random at `base`, avalanched. */
-function hashRandom(bytes: Uint8Array, base: number): number {
-  let h = 0x811c9dc5;
-  for (let i = base + 16; i < base + 32; i++) h = Math.imul(h ^ bytes[i], 0x01000193);
-  h ^= h >>> 15;
-  h = Math.imul(h, 0x2c1b3c6d);
-  h ^= h >>> 12;
-  return h >>> 0;
+const rotl = (x: number, n: number) => (x << n) | (x >>> (32 - n));
+
+/**
+ * HalfSipHash-2-4, 32-bit output, of the 32-byte random at `base` under the
+ * key `k0`, `k1` (the key's bytes 0..3 and 4..7, little-endian). Exported for
+ * the reference-vector check in `scripts/tls/key-log-table.ts`.
+ */
+export function hashRandom(bytes: Uint8Array, base: number, k0: number, k1: number): number {
+  let v0 = k0;
+  let v1 = k1;
+  let v2 = 0x6c796765 ^ k0;
+  let v3 = 0x74656462 ^ k1;
+  // Eight message words, then the length word (32 << 24, no tail bytes),
+  // then the finalisation: c = 2 rounds per word, d = 4 at the end.
+  for (let w = 0; w <= 8; w++) {
+    let m = 32 << 24;
+    if (w < 8) {
+      const o = base + w * 4;
+      m = bytes[o] | (bytes[o + 1] << 8) | (bytes[o + 2] << 16) | (bytes[o + 3] << 24);
+    }
+    v3 ^= m;
+    for (let r = 0; r < 2; r++) {
+      v0 = (v0 + v1) | 0; v1 = rotl(v1, 5); v1 ^= v0; v0 = rotl(v0, 16);
+      v2 = (v2 + v3) | 0; v3 = rotl(v3, 8); v3 ^= v2;
+      v0 = (v0 + v3) | 0; v3 = rotl(v3, 7); v3 ^= v0;
+      v2 = (v2 + v1) | 0; v1 = rotl(v1, 13); v1 ^= v2; v2 = rotl(v2, 16);
+    }
+    v0 ^= m;
+  }
+  v2 ^= 0xff;
+  for (let r = 0; r < 4; r++) {
+    v0 = (v0 + v1) | 0; v1 = rotl(v1, 5); v1 ^= v0; v0 = rotl(v0, 16);
+    v2 = (v2 + v3) | 0; v3 = rotl(v3, 8); v3 ^= v2;
+    v0 = (v0 + v3) | 0; v3 = rotl(v3, 7); v3 ^= v0;
+    v2 = (v2 + v1) | 0; v1 = rotl(v1, 13); v1 ^= v2; v2 = rotl(v2, 16);
+  }
+  return (v1 ^ v3) >>> 0;
 }
 
 interface Layout {
@@ -151,6 +187,8 @@ export class KeyLogTable {
   private u8!: Uint8Array;
   private slotsI = 0;
   private slotMask = 0;
+  private key0 = 0;
+  private key1 = 0;
   private connsB = 0;
   private recsI = 0;
   private arenaB = 0;
@@ -177,6 +215,9 @@ export class KeyLogTable {
     hdr[H.VERSION] = VERSION;
     table.writeLayout(hdr, l);
     hdr[H.GENERATION] = options.generation ?? 0;
+    const key = crypto.getRandomValues(new Int32Array(2));
+    hdr[H.KEY0] = key[0];
+    hdr[H.KEY1] = key[1];
     table.bind(buffer);
     return table;
   }
@@ -211,6 +252,8 @@ export class KeyLogTable {
     this.u8 = new Uint8Array(buffer);
     this.slotsI = i32[H.SLOTS_OFF] >> 2;
     this.slotMask = i32[H.SLOT_CAP] - 1;
+    this.key0 = i32[H.KEY0];
+    this.key1 = i32[H.KEY1];
     this.connsB = i32[H.CONNS_OFF];
     this.recsI = i32[H.RECS_OFF] >> 2;
     this.arenaB = i32[H.ARENA_OFF];
@@ -251,7 +294,7 @@ export class KeyLogTable {
   private findSlot(src: Uint8Array, so: number): number {
     const i32 = this.i32;
     const u8 = this.u8;
-    let h = hashRandom(src, so) & this.slotMask;
+    let h = hashRandom(src, so, this.key0, this.key1) & this.slotMask;
     for (;;) {
       const idx = this.slotsI + h;
       const s = Atomics.load(i32, idx);

@@ -22,6 +22,7 @@ import { runInNewContext } from 'node:vm';
 import { setFlagsFromString } from 'node:v8';
 import { Worker } from 'node:worker_threads';
 import { KeyLogStore, type KeyLogShared } from '../../src/services/tls/keyLog';
+import * as keyLogTable from '../../src/services/tls/keyLogTable';
 import { LegacyKeyLogStore } from './legacyKeyLog';
 import {
   connection, connectionText, hexOf, THREAD_LABELS,
@@ -247,6 +248,93 @@ async function main() {
     small.add(`CLIENT_RANDOM ${R(1)} ${S(1)}\n`);
     return small.stats().dropped === 20;
   })());
+
+  console.log('\n--- the hash: keyed, over every byte, so a crafted log cannot pile up ---\n');
+
+  // A key log or a pcapng's Decryption Secrets Block is input someone else can
+  // write. With an unkeyed hash over part of the random, lines that differ only
+  // outside that part all land in one run of slots, and each insert walks it:
+  // 40,000 such lines took 9.3 s against 41 ms for ordinary ones.
+  const CRAFTED = 20_000;
+  const lineFor = (random: Uint8Array) => `CLIENT_RANDOM ${hexOf(random)} ${S(0x5a, 48)}\n`;
+  const craftedLog = (vary: (random: Uint8Array, i: number) => void) => {
+    let text = '';
+    for (let i = 0; i < CRAFTED; i++) {
+      const random = new Uint8Array(32).fill(0x77);
+      vary(random, i);
+      text += lineFor(random);
+    }
+    return text;
+  };
+  const ordinaryLog = (count: number) => {
+    let text = '';
+    for (let i = 0; i < count; i++) text += lineFor(createHash('sha256').update(`random ${i}`).digest());
+    return text;
+  };
+  /** The slot region, read from the header as the table lays it out: SLOT_CAP is int 2, SLOTS_OFF int 6. */
+  const slotsOf = (store: KeyLogStore) => {
+    const buffer = store.share().buffer;
+    const header = new Int32Array(buffer, 0, 32);
+    return new Int32Array(buffer, header[6], header[2]);
+  };
+  /** The longest run of occupied slots, wrapping: the farthest a lookup can probe. */
+  const longestRun = (store: KeyLogStore) => {
+    const slots = slotsOf(store);
+    let longest = 0;
+    let run = 0;
+    for (let i = 0; i < slots.length * 2; i++) {
+      run = slots[i % slots.length] !== 0 ? run + 1 : 0;
+      longest = Math.max(longest, Math.min(run, slots.length));
+    }
+    return longest;
+  };
+  const timedAdd = (text: string) => {
+    const store = new KeyLogStore();
+    const started = performance.now();
+    store.add(text);
+    return { store, ms: performance.now() - started };
+  };
+
+  const ordinary = timedAdd(ordinaryLog(CRAFTED));
+  const crafted = [
+    { name: 'randoms that differ only in bytes 0..15', log: craftedLog((r, i) => { r[0] = i & 0xff; r[7] = i >>> 8; }) },
+    { name: 'randoms that differ only in bytes 0..3', log: craftedLog((r, i) => { r[0] = i & 0xff; r[3] = i >>> 8; }) },
+    { name: 'randoms that differ only in bytes 28..31', log: craftedLog((r, i) => { r[28] = i & 0xff; r[31] = i >>> 8; }) },
+  ];
+  console.log(`      ordinary: ${CRAFTED} connections in ${ordinary.ms.toFixed(0)} ms, longest slot run ${longestRun(ordinary.store)}`);
+  checkTrue('every ordinary connection is held', ordinary.store.stats().connections === CRAFTED);
+  for (const c of crafted) {
+    const got = timedAdd(c.log);
+    const run = longestRun(got.store);
+    console.log(`      ${c.name}: ${got.ms.toFixed(0)} ms, longest slot run ${run}`);
+    check(`${c.name}: every connection is held`, got.store.stats().connections, CRAFTED);
+    checkTrue(`${c.name} spread over the slots (longest run < 400)`, run < 400);
+    checkTrue(`...and load in about the time ordinary ones do (<= 10x + 250 ms)`, got.ms <= ordinary.ms * 10 + 250);
+  }
+
+  const twinA = new KeyLogStore();
+  const twinB = new KeyLogStore();
+  twinA.add(ordinaryLog(1_000));
+  twinB.add(ordinaryLog(1_000));
+  const slotsA = slotsOf(twinA);
+  const slotsB = slotsOf(twinB);
+  let samePlace = 0;
+  for (let i = 0; i < slotsA.length; i++) if (slotsA[i] !== 0 && slotsA[i] === slotsB[i]) samePlace++;
+  console.log(`      two tables, the same 1,000 lines: ${samePlace} connections in the same slot`);
+  checkTrue('each table has its own key: the same lines land in different slots', slotsA.length === slotsB.length && samePlace < 100);
+  checkTrue('...and each still finds every one', (() => {
+    for (let i = 0; i < 1_000; i++) {
+      const random = createHash('sha256').update(`random ${i}`).digest();
+      if (twinA.secretsFor(random) === undefined || twinB.secretsFor(random) === undefined) return false;
+    }
+    return true;
+  })());
+
+  // The reference vector: HalfSipHash-2-4, 32-bit output, key 00..07 and
+  // message 00..1f (vectors_hsip32[32] in github.com/veorq/SipHash).
+  const vectorMessage = Uint8Array.from({ length: 32 }, (_, i) => i);
+  check('the hash is HalfSipHash-2-4 (reference vector, 32-byte message)',
+    keyLogTable.hashRandom(vectorMessage, 0, 0x03020100, 0x07060504), 0x1221e7fe);
 
   console.log('\n--- copy mode, where memory cannot be shared ---\n');
 
