@@ -1,7 +1,9 @@
 # 0045 — The key log is followed, not loaded, and the choice is remembered
 
 **Status:** accepted. **Amends [0008](0008-key-material.md)** on one point, stated
-below; everything else in 0008 stands.
+below; everything else in 0008 stands. Amended by
+[0073](0073-one-shared-key-log.md): main streams the lines to the page only, whose
+one store the Workers read.
 
 ## Context
 

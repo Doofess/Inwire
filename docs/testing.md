@@ -70,6 +70,7 @@ Read each driver's prerequisites before starting it.
 | Dissection, display fields or colour rules | Column parity, tree coverage and relevant synthetic protocol scripts; snaplen for truncation changes |
 | Capture store, row space or import | `scripts/electron/disk-drive.ts` and `scripts/electron/import-drive.ts`; for import memory, `scripts/electron/import-heap-drive.ts --pcap <file>` with a file of millions of frames |
 | Live frame path or record reconstruction | `scripts/electron/live-revisit-drive.ts`; `scripts/electron/revisit-drive.ts` for imported/decrypted detail |
+| Key log store, its sharing or its cap (ADR 0073) | `scripts/tls/key-log-table.ts` and `scripts/tls/key-log.ts`; `scripts/electron/keylog-heap-drive.ts` (a ~200 MB synthetic log followed at Auto and 16 threads, then capped; `--app <dir>` runs another build); `scripts/electron/keylog-live-drive.ts` (the keylog fixture replayed live through the stub at 1 and Auto threads; skips without it) |
 | Capture-start options or agent open | `scripts/electron/capture-options-drive.ts` |
 | Agent capture-file writer or autostop | `scripts/electron/capture-file-drive.ts` |
 | Agent lifetime, health or connection | `scripts/electron/agent-live-drive.ts`; agent tests below |
@@ -176,6 +177,8 @@ nothing fails if the rule is broken. Run scripts with `npx tsx`.
 | Registry abbreviations exist in Wireshark | `scripts/dissect/wireshark-abbrevs.ts` |
 | The filter engine holds its 50,000-frame budget | `scripts/filter/engine.ts` |
 | No handler or preload method for the key log takes a path | `scripts/electron/keylog-follow.ts` |
+| A followed or loaded key log past `KEYLOG_CAP_BYTES` (512 MiB) is read from its newest part, partial first line dropped, on every read from the top, and the panel says how much was skipped (ADR 0073) | `scripts/electron/keylog-follow.ts`; `scripts/electron/keylog-heap-drive.ts` in the built app (not in `check`) |
+| The key log is held once per renderer: `KeyLogTable` answers as the old store did (an oracle over malformed, duplicate and resumed lines), stays under 128 B a line and 16 MiB of heap for 400,000 lines, never writes a retired buffer, and a `worker_threads` reader sees no torn or wrong answer while it grows; copy mode posts at most one copy per 250 ms (ADR 0073) | `scripts/tls/key-log-table.ts`; in the app, `scripts/electron/keylog-heap-drive.ts` (not in `check`) |
 | Main never sends to a crashed page; a crash loads the crash screen (Reload / Quit), the OS box only if that dies | `scripts/electron/renderer-life.ts`, `scripts/electron/smoke.ts` |
 | The crash line names only the measured out-of-memory code (-36861, Windows); `start:app` alone logs the heap every 10 s, and its log file keeps the crash lines | `scripts/electron/heap-log.ts` (the code itself is re-measured by hand after an Electron upgrade) |
 | Reverse DNS has at most four lookups in flight | `scripts/geoip/reverse-dns-queue.ts` |

@@ -28,7 +28,7 @@ Rules for the main process, the preload and the utility-process hosts; loaded wh
 - `MAIN_OUTBOUND_HOSTS` (update feed, npcap.com, the speed test's Cloudflare endpoint) are dialled by main or a utilityProcess and stay **out** of the policy: a `connect-src` entry would grant the renderer a host it never touches. `scripts/electron/shell.ts` asserts they are absent, that port 8999 is absent, that the recorded feed and Npcap hosts are the ones actually dialled, and that the speed test accepts only a loopback `INWIRE_SPEEDTEST_TARGET`.
 - `scripts/electron/smoke.ts` proves the policy is applied: a page-initiated `<img>` from a blocked origin must raise `securitypolicyviolation`. A `page.evaluate` goes through CDP and is exempt, and a blocked `fetch` looks like no network.
 - `ISOLATION_HEADERS` (COOP and COEP) go on the `Response` built in `registerAppProtocol`. `onHeadersReceived` does not fire for `protocol.handle` responses, and without COEP on the worker's own response `pipeline.worker` and maplibre's worker fail with `coep-frame-resource-needs-coep-header`. `onHeadersReceived` carries a URL filter so map tiles do not round-trip through main. `smoke.ts` evaluates `crossOriginIsolated`.
-- Nothing depends on cross-origin isolation yet; the packaged build is verified by hand.
+- The key log depends on cross-origin isolation: the page's store is a `SharedArrayBuffer` that the pipeline Worker and its shards read in place (ADR 0073). Without COOP/COEP (`npm run dev`) it does not fail; it posts frozen copies, at most one per 250 ms, and every context holds one, which is the memory 0073 removed. The packaged build is verified by hand.
 
 ## Utility processes
 
@@ -49,3 +49,4 @@ Rules for the main process, the preload and the utility-process hosts; loaded wh
 - Inno keeps an installed `unins000.exe` that is newer, even unsigned, and never removes files an old build installed; `[InstallDelete]` names `dxcompiler.dll`. Compile with the newest Inno Setup `build-signed.ps1` finds, and check the installed files, not the build (`docs/verification.md`).
 - Crash reporting stays off (`electron/keyLogFollower.ts` cites ADR 0008). A minidump is a copy of `KeyLogStore`.
 - The key log is followed by main with a fast poll (`POLL_MS`) beside `fs.watch`; the poll is what sees a browser: Chrome appends through an open handle, which raises no change notification on Windows (`electron/keyLogFollower.ts`, `keyLogTail.ts`, ADR 0045).
+- A followed file past `KEYLOG_CAP_BYTES` (512 MiB, `src/services/tls/keyLogLimits.ts`) is read from `size - cap`, its partial first line dropped, on every read from the top; `status().skippedBytes` reaches the follow card. `INWIRE_KEYLOG_CAP_BYTES` lowers the cap for a test, in main only (ADR 0073).

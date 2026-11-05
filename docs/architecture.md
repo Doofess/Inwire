@@ -336,10 +336,19 @@ through `scripts/pipeline/revisit.ts` and `moved-bytes.ts`.
 See [ADR 0049](decisions/0049-a-frames-tree-is-rebuilt-from-its-own-record.md).
 
 The key-log follower persists only the selected path, reads in main and streams
-complete lines to renderer and Worker stores. Renderer requests cannot name
-arbitrary paths. Follow survives launches by prior consent, while stopping
-follow and clearing loaded keys are distinct actions.
+complete lines to the page. Renderer requests cannot name arbitrary paths.
+Follow survives launches by prior consent, while stopping follow and clearing
+loaded keys are distinct actions.
 [ADR 0045](decisions/0045-the-key-log-is-followed-not-loaded.md).
+
+The page holds the renderer's one key log (`tls/keyLogTable.ts` behind
+`tls/keyLog.ts`): the follower, the Decryption panel and a pcapng's Decryption
+Secrets Block all add to it there. It lives in a `SharedArrayBuffer` that the
+pipeline Worker and its shards adopt and read in place; only a replacement
+(growth or clear) is posted, and a clear flushes every context's AES cache.
+Without cross-origin isolation the same messages carry copies. A file past
+512 MiB is read from its newest part, and the store holds at most 4,194,304
+secrets. [ADR 0073](decisions/0073-one-shared-key-log.md).
 
 ## Filters, row space and export
 

@@ -144,6 +144,8 @@ they expose.
   machine.
 - `crashReporter` is off: a renderer minidump would be a copy of the in-memory
   key log, which conflicts with [ADR 0008](docs/decisions/0008-key-material.md).
+  The renderer holds that log once, in shared memory its Workers read
+  ([ADR 0073](docs/decisions/0073-one-shared-key-log.md)), never on disk.
 - Npcap can grant capture-device access to all local users unless its installer's
   administrator-only option is selected. Inwire recommends that restriction;
   the LocalSystem agent allows the app to capture with it enabled.
