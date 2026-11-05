@@ -34,10 +34,12 @@ function readJson(file: string): Record<string, unknown> | null {
 const settings = readJson('.claude/settings.json');
 check('.claude/settings.json parses', settings !== null);
 
-check('plugins unused here are off for this project only', JSON.stringify(settings?.enabledPlugins) === JSON.stringify({
-  'playwright@anthropic-plugin-directory': false,
-  'design@synced': false,
-  'engineering@synced': false,
+// The user level pins every plugin but the workflow core off; a project
+// switches on only what its sessions use. Inwire's are the two language
+// servers for its TypeScript and its Rust agent.
+check('the project switches on its language servers and nothing else', JSON.stringify(settings?.enabledPlugins) === JSON.stringify({
+  'typescript-lsp@claude-plugins-official': true,
+  'rust-analyzer-lsp@claude-plugins-official': true,
 }), JSON.stringify(settings?.enabledPlugins));
 check('claude.ai connectors are off for this project', settings?.disableClaudeAiConnectors === true);
 check('the project MCP server is pre-approved', JSON.stringify(settings?.enabledMcpjsonServers) === '["microsoft-learn"]');
