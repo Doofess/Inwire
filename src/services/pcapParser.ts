@@ -297,6 +297,13 @@ export class PcapService {
       onSecrets?: (text: string) => void | Promise<void>;
       /** The file read window, settable so a test can force several. */
       windowBytes?: number;
+      /**
+       * Asked after every frame; a returned promise is awaited before the next
+       * frame is read. The one place the pass can be held up for the consumer of
+       * `onBatch`, which is synchronous: an import Worker pauses here while the
+       * store is owed too many frames. Nothing to await costs no await.
+       */
+      pace?: () => Promise<void> | undefined;
     } = {},
   ): Promise<{ totalFrames: number; built: number; missedPatches: number; facts: CaptureFileFacts }> {
     // No cap: the point is the frames the cap used to throw away. What bounds
@@ -327,7 +334,14 @@ export class PcapService {
       // records, and it is already waiting on a file read.
       options.record === true ? (await import('./dissect/frameRecord')).FrameRecorder : null,
     );
-    for await (const frame of walk.frames(undefined, options.onProgress)) batcher.push(frame);
+    const { pace } = options;
+    for await (const frame of walk.frames(undefined, options.onProgress)) {
+      batcher.push(frame);
+      if (pace !== undefined) {
+        const held = pace();
+        if (held !== undefined) await held;
+      }
+    }
     const { missedPatches } = batcher.finish();
     return { totalFrames: walk.totalFrames, built, missedPatches, facts: walk.facts };
   }

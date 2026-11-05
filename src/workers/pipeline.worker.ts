@@ -70,6 +70,7 @@ import { settleTreeTls } from '../services/dissect/shardNumbering';
 import { shardsFor, type DissectionThreads } from '../services/pipeline/threads';
 import { isShardRole, runShard, SHARD_NAME } from './shardRole';
 import { isReaderRole, READER_NAME, runReader } from './readerRole';
+import { isImportRole, runImport } from './importRole';
 import type { FromReader, ToReader } from '../services/pipeline/readParse';
 
 /** Matches the main thread's old flush cadence, which the packet list is tuned to. */
@@ -1865,14 +1866,17 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
 
 // --- start ---------------------------------------------------------------------
 //
-// One script, three roles. The app starts it as the pipeline; the pipeline
+// One script, four roles. The app starts it as the pipeline; the pipeline
 // starts it again, by its own URL, for each TCP shard it dissects on (ADR 0053
-// phase 3, `shardRole.ts`) and for catch-up's file reader (`readerRole.ts`) -
-// and neither must ever run the pipeline's timer or answer the app.
+// phase 3, `shardRole.ts`) and for catch-up's file reader (`readerRole.ts`);
+// the app starts it once more for each capture-file import (`importRole.ts`) -
+// and none of those must ever run the pipeline's timer or answer the app.
 if (isShardRole(ctx)) {
   runShard(ctx);
 } else if (isReaderRole(ctx)) {
   runReader(ctx);
+} else if (isImportRole(ctx)) {
+  runImport(ctx);
 } else {
   setInterval(flush, FLUSH_MS);
   ctx.onmessage = handleCommand;
