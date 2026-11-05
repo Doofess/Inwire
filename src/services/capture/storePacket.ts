@@ -89,18 +89,19 @@ export function plainForStore(packet: Packet): Packet {
  * its decrypted answers too, which are never written anywhere, and a message
  * clones every field it is given. Rows go through `plainForStore`.
  *
- * `_captureId` is accepted for the tagged appends of the store protocol, which
- * does not carry one yet, so it is not emitted.
+ * `captureId`, when given, tags both messages: the store drops a tagged message
+ * for a capture that is not the one it has open. Untagged output is unchanged.
  */
 export function storeMessagesFor(
   batch: readonly Packet[],
   records: readonly { id: number; record: Uint8Array }[] | undefined,
-  _captureId?: string,
+  captureId?: string,
 ): ToCapture[] {
   const messages: ToCapture[] = [];
+  const tag = captureId === undefined ? {} : { captureId };
   if (records !== undefined && records.length > 0) {
-    messages.push({ type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })) });
+    messages.push({ type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })), ...tag });
   }
-  if (batch.length > 0) messages.push({ type: 'append', packets: batch.map(plainForStore) });
+  if (batch.length > 0) messages.push({ type: 'append', packets: batch.map(plainForStore), ...tag });
   return messages;
 }

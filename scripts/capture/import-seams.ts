@@ -154,6 +154,10 @@ const sameBytes = (a: unknown, b: unknown) => Buffer.compare(serialize(a), seria
   const { storeMessagesFor } = await import('../../src/services/capture/storePacket');
   const messages = storeMessagesFor(batch, records);
   pass('storeMessagesFor equals the same literal', sameBytes(messages, characterized), messages);
+  const tagged = storeMessagesFor(batch, records, 'cap-x');
+  pass('storeMessagesFor tags both messages when given a capture id, and only then',
+    tagged.length === 2 && tagged.every((m) => (m as { captureId?: string }).captureId === 'cap-x')
+    && messages.every((m) => !('captureId' in m)));
   pass('storeMessagesFor leaves an empty half out',
     storeMessagesFor([], undefined).length === 0 && storeMessagesFor(batch, []).length === 1);
 }

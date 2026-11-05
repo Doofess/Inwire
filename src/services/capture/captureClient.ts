@@ -469,6 +469,28 @@ class CaptureClient {
   }
 
   /**
+   * `begin`, answered: resolves when the store has opened the capture (its
+   * `ready` for this request), so an import Worker can be told the capture
+   * exists before it writes to it on its own port.
+   *
+   * Rejects when the open fails or never can: the store is unavailable or died,
+   * or a fatal failure settled the request with nothing. The caller treats that
+   * as a failed import; the store's own `failure` already set `state.error`.
+   */
+  async beginAwaited(captureId: string): Promise<void> {
+    this.openGeneration++;
+    if (!captureStoreAvailable()) throw new Error('the capture store is not available');
+    this.settleAll();
+    this.state = freshCaptureStorageState();
+    const opened = await this.request(
+      this.pendingOpen as never,
+      (requestId) => ({ type: 'open', captureId, requestId }),
+      null as StoredCapture | null,
+    );
+    if (opened === null) throw new Error('the capture store could not open the capture');
+  }
+
+  /**
    * Hands a flush's frames over.
    *
    * Called from `prepareBatch`'s persist effect, which runs exactly once per

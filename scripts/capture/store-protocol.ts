@@ -1098,6 +1098,146 @@ console.log('\n--- progress ---\n');
     [...new Set(progress.map((m) => m.frameCount))].length, 1);
 }
 
+console.log('\n--- tagged appends and an awaited open (import Worker) ---\n');
+
+{
+  const A = 'cap-20260912-200000-00a1';
+  const B = 'cap-20260912-200000-00b2';
+  /** Sends through the serialiser, as a port would, then lets the host finish. */
+  const wire = async (h: ReturnType<typeof host>, message: ToCapture) => {
+    h.send(deserialize(serialize(message)) as ToCapture);
+    await h.store.drain();
+  };
+  const lastStats = (h: ReturnType<typeof host>) => {
+    const all = h.of('stats');
+    return all[all.length - 1];
+  };
+  const rows = traffic(5);
+  const records = rows.map((p) => ({ id: p.id, record: new Uint8Array([7, p.id]) }));
+
+  {
+    const h = host();
+    await wire(h, { type: 'open', captureId: A });
+    h.said.length = 0;
+    await wire(h, { type: 'append', packets: rows, captureId: B });
+    await wire(h, { type: 'appendRecords', frames: records, captureId: B });
+    const replies = [...h.said];
+    // Records for ids 1-5 held in the writer would attach to these rows, and a
+    // tagged append that was written would make it ten frames, not five.
+    await wire(h, { type: 'append', packets: rows });
+    await wire(h, { type: 'finish' });
+    const stats = lastStats(h);
+    check('a tagged append for another capture writes nothing and replies nothing',
+      { replies, frames: stats.stats.framesWritten, attached: stats.stats.recordsAttached },
+      { replies: [], frames: 5, attached: 0 });
+    h.store.close();
+  }
+
+  {
+    const h = host();
+    await wire(h, { type: 'open', captureId: A });
+    await wire(h, { type: 'append', packets: rows, captureId: A });
+    await wire(h, { type: 'appendRecords', frames: records, captureId: A });
+    await wire(h, { type: 'finish' });
+    check('a tagged append for the open capture is written',
+      lastStats(h).storedRange, { first: 1, last: 5 });
+    h.store.close();
+  }
+
+  {
+    // Nothing open: an untagged append is the wiring error it always was.
+    const h = host();
+    await wire(h, { type: 'append', packets: rows });
+    check('an untagged append still behaves as before: with no capture open it reports once',
+      h.of('failure').map((m) => m.fatal), [false]);
+    h.store.close();
+  }
+
+  {
+    const h = host();
+    await wire(h, { type: 'append', packets: rows, captureId: A });
+    await wire(h, { type: 'appendRecords', frames: records, captureId: A });
+    await wire(h, { type: 'finish' });
+    check('a tagged append with no capture open writes nothing and replies nothing', h.said, []);
+    h.store.close();
+  }
+
+  {
+    // The import's credit message: an empty slab with an ack, after the
+    // capture it belonged to was discarded.
+    const h = host();
+    await wire(h, { type: 'open', captureId: A });
+    await wire(h, { type: 'discard', captureId: A });
+    h.said.length = 0;
+    const workerPort: FromCapture[] = [];
+    h.store.receive(
+      deserialize(serialize({ type: 'appendBytes', slab: packFrames([]), ack: 5 })) as ToCapture,
+      (m) => workerPort.push(m),
+    );
+    await h.store.drain();
+    check('a late appendBytes after discard raises no client-port failure', h.said, []);
+    check('...and is still acked on its own port', workerPort, [{ type: 'bytesTaken', ack: 5 }]);
+    h.store.close();
+  }
+}
+
+{
+  // `beginAwaited` through the real client, against a port that answers by hand.
+  const posted: ToCapture[] = [];
+  const port = {
+    postMessage: (message: ToCapture) => { posted.push(message); },
+    start: () => {},
+    onmessage: null as ((event: { data: FromCapture }) => void) | null,
+  };
+  let listener: ((event: unknown) => void) | null = null;
+  const fakeWindow = {
+    addEventListener: (_type: string, l: (event: unknown) => void) => { listener = l; },
+    removeEventListener: () => { listener = null; },
+    inwire: {
+      isDesktop: true,
+      requestCaptureStorePort: () => {
+        listener?.({ source: fakeWindow, data: { channel: 'inwire:capture-port' }, ports: [port] });
+      },
+      onCaptureStoreExit: () => {},
+    },
+  };
+  (globalThis as { window?: unknown }).window = fakeWindow;
+  const { captureStore } = await import('../../src/services/capture/captureClient');
+  const ready = (captureId: string, requestId?: number): FromCapture => ({
+    type: 'ready', captureId, freeBytes: null, captureDir: '', frameCount: 0, chunkCount: 0,
+    floorOrdinal: 0, floorId: 0, storedRange: null, lastId: 0, marks: [],
+    ...(requestId === undefined ? {} : { requestId }),
+  });
+  const openOf = () => posted.find((m): m is Extract<ToCapture, { type: 'open' }> => m.type === 'open');
+
+  let settled: 'pending' | 'resolved' | 'rejected' = 'pending';
+  const waiting = captureStore.beginAwaited('cap-20260912-200000-00c3').then(
+    () => { settled = 'resolved'; }, () => { settled = 'rejected'; });
+  for (let i = 0; i < 50 && openOf() === undefined; i++) await sleep(5);
+  const open = openOf();
+  await sleep(20);
+  const beforeReady = settled;
+  // A `ready` for no request (a plain `begin`'s) is not this open's answer.
+  port.onmessage?.({ data: ready('cap-20260912-200000-00c3') });
+  await sleep(10);
+  const afterOther = settled;
+  port.onmessage?.({ data: ready('cap-20260912-200000-00c3', open?.requestId) });
+  await waiting;
+  check('beginAwaited resolves only after ready',
+    { sent: open?.captureId, hasRequest: typeof open?.requestId === 'number', beforeReady, afterOther, settled },
+    { sent: 'cap-20260912-200000-00c3', hasRequest: true, beforeReady: 'pending', afterOther: 'pending', settled: 'resolved' });
+
+  // A fatal failure settles the open with nothing, which rejects.
+  let outcome = 'pending';
+  const failing = captureStore.beginAwaited('cap-20260912-200000-00d4').then(
+    () => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+  await sleep(20);
+  port.onmessage?.({ data: { type: 'failure', message: 'disk full', fatal: true } });
+  await failing;
+  check('beginAwaited rejects when the open fails', outcome, 'rejected');
+  delete (globalThis as { window?: unknown }).window;
+}
+
 console.log(failures === 0
   ? '\nAll capture store protocol checks passed.'
   : `\n${failures} capture store protocol check(s) failed.`);

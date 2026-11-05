@@ -386,10 +386,13 @@ export class CaptureHost {
     try {
       switch (message.type) {
         case 'open': return this.onOpen(message);
-        case 'append': return this.onAppend(message);
+        case 'append':
+          if (this.isForAnotherCapture(message.captureId)) return;
+          return this.onAppend(message);
         case 'appendPacked': return this.onAppendPacked(message);
         case 'appendBytes': return this.onAppendBytes(message, reply);
         case 'appendRecords': {
+          if (this.isForAnotherCapture(message.captureId)) return;
           this.open?.writer.attachRecords(message.frames);
           return;
         }
@@ -445,6 +448,16 @@ export class CaptureHost {
         + `${error instanceof Error ? `${error.message}\n${error.stack}` : String(error)}`);
       this.fail(describe(error), message.type === 'open');
     }
+  }
+
+  /**
+   * True for a tagged message whose capture is not the open one, or with none
+   * open. Such a message is dropped without a word: it is a late arrival from a
+   * port that outlived its capture (a cancelled import), which is not the
+   * wiring error an untagged orphan append reports. Untagged is never dropped.
+   */
+  private isForAnotherCapture(captureId: string | undefined): boolean {
+    return captureId !== undefined && this.open?.id !== captureId;
   }
 
   private onOpen(message: Extract<ToCapture, { type: 'open' }>): void {
