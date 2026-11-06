@@ -5,7 +5,6 @@
     "rust-analyzer-lsp@claude-plugins-official": true
   },
   "disableClaudeAiConnectors": true,
-  "enabledMcpjsonServers": ["microsoft-learn"],
   "hooks": {
     "PreToolUse": [
       {

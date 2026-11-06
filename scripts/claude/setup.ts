@@ -9,8 +9,7 @@
  * in user settings, and this file holds them to their values - a key that
  * silently drops out puts every connector's instructions back into every turn.
  *
- * The repo is public, so nothing committed under `.claude/` or in `.mcp.json`
- * may carry a personal path or an email address. It reads only tracked files
+ * The repo is public, so nothing committed under `.claude/` may carry a personal path or an email address. It reads only tracked files
  * and the ones it names, so it passes the same on CI's clean clone.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -42,7 +41,9 @@ check('the project switches on its language servers and nothing else', JSON.stri
   'rust-analyzer-lsp@claude-plugins-official': true,
 }), JSON.stringify(settings?.enabledPlugins));
 check('claude.ai connectors are off for this project', settings?.disableClaudeAiConnectors === true);
-check('the project MCP server is pre-approved', JSON.stringify(settings?.enabledMcpjsonServers) === '["microsoft-learn"]');
+// No MCP server: the one it had, Microsoft Learn, went unused, and every server's
+// instructions ride along in every turn.
+check('no MCP server is pre-approved', settings !== null && !('enabledMcpjsonServers' in settings));
 
 // Hook wiring: each hook runs from the project root's copy, and a command
 // naming a script that is not there would fail on every tool call.
@@ -66,10 +67,7 @@ for (const entry of Object.values(hooks).flat()) {
   }
 }
 
-const mcp = readJson('.mcp.json');
-check('.mcp.json holds exactly Microsoft Learn over HTTP', JSON.stringify(mcp?.mcpServers) === JSON.stringify({
-  'microsoft-learn': { type: 'http', url: 'https://learn.microsoft.com/api/mcp' },
-}), JSON.stringify(mcp?.mcpServers));
+check('the project has no .mcp.json', !existsSync('.mcp.json'));
 
 const ignored = readFileSync('.gitignore', 'utf8').split(/\r?\n/);
 check('.gitignore keeps per-machine settings out', ignored.includes('.claude/settings.local.json'));
@@ -158,7 +156,7 @@ for (const hook of hookFiles) {
  * guards. `example.invalid` is the reserved address the hook tests commit as.
  */
 const PERSONAL = /[A-Z]:[\\/](Users|dev)[\\/]|\/[a-z]\/Users\/|[\w.+-]+@(?!example\.invalid\b)[\w-]+\.[\w.]+/i;
-const committed = ['.mcp.json', '.claude/settings.json', '.claude/README.md', ...agentFiles, ...skillFiles, ...hookFiles,
+const committed = ['.claude/settings.json', '.claude/README.md', ...agentFiles, ...skillFiles, ...hookFiles,
   'scripts/claude/setup.ts', 'scripts/claude/hooks.ts'];
 for (const file of committed.filter((f) => existsSync(f))) {
   const hit = readFileSync(file, 'utf8').match(PERSONAL);
