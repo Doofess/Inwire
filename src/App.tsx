@@ -437,7 +437,7 @@ export default function App() {
 
   const {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
-    queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
+    queueFrames, adoptBuffer, residentBytes, frameBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
     dropBelow,
   } = usePacketBuffer({
     packetBufferBytes, isCapturingRef, onAutoPause, onFramesQueued, onRowsTaken: pipelineRowsTaken,
@@ -3577,6 +3577,7 @@ export default function App() {
               // would be a second thing to keep in step for a number only Driver
               // Info reads.
               bufferResidentBytes={residentBytes()}
+              bufferFrameBytes={frameBytes()}
               bufferAutoPaused={bufferAutoPaused}
               onClearPackets={handleClearView}
               captureStorage={captureStorage}

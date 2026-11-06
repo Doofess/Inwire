@@ -83,10 +83,16 @@ export interface PacketBuffer {
     packets: Packet[], persistedThroughId: number | null, estimates?: readonly number[], shown?: Packet[],
   ) => void;
   /**
-   * Bytes the buffer is holding, for the settings panel: summaries, and the slabs its rows' raw
-   * bytes pin. The trim reads `accountingRef`'s own total, which is summaries only.
+   * The summaries the buffer is holding, the budget's own total, for the settings panel (the
+   * trim reads the same figure off `accountingRef`).
    */
   residentBytes: () => number;
+  /**
+   * The slabs the rows' raw bytes pin (`slabLedger.ts`), for the settings panel. Not in the
+   * budget: they are bounded by frame count (`BYTES_RESIDENT_FRAMES`), so Settings shows them
+   * on a line of their own rather than against it.
+   */
+  frameBytes: () => number;
   /** The current byte budget, for the restore path's own trimming. */
   budgetBytes: () => number;
   /** Borrowed by the session restore - see the note above. */
@@ -311,8 +317,8 @@ export function usePacketBuffer({
     setPackets(shown ?? next);
   }, []);
 
-  const residentBytes = useCallback(
-    () => accountingRef.current.residentBytes + accountingRef.current.slabs.pinnedBytes, []);
+  const residentBytes = useCallback(() => accountingRef.current.residentBytes, []);
+  const frameBytes = useCallback(() => accountingRef.current.slabs.pinnedBytes, []);
   const budgetBytes = useCallback(() => packetBufferBytesRef.current, []);
   const dropBelow = useCallback((floorId: number) => {
     setPackets((prev) => dropBelowFloor(prev, floorId, accountingRef.current));
@@ -320,7 +326,7 @@ export function usePacketBuffer({
 
   return {
     packets, setPackets, droppedBuffer, bufferAutoPaused, setBufferAutoPaused,
-    queueFrames, adoptBuffer, residentBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
+    queueFrames, adoptBuffer, residentBytes, frameBytes, budgetBytes, accountingRef, fieldWriter, flushNow,
     dropBelow,
   };
 }
