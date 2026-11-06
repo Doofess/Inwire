@@ -551,7 +551,28 @@ function startParallel(shards: number): void {
   // A new coordinator numbers its packs from zero again.
   windowSender.reset();
   storeSender.reset();
-  if (shards < 1) { readerChanged(replaced); return; }
+  // Catch-up hears of the change however this ends (`finally`): a start that
+  // throws leaves no reader, and a read asked of the old one must be asked again
+  // in place, or catch-up waits on a reply that never comes.
+  const begun: Worker[] = [];
+  try {
+    if (shards < 1) return;
+    beginParallel(shards, begun);
+  } catch (error) {
+    // Nothing stands yet: the Workers already begun are this start's to end.
+    if (parallel === null) for (const worker of begun) worker.terminate();
+    throw error;
+  } finally {
+    readerChanged(replaced);
+  }
+}
+
+/**
+ * `startParallel`'s shards, reader and coordinator, standing as `parallel`. Every
+ * Worker is pushed onto `begun` as it is begun, so a throw part-way leaves the
+ * caller the ones to end.
+ */
+function beginParallel(shards: number, begun: Worker[]): void {
   const workers: Worker[] = [];
   const lane = laneZero();
   const coordinator = new Coordinator({
@@ -577,11 +598,13 @@ function startParallel(shards: number): void {
       event.preventDefault();
       shardDown(s, event.message || 'it stopped');
     };
+    begun.push(worker);
     worker.postMessage({ type: 'init', shards } satisfies ToShard);
     workers.push(worker);
   }
   // Catch-up's file reader, the same script in its reader role (`readerRole.ts`).
   const reader = new Worker(self.location.href, { type: 'module', name: READER_NAME });
+  begun.push(reader);
   // Each handler is for this reader: once it is replaced or stopped, what it
   // still says is dropped (`receiveFromReader`, `readerDown`).
   reader.onmessage = (event: MessageEvent<FromReader>) => receiveFromReader(reader, event.data);
@@ -594,7 +617,6 @@ function startParallel(shards: number): void {
   coordinator.broadcast(interfacesMessage());
   if (keyLogSnapshot !== null) coordinator.broadcast({ type: 'keylogShared', snapshot: keyLogSnapshot });
   if (lastFlows !== null) coordinator.broadcast(lastFlows);
-  readerChanged(replaced);
 }
 
 function shardDown(shard: number, reason: string): void {
@@ -1377,9 +1399,11 @@ function postRows(port: MessagePort, packets: readonly Packet[]): void {
     // A row's bytes are a view into its agent batch, and a clone of a view
     // sends its whole buffer: each goes as a buffer of its own, for the length
     // of the post, as the rows above do for none at all.
+    // The swap is inside the try: a copy that throws part-way (allocation, under
+    // the pressure this path exists for) still puts every row's view back.
     const views = withBytes.map((packet) => packet.rawBytes);
-    for (let i = 0; i < withBytes.length; i++) withBytes[i].rawBytes = ownBytes(views[i]);
     try {
+      for (let i = 0; i < withBytes.length; i++) withBytes[i].rawBytes = ownBytes(views[i]);
       port.postMessage({ type: 'append', packets: withBytes });
     } finally {
       for (let i = 0; i < withBytes.length; i++) withBytes[i].rawBytes = views[i];

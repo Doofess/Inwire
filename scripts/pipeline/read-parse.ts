@@ -553,6 +553,10 @@ const twoRef: Seen[] = (() => {
     /function stopParallel\(restarting = false\)/.test(source) && /if \(!restarting\) readerChanged\(\)/.test(fn('stopParallel'))
     && /const replaced = stopParallel\(true\)/.test(fn('startParallel')) && /readerChanged\(replaced\)/.test(fn('startParallel')),
     fn('stopParallel').slice(0, 300));
+  const start = fn('startParallel');
+  check('...and catch-up hears of it however the start ends: readerChanged(replaced) is in a finally, and a start that throws before it stands terminates the Workers it began',
+    /finally\s*\{\s*readerChanged\(replaced\);?\s*\}/.test(start) && /catch \(error\) \{[\s\S]*?\.terminate\(\)[\s\S]*?throw error;/.test(start),
+    start.slice(-400));
   const captured = fn('receiveCaptured');
   check('A3: the reader gets main\'s bytes as they are - no copy of them first, their buffer transferred with them',
     captured.includes("type: 'parse'") && !/asArrayBuffer\(/.test(captured) && /\[bytes\.buffer as ArrayBuffer\]/.test(captured),
