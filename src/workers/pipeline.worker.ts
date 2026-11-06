@@ -63,6 +63,7 @@ import { overlayOf, type RowOverlay } from '../services/pipeline/rowOverlay';
 import { mergeRowSide } from '../services/pipeline/rowSteps';
 import { shardEnv } from '../services/pipeline/shard';
 import { FifoMap } from '../services/pipeline/fifoMap';
+import { ownBytes } from '../services/pipeline/ownBytes';
 import { RebuiltTrees } from '../services/pipeline/rebuiltTrees';
 import type { FromShard, ToShard } from '../services/pipeline/shardProtocol';
 import { LIVE_ENV } from '../services/dissect/dissectEnv';
@@ -323,8 +324,15 @@ function receiveCaptured(message: Extract<FromAgentLink, { type: 'capturedBytes'
   const reader = parallel?.reader ?? null;
   const state = reader !== null && !message.gone && message.error === undefined ? catchUp.tailState() : null;
   if (reader !== null && state !== null) {
-    const bytes = new Uint8Array(asArrayBuffer(message.bytes ?? new Uint8Array(0)));
-    reader.postMessage({ type: 'parse', requestId: message.requestId, state, bytes } satisfies ToReader, [bytes.buffer]);
+    // Sent as they are: the buffer is transferred and the view goes with it,
+    // offset and all, so there is no copy here. (An earlier one copied a view
+    // that was not its whole buffer, and the reader copies the frames into
+    // slabs besides.) Nothing reads `message.bytes` after this: it is main's
+    // answer, cloned into this Worker for this one request - the router never
+    // sees it on this path - and the reader's parse reads the view through its
+    // `byteOffset` (`scripts/pipeline/read-parse.ts`).
+    const bytes = message.bytes ?? new Uint8Array(0);
+    reader.postMessage({ type: 'parse', requestId: message.requestId, state, bytes } satisfies ToReader, [bytes.buffer as ArrayBuffer]);
     return;
   }
   catchUpRequest = null;
@@ -332,8 +340,11 @@ function receiveCaptured(message: Extract<FromAgentLink, { type: 'capturedBytes'
 }
 
 /** The reader's parse of the read out, or word that it failed. */
-function receiveFromReader(message: FromReader): void {
-  if (message.type === 'failure') { readerDown(message.message); return; }
+function receiveFromReader(r: Worker, message: FromReader): void {
+  // A reply or a failure from a reader that has been replaced or stopped
+  // changes nothing: the read it answers was dropped with it.
+  if (parallel?.reader !== r) return;
+  if (message.type === 'failure') { readerDown(r, message.message); return; }
   if (message.requestId !== catchUpRequest) return;
   catchUpRequest = null;
   if (!capturing) return;
@@ -344,17 +355,22 @@ function receiveFromReader(message: FromReader): void {
  * The reader failed or stopped: let it go, say so, and read the file here,
  * from where the cursor is. The read it held is asked for again.
  */
-function readerDown(reason: string): void {
-  if (parallel === null || parallel.reader === null) return;
-  parallel.reader.terminate();
+function readerDown(r: Worker, reason: string): void {
+  if (parallel?.reader !== r) return;
+  r.terminate();
   parallel.reader = null;
   post({ type: 'failure', message: `catch-up's file reader stopped: ${reason}; the file is read on the pipeline Worker` });
   readerChanged();
 }
 
-/** The reader came or went: catch-up reads through it or in place from here, and a read out is asked for again. */
-function readerChanged(): void {
-  if (catchUp.useReader(parallel?.reader != null)) {
+/**
+ * The reader came or went: catch-up reads through it or in place from here, and
+ * a read out is asked for again. `replaced`: the reader that was asked is gone
+ * and the one now standing, if any, is another - the read out is dropped even
+ * when it is the same kind (`startParallel`).
+ */
+function readerChanged(replaced = false): void {
+  if (catchUp.useReader(parallel?.reader != null, replaced)) {
     catchUpRequest = null;
     pumpCatchUp();
   }
@@ -513,21 +529,29 @@ function interfacesMessage(): ToShard {
   };
 }
 
-function stopParallel(): void {
-  if (parallel === null) return;
+/**
+ * Every shard and the reader stopped. Catch-up hears of it at once, unless a
+ * start follows (`restarting`): then it hears once, when the new reader stands,
+ * and not twice - once for the stop, which would ask a read in place that the
+ * start throws away. Returns whether a reader was stopped.
+ */
+function stopParallel(restarting = false): boolean {
+  if (parallel === null) return false;
   for (const worker of parallel.workers) worker.terminate();
+  const hadReader = parallel.reader !== null;
   parallel.reader?.terminate();
   parallel = null;
-  readerChanged();
+  if (!restarting) readerChanged();
+  return hadReader;
 }
 
 /** The shards the setting asks for, started - or none, and the single Worker. */
 function startParallel(shards: number): void {
-  stopParallel();
+  const replaced = stopParallel(true);
   // A new coordinator numbers its packs from zero again.
   windowSender.reset();
   storeSender.reset();
-  if (shards < 1) return;
+  if (shards < 1) { readerChanged(replaced); return; }
   const workers: Worker[] = [];
   const lane = laneZero();
   const coordinator = new Coordinator({
@@ -558,17 +582,19 @@ function startParallel(shards: number): void {
   }
   // Catch-up's file reader, the same script in its reader role (`readerRole.ts`).
   const reader = new Worker(self.location.href, { type: 'module', name: READER_NAME });
-  reader.onmessage = (event: MessageEvent<FromReader>) => receiveFromReader(event.data);
+  // Each handler is for this reader: once it is replaced or stopped, what it
+  // still says is dropped (`receiveFromReader`, `readerDown`).
+  reader.onmessage = (event: MessageEvent<FromReader>) => receiveFromReader(reader, event.data);
   reader.onerror = (event) => {
     event.preventDefault();
-    readerDown(event.message || 'it stopped');
+    readerDown(reader, event.message || 'it stopped');
   };
   parallel = { coordinator, workers, reader };
   coordinator.broadcast(hostMessage());
   coordinator.broadcast(interfacesMessage());
   if (keyLogSnapshot !== null) coordinator.broadcast({ type: 'keylogShared', snapshot: keyLogSnapshot });
   if (lastFlows !== null) coordinator.broadcast(lastFlows);
-  readerChanged();
+  readerChanged(replaced);
 }
 
 function shardDown(shard: number, reason: string): void {
@@ -1347,7 +1373,18 @@ function postRows(port: MessagePort, packets: readonly Packet[]): void {
       for (let i = 0; i < rows.length; i++) rows[i].rawBytes = bytes[i];
     }
   }
-  if (withBytes.length > 0) port.postMessage({ type: 'append', packets: withBytes });
+  if (withBytes.length > 0) {
+    // A row's bytes are a view into its agent batch, and a clone of a view
+    // sends its whole buffer: each goes as a buffer of its own, for the length
+    // of the post, as the rows above do for none at all.
+    const views = withBytes.map((packet) => packet.rawBytes);
+    for (let i = 0; i < withBytes.length; i++) withBytes[i].rawBytes = ownBytes(views[i]);
+    try {
+      port.postMessage({ type: 'append', packets: withBytes });
+    } finally {
+      for (let i = 0; i < withBytes.length; i++) withBytes[i].rawBytes = views[i];
+    }
+  }
 }
 
 /**

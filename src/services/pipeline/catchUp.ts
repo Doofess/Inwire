@@ -89,8 +89,12 @@ export const RETRY_MS = 150;
  * IDBs, which say the byte order, the clock and the adapters' names (#17).
  */
 export const HEADER_READ = 64 * 1024;
-/** Reads of zeros where a seek landed - a block not written yet - before the landing is called wrong. */
-const LANDING_TRIES = 20;
+/**
+ * How long a landing may read zeros - a block not written yet - from the first
+ * such read, before it is called wrong. Time, not a count of reads: how many
+ * reads that is depends on how fast they are asked for.
+ */
+export const LANDING_MS = 10_000;
 
 /**
  * An EPB's length for a frame of `capLen` bytes, as the agent writes it: no
@@ -278,12 +282,12 @@ interface Cursor {
   /** Where to jump once the header has been read, by the frames' sizes. */
   seek: SizedPoint | null;
   /**
-   * A jump the anchor has not proved yet: where it landed, and how often a
-   * read found zeros there, and the EPB length it must find when it landed on
+   * A jump the anchor has not proved yet: where it landed, when a read first
+   * found zeros there, and the EPB length it must find when it landed on
    * the anchor itself. A landing the anchor disproves is counted again from
    * the start of the file.
    */
-  landing: { at: number; zeros: number; length: number | null } | null;
+  landing: { at: number; zeroSince: number | null; length: number | null } | null;
 }
 
 export class CatchUp<F extends SeqFrame> {
@@ -339,7 +343,8 @@ export class CatchUp<F extends SeqFrame> {
     started: 0, rejoined: 0, framesRead: 0, ended: 0, misaligned: 0, holdOverflows: 0, seeks: 0, seekMisses: 0, lateRead: 0,
   };
 
-  constructor(private readonly files: CaptureFiles) {}
+  /** `now` is the clock a landing's wait is measured by, in milliseconds; a test supplies its own. */
+  constructor(private readonly files: CaptureFiles, private readonly now: () => number = () => performance.now()) {}
 
   get active(): boolean {
     return this.on;
@@ -354,14 +359,23 @@ export class CatchUp<F extends SeqFrame> {
    * Read files through the catch-up reader's parses, or in place. A change
    * goes on from where the cursor is, in the other kind, and forgets the read
    * in flight: true when it changed, and the caller drops that read's answer.
+   *
+   * `replaced` says the reader that was asked is gone and another stands in its
+   * place - a threads change stops the reader and starts a new one in one go -
+   * so the read out will never be answered even though the kind is the same:
+   * it is dropped, once, and the cursor stays as it is. Stopping and then
+   * starting as two changes would drop the read twice, and ask for one in
+   * between that the start throws away.
    */
-  useReader(on: boolean): boolean {
-    if (on === this.reader) return false;
-    this.reader = on;
-    const cursor = this.cursor;
-    if (cursor !== null) {
-      const state = cursor.tail.save();
-      cursor.tail = on ? new ParsedTail(state) : PcapngTail.restore(state);
+  useReader(on: boolean, replaced = false): boolean {
+    if (on === this.reader && !replaced) return false;
+    if (on !== this.reader) {
+      this.reader = on;
+      const cursor = this.cursor;
+      if (cursor !== null) {
+        const state = cursor.tail.save();
+        cursor.tail = on ? new ParsedTail(state) : PcapngTail.restore(state);
+      }
     }
     this.inFlight = false;
     return true;
@@ -472,7 +486,7 @@ export class CatchUp<F extends SeqFrame> {
     cursor.next = seq;
     cursor.seek = null;
     const anchor = this.anchor;
-    cursor.landing = { at, zeros: 0, length: anchor !== null && anchor.seq === seq ? epbBytes(anchor.capLen) : null };
+    cursor.landing = { at, zeroSince: null, length: anchor !== null && anchor.seq === seq ? epbBytes(anchor.capLen) : null };
     this.findGapEnd(cursor);
   }
 
@@ -485,7 +499,9 @@ export class CatchUp<F extends SeqFrame> {
   private landingHead(cursor: Cursor): 'ok' | 'zeros' | 'wrong' | 'short' {
     const head = cursor.tail.blockHead();
     if (head === null) return 'short';
-    if (head.type === 0 && head.length === 0) return 'zeros';
+    // Zeros, or a type with no length yet: the writer's head, torn - the type
+    // written, the length not - and the rest to come.
+    if (head.length === 0) return 'zeros';
     const length = cursor.landing!.length;
     const fits = length !== null ? head.length === length : head.length >= 32 && head.length <= epbBytes(MAX_CAPLEN) && head.length % 4 === 0;
     return head.type === 6 && fits ? 'ok' : 'wrong';
@@ -670,9 +686,16 @@ export class CatchUp<F extends SeqFrame> {
     if (landing !== null && cursor.tail.position === landing.at) {
       // Where the seek landed must be an EPB - the anchor's, by its length,
       // when it landed on the anchor. Zeros are one not written yet, if no
-      // more than so often; anything else is the middle of a block.
+      // longer than `LANDING_MS` from the first read of them; anything else is
+      // the middle of a block.
       const head = this.landingHead(cursor);
-      if (head === 'wrong' || (head === 'zeros' && ++landing.zeros > LANDING_TRIES)) return this.missed(cursor, out);
+      if (head === 'zeros') {
+        const now = this.now();
+        if (landing.zeroSince === null) landing.zeroSince = now;
+        if (now - landing.zeroSince > LANDING_MS) return this.missed(cursor, out);
+      } else if (head === 'wrong') {
+        return this.missed(cursor, out);
+      }
     }
     let frame;
     try {

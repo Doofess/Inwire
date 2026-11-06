@@ -10,6 +10,7 @@
  * thread, so a test that hands objects over in one context would hide what the
  * crossing drops.
  */
+import { readFileSync } from 'node:fs';
 import v8 from 'node:v8';
 import { MAX_CAPLEN, type SeqFrame } from '../../src/services/pipeline/catchUp';
 import { PcapngTail, STALL_LIMIT, startState, type TailFrame, type TailState } from '../../src/services/pipeline/pcapngTail';
@@ -506,6 +507,56 @@ const twoRef: Seen[] = (() => {
     details.push(`at ${at}: ${a} / ${b}`);
   }
   check('ParsedTail and PcapngTail: each restored from the other\'s save() reads on with the same frames', ok, details.join('; '));
+}
+
+// --- the read a view is sent as: the buffer goes, the view with it ------------------------
+
+{
+  // The Worker sends main's bytes to the reader without copying them first:
+  // the buffer is transferred and the view travels with it, offset and all.
+  const big = new Uint8Array(13 + file.length + 9).fill(0xa5);
+  big.set(file, 13);
+  const view = big.subarray(13, 13 + file.length);
+  const sent = structuredClone({ type: 'parse' as const, requestId: 7, state: startState(), bytes: view }, { transfer: [view.buffer as ArrayBuffer] });
+  const detached = big.buffer.byteLength === 0;
+  const { reply } = answerParse(sent);
+  const p = reply.type === 'parsed' ? reply.parse : null;
+  check('a view transferred with its buffer (odd offset, larger buffer) parses as the whole file does',
+    detached && sent.bytes.byteOffset === 13 && p !== null && differs(p, ref) === '' && p.end.offset === file.length,
+    `${detached} ${sent.bytes.byteOffset} ${p === null ? reply.type : differs(p, ref)}`);
+}
+
+// --- the Worker's wiring ------------------------------------------------------------
+//
+// `src/workers/pipeline.worker.ts` is not importable here: it starts itself at
+// load and needs a Worker scope. Its reader wiring is held by reading the source,
+// which is all tsx can reach.
+
+{
+  const source = readFileSync(new URL('../../src/workers/pipeline.worker.ts', import.meta.url), 'utf8');
+  /** One top-level function's text, from its `function` line to the closing brace at column 0. */
+  const fn = (name: string): string => {
+    const start = source.search(new RegExp(`^function ${name}\\(`, 'm'));
+    if (start < 0) return '';
+    const end = source.indexOf('\n}\n', start);
+    return source.slice(start, end + 3);
+  };
+  const handlers = source.slice(source.indexOf("name: READER_NAME"), source.indexOf('parallel = { coordinator'));
+  check('A2: the reader\'s message handler is bound to its own Worker: it names it, and the receiver checks it is still the current one',
+    /receiveFromReader\(reader,/.test(handlers) && /if \(parallel\?\.reader !== r\) return;/.test(fn('receiveFromReader')),
+    handlers.trim().slice(0, 200));
+  check('...and so is its error handler, and readerDown terminates the Worker it was told of, not whichever is current',
+    /readerDown\(reader,/.test(handlers) && /\br\.terminate\(\)/.test(fn('readerDown')) && !/parallel\.reader\.terminate\(\)/.test(fn('readerDown'))
+    && /if \(parallel\?\.reader !== r\) return;/.test(fn('readerDown')),
+    fn('readerDown').slice(0, 200));
+  check('A1: a threads change is one change of reader - startParallel stops without telling catch-up, and tells it once the new reader stands',
+    /function stopParallel\(restarting = false\)/.test(source) && /if \(!restarting\) readerChanged\(\)/.test(fn('stopParallel'))
+    && /const replaced = stopParallel\(true\)/.test(fn('startParallel')) && /readerChanged\(replaced\)/.test(fn('startParallel')),
+    fn('stopParallel').slice(0, 300));
+  const captured = fn('receiveCaptured');
+  check('A3: the reader gets main\'s bytes as they are - no copy of them first, their buffer transferred with them',
+    captured.includes("type: 'parse'") && !/asArrayBuffer\(/.test(captured) && /\[bytes\.buffer as ArrayBuffer\]/.test(captured),
+    captured.slice(0, 300));
 }
 
 console.log(failures === 0 ? '\nAll read-parse checks passed.' : `\n${failures} read-parse check(s) FAILED.`);

@@ -24,8 +24,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import v8 from 'node:v8';
 import {
-  CatchUp, CatchUpRouter, CaptureFiles, HEADER_READ, HOLD_MAX_FRAMES, MAX_CAPLEN, REJOIN_WITHIN, type FileFrame,
-  type SeqFrame,
+  CatchUp, CatchUpRouter, CaptureFiles, HEADER_READ, HOLD_MAX_FRAMES, LANDING_MS, MAX_CAPLEN, REJOIN_WITHIN, anchorOf,
+  type FileFrame, type SeqFrame,
 } from '../../src/services/pipeline/catchUp';
 import { PcapngTail } from '../../src/services/pipeline/pcapngTail';
 import { parseRead, type ReadParse } from '../../src/services/pipeline/readParse';
@@ -432,6 +432,21 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
       diff === null && r.holes.length === 0 && holdsEveryLiveFrameOnce(r) && r.catchUp.stats.seekMisses === 0 && r.flippedWhileActive,
       diff ?? JSON.stringify({ stats: r.catchUp.stats, holes: r.holes, flippedWhileActive: r.flippedWhileActive }));
   }
+  for (const [when, clearAt] of [['in the same batch', mid + 3], ['a batch later', mid + 4]] as const) {
+    // A threads change applied at a clear: the reader flips and the view is
+    // cleared together, or one batch apart. The clear gives back what was
+    // held and marks what the file still owed, so the holes are the clear's;
+    // what must hold is that every frame is accounted for, the order is the
+    // straight run's, no seek missed, and the file is not counted from its start.
+    const shed = new Set([mid, mid + 1, mid + 2, mid + 3, mid + 4]);
+    const r = run(frames, { mainShed: shed, flipReaderAtBatch: mid + 3, clearAtBatch: clearAt });
+    const inOrder = r.delivered.every((f, i) => i === 0 || f.seq > r.delivered[i - 1].seq);
+    const marked = r.holes.reduce((t, h) => t + h.size, 0);
+    check(`${label}: the reader flips and the view is cleared ${when} - every frame is delivered or marked, in order, no recount`,
+      inOrder && holdsEveryLiveFrameOnce(r) && r.catchUp.stats.seekMisses === 0 && r.flippedWhileActive
+      && r.catchUp.off === null,
+      JSON.stringify({ stats: r.catchUp.stats, got: r.delivered.length, marked, skipped: r.skipped, flipped: r.flippedWhileActive }));
+  }
   {
     const r = run(frames, { agentShed: new Set([mid - 3, mid - 2]) });
     const diff = sameFrames(frames, r.delivered);
@@ -724,6 +739,133 @@ async function cases(label: string, frames: Frame[]): Promise<Frame[] | null> {
     for (let i = 0; i < 100; i++) { stuck.push(early.subarray(stuck.readOffset)); while (stuck.next() !== null) { /* frames */ } }
   } catch { threw = true; }
   check('...and a block that never closes is, in the end, a corrupt file', threw);
+}
+
+// --- a catch-up driven by hand: the end of a file, the reader's change, a landing ----------
+
+/** A catch-up on a file of ten frames with a second file after it, answered by hand. */
+function handRun(reader: boolean, now: () => number = () => 0) {
+  const made = madeFrames(30);
+  const files = new CaptureFiles();
+  files.boundary(1, 0);
+  files.file(1, 'a', 'open', 0);
+  files.boundary(2, 10);
+  files.file(2, 'b', 'open', null);
+  const c = new CatchUp<SeqFrame>(files, now);
+  c.useReader(reader);
+  /** Main's answer: the bytes, parsed beside the coordinator when the reader is on. */
+  const answer = (bytes: Uint8Array) => {
+    const state = c.tailState();
+    return state !== null ? c.readDone({ parse: across(parseRead(across(state), bytes)), gone: false }) : c.readDone({ bytes, gone: false });
+  };
+  return { made, files, c, answer };
+}
+
+for (const reader of [false, true]) {
+  const mode = reader ? 'reader' : 'in place';
+  // A zero-byte read ends a file only if it was closed when the read was asked.
+  for (const when of ['before', 'after'] as const) {
+    const { made, files, c, answer } = handRun(reader);
+    const file = concat([fileHeader(), ...made.slice(0, 10).map(epb)]);
+    c.start(3, null);
+    c.shedSeen(3, 20);
+    answer(file.subarray(c.wantRead()!.offset));
+    if (when === 'before') files.file(1, 'a', 'closed', null);
+    const asked = c.wantRead()!;
+    if (when === 'after') files.file(1, 'a', 'closed', null);
+    const out = answer(new Uint8Array(0));
+    const next = c.wantRead();
+    if (when === 'before') {
+      check(`a file closed before the read was asked, ${mode}: a zero read moves on to the next file`,
+        asked.name === 'a' && next?.name === 'b' && out.ended === null, JSON.stringify({ next, ended: out.ended }));
+    } else {
+      check(`a file closed after the read was asked, ${mode}: a zero read reads it again, at once, and does not move on`,
+        next?.name === 'a' && out.retryMs === 0 && out.ended === null, JSON.stringify({ next, retryMs: out.retryMs, ended: out.ended }));
+    }
+  }
+}
+
+{
+  // A1: a threads change is stop then start, and the read out is the reader's
+  // that is gone. It is asked again once, not once for the stop and once more
+  // for the start: `useReader(on, true)` is that one change.
+  const { c } = handRun(true);
+  c.start(3, null);
+  c.shedSeen(3, 20);
+  const first = c.wantRead();
+  check('a read out through the reader is the only one asked', first !== null && c.wantRead() === null);
+  check('the same kind again changes nothing, and the read stays out', !c.useReader(true) && c.wantRead() === null);
+  let asked = 0;
+  if (c.useReader(true, true) && c.wantRead() !== null) asked++;
+  check('the reader replaced (stopped and started at once): the read out is dropped and asked again - once', asked === 1, `asked ${asked}`);
+  check('...and a replaced reader that is not the kind changed keeps the cursor: the read is from the same offset',
+    c.tailState() !== null && c.tailState()!.offset === first!.offset);
+}
+
+{
+  // D9 and D10: a seek that lands on a block the agent has not finished writing.
+  const made = madeFrames(30);
+  const header = fileHeader();
+  const blocks = made.map(epb);
+  const whole = concat([header, ...blocks]);
+  const anchorAt = header.length + blocks.slice(0, 20).reduce((n, b) => n + b.length, 0);
+  /** The file as written so far: every frame before the anchor, then zeros - and `torn` bytes of its head. */
+  const written = (head?: { type: number; length: number }): Uint8Array => {
+    const out = new Uint8Array(whole.length);
+    out.set(whole.subarray(0, anchorAt));
+    if (head !== undefined) { new DataView(out.buffer).setUint32(anchorAt, head.type, true); new DataView(out.buffer).setUint32(anchorAt + 4, head.length, true); }
+    return out;
+  };
+  /** A catch-up whose seek has landed at frame 20, the anchor, in `file`. */
+  const landed = (reader: boolean, file: () => Uint8Array) => {
+    let now = 0;
+    const files = new CaptureFiles();
+    files.boundary(1, 0);
+    files.file(1, 'a', 'open', 0);
+    const c = new CatchUp<SeqFrame>(files, () => now);
+    c.useReader(reader);
+    for (let i = 0; i < 21; i++) c.passed(i, made[i].bytes.length);
+    c.start(21, anchorOf(made[20]));
+    c.shedSeen(21, 100);
+    const read = () => {
+      const want = c.wantRead();
+      if (want === null) return null;
+      const bytes = file().subarray(want.offset, want.offset + want.length);
+      const state = c.tailState();
+      return state !== null ? c.readDone({ parse: across(parseRead(across(state), bytes)), gone: false }) : c.readDone({ bytes, gone: false });
+    };
+    read();
+    return { c, read, at: (ms: number) => { now = ms; } };
+  };
+  check('the landing waits LANDING_MS', LANDING_MS === 10_000);
+  for (const reader of [false, true]) {
+    const mode = reader ? 'reader' : 'in place';
+    {
+      // D9: zeros where the seek landed are waited for by the clock, not by a count of reads.
+      const { c, read, at } = landed(reader, () => written());
+      let t = 0;
+      for (; t < 4000; t += 150) { at(t + 150); read(); }
+      check(`a landing on zeros for 4 s of reads ${mode}: still waited for, not a seek miss`, c.stats.seekMisses === 0, `${c.stats.seekMisses} misses after ${t} ms`);
+      for (t = 5000; t <= 10_000; t += 1000) { at(t); read(); }
+      check(`...and still waiting at 10 s ${mode}`, c.stats.seekMisses === 0, `${c.stats.seekMisses} misses`);
+      at(11_000);
+      read();
+      check(`...and a seek miss once the zeros have lasted longer than that ${mode}`, c.stats.seekMisses === 1, `${c.stats.seekMisses} misses`);
+    }
+    {
+      // D10: a head with a type and no length yet is a block being written.
+      let file = written({ type: 6, length: 0 });
+      const { c, read, at } = landed(reader, () => file);
+      for (let i = 1; i <= 5; i++) { at(i * 200); read(); }
+      check(`a landing on a head with a type and length 0 ${mode}: waited for, not a seek miss`, c.stats.seekMisses === 0, `${c.stats.seekMisses} misses`);
+      file = whole;
+      at(1200);
+      const out = read()!;
+      check(`...and when the length appears it lands, and catches up the frames after the anchor ${mode}`,
+        c.stats.seekMisses === 0 && out.ended === null && out.frames.map((f) => f.seq).join() === '21,22,23,24,25,26,27,28,29',
+        JSON.stringify({ misses: c.stats.seekMisses, ended: out.ended, frames: out.frames.map((f) => f.seq) }));
+    }
+  }
 }
 
 // --- run them --------------------------------------------------------------------
