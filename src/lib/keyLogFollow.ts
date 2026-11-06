@@ -32,6 +32,8 @@ export interface KeyLogFollowStatus {
   capBytes: number;
   suggested: string | null;
   error?: string;
+  /** Bytes main is about to send; 0 when the status does not announce a read. */
+  incomingBytes: number;
 }
 
 const STATES = new Set(['off', 'following', 'missing', 'unreadable']);
@@ -50,6 +52,8 @@ export function narrowStatus(value: unknown): KeyLogFollowStatus | null {
       ? v.capBytes : KEYLOG_CAP_BYTES,
     suggested: typeof v.suggested === 'string' ? v.suggested : null,
     ...(typeof v.error === 'string' ? { error: v.error } : {}),
+    incomingBytes: typeof v.incomingBytes === 'number' && Number.isFinite(v.incomingBytes) && v.incomingBytes >= 0
+      ? v.incomingBytes : 0,
   };
 }
 
@@ -88,7 +92,12 @@ export function startKeyLogFollow(): void {
   });
   bridge.onKeyLogStatus((value) => {
     const next = narrowStatus(value);
-    if (next !== null) { status = next; notify(); }
+    if (next !== null) {
+      // Size the table before the text it is for, so it moves once.
+      if (next.incomingBytes > 0) keyLog.reserve(next.incomingBytes);
+      status = next;
+      notify();
+    }
   });
   void bridge.attachKeyLog().then((value) => {
     const next = narrowStatus(value);

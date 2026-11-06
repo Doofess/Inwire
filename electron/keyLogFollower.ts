@@ -62,6 +62,8 @@ export class KeyLogFollower {
   private file: string | null;
   private offset = 0;
   private skipped = 0;
+  /** Bytes about to be sent; set only around the status pushed before a read's text. */
+  private incoming: number | undefined;
   private readonly lines = new LineAssembler();
   private watcher: FSWatcher | null = null;
   private poll: ReturnType<typeof setInterval> | null = null;
@@ -88,6 +90,7 @@ export class KeyLogFollower {
       capBytes: KEYLOG_CAP,
       suggested: suggestedKeyLog(),
       ...(this.error !== undefined ? { error: this.error } : {}),
+      ...(this.incoming !== undefined ? { incomingBytes: this.incoming } : {}),
     };
   }
 
@@ -239,8 +242,14 @@ export class KeyLogFollower {
         if (plan.restart || plan.from === 0) {
           const top = planFromTop(size, KEYLOG_CAP);
           readFrom = top.from;
-          this.skipped = top.from;
+          this.skipped = top.skipped;
           this.lines.reset(top.skipPartial);
+          // Tell the page how much is coming before any of it, so its table
+          // is sized once rather than grown at every overflow. Only a read
+          // from the top: a tail read is a browser's few new lines.
+          this.incoming = plan.to - readFrom;
+          this.pushStatus();
+          this.incoming = undefined;
         }
         for (const [from, to] of readSpans(readFrom, plan.to)) {
           const buffer = Buffer.alloc(to - from);

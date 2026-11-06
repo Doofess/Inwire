@@ -52,15 +52,22 @@ export function startOffset(size: number, cap: number): number {
 export function keyLogCap(env: string | undefined): number {
   if (env !== undefined && /^\d+$/.test(env)) {
     const value = Number(env);
-    if (Number.isSafeInteger(value) && value > 0) return value;
+    // A test hook only lowers the cap: it never raises it past the default.
+    if (Number.isSafeInteger(value) && value > 0) return Math.min(value, KEYLOG_CAP_BYTES);
   }
   return KEYLOG_CAP_BYTES;
 }
 
-/** A read from the top: where it starts, and whether it starts mid-line. */
-export function planFromTop(size: number, cap: number): { from: number; skipPartial: boolean } {
-  const from = startOffset(size, cap);
-  return { from, skipPartial: from > 0 };
+/**
+ * A read from the top: where it starts, whether it starts mid-line, and how
+ * many bytes at the top are left unread.
+ *
+ * The read starts one byte early (`size - cap - 1`): if that byte is a newline,
+ * the first line at the cut is whole and is kept; if not, the partial is dropped.
+ */
+export function planFromTop(size: number, cap: number): { from: number; skipPartial: boolean; skipped: number } {
+  const over = size > cap;
+  return { from: over ? size - cap - 1 : 0, skipPartial: over, skipped: Math.max(0, size - cap) };
 }
 
 export function planRead(size: number, offset: number): ReadPlan {
@@ -188,6 +195,11 @@ export interface KeyLogFollowStatus {
    */
   suggested: string | null;
   error?: string;
+  /**
+   * Set only on the status pushed just before a read's text: the bytes about
+   * to be sent, so the page can size its table once (`KeyLogStore#reserve`).
+   */
+  incomingBytes?: number;
 }
 
 /** The settings file's shape. Only the path is ever written - never a secret. */
