@@ -198,4 +198,7 @@ The capture-file import Worker (0074) is a third reader context beside the
 pipeline Worker and its shards: it adopts the page's `keylog-shared` snapshots
 and never loads a key log. A Decryption Secrets Block found in its walk goes to
 the page, which adds it and acks with a fresh snapshot; the walk waits for that
-ack. The page is still the one writer.
+ack. The page is still the one writer. Only `keylog-shared` with `cleared`
+empties the import's decrypted answers: an ack's snapshot keeps `cleared` set
+after a Clear until the table grows, and arrives as a new buffer object each
+time, so it cannot be told from the Clear.

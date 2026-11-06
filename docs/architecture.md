@@ -302,7 +302,7 @@ See [ADR 0051](decisions/0051-the-version-is-0x-in-development.md).
 Live capture dissects in the Worker. A capture-file import (pcap/pcapng) runs
 `PcapService.streamCaptureFile` in its own Worker, the pipeline script's import
 role (ADR 0074, `importRun.ts`, `importClient.ts`): the Worker writes batches to the
-store over an ingest port of its own (tagged appends, credit, a closing barrier),
+store over an ingest port of its own (tagged appends, credit in frames and bytes, a closing barrier),
 packs each batch once for the store and the page, and the page keeps a bounded
 newest window. CSV, JSON, xlsx and a zip stay in-process. The walk reads the file in windows of
 `READ_WINDOW_BYTES` (64 MiB, `byteWindow.ts`), so a file of any size imports

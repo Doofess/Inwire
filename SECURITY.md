@@ -55,8 +55,9 @@ yet.
 `nodeIntegration: false`, no service workers, every permission request denied,
 and a bundled preload that exposes specific APIs. The packaged binary has the
 RunAsNode, Node inspector arguments and NODE_OPTIONS fuses off and loads only
-from ASAR. Live capture is dissected in sandboxed Workers. **File import is
-parsed on the renderer's main thread** (`PcapService.streamCaptureFile`): equally
+from ASAR. Live capture is dissected in sandboxed Workers, and so is a pcap or
+pcapng import (ADR 0074): a Worker per import, terminated when it ends. **CSV,
+JSON, xlsx and a zip are still parsed on the renderer's main thread**: equally
 sandboxed and without Node access, but not isolated in a Worker. The capture
 store is a separate unprivileged utility process that owns the derived capture
 files; the agent owns the original pcapng writer.

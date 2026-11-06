@@ -47,9 +47,13 @@ goes down the ingest port, and the host already acks that on its own reply. The
 page awaits the open (`CaptureClient.beginAwaited`), which rejects on a failed
 or unavailable store.
 
-**Credit and a barrier.** The Worker sends at most `IMPORT_CREDIT_FRAMES`
-(50,000) frames ahead of what the store has acked, so the store's heap guard
-needs no main-thread pacing. Before `done` it sends one empty acked
+**Credit and a barrier.** The Worker pauses while more than `IMPORT_CREDIT_FRAMES`
+(50,000) frames or `IMPORT_CREDIT_BYTES` (256 MiB, the bound `electron/pipeCredit.ts`
+puts on the live path) are unacked by the store, so the store's heap guard needs
+no main-thread pacing. Frames alone were not enough: a capture of 64 KB segments
+(large send offload) would put about 3 GB in flight toward a store that stops at
+about 4 GB. The pause is checked between batches, so a batch larger than the
+byte credit still goes. Before `done` it sends one empty acked
 `appendBytes`: the ingest port's replies are ordered, so the ack means every
 earlier append has landed. Stop's rule (drain, await writes, then seal) is kept.
 
@@ -74,7 +78,12 @@ seam; production passes nothing, so it has no user-facing switch.
 Decryption Secrets Block goes to the page (`secrets`, with a `seq`); the page
 adds it to its `KeyLogStore`, answers `secretsTaken` with a fresh snapshot, and
 the walk waits for that ack. Frames after the block decrypt from
-the new snapshot. A cleared key log empties the Worker's `DerivedStore`.
+the new snapshot. A `keylog-shared` with `cleared` (the page's Clear) empties
+the Worker's `DerivedStore`; a `secretsTaken` ack never does. After a Clear
+every snapshot carries `cleared` until the table next grows, and a
+`SharedArrayBuffer` arrives as a new object with every message, so the Worker
+cannot tell an ack from the Clear by looking at the snapshot: an ack that cleared
+emptied the answers of every frame already decrypted (found in the final review).
 
 **Adoption in slices, the minimap held.** At `done` the page hands the finished
 buffer to the list in slices of `ADOPT_SLICE_ROWS` (150,000), a task each. Why:
@@ -97,7 +106,8 @@ finds the selection line by bisection when ids are ordered.
 | adopt | not offered |
 
 The job stays `running` until `fail()` returns, there is no dialog and a quiet
-line is shown. A store that dies or fails for good mid-import ends the Worker
+line is shown. A request that has to wait (the seal, an in-process parse) is
+published in the job: the button reads `Cancelling…` and is disabled. A store that dies or fails for good mid-import ends the Worker
 run as a failure (`CaptureClient.onLost`, `onStoreLost`); otherwise the Worker
 waits for ever on credit or the barrier.
 
