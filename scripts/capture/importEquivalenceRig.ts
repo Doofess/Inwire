@@ -44,14 +44,37 @@ export function canonicalRow(p: Packet): CanonicalRow {
   const fields = fieldEntries(p).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   // Keys sorted at every depth: the codec rebuilds an expert entry's keys in an
   // order of its own, which is not a difference.
+  // A BigInt (a real capture's nanosecond stamp, say) is not JSON: written as text with a tag.
   const sorted = (_key: string, value: unknown): unknown =>
-    value !== null && typeof value === 'object' && !Array.isArray(value)
-      ? Object.fromEntries(Object.entries(value).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)))
-      : value;
+    typeof value === 'bigint' ? `${value}n`
+      : value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)))
+        : value;
   return {
     scalars: JSON.stringify(scalars, sorted),
-    fields: JSON.stringify(fields),
+    fields: JSON.stringify(fields, sorted),
     raw: Buffer.from(p.rawBytes.buffer, p.rawBytes.byteOffset, p.rawBytes.byteLength).toString('hex'),
+  };
+}
+
+/**
+ * How two canonical rows differ, as names only - never values: a private capture's
+ * rows hold addresses and hostnames. The scalar keys and the field keys whose
+ * values differ, and whether the bytes do.
+ */
+export function rowDifference(x: CanonicalRow, y: CanonicalRow): {
+  raw: boolean; scalarKeys: string[]; fieldKeys: string[];
+} {
+  const keysOf = (json: string) => JSON.parse(json) as Record<string, unknown>;
+  const [sx, sy] = [keysOf(x.scalars), keysOf(y.scalars)];
+  const fieldsOf = (json: string) => new Map(JSON.parse(json) as [string, unknown][]);
+  const [fx, fy] = [fieldsOf(x.fields), fieldsOf(y.fields)];
+  return {
+    raw: x.raw === y.raw,
+    scalarKeys: [...new Set([...Object.keys(sx), ...Object.keys(sy)])]
+      .filter((k) => JSON.stringify(sx[k]) !== JSON.stringify(sy[k])),
+    fieldKeys: [...new Set([...fx.keys(), ...fy.keys()])]
+      .filter((k) => JSON.stringify(fx.get(k)) !== JSON.stringify(fy.get(k))),
   };
 }
 

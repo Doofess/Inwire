@@ -56,7 +56,7 @@ import { SCORING_FRAMES } from '../../src/services/hostIdentity';
 import { keyLog, KeyLogStore } from '../../src/services/tls/keyLog';
 import type { FromImport, ImportRunOptions } from '../../src/services/pipeline/importProtocol';
 import {
-  canonicalRow, derivedHex, dnsTcpInput, normalizeStoreMessage, tlsWithDsbInput,
+  canonicalRow, derivedHex, dnsTcpInput, normalizeStoreMessage, rowDifference, tlsWithDsbInput,
   type CanonicalRow, type RouteResult, type SyntheticInput, type ThreadCommand,
 } from './importEquivalenceRig';
 
@@ -256,14 +256,8 @@ function sameRows(a: CanonicalRow[], b: CanonicalRow[], strictBytes: boolean) {
     if (x.scalars !== y.scalars || x.fields !== y.fields || ((both || strictBytes) && x.raw !== y.raw)) {
       equal = false;
       // Names of the keys that differ, never values: a private capture's rows hold addresses.
-      const keysOf = (json: string) => JSON.parse(json) as Record<string, unknown>;
-      const [sx, sy] = [keysOf(x.scalars), keysOf(y.scalars)];
-      firstDifference = {
-        row: i, raw: x.raw === y.raw,
-        scalarKeys: [...new Set([...Object.keys(sx), ...Object.keys(sy)])]
-          .filter((k) => JSON.stringify(sx[k]) !== JSON.stringify(sy[k])),
-        fieldsEqual: x.fields === y.fields,
-      };
+      const { raw, scalarKeys } = rowDifference(x, y);
+      firstDifference = { row: i, raw, scalarKeys, fieldsEqual: x.fields === y.fields };
     }
   }
   return { equal, firstDifference, bytesCompared };
