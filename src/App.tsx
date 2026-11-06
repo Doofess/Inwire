@@ -2931,6 +2931,7 @@ export default function App() {
       keyLog,
       onOpening: handleImportOpening,
       storedThrough: bytesStoredThrough,
+      onStoreLost: (listener) => captureStore.onLost(listener),
       onProgress: run.onProgress,
       options: {
         record: true,

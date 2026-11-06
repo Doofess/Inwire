@@ -87,22 +87,38 @@ class RealWorker implements WorkerLike {
 }
 
 /** The capture store's far end of the ingest port: answers the credit, remembers the last row. */
-function fakeStore() {
+function fakeStore(options: { holdAcks?: boolean } = {}) {
   const { port1, port2 } = new MessageChannel();
-  const state = { lastId: 0, appended: 0, closed: false };
+  // `openId` is the capture the store has open (`CaptureHost.isForAnotherCapture`
+  // drops a tagged message for any other, silently); `dropped` counts those.
+  const state = {
+    lastId: 0, appended: 0, closed: false, dropped: 0,
+    openId: 'capture-under-test' as string | null, lastPacked: null as unknown,
+  };
   // The store's own reader: the Worker sends `appendPacked`, never `append`.
   const reader = new PackReader();
-  port1.onmessage = (event: MessageEvent<{ type: string; ack?: number; rows?: PackedRows }>) => {
+  port1.onmessage = (event: MessageEvent<{ type: string; ack?: number; rows?: PackedRows; captureId?: string }>) => {
     const m = event.data;
+    if (m.captureId !== undefined && m.captureId !== state.openId) { state.dropped++; return; }
     if (m.type === 'appendPacked' && m.rows !== undefined) {
+      state.lastPacked = m;
       const rows = reader.read(m.rows);
       state.appended += rows.length;
       if (rows.length > 0) state.lastId = Math.max(state.lastId, rows[rows.length - 1].id);
     }
-    if (m.type === 'appendBytes' && m.ack !== undefined) port1.postMessage({ type: 'bytesTaken', ack: m.ack });
+    if (m.type === 'appendBytes' && m.ack !== undefined && options.holdAcks !== true) {
+      port1.postMessage({ type: 'bytesTaken', ack: m.ack });
+    }
   };
   port1.addEventListener('close', () => { state.closed = true; });
-  return { port: port2 as unknown as MessagePort, state, close: () => port1.close() };
+  return {
+    port: port2 as unknown as MessagePort, state, close: () => port1.close(),
+    /**
+     * A message already in flight from a Worker that has since been terminated:
+     * the last `appendPacked` the store took, sent again from the Worker's end.
+     */
+    lateAppend: () => port2.postMessage(state.lastPacked),
+  };
 }
 
 /** A page key log that counts who is subscribed. */
@@ -137,22 +153,28 @@ interface Rig {
   keys: ReturnType<typeof trackedKeyLog>;
   store: ReturnType<typeof fakeStore>;
   spawned: number;
+  /** Listeners `deps.onStoreLost` holds right now; `storeLost` is the store dying. */
+  lost: Set<(message: string) => void>;
+  storeLost: (message: string) => void;
 }
 
 function rig(
   make: () => ScriptedWorker | RealWorker, options: ImportRunOptions = OPTIONS,
-  overrides: Partial<ImportClientDeps> = {},
+  overrides: Partial<ImportClientDeps> = {}, storeOptions: Parameters<typeof fakeStore>[0] = {},
 ): Rig {
   const keys = trackedKeyLog();
-  const store = fakeStore();
+  const store = fakeStore(storeOptions);
+  const lost = new Set<(message: string) => void>();
   const state: Rig = {
-    worker: undefined as unknown as Rig['worker'], progress: [], opened: [], keys, store, spawned: 0,
+    worker: undefined as unknown as Rig['worker'], progress: [], opened: [], keys, store, spawned: 0, lost,
+    storeLost: (message) => { for (const listener of [...lost]) listener(message); },
     deps: {
       spawn: () => { state.spawned++; state.worker = make(); return state.worker; },
       ingestPort: async () => store.port,
       keyLog: keys.deps,
       onOpening: async () => { state.opened.push('capture-under-test'); return 'capture-under-test'; },
       storedThrough: () => store.state.lastId,
+      onStoreLost: (listener) => { lost.add(listener); return () => { lost.delete(listener); }; },
       onProgress: (read, total) => { state.progress.push([read, total]); },
       options,
       ...overrides,
@@ -364,6 +386,78 @@ const ids = (outcome: ImportOutcome) => (outcome.ok ? outcome.packets.map((p) =>
   await withTimeout(new Promise((resolve) => setTimeout(resolve, 20)), 'settle');
   check('cancel before the port arrives never makes a Worker', out4.ok === false && out4.failure.kind === 'cancelled' && early.spawned === 0);
   for (const s of [first.store, second.store, scripted.store, early.store]) s.close();
+}
+
+// --- 4b. Cancel mid-import, and a store that dies mid-import ----------------------------
+//
+// The store never answers the Worker's credit here, so the Worker is parked on it,
+// as it is when the store is slow or gone: the one state in which only the page can
+// end the run.
+
+async function stalledRun(name: string) {
+  const frames: Uint8Array[] = [];
+  for (let i = 0; i < 6_000; i++) frames.push(udpFrame(5000 + (i % 100), 9999, Uint8Array.of(i & 0xff, (i >> 8) & 0xff)));
+  const r = rig(() => new RealWorker(), {
+    ...OPTIONS, maxFrames: 6_100, batchFrames: 500, windowBytes: 32 * 1024, creditFrames: 1_000,
+  }, {}, { holdAcks: true });
+  const run = runWorkerImport(fileOf(pcapOf(frames), name), r.deps);
+  for (let waited = 0; r.store.state.appended === 0 && waited < 200; waited++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  // Long enough for the Worker to have read on until the credit stopped it.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return { r, run, worker: r.worker as RealWorker };
+}
+
+{
+  const { r, run, worker } = await stalledRun('cancel.pcap');
+  const atCancel = { appended: r.store.state.appended, log: worker.log.length };
+  check('the Worker is parked on credit, having written some rows, when Cancel is pressed',
+    atCancel.appended > 0 && atCancel.appended < 6_000 && !worker.terminated, atCancel);
+  run.cancel();
+  const outcome = await withTimeout(run.result, 'cancel mid-import', 5_000);
+  // The lifecycle's `fail()` discards the capture: the store has no open capture.
+  r.store.state.openId = null;
+  r.store.lateAppend();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  check('cancel mid-import discards it and a late tagged append is dropped',
+    outcome.ok === false && outcome.failure.kind === 'cancelled' && worker.terminated
+    && r.keys.counts.live === 0 && r.lost.size === 0
+    && r.store.state.appended === atCancel.appended && r.store.state.dropped === 1 && worker.log.length === atCancel.log,
+    { kind: outcome.ok ? 'ok' : outcome.failure.kind, now: r.store.state.appended, dropped: r.store.state.dropped });
+  r.store.close();
+}
+{
+  const { r, run, worker } = await stalledRun('lost.pcap');
+  check('the page is listening for the store while the Worker waits', r.lost.size === 1, r.lost.size);
+  r.storeLost('the capture store stopped');
+  let outcome: ImportOutcome | null = null;
+  try { outcome = await withTimeout(run.result, 'store death', 3_000); } catch { /* hung: checked below */ }
+  check('store death mid-import ends the run as a failure',
+    outcome !== null && outcome.ok === false && outcome.failure.kind === 'unreadable'
+    && outcome.failure.message === 'the capture store stopped' && worker.terminated
+    && r.lost.size === 0 && r.keys.counts.live === 0,
+    { settled: outcome !== null, terminated: worker.terminated, listeners: r.lost.size });
+  r.storeLost('again');
+  check('...and a second report from the store changes nothing', r.lost.size === 0);
+  if (outcome === null) run.cancel();
+  r.store.close();
+}
+{
+  // Every other exit lets go of the store listener too.
+  const done = rig(() => new RealWorker());
+  const input = dnsTcpInput();
+  const outcome = await withTimeout(runWorkerImport(fileOf(input.bytes), done.deps).result, 'listener on success');
+  check('the store listener ends with the run (success)', outcome.ok === true && done.lost.size === 0, done.lost.size);
+  const failing = rig(() => new ScriptedWorker());
+  const run = runWorkerImport(fileOf(new Uint8Array(8)), failing.deps);
+  await withTimeout(new Promise((resolve) => later(() => resolve(undefined))), 'start');
+  const during = failing.lost.size;
+  run.cancel();
+  await run.result;
+  check('...and the listener is held for the run only: one while it runs, none after Cancel', during === 1 && failing.lost.size === 0, [during, failing.lost.size]);
+  done.store.close();
+  failing.store.close();
 }
 
 // --- 7. the tail's bytes are released below what the store holds ------------------------

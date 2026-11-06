@@ -283,6 +283,7 @@ async function importZip(file: File, maxFrames: number): Promise<ImportOutcome> 
 async function importCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch?: ImportBatchSink,
   onProgress?: ImportProgress, bytesStoredThrough?: () => number, worker?: WorkerImportRoute,
+  onCancelHandle?: (cancel: (() => void) | null) => void,
 ): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
@@ -292,7 +293,11 @@ async function importCapture(
     let read: CaptureRead;
     if (worker !== undefined) {
       const run = await worker(file, { maxFrames, residentBytes, onProgress: onProgress ?? (() => {}) });
+      // Handed over as soon as it exists; a Cancel pressed while the client was
+      // loading reaches it here, and settles `result` as cancelled.
+      onCancelHandle?.(run.cancel);
       const outcome = await run.result;
+      onCancelHandle?.(null);
       if (outcome.ok === false) return outcome;
       read = {
         packets: outcome.packets, totalFrames: outcome.totalFrames ?? outcome.packets.length,
@@ -438,6 +443,12 @@ export interface ImportOptions {
    * where they were.
    */
   worker?: WorkerImportRoute;
+  /**
+   * Told the Worker run's `cancel` once it exists, and null once it is over, so
+   * the import job can stop it (`importJob.ts`). Never called for a format with
+   * no run to stop.
+   */
+  onCancelHandle?: (cancel: (() => void) | null) => void;
 }
 
 export async function importAnyFile(file: File, options: ImportOptions = {}): Promise<ImportOutcome> {
@@ -448,7 +459,7 @@ export async function importAnyFile(file: File, options: ImportOptions = {}): Pr
   if (CAPTURE_EXTENSIONS.includes(extension)) {
     return importCapture(
       file, maxFrames, options.residentBytes ?? Number.POSITIVE_INFINITY, options.onBatch,
-      options.onProgress, options.bytesStoredThrough, options.worker,
+      options.onProgress, options.bytesStoredThrough, options.worker, options.onCancelHandle,
     );
   }
   if (extension === '.json') return importJson(file);

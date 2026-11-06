@@ -55,11 +55,17 @@ check('handleFile refuses while the job runs', beforeAwait.includes(RUNNING));
 check('handleFile no longer keys its refusal on a local busy flag', !handleFile.includes('busy'));
 check('handleFile begins the job before its first await', beforeAwait.includes('beginImportJob(file.name, file.size)'));
 check('handleFile ends the job in finally, with the result', handleFile.slice(handleFile.indexOf('finally')).includes('endImportJob(result)'));
-check('handleFile awaits the lifecycle\'s begin before it reads the file',
-  handleFile.indexOf('await onImportBegin?.()') !== -1
-  && handleFile.indexOf('await onImportBegin?.()') < handleFile.indexOf('importAnyFile('));
-check('a refusal and a throw both undo a begun import, before the dialog',
-  (handleFile.match(/if \(begun\) onImportFailed\?\.\(\);\s+onFailure\(/g) ?? []).length === 2);
+// The phases' order moved to `importFlow.ts` (a script can run it, which it cannot
+// do to the panel); the panel hands it the lifecycle's begin and failed.
+const earlyFlow = readFileSync('src/services/importFlow.ts', 'utf8');
+check('handleFile hands the flow the lifecycle\'s begin and failed, and the flow awaits begin before it reads the file',
+  handleFile.includes('begin: onImportBegin') && handleFile.includes('failed: onImportFailed')
+  && earlyFlow.indexOf('await deps.begin?.()') !== -1
+  && earlyFlow.indexOf('await deps.begin?.()') < earlyFlow.indexOf('await deps.read()'));
+check('a refusal and a throw both undo a begun import, before the dialog (the flow runs `failed` before it returns)',
+  (earlyFlow.match(/deps\.failed\?\.\(\);\s+return \{ status: 'failed'/g) ?? []).length === 1
+  && /if \(begun\) deps\.failed\?\.\(\);\s+return \{\s+status: 'failed'/.test(earlyFlow)
+  && handleFile.indexOf('await runImportFlow(') < handleFile.indexOf('onFailure('));
 // The tail's byte release used to be a callback handed down to the walk on this
 // thread; the Worker route writes to the store itself and learns the store's reach
 // from App's `storedThrough` (checked below), so the panel hands over the route.
@@ -91,8 +97,38 @@ check('...in one grid cell, so the zone keeps its height',
 check('the name truncates with the full name in a title',
   busyBody.includes('truncate') && busyBody.includes('title={'));
 check('the result and notes sit above the help card',
-  panel.indexOf('{status && (') !== -1 && panel.indexOf('{status && (') < panel.indexOf('Spreadsheets and tables are checked')
+  panel.indexOf('{status && !cancelled && (') !== -1
+  && panel.indexOf('{status && !cancelled && (') < panel.indexOf('Spreadsheets and tables are checked')
   && panel.indexOf('{notes.length > 0 && (') < panel.indexOf('Spreadsheets and tables are checked'));
+
+// --- Cancel -----------------------------------------------------------------
+
+// A cancelled import is the user's own act: no error dialog, on either branch of
+// handleFile (a refusal the flow reports, or a throw it catches), and no success
+// line - the quiet "Import cancelled" one.
+check('a cancelled import shows no error dialog',
+  (handleFile.match(/onFailure\(/g) ?? []).length === 1
+  && /flow\.status === 'failed'\)\s*\{?\s*onFailure\(/.test(handleFile)
+  && /flow\.status === 'cancelled'/.test(handleFile));
+const flowSource = earlyFlow;
+check('the flow maps a cancelled outcome, or a requested cancel, to `cancelled`, never to a failure',
+  /kind === 'cancelled' \|\| deps\.cancelRequested\(\)/.test(flowSource)
+  && /status: 'cancelled'/.test(flowSource));
+check('the Cancel button is outside the drop zone\'s label, which would open the file picker',
+  panel.indexOf('aria-label="Cancel import"') > panel.indexOf('</label>')
+  && !zone.includes('Cancel import') && !zone.includes('cancelImportJob'));
+const cancelButton = between(panel, '<button', '</button>');
+check('...it is a plain button named for what it does, calling the job\'s cancel',
+  cancelButton.includes('type="button"') && cancelButton.includes('aria-label="Cancel import"')
+  && cancelButton.includes('onClick={() => cancelImportJob()}') && /Cancel\s*$/.test(cancelButton));
+check('...shown only while the job is running and can still be cancelled; its row is kept while busy so the cards do not move',
+  /\{busy && \(/.test(panel) && /\{job\.status === 'running' && job\.cancellable && \(/.test(panel));
+check('the cancelled result is a muted line, not the success one',
+  panel.includes('job.result?.cancelled === true')
+  && /\{status && cancelled && \(\s*<div className="text-muted-foreground/.test(panel));
+check('handleFile hands the run\'s cancel to the job, and locks Cancel before the adoption (in the flow)',
+  handleFile.includes('onCancelHandle: setImportJobCancel') && handleFile.includes('lockCancel: lockImportCancel')
+  && flowSource.indexOf('deps.lockCancel()') < flowSource.indexOf('await deps.adopt('));
 
 // --- App --------------------------------------------------------------------
 

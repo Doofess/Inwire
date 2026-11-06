@@ -18,9 +18,12 @@
  * - `progress`: report it. The tail lets go of the bytes the store can supply
  *   (`deps.storedThrough`) here and after each `rows`, once the capture is open.
  * - `done` / `failed` / the Worker's `onerror`: the run is over.
+ * - the store lost (`deps.onStoreLost`): the run is over, as a failure. The Worker
+ *   would wait for ever on credit or the barrier of a store that is gone.
  *
- * Every exit - success, failure, a Worker that dies, Cancel - settles `result`
- * exactly once, terminates the Worker and ends the key-log subscription; after
+ * Every exit - success, failure, a Worker that dies, a lost store, Cancel - settles
+ * `result` exactly once, terminates the Worker and ends the key-log and store
+ * subscriptions; after
  * it every message from that Worker is ignored (the run is its own token), so a
  * second import started at once is independent of the first.
  *
@@ -54,6 +57,13 @@ export interface ImportClientDeps {
   onOpening(): Promise<string>;
   /** The highest frame id the store can supply bytes for (0 = none). */
   storedThrough(): number;
+  /**
+   * Hears when the capture store is gone or has failed for good, until the
+   * returned function is called. The Worker's only link to the store is a port
+   * that goes quiet when the store dies, so it would wait for ever on credit or
+   * the barrier: only the page is told, and the run must end then.
+   */
+  onStoreLost(listener: (message: string) => void): () => void;
   onProgress(readBytes: number, totalBytes: number): void;
   options: ImportRunOptions;
 }
@@ -84,6 +94,7 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
   let over = false;
   let worker: WorkerLike | null = null;
   let unsubscribe: (() => void) | null = null;
+  let unlisten: (() => void) | null = null;
   let storeOpened = false;
   // Not before the capture is open: until then `storedRange` is the PREVIOUS
   // capture's (this one's `ready` has not arrived), so a stale high answer would
@@ -100,6 +111,8 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
     over = true;
     unsubscribe?.();
     unsubscribe = null;
+    unlisten?.();
+    unlisten = null;
     if (worker !== null) {
       worker.onmessage = null;
       worker.onerror = null;
@@ -154,6 +167,10 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
         return;
     }
   };
+
+  // From the start, not from the Worker's: the store can die while the port is on
+  // its way, and the run must not outlive it.
+  unlisten = deps.onStoreLost((message) => finish(unreadable(message || 'The capture store stopped.')));
 
   void (async () => {
     let port: MessagePort | null = null;

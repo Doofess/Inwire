@@ -220,6 +220,26 @@ class CaptureClient {
 
   onState: (state: CaptureStorageState) => void = () => {};
 
+  private readonly lostListeners = new Set<(message: string) => void>();
+
+  /**
+   * Hears when the store is gone (its process exited, or its port never came) or
+   * has failed for good. Something that is waiting on a stream the client does not
+   * see - the import Worker's own port to the store - cannot learn it any other
+   * way, and would wait for ever. Returns the way to stop listening.
+   */
+  onLost(listener: (message: string) => void): () => void {
+    this.lostListeners.add(listener);
+    return () => { this.lostListeners.delete(listener); };
+  }
+
+  private announceLost(message: string): void {
+    // Copied: a listener ends its run, which unsubscribes it.
+    for (const listener of [...this.lostListeners]) {
+      try { listener(message); } catch (error) { console.warn('a capture-store listener threw', error); }
+    }
+  }
+
   private ensurePort(): Promise<MessagePort | null> {
     if (this.connection) return this.connection;
     if (this.disabled || !captureStoreAvailable()) return Promise.resolve(null);
@@ -257,6 +277,7 @@ class CaptureClient {
     // never settles: a frame whose bytes cannot be fetched is a thing to
     // render, and the hex viewer already knows how to say so.
     this.settleAll();
+    this.announceLost(reason || 'the capture store stopped');
   }
 
   /**
@@ -443,6 +464,7 @@ class CaptureClient {
           this.settleAll();
         }
         this.update({ error: message.message });
+        if (message.fatal) this.announceLost(message.message);
         break;
     }
   }
