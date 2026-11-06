@@ -924,9 +924,9 @@ buffer.
 
 | Offered | Sent (a second) | Advanced (a second) | Skipped | Level | Worker ArrayBuffers |
 |---|---|---|---|---|---|
-| 120,000 | 112,661 | 80,016 | 0 | 10.1 s | 32-160 MB |
-| 120,000 | 112,079 | 78,325 | 0 | 9.6 s | 32-160 MB |
-| 120,000 | 112,054 | 80,671 | 0 | 10.7 s | 32-160 MB |
+| 120,000 | 112,661 | 80,016 | 0 | 10.1 s | 32-136 MB |
+| 120,000 | 112,079 | 78,325 | 0 | 9.6 s | 66-160 MB |
+| 120,000 | 112,054 | 80,671 | 0 | 10.7 s | 56-110 MB |
 | 60,000 | ~59,850 | kept up, 3 of 3 | 0 | 0.5 s | 27-109 MB |
 
 - **ArrayBuffers.** The 120,000 ranges leave out each run's first two
