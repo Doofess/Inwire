@@ -53,13 +53,13 @@ importJobProgress(5);
 check('progress while idle is ignored', [getImportJob(), heard], [{ status: 'idle' }, 0]);
 
 check('begin succeeds', beginImportJob('cap.pcapng', 1000), true);
-check('running state', getImportJob(), { status: 'running', fileName: 'cap.pcapng', readBytes: 0, totalBytes: 1000, cancellable: true });
+check('running state', getImportJob(), { status: 'running', fileName: 'cap.pcapng', readBytes: 0, totalBytes: 1000, cancellable: true, cancelRequested: false });
 check('a second begin is refused while running', beginImportJob('other.pcap', 5), false);
 check('the refused begin changed nothing', (getImportJob() as { fileName?: string }).fileName, 'cap.pcapng');
 const afterBegin = heard;
 importJobProgress(400);
 check('progress is published', [getImportJob(), heard], [
-  { status: 'running', fileName: 'cap.pcapng', readBytes: 400, totalBytes: 1000, cancellable: true }, afterBegin + 1,
+  { status: 'running', fileName: 'cap.pcapng', readBytes: 400, totalBytes: 1000, cancellable: true, cancelRequested: false }, afterBegin + 1,
 ]);
 endImportJob();
 check('end returns to idle', getImportJob(), { status: 'idle' });
@@ -82,7 +82,7 @@ check('progress while idle keeps the result and publishes nothing', [getImportJo
 ]);
 beginImportJob('b.pcap', 10);
 check('the next import clears the result as it begins', getImportJob(), {
-  status: 'running', fileName: 'b.pcap', readBytes: 0, totalBytes: 10, cancellable: true,
+  status: 'running', fileName: 'b.pcap', readBytes: 0, totalBytes: 10, cancellable: true, cancelRequested: false,
 });
 endImportJob();
 check('an import that ends with no result leaves none', getImportJob(), { status: 'idle' });
@@ -113,10 +113,10 @@ check('an unsubscribed listener hears nothing', heard, quiet);
   setImportJobCancel(() => { called++; });
   cancelImportJob();
   check('cancel calls the registered cancel once and records the request', [called, importCancelRequested()], [1, true]);
-  check('...and the job is still running, unchanged, and nothing was published',
-    [getImportJob(), rang], [{ status: 'running', fileName: 'cancel.pcap', readBytes: 0, totalBytes: 100, cancellable: true }, 0]);
+  check('a cancel request is published, once',
+    [getImportJob(), rang], [{ status: 'running', fileName: 'cancel.pcap', readBytes: 0, totalBytes: 100, cancellable: true, cancelRequested: true }, 1]);
   cancelImportJob();
-  check('a second press calls nothing again', called, 1);
+  check('a second press calls nothing again and publishes nothing new', [called, rang], [1, 1]);
   endImportJob();
   check('...and the job ends only through endImportJob', getImportJob().status, 'idle');
   check('the next job does not inherit the request', (beginImportJob('next.pcap', 1), importCancelRequested()), false);

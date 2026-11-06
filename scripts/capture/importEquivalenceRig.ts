@@ -342,6 +342,8 @@ export interface SyntheticInput {
   /** Frame ids (1-based) of a TLS record before the secrets block, and of one after it. */
   opaqueId?: number;
   decryptedId?: number;
+  /** Decryption Secrets Blocks in the file; one when absent. */
+  blocks?: number;
 }
 
 /**
@@ -353,8 +355,12 @@ export interface SyntheticInput {
  * `SCORING_FRAMES` frames in a pass of its own, which hands over every block it
  * reaches before the main pass dissects anything: with more filler than that, the
  * block is reached by the main pass, in the middle of dissection, as in a big file.
+ *
+ * `secondBlock` adds a second block (the keys of a third connection nothing uses)
+ * just before the last frame, after enough other frames that every answer decrypted
+ * between the two is already delivered when the second block is acked.
  */
-export function tlsWithDsbInput(fillerFrames = 0): SyntheticInput {
+export function tlsWithDsbInput(fillerFrames = 0, secondBlock = false): SyntheticInput {
   const a = connection(40001);
   const b = connection(40002);
   const hello = (c: Connection) => [
@@ -376,13 +382,18 @@ export function tlsWithDsbInput(fillerFrames = 0): SyntheticInput {
   frames.push(appRecord(b, false, response));
   frames.push(appRecord(b, true, windowUpdate));
   frames.push(appRecord(a, false, response));
+  // The batcher holds a frame until its patch window closes: enough frames between
+  // the answers and the second block that the batches carrying them are out.
+  if (secondBlock) for (let i = 0; i < 300; i++) frames.push(udpFrame(5001, 9999, Uint8Array.of(i & 0xff)));
   frames.push(appRecord(a, true, windowUpdate));
   const parts: Uint8Array[] = [shb(), idb()];
   frames.forEach((frame, i) => {
     if (i === before) parts.push(dsb(secrets));
+    if (secondBlock && i === frames.length - 1) parts.push(dsb(keyLines(connection(40003))));
     parts.push(epb(frame, i));
   });
   return {
+    ...(secondBlock ? { blocks: 2 } : {}),
     name: fillerFrames > SCORING_FRAMES
       ? 'a pcapng with TLS 1.3 and a DSB the main pass reaches, past host inference\'s prefix'
       : 'a pcapng with TLS 1.3 and a DSB inside host inference\'s prefix',
@@ -394,6 +405,18 @@ export function tlsWithDsbInput(fillerFrames = 0): SyntheticInput {
     // "before" it decrypts too, in both routes.
     ...(fillerFrames > SCORING_FRAMES ? { opaqueId: fillerFrames + 3, decryptedId: fillerFrames + 6 } : {}),
   };
+}
+
+/**
+ * A classic pcap of `count` UDP frames of `payloadBytes` each: frames the size of
+ * a large-send-offload segment, where a count of frames says little about bytes.
+ */
+export function bigFramesInput(count: number, payloadBytes: number): SyntheticInput {
+  const frames: Uint8Array[] = [];
+  for (let i = 0; i < count; i++) {
+    frames.push(udpFrame(6000, 7000 + (i % 5), Uint8Array.from({ length: payloadBytes }, (_, k) => (i + k) & 0xff)));
+  }
+  return { name: `${count} UDP frames of ${payloadBytes} payload bytes`, bytes: pcapOf(frames), maxFrames: 40 };
 }
 
 function dnsPayload(txid: number, response: boolean): Uint8Array {

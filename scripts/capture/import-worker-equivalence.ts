@@ -56,7 +56,7 @@ import { SCORING_FRAMES } from '../../src/services/hostIdentity';
 import { keyLog, KeyLogStore } from '../../src/services/tls/keyLog';
 import type { FromImport, ImportRunOptions } from '../../src/services/pipeline/importProtocol';
 import {
-  canonicalRow, derivedHex, dnsTcpInput, normalizeStoreMessage, rowDifference, tlsWithDsbInput,
+  bigFramesInput, canonicalRow, derivedHex, dnsTcpInput, normalizeStoreMessage, rowDifference, tlsWithDsbInput,
   type CanonicalRow, type RouteResult, type SyntheticInput, type ThreadCommand,
 } from './importEquivalenceRig';
 
@@ -109,6 +109,10 @@ interface WorkerRouteResult extends RouteResult {
   secretsSeen: number;
   /** The most frames the store held received and unanswered at once. */
   peakOutstanding: number;
+  /** The most bytes of those frames, as the store holds them. */
+  peakOutstandingBytes: number;
+  /** Acks of a secrets message whose snapshot said `cleared`. */
+  acksCleared: number;
   /** Every type of message the page sent the Worker. */
   sentTypes: string[];
   /** `rows` messages that reached the page. */
@@ -117,9 +121,13 @@ interface WorkerRouteResult extends RouteResult {
   storeRowsAtDone: number;
 }
 
-/** `ackDelayMs`: how long the fake store sits on each answer, to let a pause show. */
+/**
+ * `ackDelayMs`: how long the fake store sits on each answer, to let a pause show.
+ * `clearOnSecret`: the page clears its key log (a Settings Clear) as it takes the
+ * Decryption Secrets Block with this `seq`, before the ack.
+ */
 async function workerRoute(
-  blob: Blob, options: ImportRunOptions, ackDelayMs = 0, copyMode = false,
+  blob: Blob, options: ImportRunOptions, ackDelayMs = 0, copyMode = false, clearOnSecret = 0,
 ): Promise<WorkerRouteResult> {
   const thread = spawnThread();
   const { port1, port2 } = new MessageChannel();
@@ -139,8 +147,10 @@ async function workerRoute(
   const storeRows: CanonicalRow[] = [];
   const out = {
     untagged: 0, plainAppends: 0, badPacked: 0, nonEmptySlabs: 0, appendBytesSeen: 0, secretsSeen: 0,
-    peakOutstanding: 0, rowsMessages: 0,
+    peakOutstanding: 0, peakOutstandingBytes: 0, acksCleared: 0, rowsMessages: 0,
   };
+  let outstandingBytes = 0;
+  let sinceAnswerBytes = 0;
   const CAPTURE = 'capture-under-test';
   let outstanding = 0;
   let sinceAnswer = 0;
@@ -164,9 +174,13 @@ async function workerRoute(
       if (m.sent.some((flag) => flag !== 0) || m.rows.packsReset !== undefined) out.badPacked++;
       const decoded = storeReader.read(m.rows);
       for (const row of decoded) storeRows.push(canonicalRow(row));
+      const bytes = decoded.reduce((n, row) => n + row.rawBytes.length, 0);
       outstanding += decoded.length;
       sinceAnswer += decoded.length;
+      outstandingBytes += bytes;
+      sinceAnswerBytes += bytes;
       out.peakOutstanding = Math.max(out.peakOutstanding, outstanding);
+      out.peakOutstandingBytes = Math.max(out.peakOutstandingBytes, outstandingBytes);
       storedThrough = Math.max(storedThrough, decoded[decoded.length - 1].id);
     }
     if (m.type === 'appendBytes') {
@@ -175,9 +189,12 @@ async function workerRoute(
       if (m.ack !== undefined) {
         const { ack } = m;
         const frames = sinceAnswer;
+        const answeredBytes = sinceAnswerBytes;
         sinceAnswer = 0;
+        sinceAnswerBytes = 0;
         setTimeout(() => {
           outstanding -= frames;
+          outstandingBytes -= answeredBytes;
           port1.postMessage({ type: 'bytesTaken', ack });
         }, ackDelayMs);
       }
@@ -197,8 +214,11 @@ async function workerRoute(
             // Worker that read on would dissect the frames after the block with
             // no keys in the table, and this delay is what lets that show.
             setTimeout(() => {
+              if (msg.seq === clearOnSecret) page.clear();
               page.add(msg.text);
-              send({ kind: 'msg', msg: { type: 'secretsTaken', seq: msg.seq, snapshot: page.share() } });
+              const snapshot = page.share();
+              if (snapshot.cleared) out.acksCleared++;
+              send({ kind: 'msg', msg: { type: 'secretsTaken', seq: msg.seq, snapshot } });
             }, 50);
             return;
           case 'opening':
@@ -372,6 +392,62 @@ try {
     pass(`credit: the walk pauses past the bound (peak ${paced.peakOutstanding} frames outstanding, bound 60 + batch + window = 174)`,
       paced.peakOutstanding >= 50 && paced.peakOutstanding <= 60 + 50 + 64 && paced.totalFrames === 362,
       { peak: paced.peakOutstanding, totalFrames: paced.totalFrames });
+  }
+
+  // Credit is bytes as well as frames: 64 KB segments (large send offload) put a
+  // few hundred thousand frames' worth of memory in flight under a frame bound that
+  // is never reached. 400 frames of 1242 bytes, a byte bound of 64 KiB, and a frame
+  // bound (the default, 50,000) that is nowhere near: the walk must stop on the bytes.
+  {
+    const input = bigFramesInput(400, 1200);
+    const frameBytes = (input.bytes.length - 24) / 400 - 16;
+    const options: ImportRunOptions = {
+      record: true, residentBytes: 256 * 1024 * 1024, maxFrames: 40, derivedBudget: 64 * 1024 * 1024,
+      patchWindow: 8, batchFrames: 20, windowBytes: 64 * 1024,
+    };
+    const blob = new Blob([input.bytes]);
+    const unbounded = await workerRoute(blob, options, 5);
+    const bounded = await workerRoute(blob, { ...options, creditBytes: 64 * 1024 }, 5);
+    const ceiling = 64 * 1024 + (20 + 8) * frameBytes;
+    pass(`import credit is bounded by bytes as well as frames (peak ${bounded.peakOutstandingBytes} B in ${bounded.peakOutstanding} frames outstanding, bound ${ceiling} B; unbounded run ${unbounded.peakOutstandingBytes} B)`,
+      bounded.peakOutstandingBytes > 64 * 1024 && bounded.peakOutstandingBytes <= ceiling
+      && bounded.peakOutstanding < 400 && unbounded.peakOutstandingBytes > 2 * ceiling,
+      { bounded: bounded.peakOutstandingBytes, unbounded: unbounded.peakOutstandingBytes, ceiling });
+    const same = sameRows(unbounded.storeRows, bounded.storeRows, true);
+    pass('the byte-bounded run completes and equals the unbounded run',
+      bounded.totalFrames === 400 && unbounded.totalFrames === 400 && same.equal && bounded.storeRows.length === 400
+      && bounded.storeRowsAtDone === 400 && JSON.stringify(bounded.estimates) === JSON.stringify(unbounded.estimates),
+      { total: bounded.totalFrames, atDone: bounded.storeRowsAtDone, rows: bounded.storeRows.length });
+  }
+
+  // A cleared key log and a second Decryption Secrets Block. The page acks each
+  // block with a snapshot, and `cleared` stays set on every snapshot of a cleared
+  // log until its table next grows: an ack is never a clear, or each block would
+  // empty the answers of frames already decrypted. (`workerRoute` clears the page's
+  // key log first, and a real `postMessage` hands the Worker a new buffer object
+  // every time; the route runs in a thread, so this one does too.)
+  {
+    const input = tlsWithDsbInput(SCORING_FRAMES + 5, true);
+    const file = join(scratch, 'tls-two-blocks.pcapng');
+    writeFileSync(file, input.bytes);
+    const options: ImportRunOptions = {
+      record: true, residentBytes: 256 * 1024 * 1024, maxFrames: input.maxFrames, derivedBudget: 64 * 1024 * 1024,
+      patchWindow: 64, batchFrames: 50, windowBytes: 64 * 1024,
+    };
+    const blob = new Blob([readFileSync(file)]);
+    const base = await inProcessRoute(blob, options);
+    const before = base.derived.filter(([id]) => id < base.totalFrames);
+    const worker = await workerRoute(blob, options);
+    pass('a secrets ack after a Clear keeps the answers already decrypted',
+      worker.acksCleared === 2 && worker.secretsSeen === 2 && before.length >= 2
+      && JSON.stringify(worker.derived) === JSON.stringify(base.derived),
+      { acksCleared: worker.acksCleared, secretsSeen: worker.secretsSeen, before: before.length, base: base.derived.length, worker: worker.derived.length });
+    // The other half: a Clear that arrives as a `keylog-shared` is the one that
+    // empties them, as in the live Worker. The page clears as it takes block 2.
+    const cleared = await workerRoute(blob, options, 0, false, 2);
+    pass('a keylog-shared clear empties the decrypted answers',
+      cleared.secretsSeen === 2 && cleared.derived.length === 0 && base.derived.length > 0,
+      { derived: cleared.derived.length, base: base.derived.length });
   }
 
   // The owner's captures, when they are here. Nothing of them is printed but names of checks.

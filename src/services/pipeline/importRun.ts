@@ -31,9 +31,12 @@
  *   waits in the queue is a copy of its own: the page's `rows` transfers the
  *   same buffers right after.
  * - **Credit.** Each batch is followed by an empty acked `appendBytes`; the walk
- *   pauses while more than `IMPORT_CREDIT_FRAMES` are unanswered. It is queued
- *   behind the batch's messages, so frames waiting for the open count too. Only
- *   empty slabs are ever sent: an `appendBytes` with frames has no tag.
+ *   pauses while more than `IMPORT_CREDIT_FRAMES` frames or `IMPORT_CREDIT_BYTES`
+ *   bytes are unanswered. It is queued behind the batch's messages, so frames
+ *   waiting for the open count too. The pause is checked between frames, after a
+ *   batch is posted and never before, so one batch larger than the byte credit
+ *   still goes. Only empty slabs are ever sent: an `appendBytes` with frames has
+ *   no tag.
  * - **Secrets.** A Decryption Secrets Block goes to the page, the one writer of
  *   the key log, and the walk waits for its `secretsTaken` before it reads
  *   another frame; frames after the block decrypt, as they do in-process.
@@ -51,7 +54,7 @@ import type { Packet } from '../../types/packet';
 import { DerivedStore } from './derivedStore';
 import { PackedFlush, packRows, type PackedRows } from './rowPack';
 import {
-  IMPORT_CREDIT_FRAMES, IMPORT_PACK_KEY_BASE,
+  IMPORT_CREDIT_BYTES, IMPORT_CREDIT_FRAMES, IMPORT_PACK_KEY_BASE,
   type FromImport, type ImportRunOptions, type ToImport,
 } from './importProtocol';
 
@@ -88,11 +91,13 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
   let queue: ToCapture[] | null = [];
   let captureId: string | null = null;
   let openingPosted = false;
-  // The credit: each ack id and the frames it stands for, and their sum.
+  // The credit: each ack id and the frames and bytes it stands for, and their sums.
   let nextAck = 1;
-  const owed = new Map<number, number>();
+  const owed = new Map<number, { frames: number; bytes: number }>();
   let owedFrames = 0;
+  let owedBytes = 0;
   let creditFrames = IMPORT_CREDIT_FRAMES;
+  let creditBytes = IMPORT_CREDIT_BYTES;
   let resume: (() => void) | null = null;
   let barrier: (() => void) | null = null;
   let barrierAck = -1;
@@ -108,21 +113,25 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
     else storePort?.postMessage(message);
   };
 
-  const owe = (frames: number): number => {
+  const owe = (frames: number, bytes: number): number => {
     const ack = nextAck++;
-    owed.set(ack, frames);
+    owed.set(ack, { frames, bytes });
     owedFrames += frames;
+    owedBytes += bytes;
     toStore({ type: 'appendBytes', slab: packFrames([]), ack });
     return ack;
   };
 
+  const overCredit = (): boolean => owedFrames > creditFrames || owedBytes > creditBytes;
+
   const taken = (ack: number): void => {
-    const frames = owed.get(ack);
-    if (frames === undefined) return;
+    const entry = owed.get(ack);
+    if (entry === undefined) return;
     owed.delete(ack);
-    owedFrames -= frames;
+    owedFrames -= entry.frames;
+    owedBytes -= entry.bytes;
     if (ack === barrierAck) { barrier?.(); barrier = null; }
-    if (resume !== null && owedFrames <= creditFrames) {
+    if (resume !== null && !overCredit()) {
       const go = resume;
       resume = null;
       go();
@@ -131,23 +140,31 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
 
   /**
    * A snapshot of the page's key log, adopted: this context only ever reads it.
-   * One that clears it empties the decrypted answers too - they were read with
-   * keys the user has just said to forget, and the live Worker does the same.
    * What the page's tree cache does for the live Worker has no counterpart
    * here: an import keeps no trees.
    */
-  let adoptedBuffer: unknown = null;
   const adoptKeyLog = (snapshot: KeyLogShared): void => {
     keyLog.adopt(snapshot);
-    // `cleared` stays set on every snapshot of a cleared buffer until it is next
-    // replaced, and the page acks each Decryption Secrets Block with one: only a
-    // snapshot that is a new buffer is the clear itself.
-    if (snapshot.cleared && snapshot.buffer !== adoptedBuffer) derived?.clear();
-    adoptedBuffer = snapshot.buffer;
+  };
+
+  /**
+   * `keylog-shared`: the page says the buffer is replaced, by a growth or by a
+   * Clear. One that clears it empties the decrypted answers too - they were read
+   * with keys the user has just said to forget, and the live Worker does the same.
+   * `secretsTaken` is never this: `cleared` stays set on every snapshot of a
+   * cleared log until its table next grows, the page acks each Decryption Secrets
+   * Block with one, and a `SharedArrayBuffer` arrives as a new object with every
+   * message, so no test of the snapshot can tell an ack from the Clear itself.
+   * An ack that cleared would empty the answers of every frame already decrypted.
+   */
+  const keyLogShared = (snapshot: KeyLogShared): void => {
+    adoptKeyLog(snapshot);
+    if (snapshot.cleared) derived?.clear();
   };
 
   const run = async (file: Blob, options: ImportRunOptions): Promise<void> => {
     creditFrames = options.creditFrames ?? IMPORT_CREDIT_FRAMES;
+    creditBytes = options.creditBytes ?? IMPORT_CREDIT_BYTES;
     derived = new DerivedStore(options.derivedBudget);
     // `streamCaptureFile` reads only `size` and `slice`, which a Blob has; the
     // file's name is the page's to report, not the walk's.
@@ -164,7 +181,8 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
       if (batch.length > 0) {
         // Measured now, on the final rows: what `ImportTail.push` would estimate.
         const sizes = batch.map(estimateSummaryBytes);
-        const pack = packRows(packKey++, batch, batch.map((row) => row.rawBytes.length));
+        const lengths = batch.map((row) => row.rawBytes.length);
+        const pack = packRows(packKey++, batch, lengths);
         const flush = new PackedFlush();
         batch.forEach((row, i) => flush.packed(pack, i, row.rawBytes, null));
         const rows = flush.seal(new Map());
@@ -174,10 +192,10 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
           type: 'appendPacked', rows, sent: new Uint8Array(batch.length),
           ...(tag === undefined ? {} : { captureId: tag }),
         });
-        owe(batch.length);
+        owe(batch.length, lengths.reduce((sum, length) => sum + length, 0));
         io.post({ type: 'rows', pack: rows, sizes }, transferListOf(packedRowsViews(rows)));
       } else {
-        owe(0);
+        owe(0, 0);
       }
       if (records !== undefined) {
         for (const { id, derived: answers } of records) if (answers) derived?.set(id, answers);
@@ -195,7 +213,7 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
           io.post({ type: 'secrets', seq, text });
         });
       },
-      pace: () => (owedFrames > creditFrames
+      pace: () => (overCredit()
         ? new Promise<void>((resolve) => { resume = resolve; })
         : undefined),
     });
@@ -203,7 +221,7 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
     // The barrier: everything before it on the port has been taken. With no
     // batch there was nothing to open and the host answers it with no capture.
     if (!openingPosted) queue = null;
-    const ack = owe(0);
+    const ack = owe(0, 0);
     barrierAck = ack;
     if (owed.has(ack)) await new Promise<void>((resolve) => { barrier = resolve; });
 
@@ -238,7 +256,7 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
         return;
       }
       case 'keylog-shared':
-        adoptKeyLog(message.snapshot);
+        keyLogShared(message.snapshot);
         return;
       case 'secretsTaken': {
         if (message.snapshot !== undefined) adoptKeyLog(message.snapshot);

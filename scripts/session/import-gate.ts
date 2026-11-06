@@ -120,7 +120,14 @@ check('the Cancel button is outside the drop zone\'s label, which would open the
 const cancelButton = between(panel, '<button', '</button>');
 check('...it is a plain button named for what it does, calling the job\'s cancel',
   cancelButton.includes('type="button"') && cancelButton.includes('aria-label="Cancel import"')
-  && cancelButton.includes('onClick={() => cancelImportJob()}') && /Cancel\s*$/.test(cancelButton));
+  && cancelButton.includes('onClick={() => cancelImportJob()}'));
+// The request waits behind a live capture's seal (up to a 3 s drain) or a CSV
+// parse, so the press must show at once: the job publishes it, the button says so.
+check('a requested Cancel reads Cancelling… and is disabled',
+  /disabled=\{job\.cancelRequested\}/.test(cancelButton)
+  && /job\.cancelRequested \? 'Cancelling…' : 'Cancel'/.test(cancelButton)
+  && cancelButton.includes('aria-label="Cancel import"')
+  && cancelButton.includes('disabled:opacity-40 disabled:cursor-not-allowed'));
 check('...shown only while the job is running and can still be cancelled; its row is kept while busy so the cards do not move',
   /\{busy && \(/.test(panel) && /\{job\.status === 'running' && job\.cancellable && \(/.test(panel));
 check('the cancelled result is a muted line, not the success one',

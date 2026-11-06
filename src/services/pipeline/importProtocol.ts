@@ -27,6 +27,14 @@ export const IMPORT_NAME = 'inwire-import';
 /** Frames the store has not yet acknowledged before the walk pauses (as `liveFlow`). */
 export const IMPORT_CREDIT_FRAMES = 50_000;
 
+/**
+ * Bytes of those frames the store has not yet acknowledged before the walk pauses,
+ * as the live path bounds its pipe (`electron/pipeCredit.ts`, 256 MB). Frames alone
+ * do not bound memory: a capture of 64 KB segments (large send offload) would put
+ * about 3 GB in flight toward the store's process, whose heap guard is near 4 GB.
+ */
+export const IMPORT_CREDIT_BYTES = 256 * 1024 * 1024;
+
 export interface ImportRunOptions {
   /** Whether to keep each frame's record, which the store is handed ahead of the rows. */
   record: boolean;
@@ -44,6 +52,8 @@ export interface ImportRunOptions {
   windowBytes?: number;
   /** Test seam: the unanswered-frames bound; default `IMPORT_CREDIT_FRAMES`. */
   creditFrames?: number;
+  /** Test seam: the unanswered-bytes bound; default `IMPORT_CREDIT_BYTES`. */
+  creditBytes?: number;
 }
 
 export type ToImport =
