@@ -52,6 +52,12 @@
  * one again. A reader on the old buffer keeps answering from it, whole and
  * stale, until it adopts the new one. Where the new buffer would pass
  * `MAX_BUFFER_BYTES`, or allocation throws, the line is dropped and counted.
+ *
+ * Every growth leaves a whole buffer behind, and a reader that allocates
+ * nothing (an idle shard) does not collect it: a 205 MB log fed in 1 MiB
+ * pieces left about 230 MB of them. So a writer that knows how much text is
+ * coming calls `reserve` first, and the table moves once, to what
+ * `capacityFor` says that much text can hold (ADR 0073's amendment).
  */
 import { MAX_KEYLOG_SECRETS } from './keyLogLimits';
 
@@ -90,6 +96,44 @@ const INITIAL_RECS = 1024;
 const INITIAL_ARENA = 32_768;
 /** Int32 offsets and typed-array lengths stay well inside what V8 allocates. */
 const MAX_BUFFER_BYTES = 2_000_000_000;
+
+/**
+ * The shortest line a browser writes: `CLIENT_RANDOM`, a space, 64 hex, a
+ * space, a 32-byte secret's 64 hex, LF. Real labels are longer and TLS 1.2's
+ * secret is 48 bytes, so no browser's text holds more secrets than this allows.
+ */
+const MIN_LINE_BYTES = 144;
+/** The most secret bytes a byte of browser text carries: a 48-byte secret on the shortest label, 48 / 176. */
+const SECRET_PER_TEXT_BYTE = 3 / 11;
+/** The largest secret a browser writes (TLS 1.2's master secret; TLS 1.3 under SHA-384). */
+const MAX_BROWSER_SECRET = 48;
+/**
+ * Secrets per connection, guessed: TLS 1.3 writes four to six lines for one,
+ * TLS 1.2 one. A log mostly of TLS 1.2 outgrows the guess and grows on
+ * connections, which costs what a growth costs without `reserve`.
+ */
+const SECRETS_PER_CONN = 4;
+
+/**
+ * A reserve that moves sizes for this much more text than asked, so the same
+ * file asked for again after a browser's appends finds the room already there.
+ */
+const RESERVE_HEADROOM = 9 / 8;
+
+/**
+ * What `textBytes` of key-log text can hold, region by region: secrets and
+ * secret bytes at their limit for browser-written lines, connections guessed.
+ * A crafted log of tiny secrets can hold more and grows past it as before.
+ */
+export function capacityFor(
+  textBytes: number,
+  maxSecrets = MAX_KEYLOG_SECRETS,
+): { conns: number; recs: number; arena: number } {
+  const bytes = Number.isFinite(textBytes) && textBytes > 0 ? textBytes : 0;
+  const recs = Math.min(maxSecrets, Math.ceil(bytes / MIN_LINE_BYTES));
+  const arena = Math.min(recs * MAX_BROWSER_SECRET, Math.ceil(bytes * SECRET_PER_TEXT_BYTE));
+  return { conns: Math.ceil(recs / SECRETS_PER_CONN), recs, arena };
+}
 
 export interface KeyLogTableStats { connections: number; secrets: number; ignored: number; dropped: number }
 
@@ -462,16 +506,45 @@ export class KeyLogTable {
    * would be too big or the allocation fails.
    */
   private grow(needConns: number, needRecs: number, needArena: number): boolean {
+    const i32 = this.i32;
+    let cc = this.connCap;
+    let rc = this.recCap;
+    let ac = this.arenaCap;
+    while (i32[H.CONNS] + needConns > cc) cc *= 2;
+    while (i32[H.RECS] + needRecs > rc) rc *= 2;
+    while (i32[H.ARENA_USED] + needArena > ac) ac *= 2;
+    return this.resize(cc, rc, ac);
+  }
+
+  /**
+   * Makes room for `textBytes` of key-log text in all, counting what is held,
+   * in one move rather than a growth at every overflow. Absolute, and a move
+   * sizes for `RESERVE_HEADROOM` more than asked while the test for moving
+   * uses the bare length: a followed file the browser has since appended to,
+   * loaded or followed again from the top, moves nothing until it has grown by
+   * an eighth. Never shrinks a region and never touches the generation: the
+   * new buffer holds exactly what the old one did. True when the buffer was
+   * replaced; false when it already had the room or the bigger one could not
+   * be made, which leaves the table as it was.
+   */
+  public reserve(textBytes: number): boolean {
+    if (this.readOnly) throw new Error('key log is read-only in this context');
+    const want = capacityFor(textBytes, this.maxSecrets);
+    if (this.connCap >= want.conns && this.recCap >= want.recs && this.arenaCap >= want.arena) return false;
+    const roomy = capacityFor(textBytes * RESERVE_HEADROOM, this.maxSecrets);
+    return this.resize(
+      Math.max(this.connCap, roomy.conns),
+      Math.max(this.recCap, roomy.recs),
+      Math.max(this.arenaCap, roomy.arena),
+    );
+  }
+
+  /** Moves to a buffer with these capacities. False, with nothing changed, when it would be too big or allocation fails. */
+  private resize(cc: number, rc: number, ac: number): boolean {
     const old = this.i32;
     const conns = old[H.CONNS];
     const recs = old[H.RECS];
     const used = old[H.ARENA_USED];
-    let cc = this.connCap;
-    let rc = this.recCap;
-    let ac = this.arenaCap;
-    while (conns + needConns > cc) cc *= 2;
-    while (recs + needRecs > rc) rc *= 2;
-    while (used + needArena > ac) ac *= 2;
     const l = layoutFor(cc, rc, ac);
     if (l.total > MAX_BUFFER_BYTES) return false;
     let buffer: ArrayBuffer | SharedArrayBuffer;

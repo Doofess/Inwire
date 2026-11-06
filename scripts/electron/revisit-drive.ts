@@ -202,12 +202,13 @@ async function drive(name: string, capture: string, keysPath: string | null, pic
     await sleep(1500);
 
     if (keysPath !== null) {
-      await page.evaluate(() => window.inwire?.followSuggestedKeyLog?.());
-      const until = Date.now() + 15_000;
-      // The Worker is given the page's key log buffer, once, when it is made
-      // (ADR 0073); lines the follower adds after that reach it with no message.
-      while (Date.now() < until && !(await sentTypes()).includes('keylog-shared')) await sleep(200);
-      checkTrue(`${name}: the Worker was given the page's key log before the import`, (await sentTypes()).includes('keylog-shared'));
+      const status = await page.evaluate(() => window.inwire?.followSuggestedKeyLog?.()) as
+        { state?: string; bytes?: number } | null | undefined;
+      // The keys reach the Worker through the page's shared buffer with no
+      // message (ADR 0073); the later check that the import's `derived`
+      // answers reach the Worker is what proves they arrived.
+      checkTrue(`${name}: the key log is followed and has bytes`,
+        status?.state === 'following' && (status.bytes ?? 0) > 0);
     }
 
     const counts = () => page.evaluate(() => {

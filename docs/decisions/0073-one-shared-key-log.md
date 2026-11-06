@@ -183,12 +183,14 @@ peak share is +576 MB and it holds +151 MB after a GC; the page heap is 32 MB.
 - A context that has adopted the page's buffer is a reader for good: its
   `add` and `clear` throw. Only the page loads a key log.
 - A retired buffer lives until every context that adopted it has collected
-  it. An idle shard allocates nothing and so does not collect: after a large
-  load, the retired buffers stay in the renderer's private bytes until the
-  shards next GC. They total under twice the table, about 230 MB for the
-  205 MB log. They sit outside the JS heap's cage, the one that crashed. A
-  buffer is at most 2 GB (`MAX_BUFFER_BYTES`). Pre-sizing the table from the
-  length main is about to send would remove most of them; it was not done.
+  it. An idle shard allocates nothing and so does not collect. Before
+  pre-sizing, a large load left about 230 MB of retired buffers for the 205 MB
+  log in the renderer's private bytes until the shards next collected. The
+  table is now sized once from the length about to arrive (amendment
+  "Pre-sizing" below), so a load moves the buffer once, from the small empty
+  table. A log mostly of TLS 1.2 can still grow twice on connections, and a
+  crafted log outside the browser shape grows by doubling as before. A buffer is
+  at most 2 GB (`MAX_BUFFER_BYTES`).
 - A renderer minidump would now hold the log once rather than eight times.
   Crash reporting stays off (0008).
 
@@ -200,5 +202,74 @@ and never loads a key log. A Decryption Secrets Block found in its walk goes to
 the page, which adds it and acks with a fresh snapshot; the walk waits for that
 ack. The page is still the one writer. Only `keylog-shared` with `cleared`
 empties the import's decrypted answers: an ack's snapshot keeps `cleared` set
-after a Clear until the table grows, and arrives as a new buffer object each
-time, so it cannot be told from the Clear.
+after a Clear until the table next moves (a growth or a `reserve`), and
+arrives as a new buffer object each time, so it cannot be told from the Clear.
+The page adds a block through `addKeyLogText` (reserve, then newline-aligned
+pieces) before it acks.
+
+## Amendment 2026-11-06: pre-sizing
+
+The table is sized once, from the length of the text about to arrive, instead
+of doubling at every overflow. `KeyLogTable#reserve(textBytes)` moves to one
+buffer whose regions are at least `capacityFor(textBytes)`; it never shrinks,
+never bumps the generation, and on a reservation too big to allocate keeps the
+current table and returns false. `KeyLogStore#reserve` posts the new buffer as
+a growth does. Every writer learns the length first:
+
+- **Following.** Before each read from the top, main pushes one status with
+  `incomingBytes` (`electron/keyLogFollower.ts`); the page reserves before it
+  notifies. A tail read announces nothing: it is a browser's few new lines.
+- **The panel's Load.** `loadKeyLogFile` reserves `min(file size, cap)`.
+- **A Decryption Secrets Block.** `addKeyLogText` reserves the text's length,
+  then adds newline-aligned pieces of at most 8 MiB. It runs on the page, both
+  for the import Worker's `secrets` message (0074) and for the in-process
+  walk's default; the import protocol is unchanged.
+
+`reserve` is absolute, not additive, and a reserve that moves sizes for 9/8 of
+the length asked (`RESERVE_HEADROOM`) while the test for moving uses the bare
+length. A follow that restarts from the top, or a Load of the file already
+followed, asks for about the size the table already has: nothing moves until
+the browser's appends have grown the file by an eighth. Without the headroom a
+single appended line moved the whole table again (the final review's finding).
+
+`capacityFor(textBytes, maxSecrets)`: `recs = min(maxSecrets, ceil(textBytes /
+144))`, `arena = min(recs × 48, ceil(textBytes × 3 / 11))`, `conns = ceil(recs /
+4)`. 144 bytes is the shortest browser-shaped line (`CLIENT_RANDOM`, a 32-byte
+secret, a newline), so no browser log holds more secrets than that; 3/11 is the
+largest secret-to-line ratio (a 48-byte secret on the shortest label). The
+connections are a guess, one per four lines, the TLS 1.3 shape; a log of
+mostly TLS 1.2, one connection a line, grows on connections at most twice. A
+crafted log outside these bounds grows as before.
+
+The cut at the cap moved too: a read past the cap starts one byte early
+(`size - cap - 1`), so a cut that lands exactly on a line start keeps that
+line, in the follower and in the Load's reader. `INWIRE_KEYLOG_CAP_BYTES` only
+lowers the cap.
+
+Measured with `scripts/electron/keylog-heap-drive.ts`, the same 205 MB,
+1,380,000-line synthetic log as above. The first two runs reserved the bare
+length (a 96 MB table); the last reserves with the headroom, as shipped (a
+107 MB table, the same size growth ended at, reached in one move).
+
+| share | peak | at 30 s | after a GC | 30 s less after a GC |
+|---|---|---|---|---|
+| before, Auto | +384 MB | +373 MB | +145 MB | 228 MB |
+| before, 16 threads | +391 MB | +386 MB | +146 MB | 240 MB |
+| pre-sized, Auto | +172, +140 MB | +154, +118 MB | +149, +130 MB | 5, −12 MB |
+| pre-sized, 16 threads | +136, +153 MB | +128, +141 MB | +124, +129 MB | 4, 12 MB |
+| with headroom, Auto | +160 MB | +149 MB | +143 MB | 6 MB |
+| with headroom, 16 threads | +166 MB | +160 MB | +153 MB | 7 MB |
+
+The retired buffers are gone: the 30 s share is within run-to-run noise of
+what a GC leaves. The held share did not fall and was not expected to, since a
+GC already frees retired buffers; it sits 28 to 53 MB above the table (36 to
+46 MB with the headroom's bigger table), which this measurement does not
+attribute. Every secret is counted 3.5 to 3.8 s after
+launch, as before. Capped at 64 MiB the result is unchanged: 430,304 secrets
+and 148,111,136 B skipped.
+
+The drive's ceilings fell with it, on the synthetic log: the peak share is
+under 2.25 times the table (was 1,024 MB), and the 30 s share is within a
+quarter of the table of the held one. The held check stays under twice the
+table. The `--keylog` branch, which follows a real file in place, keeps the
+old peak ceiling: it was not measured with pre-sizing.

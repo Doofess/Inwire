@@ -18,12 +18,16 @@
  *   still appending and growing.
  */
 import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { setFlagsFromString } from 'node:v8';
 import { Worker } from 'node:worker_threads';
 import { KeyLogStore, type KeyLogShared } from '../../src/services/tls/keyLog';
 import * as keyLogTable from '../../src/services/tls/keyLogTable';
 import { LegacyKeyLogStore } from './legacyKeyLog';
+import { writeSyntheticKeyLog } from '../electron/syntheticKeyLog';
 import {
   connection, connectionText, hexOf, THREAD_LABELS,
   type ReaderReport, type ToReader,
@@ -52,6 +56,20 @@ const entries = (m: Map<string, Uint8Array> | undefined) =>
   m === undefined ? null : [...m].map(([k, v]) => [k, hexOf(v)]);
 const pick = <T extends object>(o: T, keys: string[]) =>
   Object.fromEntries(keys.map((k) => [k, (o as Record<string, unknown>)[k]]));
+
+/** `text` cut into pieces of at most `size`, each ending on a newline, as main's follower sends a file. */
+function piecesOf(text: string, size: number): string[] {
+  const out: string[] = [];
+  let at = 0;
+  while (at < text.length) {
+    let end = Math.min(text.length, at + size);
+    const nl = text.lastIndexOf('\n', end - 1);
+    if (end < text.length && nl >= at) end = nl + 1;
+    out.push(text.slice(at, end));
+    at = end;
+  }
+  return out;
+}
 
 async function main() {
   console.log('\n--- the same answers as the store it replaced ---\n');
@@ -336,25 +354,122 @@ async function main() {
   check('the hash is HalfSipHash-2-4 (reference vector, 32-byte message)',
     keyLogTable.hashRandom(vectorMessage, 0, 0x03020100, 0x07060504), 0x1221e7fe);
 
+  console.log('\n--- reserve: one buffer for a whole log ---\n');
+
+  check('capacityFor: a secret per 144 bytes, 3/11 of the text in secret bytes, a connection per 4 secrets',
+    keyLogTable.capacityFor(144_000), { conns: 250, recs: 1000, arena: 39_273 });
+  check('...and never more secrets than the bound', keyLogTable.capacityFor(1e9, 4_194_304).recs, 4_194_304);
+
+  // An owner-shaped log, generated at run time and deleted at once.
+  const synthDir = mkdtempSync(join(tmpdir(), 'inwire-reserve-'));
+  let synth = '';
+  try {
+    const file = join(synthDir, 'keylog.txt');
+    await writeSyntheticKeyLog(file, 20_000);
+    synth = readFileSync(file, 'latin1');
+  } finally {
+    rmSync(synthDir, { recursive: true, force: true });
+  }
+  const synthPieces = piecesOf(synth, 1_048_576);
+  const feed = (reserve: boolean) => {
+    const store = new KeyLogStore();
+    let posted = 0;
+    store.onSnapshot(() => { posted++; });
+    if (reserve) store.reserve(synth.length);
+    const afterReserve = posted;
+    for (const piece of synthPieces) store.add(piece);
+    return { afterReserve, duringAdds: posted - afterReserve, secrets: store.stats().secrets };
+  };
+  const reserved = feed(true);
+  const unreserved = feed(false);
+  check('an owner-shaped log reserved for its length: the reserve posts one buffer...', reserved.afterReserve, 1);
+  check('...and its 1 MiB pieces post none', reserved.duringAdds, 0);
+  checkTrue(`...where without the reserve they post ${unreserved.duringAdds} (at least 5)`, unreserved.duringAdds >= 5);
+  checkTrue(`...holding the same ${reserved.secrets.toLocaleString()} secrets either way`,
+    reserved.secrets === unreserved.secrets && reserved.secrets > 100_000);
+
+  const twice = new KeyLogStore();
+  let twicePosted = 0;
+  twice.onSnapshot(() => { twicePosted++; });
+  twice.reserve(synth.length);
+  twice.reserve(synth.length);
+  check('reserving the same length again posts nothing more', twicePosted, 1);
+  // Followed, then the browser appends, then the same file is loaded or
+  // followed again from the top: a slightly longer length must not move the
+  // whole table once more (the final review's Important 1).
+  const grown = new KeyLogStore();
+  let grownPosted = 0;
+  grown.onSnapshot(() => { grownPosted++; });
+  grown.reserve(synth.length);
+  for (const piece of synthPieces) grown.add(piece);
+  const grownBefore = grownPosted;
+  grown.reserve(synth.length + 4);
+  grown.reserve(synth.length + Math.floor(synth.length / 10));
+  check('a followed log that grew by a line, then by a tenth, reserved again: nothing more posted', grownPosted - grownBefore, 0);
+  grown.reserve(synth.length * 2);
+  check('...while one that doubled moves once', grownPosted - grownBefore, 1);
+  const zero = new KeyLogStore();
+  let zeroPosted = 0;
+  zero.onSnapshot(() => { zeroPosted++; });
+  zero.reserve(0);
+  check('reserve(0) on an empty store posts nothing', zeroPosted, 0);
+
+  const held = new KeyLogStore();
+  for (let i = 1; i <= 10; i++) held.add(`CLIENT_RANDOM ${R(i)} ${S(i, 48)}\n`);
+  const heldReader = new KeyLogStore();
+  heldReader.adopt(held.share());
+  const heldGeneration = held.generation;
+  held.reserve(synth.length);
+  checkTrue('reserve keeps every secret held',
+    held.stats().secrets === 10 && hexOf(held.secretsFor(randomOf(7))?.get('CLIENT_RANDOM') ?? new Uint8Array(0)) === S(7, 48));
+  check('...leaves the generation where it was', held.generation, heldGeneration);
+  checkTrue('...really replaces the buffer', held.share().buffer !== heldReader.share().buffer);
+  checkTrue('...and a reader still on the old buffer answers', heldReader.secretsFor(randomOf(7)) !== undefined);
+  checkTrue('a reader context cannot reserve', throws(() => heldReader.reserve(1000)));
+
+  let tls12 = '';
+  for (let i = 0; i < 2000; i++) tls12 += `CLIENT_RANDOM ${hexOf(connection(i).random)} ${S(i & 0xff, 48)}\n`;
+  const t12 = new KeyLogStore();
+  let t12Posted = 0;
+  t12.onSnapshot(() => { t12Posted++; });
+  t12.reserve(tls12.length);
+  const t12AfterReserve = t12Posted;
+  for (const piece of piecesOf(tls12, 16_384)) t12.add(piece);
+  checkTrue(`a TLS 1.2-only log, one connection a line, grows at most twice after its reserve (${t12Posted - t12AfterReserve})`,
+    t12Posted - t12AfterReserve <= 2);
+  check('...and holds all 2,000 secrets', t12.stats().secrets, 2000);
+
+  const huge = new KeyLogStore({ maxSecrets: 1_000_000_000 });
+  for (let i = 1; i <= 10; i++) huge.add(`CLIENT_RANDOM ${R(i)} ${S(i, 48)}\n`);
+  let hugePosted = 0;
+  huge.onSnapshot(() => { hugePosted++; });
+  checkTrue('a reservation past the 2 GB buffer limit throws nothing...', !throws(() => huge.reserve(1e12)));
+  check('...posts nothing and keeps the secrets', [hugePosted, huge.stats().secrets], [0, 10]);
+  huge.add(`CLIENT_RANDOM ${R(0x77)} ${S(0x77, 48)}\n`);
+  check('...and a later add still works', huge.stats().secrets, 11);
+
   console.log('\n--- copy mode, where memory cannot be shared ---\n');
 
   const copy = new KeyLogStore({ shared: false });
   const copySnaps: KeyLogShared[] = [];
-  copy.onSnapshot((s) => copySnaps.push(s));
+  // When each copy arrived, read in the callback: the check below is about the
+  // copy's latency, not about how long this script then sleeps.
+  const copyArrived: number[] = [];
+  copy.onSnapshot((s) => { copySnaps.push(s); copyArrived.push(Date.now()); });
   let copyText = '';
   for (let i = 0; i < 50; i++) copyText += `CLIENT_RANDOM ${R(i + 1)} ${S(i + 1)}\n`;
   for (const part of copyText.split('\n').filter(Boolean)) copy.add(`${part}\n`);
   const lastAdd = Date.now();
   check('nothing is posted in the turn of the adds', copySnaps.length, 0);
   await sleep(300);
-  const copyLatencyMs = copySnaps.length > 0 ? Date.now() - lastAdd : -1;
+  const copyLatencyMs = copyArrived.length > 0 ? copyArrived[0] - lastAdd : -1;
   check('copy mode coalesces 50 adds in one turn into one snapshot', copySnaps.length, 1);
   const copyReader = new KeyLogStore();
   if (copySnaps.length > 0) copyReader.adopt(copySnaps[0]);
   checkTrue('copy mode posts a frozen ArrayBuffer',
     copySnaps.length > 0 && !(copySnaps[0].buffer instanceof SharedArrayBuffer) && copySnaps[0].live === false);
-  checkTrue('...which arrives within 300 ms of the last add, holding all 50',
-    copyLatencyMs >= 0 && copyLatencyMs <= 320 && copyReader.stats().secrets === 50);
+  checkTrue(`...which arrives ${copyLatencyMs} ms after the last add (coalesced, so 200 to 300), holding all 50`,
+    copyLatencyMs >= 200 && copyLatencyMs <= 300 && copyReader.stats().secrets === 50);
   copy.add(`CLIENT_RANDOM ${R(0xf1)} ${S(0xf1)}\n`);
   checkTrue('a copy is frozen: a later add does not reach it', copyReader.secretsFor(randomOf(0xf1)) === undefined);
   await sleep(300);

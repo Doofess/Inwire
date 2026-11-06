@@ -29,6 +29,10 @@ import { dnsTcpInput, tlsWithDsbInput } from './importEquivalenceRig';
 import { pcapOf, udpFrame } from '../parity/synthetic';
 import { PackReader, PackedFlush, packRows, type PackedRows } from '../../src/services/pipeline/rowPack';
 import type { Packet } from '../../src/types/packet';
+import { writeSyntheticKeyLog } from '../electron/syntheticKeyLog';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -130,6 +134,7 @@ function trackedKeyLog() {
     deps: {
       share: () => store.share(),
       add: (text: string) => { counts.added++; return store.add(text); },
+      reserve: (textBytes: number) => { store.reserve(textBytes); },
       onSnapshot: (listener: Parameters<KeyLogStore['onSnapshot']>[0]) => {
         counts.live++;
         counts.peak = Math.max(counts.peak, counts.live);
@@ -232,6 +237,43 @@ const ids = (outcome: ImportOutcome) => (outcome.ok ? outcome.packets.map((p) =>
   // 5. snapshot subscription
   check('the snapshot subscription ends with the run (success)',
     r.keys.counts.peak === 1 && r.keys.counts.live === 0, r.keys.counts);
+  r.store.close();
+}
+
+// --- 2b. a large secrets text moves the page's key log buffer once --------------------------
+//
+// The page's store is the live (shared) kind here: a snapshot is posted only when the
+// buffer is replaced. A key log's worth of text added piece by piece grew it at every
+// overflow, each leaving an old buffer in every reader; the page reserves for the text first.
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-import-client-'));
+  let text = '';
+  try {
+    const file = join(dir, 'keylog.txt');
+    await writeSyntheticKeyLog(file, 20_000);
+    text = readFileSync(file, 'latin1');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const live = new KeyLogStore({ shared: true });
+  const emitted: SharedArrayBuffer[] = [];
+  live.onSnapshot((snapshot) => { emitted.push(snapshot.buffer as SharedArrayBuffer); });
+  const r = rig(() => new ScriptedWorker(), OPTIONS, { keyLog: live });
+  const run = runWorkerImport(fileOf(new Uint8Array(8)), r.deps);
+  await withTimeout(new Promise((resolve) => later(() => resolve(undefined))), 'start');
+  const worker = r.worker as ScriptedWorker;
+  worker.say({ type: 'secrets', seq: 7, text });
+  const ack = worker.posted.find((m) => m.type === 'secretsTaken');
+  check('a large secrets text (20,000 connections) is held whole by the live page key log',
+    live.stats().connections === 20_000 && live.stats().secrets > 100_000 && live.stats().dropped === 0, live.stats());
+  check('...and moves the buffer exactly once: one snapshot, the reserve', emitted.length === 1, emitted.length);
+  check('...the ack carries seq and the reserved buffer, which is the current one',
+    ack?.type === 'secretsTaken' && ack.seq === 7 && ack.snapshot !== undefined
+    && ack.snapshot.buffer === emitted[0] && ack.snapshot.buffer === live.share().buffer
+    && ack.snapshot.live, ack);
+  run.cancel();
+  await run.result;
   r.store.close();
 }
 

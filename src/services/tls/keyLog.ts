@@ -152,6 +152,24 @@ export class KeyLogStore {
     return table.stats();
   }
 
+  /**
+   * Makes room for a key log of `textBytes` before its text arrives, so the
+   * buffer moves once instead of at every overflow: each move leaves the old
+   * buffer in every reader until that reader next collects, and an idle shard
+   * does not. Called with what main is about to send (`keyLogFollow`), a
+   * file's size (`loadKeyLogFile`), and a Decryption Secrets Block's length.
+   * Absolute, so a second call for the same length does nothing.
+   */
+  public reserve(textBytes: number): void {
+    if (this.reader) throw new Error('key log is read-only in this context');
+    const table = this.table ?? (this.table = this.create(0));
+    if (!table.reserve(textBytes)) return;
+    // As `add` after a growth: a new buffer is posted at once, and the
+    // cleared flag has already gone out with the snapshot `clear` posted.
+    this.clearedFlag = false;
+    if (this.live) this.emit(this.snapshot(table));
+  }
+
   public stats(): KeyLogStats {
     return this.table === null ? { connections: 0, secrets: 0, ignored: 0, dropped: 0 } : this.table.stats();
   }
@@ -255,6 +273,37 @@ export class KeyLogStore {
   private cancelCopy(): void {
     if (this.copyTimer !== undefined) clearTimeout(this.copyTimer);
     this.copyTimer = undefined;
+  }
+}
+
+/**
+ * Adds a key log's text to the page's store: sized once, then added in pieces.
+ *
+ * The buffer is reserved for the whole text first, so it moves once instead of
+ * at every overflow (`KeyLogStore#reserve`). The pieces end on a newline, because
+ * `add` parses whole lines and a line a piece cut in two would be two junk
+ * lines; a piece that holds no newline within `pieceChars` runs to the next
+ * newline or the end, so a log with a very long line never loses it. Used by
+ * the places that hold a whole log as a string: a pcapng's Decryption Secrets
+ * Block, on the page's route and the in-process one.
+ */
+export function addKeyLogText(
+  store: Pick<KeyLogStore, 'reserve' | 'add'>, text: string, pieceChars = 8 * 1024 * 1024,
+): void {
+  store.reserve(text.length);
+  for (let at = 0; at < text.length;) {
+    let end = Math.min(text.length, at + pieceChars);
+    if (end < text.length) {
+      const newline = text.lastIndexOf('\n', end - 1);
+      if (newline >= at) {
+        end = newline + 1;
+      } else {
+        const next = text.indexOf('\n', end);
+        end = next < 0 ? text.length : next + 1;
+      }
+    }
+    store.add(text.slice(at, end));
+    at = end;
   }
 }
 

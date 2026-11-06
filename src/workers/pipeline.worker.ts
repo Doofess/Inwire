@@ -953,22 +953,14 @@ const REVISITED_TREES = 64;
 const kitWaiters = new Map<number, (kit: RevisitKit | null) => void>();
 let nextKitRequest = 1;
 const rebuiltTrees = new RebuiltTrees(REVISITED_TREES);
-/** `keyLog.generation` when `rebuiltTrees` was last cleared. */
-let rebuiltGeneration = 0;
 
 function clearRebuiltTrees(): void {
-  rebuiltTrees.clear();
-  rebuiltGeneration = keyLog.generation;
+  rebuiltTrees.clear(keyLog.generation);
 }
 
-/**
- * Appends to the page's key log reach this Worker with no message, so a
- * rebuilt tree is dropped when the log's generation has moved since the last
- * clear. Asked wherever a rebuilt tree is read or kept: a tree rebuilt before
- * a key arrived could not decrypt, and one rebuilt after could.
- */
+/** Appends reach this Worker with no message; see `RebuiltTrees#sync`. */
 function syncRebuiltTrees(): void {
-  if (keyLog.generation !== rebuiltGeneration) clearRebuiltTrees();
+  rebuiltTrees.sync(keyLog.generation);
 }
 
 function requestKit(id: number): Promise<RevisitKit | null> {

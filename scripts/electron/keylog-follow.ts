@@ -21,8 +21,13 @@ import {
   keyLogCap, LineAssembler, MAX_READ_BYTES, parseKeyLogSettings, planFromTop, planRead, POLL_MS,
   readSpans, REARM_TICKS, startOffset,
 } from '../../electron/keyLogTail';
-import { narrowStatus } from '../../src/lib/keyLogFollow';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { narrowStatus, startKeyLogFollow } from '../../src/lib/keyLogFollow';
+import { keyLog } from '../../src/services/tls/keyLog';
 import { KEYLOG_CAP_BYTES } from '../../src/services/tls/keyLogLimits';
+import { writeSyntheticKeyLog } from './syntheticKeyLog';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -102,9 +107,33 @@ check('...and falls back on anything else',
   const shrunk = planRead(9_000, 20_000);
   check('a shrunken file is a restart', shrunk.kind === 'read' && shrunk.restart, true);
   check('...which a cap smaller than it reads from size - cap, skipping the partial line',
-    planFromTop(9_000, 4096), { from: 4904, skipPartial: true });
+    planFromTop(9_000, 4096), { from: 4903, skipPartial: true, skipped: 4904 });
   check('...and a file under the cap reads from 0 with nothing skipped',
-    planFromTop(1000, 4096), { from: 0, skipPartial: false });
+    planFromTop(1000, 4096), { from: 0, skipPartial: false, skipped: 0 });
+  {
+    // One byte before the cut: when it is a newline, the first line at the
+    // cut is whole and must be kept; when it is mid-line, the partial goes.
+    const cap = 64;
+    const size = 200;
+    const line = 'LABEL aaaa bbbb\n';
+    const wholeText = line.repeat(Math.ceil(size / line.length)).slice(0, size);
+    const cutAtLine = size - cap - 1;
+    // Shape the text so the byte at cutAtLine is '\n'.
+    const shaped = wholeText.slice(0, cutAtLine) + '\n' + wholeText.slice(cutAtLine + 1);
+    const plan = planFromTop(size, cap);
+    const a = new LineAssembler();
+    a.reset(plan.skipPartial);
+    const kept = a.push(shaped.slice(plan.from));
+    checkTrue('a cut right after a newline keeps the first line at the cut',
+      kept.startsWith(shaped.slice(cutAtLine + 1, cutAtLine + 1 + 5)) && kept.length >= cap - 16);
+    const midText = 'X'.repeat(size - cap - 5) + '\nLABEL one two\n' + 'LABEL three four\n'.repeat(10);
+    const mid = planFromTop(midText.length, cap);
+    const b = new LineAssembler();
+    b.reset(mid.skipPartial);
+    const got = b.push(midText.slice(mid.from));
+    checkTrue('a cut mid-line drops the partial line', !got.startsWith('X') && got.startsWith('LABEL'));
+  }
+  check('the env hook never raises the cap', keyLogCap('999999999999'), KEYLOG_CAP_BYTES);
   const src = readFileSync('electron/keyLogFollower.ts', 'utf8');
   checkTrue('the follower plans every top read through planFromTop', /planFromTop\(/.test(src));
   checkTrue('...and reports skippedBytes', /skippedBytes/.test(src));
@@ -126,6 +155,22 @@ check('...absent or invalid is KEYLOG_CAP_BYTES',
 {
   const src = readFileSync('electron/keyLogFollower.ts', 'utf8');
   checkTrue('the follower reports the cap it applies', /capBytes: KEYLOG_CAP\b/.test(src));
+}
+
+console.log('\n--- incomingBytes: main says how much is coming ---\n');
+
+check('incomingBytes is passed on', narrowStatus({ state: 'following', incomingBytes: 5000 })?.incomingBytes, 5000);
+check('...absent, negative, NaN, infinite or not a number is 0',
+  [undefined, -1, NaN, Infinity, '5'].map((n) => narrowStatus({ state: 'following', incomingBytes: n })?.incomingBytes),
+  new Array(5).fill(0));
+{
+  const src = readFileSync('electron/keyLogFollower.ts', 'utf8');
+  const readNew = src.slice(src.indexOf('private readNew('));
+  const push = readNew.indexOf('this.incoming = ');
+  const spans = readNew.indexOf('readSpans(');
+  checkTrue('the follower pushes incomingBytes before reading spans', push >= 0 && spans >= 0 && push < spans);
+  checkTrue('...and takes skipped from planFromTop', /this\.skipped = top\.skipped/.test(src));
+  checkTrue('...and spreads incomingBytes into status only while set', /incomingBytes/.test(src.slice(0, src.indexOf('attach(contents'))));
 }
 
 console.log('\n--- no single read is unbounded ---\n');
@@ -198,10 +243,50 @@ check('the follower writes one file', writes.length, 1);
 checkTrue('...and it is `{ path }` and nothing else',
   writes[0] !== undefined && /JSON\.stringify\(\{\s*path:\s*this\.file\s*\}\)/.test(writes[0]));
 
-console.log();
-if (failures) {
-  console.log(`${failures} check(s) FAILED`);
-  process.exit(1);
+async function pageSide(): Promise<void> {
+  console.log('\n--- the page reserves before the first piece arrives ---\n');
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-keylog-presize-'));
+  const file = join(dir, 'synthetic.txt');
+  const handlers: { text?: (text: string) => void; status?: (value: unknown) => void } = {};
+  const g = globalThis as { window?: unknown };
+  const previous = g.window;
+  try {
+    await writeSyntheticKeyLog(file, 8_000);
+    const text = readFileSync(file, 'latin1');
+    g.window = {
+      inwire: {
+        attachKeyLog: () => new Promise(() => { /* never answers: the handlers are what is under test */ }),
+        onKeyLogText: (h: (text: string) => void) => { handlers.text = h; },
+        onKeyLogStatus: (h: (value: unknown) => void) => { handlers.status = h; },
+      },
+    };
+    startKeyLogFollow();
+    checkTrue('the follow subscribed to text and status', !!handlers.text && !!handlers.status);
+    keyLog.clear();
+    let snapshots = 0;
+    const off = keyLog.onSnapshot(() => { snapshots++; });
+    handlers.status!({ state: 'following', incomingBytes: text.length });
+    check('a status with incomingBytes posts one snapshot', snapshots, 1);
+    const before = snapshots;
+    for (let at = 0; at < text.length; at += 1 << 20) handlers.text!(text.slice(at, at + (1 << 20)));
+    check('...and the pieces post none', snapshots - before, 0);
+    checkTrue('...and the secrets all arrived', keyLog.stats().secrets > 40_000);
+    off();
+  } finally {
+    g.window = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
-console.log('All key log follow checks passed.');
-process.exit(0);
+
+void pageSide().then(() => {
+  console.log();
+  if (failures) {
+    console.log(`${failures} check(s) FAILED`);
+    process.exit(1);
+  }
+  console.log('All key log follow checks passed.');
+  process.exit(0);
+}, (error) => {
+  console.log('FAIL  page-side check threw', error);
+  process.exit(1);
+});

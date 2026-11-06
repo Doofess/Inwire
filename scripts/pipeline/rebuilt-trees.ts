@@ -70,6 +70,31 @@ const tree = (): ProtocolLayer[] => [{ name: 'Frame', summary: '', fields: [] }]
   check('a rebuild under way when the cache is cleared is not kept', trees.get(30) === undefined);
 }
 
+// --- the key-log generation sync -------------------------------------------------------
+{
+  const trees = new RebuiltTrees(3);
+  trees.clear(3);
+  const a = tree();
+  trees.begin(1);
+  trees.keep(1, a);
+  trees.sync(3);
+  check('sync at the same generation keeps a tree', trees.get(1) === a);
+  trees.sync(4);
+  check('sync at a newer generation drops it', trees.get(1) === undefined);
+
+  trees.clear(5);
+  const b = tree();
+  trees.begin(2);
+  trees.keep(2, b);
+  trees.sync(5);
+  check('after clear(5), sync(5) keeps a tree kept after it', trees.get(2) === b);
+
+  trees.begin(3); // mid-rebuild when the generation moves
+  trees.sync(6);
+  trees.keep(3, tree());
+  check('a rebuild under way when sync moves is not kept', trees.get(3) === undefined);
+}
+
 // --- the fingerprint row -------------------------------------------------------------
 {
   const store = new ClientFingerprintStore();

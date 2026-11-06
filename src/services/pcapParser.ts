@@ -19,7 +19,7 @@ import {
 import { SCORING_FRAMES, inferHostIdentity } from './hostIdentity';
 import { decodeNetworkLayer, nestQuotedLayers } from './dissectors/networkLayer';
 import { nestLayers } from './dissect/nestedLayers';
-import { keyLog } from './tls/keyLog';
+import { addKeyLogText, keyLog } from './tls/keyLog';
 import { ByteWindow, READ_WINDOW_BYTES, type BlobLike } from './byteWindow';
 import { snaplenOrWhole, type CaptureFileFacts, type FileInterfaceFacts } from './captureFileFacts';
 import { DSB_SECRETS_TYPE_TLS_KEY_LOG, LINKTYPE, type InfoPatch } from './dissect/types';
@@ -404,7 +404,7 @@ export class PcapService {
      * Where a Decryption Secrets Block's key log goes, awaited before the walk
      * reads on. The default is this page's key log.
      */
-    onSecrets: (text: string) => void | Promise<void> = (text) => { keyLog.add(text); },
+    onSecrets: (text: string) => void | Promise<void> = (text) => { addKeyLogText(keyLog, text); },
   ): Promise<FrameWalk> {
     const size = 'size' in source ? source.size : source.byteLength;
     if (size < 8) {

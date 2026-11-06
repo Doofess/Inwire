@@ -8,7 +8,12 @@
  * `cap` bytes, the way main's follower does.
  */
 import { loadKeyLogFile, readKeyLogFile } from '../../src/lib/keyLogFile';
-import { KeyLogStore } from '../../src/services/tls/keyLog';
+import { KeyLogStore, addKeyLogText } from '../../src/services/tls/keyLog';
+import { writeSyntheticKeyLog } from '../electron/syntheticKeyLog';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -49,6 +54,22 @@ console.log('\n--- over the cap ---\n');
   check('...and starts at the first whole line after it', capped.joined, lines.slice(-10).join(''));
   const big = await read(log, { cap, chunkBytes: 1 << 20 });
   check('...the same with one chunk', big.joined, lines.slice(-10).join(''));
+}
+
+console.log('\n--- a cut that lands exactly on a line start ---\n');
+{
+  // The byte before `size - cap` is the previous line's newline: the cut is a
+  // line start, and that line is whole, so it is kept (the follower does the same).
+  const L = lines[0].length;
+  const exact = await read(log, { cap: L * 10, chunkBytes: 64 });
+  check('an exact cut keeps the line it lands on', exact.joined, lines.slice(-10).join(''));
+  check('...and still reports size - cap as skipped', exact.skippedBytes, log.length - L * 10);
+  const exactOne = await read(log, { cap: L * 10, chunkBytes: 1 << 20 });
+  check('...the same with one chunk', exactOne.joined, lines.slice(-10).join(''));
+  const midLine = await read(log, { cap: L * 10 + 1, chunkBytes: 64 });
+  check('a cut that lands on the newline ending the line before drops that line, not the next', midLine.joined, lines.slice(-10).join(''));
+  const midLineLate = await read(log, { cap: L * 10 - 1, chunkBytes: 64 });
+  check('a cut one byte into the first kept line drops it', midLineLate.joined, lines.slice(-9).join(''));
 }
 
 console.log('\n--- what a chunk boundary must not break ---\n');
@@ -116,6 +137,98 @@ console.log('\n--- the panel\'s Load, and a Clear pressed while it runs ---\n');
   early.clear();
   const afterEarlyClear = await loadKeyLogFile(new Blob([log]), early, { chunkBytes: 1024 });
   check('a Clear before a Load starts does not cancel it', afterEarlyClear.kind === 'loaded' && early.stats().secrets === 40, true);
+}
+
+console.log('\n--- the panel\'s Load reserves once ---\n');
+{
+  // An owner-shaped log, generated at run time and deleted at once (never committed).
+  const dir = mkdtempSync(join(tmpdir(), 'inwire-keylog-file-'));
+  let synth = '';
+  try {
+    const file = join(dir, 'keylog.txt');
+    await writeSyntheticKeyLog(file, 20_000);
+    synth = readFileSync(file, 'latin1');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const store = new KeyLogStore();
+  let snapshots = 0;
+  store.onSnapshot(() => { snapshots++; });
+  const loaded = await loadKeyLogFile(new Blob([synth]), store, { chunkBytes: 1 << 20 });
+  check('a Load of an owner-shaped log (20,000 connections) is read in many chunks and keeps every secret',
+    loaded.kind === 'loaded' && loaded.connections === 20_000 && loaded.secrets > 100_000
+    && synth.length > 4 * (1 << 20), true);
+  check('...and posts one snapshot, the reserve, none during the chunks', snapshots, 1);
+
+  const over = new KeyLogStore();
+  let overSnapshots = 0;
+  over.onSnapshot(() => { overSnapshots++; });
+  const cap = Math.floor(synth.length / 2);
+  const capped = await loadKeyLogFile(new Blob([synth]), over, { chunkBytes: 1 << 20, cap });
+  check('a Load over the cap reserves for the cap, not the file: one snapshot too', overSnapshots, 1);
+  check('...and reports the bytes it skipped', capped.kind === 'loaded' && capped.skippedBytes === synth.length - cap, true);
+}
+
+console.log('\n--- addKeyLogText: sized once, added in whole lines ---\n');
+{
+  const text = Array.from({ length: 300 }, (_, i) =>
+    `CLIENT_RANDOM ${String(i).padStart(64, '0')} ${'ab'.repeat(48)}\n`).join('');
+  const junk = 'x'.repeat(10_000);
+  const withJunk = `${text.slice(0, text.length / 2)}${junk}\n${text.slice(text.length / 2)}`;
+
+  const store = new KeyLogStore();
+  const adds: string[] = [];
+  const reserves: number[] = [];
+  let threw = false;
+  try {
+    addKeyLogText({
+      reserve: (n) => { reserves.push(n); store.reserve(n); },
+      add: (t) => { adds.push(t); return store.add(t); },
+    }, withJunk, 4096);
+  } catch {
+    threw = true;
+  }
+  check('a log with a 10,000-character junk line adds without throwing', threw, false);
+  check('...reserving its whole length first, once', reserves, [withJunk.length]);
+  check('...every secret is held', store.stats().secrets, 300);
+  check('...the pieces are the text, in order', adds.join(''), withJunk);
+  check('...no add but the last gets text that does not end on a newline',
+    adds.slice(0, -1).every((t) => t.endsWith('\n')), true);
+  check('...no piece but the junk line\'s is longer than the piece size',
+    adds.filter((t) => t.length > 4096).every((t) => t.includes(junk)), true);
+  check('...the junk line goes in one piece', adds.filter((t) => t.includes(junk)).length, 1);
+  check('...in more than one piece overall (the size bound is real)', adds.length > 5, true);
+
+  const whole = new KeyLogStore();
+  let wholeAdds = 0;
+  addKeyLogText({ reserve: (n) => whole.reserve(n), add: (t) => { wholeAdds++; return whole.add(t); } }, text);
+  check('a log under the piece size is one add', wholeAdds, 1);
+  check('...holding all of it', whole.stats().secrets, 300);
+
+  const noNewline = new KeyLogStore();
+  const tail: string[] = [];
+  addKeyLogText({ reserve: (n) => noNewline.reserve(n), add: (t) => { tail.push(t); return noNewline.add(t); } }, 'LABEL a b\nLABEL c d', 4);
+  check('a last line with no newline is still added', tail.join(''), 'LABEL a b\nLABEL c d');
+}
+
+console.log('\n--- who calls it (the writers of the page key log) ---\n');
+{
+  const read = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8');
+  const client = read('src/services/importClient.ts');
+  const secretsCase = /case 'secrets':[\s\S]*?case '/.exec(client)?.[0] ?? '';
+  check('importClient\'s secrets case adds through addKeyLogText(', secretsCase.includes('addKeyLogText('), true);
+  check('...and not through a bare keyLog.add(', secretsCase.includes('keyLog.add('), false);
+  check('...before the ack it posts', secretsCase.indexOf('addKeyLogText(') >= 0
+    && secretsCase.indexOf('addKeyLogText(') < secretsCase.indexOf('secretsTaken'), true);
+  const parser = read('src/services/pcapParser.ts');
+  const defaultOnSecrets = /onSecrets: \(text: string\) => void \| Promise<void> = ([^\n]*)/.exec(parser)?.[1] ?? '';
+  check('pcapParser\'s default onSecrets adds through addKeyLogText(', defaultOnSecrets.includes('addKeyLogText('), true);
+  check('...and not through a bare keyLog.add(', defaultOnSecrets.includes('keyLog.add('), false);
+  const panel = read('src/components/common/DecryptionSettingsPanel.tsx');
+  check('the panel no longer tells the user to restart Inwire for the newest part',
+    panel.includes('Restart Inwire to load the newest part'), false);
+  check('...it says what to do instead',
+    panel.includes('the key log store is full. Clear, then load or follow the file again to bring in its newest secrets.'), true);
 }
 
 console.log();

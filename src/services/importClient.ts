@@ -34,7 +34,7 @@ import { ImportTail } from './importTail';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 import { PackReader } from './pipeline/rowPack';
 import { IMPORT_NAME, type FromImport, type ImportRunOptions, type ToImport } from './pipeline/importProtocol';
-import type { KeyLogStore } from './tls/keyLog';
+import { addKeyLogText, type KeyLogStore } from './tls/keyLog';
 import type { ImportOutcome, ImportRunHandle } from './tabularImport';
 
 export { IMPORT_NAME };
@@ -52,7 +52,7 @@ export interface ImportClientDeps {
   spawn(): WorkerLike;
   /** A fresh port to the store's ingest side; the Worker owns it from `start`. */
   ingestPort(): Promise<MessagePort>;
-  keyLog: Pick<KeyLogStore, 'share' | 'add' | 'onSnapshot'>;
+  keyLog: Pick<KeyLogStore, 'share' | 'add' | 'reserve' | 'onSnapshot'>;
   /** Runs the lifecycle's open of the capture, awaited; answers the capture's id. */
   onOpening(): Promise<string>;
   /** The highest frame id the store can supply bytes for (0 = none). */
@@ -135,7 +135,7 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
         return;
       }
       case 'secrets':
-        deps.keyLog.add(message.text);
+        addKeyLogText(deps.keyLog, message.text);
         post({ type: 'secretsTaken', seq: message.seq, snapshot: deps.keyLog.share() });
         return;
       case 'opening':

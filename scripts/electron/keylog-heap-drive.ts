@@ -231,11 +231,14 @@ async function run(label: string, keyLogFile: string, expectSecrets: number, thr
 
 /**
  * The secrets the store accepts from the file as it is now, and the size of
- * the table that holds them, counted in this process.
+ * the table that holds them, counted in this process. Reserved for the file's
+ * length first, as the app's follower now does before its read from the top.
  */
 function tableOf(file: string): { secrets: number; tableMB: number } {
   const store = new KeyLogStore();
-  store.add(readFileSync(file, 'latin1'));
+  const text = readFileSync(file, 'latin1');
+  store.reserve(text.length);
+  store.add(text);
   return { secrets: store.stats().secrets, tableMB: Math.round(store.share().buffer.byteLength / MIB) };
 }
 
@@ -246,9 +249,10 @@ function tableOf(file: string): { secrets: number; tableMB: number } {
  * charged to it. The peak carries the load's transient; the held figure is
  * after a GC of every context, which is what a copy per shard would raise.
  */
-interface Share { peakMB: number; heldMB: number }
+interface Share { peakMB: number; endMB: number; heldMB: number }
 const shareOf = (r: Run, empty: Run): Share => ({
   peakMB: r.rendererPrivateMB - empty.rendererPrivateMB,
+  endMB: r.rendererPrivateEndMB - empty.rendererPrivateEndMB,
   heldMB: r.rendererPrivateHeldMB - empty.rendererPrivateHeldMB,
 });
 
@@ -256,14 +260,30 @@ const dir = mkdtempSync(path.join(tmpdir(), 'inwire-keylog-synthetic-'));
 const emptyFile = path.join(dir, 'empty.txt');
 writeFileSync(emptyFile, '');
 
-/** Alive, every secret, and the key log held once: the checks for one thread count. */
-function checkShare(label: string, r: Run, empty: Run, tableMB: number): Share {
+/**
+ * Alive, every secret, and the key log held once: the checks for one thread
+ * count. `sized` adds the pre-sizing ceilings (ADR 0073, amendment 2026-11-06),
+ * measured on the synthetic log only: the table moves once, so the peak stays
+ * near the table and no retired buffer waits in an idle shard. Before it, the
+ * peak was +384 MB on a 107 MB table and the 30 s share sat 228 MB above the
+ * held one.
+ */
+function checkShare(label: string, r: Run, empty: Run, tableMB: number, sized: boolean): Share {
   const share = shareOf(r, empty);
-  const measured = r.alive && empty.alive && r.rendererPrivateHeldMB >= 0 && empty.rendererPrivateHeldMB >= 0;
-  console.log(`      the key log's share: peak +${share.peakMB} MB, held +${share.heldMB} MB; its table is ${tableMB} MB`);
+  const measured = r.alive && empty.alive && r.rendererPrivateHeldMB >= 0 && empty.rendererPrivateHeldMB >= 0
+    && r.rendererPrivateEndMB >= 0 && empty.rendererPrivateEndMB >= 0;
+  console.log(`      the key log's share: peak +${share.peakMB} MB, at ${ALIVE_MS / 1000} s +${share.endMB} MB, held +${share.heldMB} MB; its table is ${tableMB} MB; ` +
+    `the renderer's peak ${r.rendererPrivateMB} MB, held ${r.rendererPrivateHeldMB} MB (empty: ${empty.rendererPrivateMB}, ${empty.rendererPrivateHeldMB})`);
   // A dead renderer's numbers are the crash page's: they count only alive.
-  checkTrue(`${label}: the key log's peak share of the renderer's private bytes is under 1,024 MB`,
-    measured && share.peakMB < 1024);
+  if (sized) {
+    checkTrue(`${label}: the key log's peak share of the renderer's private bytes is under 2.25 times its table (${Math.round(2.25 * tableMB)} MB)`,
+      measured && share.peakMB < 2.25 * tableMB);
+    checkTrue(`${label}: ...and its share at ${ALIVE_MS / 1000} s is within a quarter of its table of what a GC leaves (${Math.round(tableMB / 4)} MB): no retired buffers`,
+      measured && share.endMB - share.heldMB < tableMB / 4);
+  } else {
+    checkTrue(`${label}: the key log's peak share of the renderer's private bytes is under 1,024 MB`,
+      measured && share.peakMB < 1024);
+  }
   checkTrue(`${label}: ...and what it holds after a GC is under twice its table (${2 * tableMB} MB)`,
     measured && share.heldMB < 2 * tableMB);
   checkTrue(`${label}: ...and the page's usedJSHeapSize is under 512 MB`, r.alive && r.pageHeapMB >= 0 && r.pageHeapMB < 512);
@@ -282,7 +302,7 @@ if (KEYLOG) {
     checkTrue(`real log: the renderer is alive ${ALIVE_MS / 1000} s after the launch`, r.alive);
     checkTrue(`real log: Decryption shows the secrets an in-process store counts (${before.secrets.toLocaleString()} to ${after.secrets.toLocaleString()})`,
       r.secrets >= before.secrets && r.secrets <= after.secrets);
-    checkShare('real log', r, empty, after.tableMB);
+    checkShare('real log', r, empty, after.tableMB, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -304,7 +324,7 @@ try {
     const r = await run(`following it at ${threads} threads`, file, made.lines, threads);
     checkTrue(`${threads}: the renderer is alive ${ALIVE_MS / 1000} s after the launch`, r.alive);
     check(`${threads}: Decryption shows every secret`, r.secrets, made.lines);
-    shares[threads] = checkShare(String(threads), r, empty, tableMB);
+    shares[threads] = checkShare(String(threads), r, empty, tableMB, true);
     workers[threads] = r.workers;
   }
   // The setting is written by a launch before the measured one; a profile
