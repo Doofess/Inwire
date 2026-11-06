@@ -157,9 +157,11 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
           finish(unreadable(error instanceof Error ? error.message : String(error)));
           return;
         }
-        release();
         // After the decode, never before: the credit is for rows the page has taken.
+        // Ahead of the release, which is the page's own bookkeeping: the Worker
+        // has nothing to wait for in it.
         post({ type: 'rowsTaken' });
+        release();
         return;
       case 'done':
         finish({

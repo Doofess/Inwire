@@ -697,6 +697,36 @@ async function stalledRun(name: string) {
   for (let n = 0; n < 20; n++) again.send({ type: 'rows', n });
   check('spurious acknowledgements do not raise the credit above the bound', fresh.length === IMPORT_ROWS_IN_FLIGHT, fresh.length);
 }
+{
+  // The walk's pace waits once the credit is spent, not one batch later: a pace that
+  // waited only on held messages let the walk build a ninth batch to hold.
+  type Out = { type: 'rows' | 'progress'; n?: number };
+  const posted: Out[] = [];
+  const credit = createRowsCredit<Out>((message) => { posted.push(message); });
+  for (let n = 0; n < IMPORT_ROWS_IN_FLIGHT - 1; n++) credit.send({ type: 'rows', n });
+  check('with room left in the credit, the walk does not wait', credit.clear() === undefined);
+  credit.send({ type: 'rows', n: IMPORT_ROWS_IN_FLIGHT - 1 });
+  const full = credit.clear();
+  let resumed = false;
+  void full?.then(() => { resumed = true; });
+  await Promise.resolve();
+  check('with the credit spent and nothing held, the walk waits before building another batch',
+    full !== undefined && !resumed);
+  credit.taken();
+  await Promise.resolve();
+  check('...and resumes on the next rowsTaken', resumed);
+
+  // Progress reports held behind rows are only the newest one's worth, wherever they sit.
+  credit.send({ type: 'rows', n: 100 });
+  credit.send({ type: 'rows', n: 101 });
+  credit.send({ type: 'progress', n: 1 });
+  credit.send({ type: 'rows', n: 102 });
+  credit.send({ type: 'progress', n: 2 });
+  for (let i = 0; i < 4; i++) credit.taken();
+  const tail = posted.slice(IMPORT_ROWS_IN_FLIGHT).map((m) => `${m.type[0]}${m.n}`).join(' ');
+  check('progress held between rows merges into the newest report, after the rows before it',
+    tail === 'r100 r101 r102 p2', tail);
+}
 
 async function starvedRun(name: string) {
   const frames: Uint8Array[] = [];
@@ -728,6 +758,22 @@ async function starvedRun(name: string) {
     outcome.ok === true && outcome.packets.length === 6_000 && rowsIn > IMPORT_ROWS_IN_FLIGHT
     && log.filter((t) => t === '>rowsTaken').length === rowsIn && log.indexOf('<done') > log.lastIndexOf('<rows'),
     { ok: outcome.ok, rowsIn, acks: log.filter((t) => t === '>rowsTaken').length });
+  r.store.close();
+}
+{
+  // The credit goes back once the batch is decoded, before the tail lets bytes go: the
+  // release is the page's own bookkeeping and the Worker need not wait on it.
+  const frames: Uint8Array[] = [];
+  for (let i = 0; i < 3_000; i++) frames.push(udpFrame(5000 + (i % 100), 9999, Uint8Array.of(i & 0xff, (i >> 8) & 0xff)));
+  const r = rig(() => new RealWorker(), { ...OPTIONS, maxFrames: 3_100, batchFrames: 500, windowBytes: 32 * 1024 });
+  const log = () => (r.worker as RealWorker).log;
+  r.deps.storedThrough = () => { log().push('~release'); return r.store.state.lastId; };
+  r.deps.onProgress = () => { log().push('~progress'); };
+  const outcome = await withTimeout(runWorkerImport(fileOf(pcapOf(frames), 'credit-first.pcap'), r.deps).result, 'credit-first');
+  const order = log();
+  const late = order.filter((t, i) => t === '~release' && order[i - 1] !== '~progress' && order[i - 1] !== '>rowsTaken').length;
+  check('the page answers rowsTaken as soon as a batch is decoded, before releasing tail bytes',
+    outcome.ok === true && order.includes('~release') && late === 0, { ok: outcome.ok, late, releases: order.filter((t) => t === '~release').length });
   r.store.close();
 }
 {

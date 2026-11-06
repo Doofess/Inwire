@@ -11,11 +11,12 @@
  * The messages after a held `rows` wait behind it, in order, whatever they are:
  * `done` carries the tail's last word and must not overtake a row. Progress
  * reports that pile up behind a held batch are only the newest one's worth, so
- * they are merged rather than queued.
+ * a new one replaces every one held, wherever it sits, and waits at the back.
  *
- * The walk waits too (`clear`, the run's `pace`): held messages are memory in the
- * renderer process as surely as the page's queue was (#19), so a page that is
- * slow to decode slows the file's reading rather than piling its rows here.
+ * The walk waits too (`clear`, the run's `pace`), from the moment the credit is
+ * spent: held messages are memory in the renderer process as surely as the
+ * page's queue was (#19), so a page that is slow to decode slows the file's
+ * reading rather than piling its rows here.
  *
  * Nothing here can hang a run. The credit only ever holds messages for a page
  * that is alive to answer them; Cancel and a lost store end the run on the page
@@ -32,7 +33,10 @@ export interface RowsCredit<M extends { type: string }> {
   send(message: M, transfer?: Transferable[]): void;
   /** One `rowsTaken` arrived: one batch fewer in flight, and what waited on it goes out. */
   taken(): void;
-  /** Nothing held: undefined. Otherwise a promise settled once every held message has gone out. */
+  /**
+   * Nothing held and room for another `rows`: undefined. Otherwise a promise
+   * settled once every held message has gone out and a batch more may.
+   */
   clear(): Promise<void> | undefined;
 }
 
@@ -54,6 +58,7 @@ export function createRowsCredit<M extends { type: string }>(
       held.shift();
       post(next.message, next.transfer);
     }
+    if (inFlight >= limit) return;
     const waiting = cleared;
     cleared = [];
     for (const resolve of waiting) resolve();
@@ -62,9 +67,12 @@ export function createRowsCredit<M extends { type: string }>(
   return {
     send(message, transfer) {
       if (held.length > 0) {
-        const last = held[held.length - 1];
-        if (message.type === 'progress' && last.message.type === 'progress') last.message = message;
-        else held.push({ message, transfer });
+        // Only the newest report is worth anything: earlier held ones go, wherever
+        // they sit, and this one waits behind every row sent before it.
+        if (message.type === 'progress') {
+          for (let i = held.length - 1; i >= 0; i--) if (held[i].message.type === 'progress') held.splice(i, 1);
+        }
+        held.push({ message, transfer });
         return;
       }
       if (message.type === 'rows') {
@@ -81,7 +89,9 @@ export function createRowsCredit<M extends { type: string }>(
       release();
     },
     clear() {
-      if (held.length === 0) return undefined;
+      // Waits with the credit spent too, not only with messages held: otherwise
+      // the walk builds one batch more than the credit only to hold it.
+      if (held.length === 0 && inFlight < limit) return undefined;
       return new Promise<void>((resolve) => { cleared.push(resolve); });
     },
   };
