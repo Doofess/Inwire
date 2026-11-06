@@ -113,6 +113,24 @@ console.log('\n--- what is counted, and when it is let go ---\n');
 }
 
 {
+  // The cost is the one counted at dispatch, not read again from bytes that may
+  // have moved on: frames held behind a barrier are routed later, and the
+  // caller's buffers can be transferred away in between (3.1).
+  const { coordinator, merged, deliver } = rig();
+  const own = (frame: CoordFrame): CoordFrame => ({ ...frame, bytes: new Uint8Array(frame.bytes) });
+  const frames = [fragment(1), own(segment(2, 300)), own(datagram(3, 500)), own(segment(4, 90))];
+  const cost = costOf(frames);
+  coordinator.dispatch(frames);
+  for (const frame of frames.slice(1)) structuredClone(frame.bytes.buffer, { transfer: [frame.bytes.buffer as ArrayBuffer] });
+  check('the frames behind the barrier lost their bytes before being routed', frames[1].bytes.length === 0);
+  check('...and the count held at dispatch is not changed by it', coordinator.inFlightBytes === cost,
+    `${coordinator.inFlightBytes} against ${cost}`);
+  deliver();
+  check('...so every one merges and the count returns to zero', merged.length === frames.length && coordinator.inFlightBytes === 0,
+    `${merged.length} merged, ${coordinator.inFlightBytes} bytes`);
+}
+
+{
   const { coordinator } = rig();
   coordinator.dispatch([segment(1, 400), datagram(2, 400), segment(3, 400)]);
   check('frames are in flight before a reset', coordinator.inFlightBytes > 0);

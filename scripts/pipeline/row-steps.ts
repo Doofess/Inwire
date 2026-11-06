@@ -11,7 +11,8 @@
  * packed and its side record structured-cloned, then `mergeRowSide` in merged
  * order (or the old steps on the decoded row when the side says `needsRow`),
  * and the overlay applied. The two must agree on every row's fields and
- * findings, on the Frame layer's rows, and on the facts the collector ends up
+ * findings, on the Frame layer's rows (but for the fingerprint match row, which the
+ * merge carries as an overlay value and no tree), and on the facts the collector ends up
  * with. A synthetic set runs always; the fixtures' TCP rows and `--burst` run
  * when their files are present, with a socket table built from the capture's
  * own first flows. Only counts are printed.
@@ -57,6 +58,9 @@ const BATCH = 384;
 function norm(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value ?? null, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v)));
 }
+
+/** The tree row `learnOrLabelFingerprint` adds when it matches: the merge's overlay carries the value instead. */
+const JA4_MATCH_ROW = 'inwire.process.ja4_match';
 
 function frameRowsOf(layers: ProtocolLayer[]): ProtocolField[] {
   return layers.find((layer) => layer.name === 'Frame')?.fields ?? [];
@@ -121,17 +125,13 @@ class Comparison {
     // B, the coordinator: in merged order, a side or the old steps on the row.
     back.forEach((row, i) => {
       const side = sent[i];
-      let frameRows: ProtocolField[] = [];
       if (side?.needsRow) {
         this.needsRow++;
-        const stub: ProtocolLayer = { name: 'Frame', summary: '', fields: [] };
-        learnOrLabelFingerprint(row.fields, this.fingerprintsB, [stub]);
+        learnOrLabelFingerprint(row.fields, this.fingerprintsB);
         this.factsB.observe(row, host);
-        frameRows = stub.fields;
       } else {
         const merged = mergeRowSide(side, { fingerprints: this.fingerprintsB, facts: this.factsB, host }, null);
         if (merged.overlay !== null) applyOverlay(row, merged.overlay);
-        frameRows = merged.frameRows;
       }
       if (side !== undefined) this.sides++;
       if (this.keepSides) this.sideById.set(row.id, side);
@@ -140,7 +140,8 @@ class Comparison {
       const want = a[i];
       if (!isDeepStrictEqual(norm(row.fields), norm(want.fields))) this.wrong = `row ${row.id}: fields differ`;
       else if (!isDeepStrictEqual(norm(row.expert), norm(want.expert))) this.wrong = `row ${row.id}: findings differ`;
-      else if (!isDeepStrictEqual(norm([...trees[i], ...frameRows]), norm(frameRowsOf(want.layers)))) {
+      else if (!isDeepStrictEqual(norm(trees[i]), norm(frameRowsOf(want.layers).filter((f) => f.abbrev !== JA4_MATCH_ROW)))) {
+        // The merge adds no tree row of its own (no shard caches a tree); the match is in `fields`, compared above.
         this.wrong = `row ${row.id}: the Frame layer's rows differ`;
       }
     });
@@ -237,6 +238,17 @@ set.push(synth({ sport: 54322, protocols: TLS, srcMac: OTHER_MAC, dst: '10.0.0.9
   check('an unattributed hello carries its ja4 and no process', matchSide?.ja4 === JA4 && matchSide.process === undefined);
   check('a hello with nothing to observe in TLS carries no tls facts', matchSide?.tls === undefined);
   check('only the DNS-over-TCP and ARP rows of the set went through the full path', run.needsRow === 2, `${run.needsRow}`);
+}
+
+// The merge hands back an overlay only: no caller reads a tree row from it (no tree is cached on a shard).
+{
+  const store = new ClientFingerprintStore();
+  const ctx = { fingerprints: store, facts: new NetworkFactsCollector(), host: HOST };
+  mergeRowSide({ ja4: JA4, process: 'chrome.exe' }, ctx, null); // learns
+  const matched = mergeRowSide({ ja4: JA4 }, ctx, null);
+  check('a merged ja4 match is returned as an overlay, with no tree row beside it',
+    matched.overlay?.fields?.['inwire.process.ja4_match'] === 'chrome.exe', JSON.stringify(matched));
+  check('...the result has no frameRows', !('frameRows' in matched) && !('frameRows' in mergeRowSide(undefined, ctx, null)));
 }
 
 // A decoded row has had the shard's steps; the decoded merge path must not repeat them.
