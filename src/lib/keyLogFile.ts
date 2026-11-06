@@ -104,7 +104,8 @@ export async function loadKeyLogFile(file: Blob, store: KeyLogStore, options: Re
   try {
     // The buffer moves once, here, for what will be read, instead of at every
     // overflow while the chunks arrive (each move strands the old buffer in
-    // every reader). Absolute: a file already being followed adds nothing.
+    // every reader). Absolute, with headroom: the file already being
+    // followed, even a little longer since, finds the room and moves nothing.
     store.reserve(Math.min(file.size, options.cap ?? KEYLOG_CAP_BYTES));
     const { skippedBytes } = await readKeyLogFile(file, (text) => {
       if (store.clears !== clears) return false;

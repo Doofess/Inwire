@@ -394,6 +394,20 @@ async function main() {
   twice.reserve(synth.length);
   twice.reserve(synth.length);
   check('reserving the same length again posts nothing more', twicePosted, 1);
+  // Followed, then the browser appends, then the same file is loaded or
+  // followed again from the top: a slightly longer length must not move the
+  // whole table once more (the final review's Important 1).
+  const grown = new KeyLogStore();
+  let grownPosted = 0;
+  grown.onSnapshot(() => { grownPosted++; });
+  grown.reserve(synth.length);
+  for (const piece of synthPieces) grown.add(piece);
+  const grownBefore = grownPosted;
+  grown.reserve(synth.length + 4);
+  grown.reserve(synth.length + Math.floor(synth.length / 10));
+  check('a followed log that grew by a line, then by a tenth, reserved again: nothing more posted', grownPosted - grownBefore, 0);
+  grown.reserve(synth.length * 2);
+  check('...while one that doubled moves once', grownPosted - grownBefore, 1);
   const zero = new KeyLogStore();
   let zeroPosted = 0;
   zero.onSnapshot(() => { zeroPosted++; });

@@ -115,6 +115,12 @@ const MAX_BROWSER_SECRET = 48;
 const SECRETS_PER_CONN = 4;
 
 /**
+ * A reserve that moves sizes for this much more text than asked, so the same
+ * file asked for again after a browser's appends finds the room already there.
+ */
+const RESERVE_HEADROOM = 9 / 8;
+
+/**
  * What `textBytes` of key-log text can hold, region by region: secrets and
  * secret bytes at their limit for browser-written lines, connections guessed.
  * A crafted log of tiny secrets can hold more and grows past it as before.
@@ -512,21 +518,25 @@ export class KeyLogTable {
 
   /**
    * Makes room for `textBytes` of key-log text in all, counting what is held,
-   * in one move rather than a growth at every overflow. Absolute, so asking
-   * again for the same length - a follow read again from the top, a Load of
-   * the file being followed - moves nothing. Never shrinks a region and never
-   * touches the generation: the new buffer holds exactly what the old one did.
-   * True when the buffer was replaced; false when it already had the room or
-   * the bigger one could not be made, which leaves the table as it was.
+   * in one move rather than a growth at every overflow. Absolute, and a move
+   * sizes for `RESERVE_HEADROOM` more than asked while the test for moving
+   * uses the bare length: a followed file the browser has since appended to,
+   * loaded or followed again from the top, moves nothing until it has grown by
+   * an eighth. Never shrinks a region and never touches the generation: the
+   * new buffer holds exactly what the old one did. True when the buffer was
+   * replaced; false when it already had the room or the bigger one could not
+   * be made, which leaves the table as it was.
    */
   public reserve(textBytes: number): boolean {
     if (this.readOnly) throw new Error('key log is read-only in this context');
     const want = capacityFor(textBytes, this.maxSecrets);
-    const cc = Math.max(this.connCap, want.conns);
-    const rc = Math.max(this.recCap, want.recs);
-    const ac = Math.max(this.arenaCap, want.arena);
-    if (cc === this.connCap && rc === this.recCap && ac === this.arenaCap) return false;
-    return this.resize(cc, rc, ac);
+    if (this.connCap >= want.conns && this.recCap >= want.recs && this.arenaCap >= want.arena) return false;
+    const roomy = capacityFor(textBytes * RESERVE_HEADROOM, this.maxSecrets);
+    return this.resize(
+      Math.max(this.connCap, roomy.conns),
+      Math.max(this.recCap, roomy.recs),
+      Math.max(this.arenaCap, roomy.arena),
+    );
   }
 
   /** Moves to a buffer with these capacities. False, with nothing changed, when it would be too big or allocation fails. */

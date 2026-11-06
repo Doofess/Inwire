@@ -187,8 +187,9 @@ peak share is +576 MB and it holds +151 MB after a GC; the page heap is 32 MB.
   pre-sizing, a large load left about 230 MB of retired buffers for the 205 MB
   log in the renderer's private bytes until the shards next collected. The
   table is now sized once from the length about to arrive (amendment
-  "Pre-sizing" below), so a browser-shaped load retires one small buffer at
-  most; a crafted log outside that shape still grows by doubling. A buffer is
+  "Pre-sizing" below), so a load moves the buffer once, from the small empty
+  table. A log mostly of TLS 1.2 can still grow twice on connections, and a
+  crafted log outside the browser shape grows by doubling as before. A buffer is
   at most 2 GB (`MAX_BUFFER_BYTES`).
 - A renderer minidump would now hold the log once rather than eight times.
   Crash reporting stays off (0008).
@@ -224,9 +225,12 @@ a growth does. Every writer learns the length first:
   for the import Worker's `secrets` message (0074) and for the in-process
   walk's default; the import protocol is unchanged.
 
-`reserve` is absolute, not additive: a follow that restarts from the top, or a
-Load of the file already followed, asks for a size the table already has, and
-nothing moves.
+`reserve` is absolute, not additive, and a reserve that moves sizes for 9/8 of
+the length asked (`RESERVE_HEADROOM`) while the test for moving uses the bare
+length. A follow that restarts from the top, or a Load of the file already
+followed, asks for about the size the table already has: nothing moves until
+the browser's appends have grown the file by an eighth. Without the headroom a
+single appended line moved the whole table again (the final review's finding).
 
 `capacityFor(textBytes, maxSecrets)`: `recs = min(maxSecrets, ceil(textBytes /
 144))`, `arena = min(recs × 48, ceil(textBytes × 3 / 11))`, `conns = ceil(recs /
@@ -243,8 +247,9 @@ line, in the follower and in the Load's reader. `INWIRE_KEYLOG_CAP_BYTES` only
 lowers the cap.
 
 Measured with `scripts/electron/keylog-heap-drive.ts`, the same 205 MB,
-1,380,000-line synthetic log as above, two runs each. The table is 96 MB
-pre-sized against 107 MB grown.
+1,380,000-line synthetic log as above. The first two runs reserved the bare
+length (a 96 MB table); the last reserves with the headroom, as shipped (a
+107 MB table, the same size growth ended at, reached in one move).
 
 | share | peak | at 30 s | after a GC | 30 s less after a GC |
 |---|---|---|---|---|
@@ -252,11 +257,14 @@ pre-sized against 107 MB grown.
 | before, 16 threads | +391 MB | +386 MB | +146 MB | 240 MB |
 | pre-sized, Auto | +172, +140 MB | +154, +118 MB | +149, +130 MB | 5, −12 MB |
 | pre-sized, 16 threads | +136, +153 MB | +128, +141 MB | +124, +129 MB | 4, 12 MB |
+| with headroom, Auto | +160 MB | +149 MB | +143 MB | 6 MB |
+| with headroom, 16 threads | +166 MB | +160 MB | +153 MB | 7 MB |
 
 The retired buffers are gone: the 30 s share is within run-to-run noise of
 what a GC leaves. The held share did not fall and was not expected to, since a
-GC already frees retired buffers; it sits 28 to 53 MB above the table, which
-this measurement does not attribute. Every secret is counted 3.5 to 3.8 s after
+GC already frees retired buffers; it sits 28 to 53 MB above the table (36 to
+46 MB with the headroom's bigger table), which this measurement does not
+attribute. Every secret is counted 3.5 to 3.8 s after
 launch, as before. Capped at 64 MiB the result is unchanged: 430,304 secrets
 and 148,111,136 B skipped.
 
