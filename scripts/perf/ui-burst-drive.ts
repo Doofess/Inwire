@@ -572,19 +572,22 @@ phases.push({
     let missed = 0;
     let unselected = 0;
     while (Date.now() < until) {
+      const t0 = Date.now();
+      // Found and clicked in one task: following at tens of thousands a second
+      // the list never holds still for Playwright's actionability wait, so a
+      // locator's click timed out and selected nothing.
       const newest = await page.evaluate(() => {
         const rows = [...document.querySelectorAll('[role="row"][aria-rowindex]')]
           .filter((r) => Number(r.getAttribute('aria-rowindex')) > 1);
         const last = rows.sort((a, b) => Number(b.getAttribute('aria-rowindex')) - Number(a.getAttribute('aria-rowindex')))[0];
         // The No. column: the first cell that is only a number (`PacketList`'s `<td>`s carry no role).
         const n = Number([...(last?.querySelectorAll('td') ?? [])].map((td) => (td.textContent ?? '').trim()).find((t) => /^\d+$/.test(t)) ?? 0);
-        return last ? { index: last.getAttribute('aria-rowindex'), n } : null;
+        if (last && n > 0) (last as HTMLElement).click();
+        return last ? { n } : null;
       });
       if (newest && newest.n > 0) {
-        const t0 = Date.now();
-        await page.locator(`[role="row"][aria-rowindex="${newest.index}"]`).first().click({ timeout: 2000 }).catch(() => {});
-        // Following, the list moves between the read and the click: wait on the
-        // frame the click selected, not the one that was newest a moment ago.
+        // Wait on the frame the click selected, which the list may have moved
+        // past since: not the one that was newest a moment ago.
         const selected = await page.evaluate(() => {
           const row = document.querySelector('[role="row"][aria-selected="true"]');
           return Number([...(row?.querySelectorAll('td') ?? [])].map((td) => (td.textContent ?? '').trim()).find((t) => /^\d+$/.test(t)) ?? 0);
