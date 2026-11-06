@@ -174,7 +174,8 @@ Sequence gaps or shed-batch notifications trigger `pipeline/catchUp.ts`.
 Main's `capturedRead.ts` accepts a capture ID, original filename and bounded
 range, and reads the agent's pcapng for the Worker. With shards the reader
 Worker parses each read, statelessly, into slabs and columns (`readParse.ts`,
-`parsedTail.ts`); without them, or if it fails, the coordinator parses in place.
+`parsedTail.ts`), and if it fails the coordinator parses in place; without shards
+there is no coordinator, and the one Worker parses in place.
 Recovery counts from file boundaries and checks sequence alignment against
 adjacent live frames.
 Live-path gaps remain distinct from driver loss and ring eviction.

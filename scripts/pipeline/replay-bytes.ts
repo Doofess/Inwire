@@ -11,7 +11,9 @@
  * The rows here come out of a real `PackReader`, as the window has them, and
  * every frame of the bundle must be exactly its own buffer and its own bytes.
  */
+import { readFileSync } from 'node:fs';
 import { deserialize, serialize } from 'node:v8';
+import { ownBytes } from '../../src/services/pipeline/ownBytes';
 import { PcapService } from '../../src/services/pcapParser';
 import { TcpStreamTracker } from '../../src/services/tcpStreamTracker';
 import { IcmpEchoTracker } from '../../src/services/icmpEchoTracker';
@@ -62,7 +64,29 @@ async function windowRows(): Promise<{ rows: Packet[]; own: Map<number, Uint8Arr
   return { rows: new PackReader().read(deserialize(serialize(moved))), own };
 }
 
+/** The Worker's own bytes for a row posted with them (`postRows`), and what a clone of each carries. */
+function ownBytesChecks(): void {
+  const batch = new Uint8Array(1024 * 1024).fill(0x5a);
+  const frame = batch.subarray(4096, 4096 + 71);
+  const own = ownBytes(frame);
+  check('ownBytes: a view into a 1 MB buffer is a 71-byte buffer of its own, the same bytes',
+    own.byteLength === 71 && own.buffer.byteLength === 71 && own.byteOffset === 0 && own.every((b) => b === 0x5a),
+    `${own.byteLength} bytes in a ${own.buffer.byteLength} byte buffer`);
+  own[0] = 1;
+  check('...a copy: writing it leaves the batch alone', batch[4096] === 0x5a);
+  const whole = new Uint8Array(71).fill(7);
+  check('ownBytes: a view that is its whole buffer is itself, not copied', ownBytes(whole) === whole);
+  const empty = new Uint8Array(0);
+  check('ownBytes: an empty view is itself', ownBytes(empty) === empty);
+  const worker = readFileSync(new URL('../../src/workers/pipeline.worker.ts', import.meta.url), 'utf8');
+  const start = worker.indexOf('function postRows(');
+  const body = worker.slice(start, worker.indexOf('\n}\n', start));
+  check('postRows: a row posted with its bytes posts the bytes of its own, not its batch (D1)',
+    /ownBytes\(/.test(body) && /withBytes/.test(body), body.slice(0, 200));
+}
+
 async function main(): Promise<void> {
+  ownBytesChecks();
   const { rows, own } = await windowRows();
   const slab = rows.find((row) => row.rawBytes.byteLength > 0)?.rawBytes.buffer;
   check('the window rows are views into one slab (the case under test)',

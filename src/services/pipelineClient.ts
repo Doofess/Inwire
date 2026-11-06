@@ -19,6 +19,8 @@ import type { AgentServiceFacts } from './agentLink';
 import { publishLiveLag } from './liveLag';
 import { keyLog } from './tls/keyLog';
 import type { DissectionThreads } from './pipeline/threads';
+import { captureStore } from './capture/captureClient';
+import { readPackedBatch } from './packRead';
 import { PackReader } from './pipeline/rowPack';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 import type {
@@ -122,6 +124,10 @@ let ingestRequests: Promise<unknown> = Promise.resolve();
 
 /** A fresh port to the capture store's ingest side, for whoever is next in line. */
 export function requestCaptureIngestPort(): Promise<MessagePort> {
+  // A store the page has seen go (or fail for good) will not hand a port over, so
+  // the wait would only be the request's 15 s: refuse in the timeout's own words.
+  // Not queued: nothing is asked of main, so there is no order to keep.
+  if (captureStore.lost) return Promise.reject(new Error('the capture store did not answer'));
   const next = ingestRequests.then(() => requestPort(
     INGEST_PORT_MESSAGE,
     () => window.inwire?.requestCaptureIngestPort?.(),
@@ -222,17 +228,16 @@ export class PipelineClient {
         this.onAgentMessage(message.message);
         break;
       case 'frames': {
-        let packets: Packet[];
-        try {
-          packets = this.packReader.read(message.rows);
-        } catch (error) {
+        const read = readPackedBatch(this.packReader, message.rows, (count) => this.rowsTaken(count));
+        if (!read.ok) {
           // A pack the Worker never sent: the batch cannot be shown, and a blank
-          // row would pass for a quiet network. Say so; do not guess.
-          this.onFailure(error instanceof Error ? error.message : String(error));
+          // row would pass for a quiet network. Say so; do not guess. Its rows are
+          // acknowledged and the reader reset (`packRead.ts`).
+          this.onFailure(read.message);
           break;
         }
         this.onFrames({
-          packets, icmpReplies: message.icmpReplies, infoPatches: message.infoPatches,
+          packets: read.packets, icmpReplies: message.icmpReplies, infoPatches: message.infoPatches,
           lateCount: message.lateCount, stored: message.stored,
         });
         break;

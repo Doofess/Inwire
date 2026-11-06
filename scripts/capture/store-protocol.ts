@@ -1361,6 +1361,22 @@ console.log('\n--- tagged appends and an awaited open (import Worker) ---\n');
   port.onmessage?.({ data: { type: 'failure', message: 'disk full', fatal: true } });
   await failing;
   check('beginAwaited rejects when the open fails', outcome, 'rejected');
+
+  // The fatal failure above is the store gone for good. An import asks for a port of
+  // its own to the same store (`requestCaptureIngestPort`): main would never answer,
+  // so waiting out the request's 15 s only delays the failure. It rejects at once, in
+  // the same words as the timeout.
+  {
+    const { requestCaptureIngestPort } = await import('../../src/services/pipelineClient');
+    const started = Date.now();
+    const answer = await Promise.race([
+      requestCaptureIngestPort().then(() => 'resolved', (error: Error) => error.message),
+      sleep(100).then(() => 'still waiting after 100 ms'),
+    ]);
+    check('an ingest port requested from a lost store rejects at once, with the timeout\'s own words',
+      { answer, fast: Date.now() - started < 100 },
+      { answer: 'the capture store did not answer', fast: true });
+  }
   delete (globalThis as { window?: unknown }).window;
 }
 

@@ -20,7 +20,8 @@
 import {
   runWorkerImport, type ImportClientDeps, type WorkerLike,
 } from '../../src/services/importClient';
-import { createImportRun } from '../../src/services/pipeline/importRun';
+import { createImportRole } from '../../src/workers/importRole';
+import { IMPORT_ROWS_IN_FLIGHT, createRowsCredit, type RowsTaken } from '../../src/services/importCredit';
 import type { FromImport, ImportRunOptions, ToImport } from '../../src/services/pipeline/importProtocol';
 import { KeyLogStore } from '../../src/services/tls/keyLog';
 import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from '../../src/services/bufferBudget';
@@ -29,6 +30,7 @@ import { dnsTcpInput, tlsWithDsbInput } from './importEquivalenceRig';
 import { pcapOf, udpFrame } from '../parity/synthetic';
 import { PackReader, PackedFlush, packRows, type PackedRows } from '../../src/services/pipeline/rowPack';
 import type { Packet } from '../../src/types/packet';
+import { readPackedBatch } from '../../src/services/packRead';
 import { writeSyntheticKeyLog } from '../electron/syntheticKeyLog';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -58,30 +60,34 @@ class ScriptedWorker implements WorkerLike {
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: ((event: MessageEvent) => void) | null = null;
   terminated = false;
-  readonly posted: ToImport[] = [];
-  postMessage(message: ToImport): void { this.posted.push(message); }
+  readonly posted: (ToImport | RowsTaken)[] = [];
+  postMessage(message: ToImport | RowsTaken): void { this.posted.push(message); }
   terminate(): void { this.terminated = true; }
   say(message: FromImport): void { this.onmessage?.({ data: message } as MessageEvent<FromImport>); }
 }
 
-/** `createImportRun` in this isolate, as a Worker would run it. */
+/**
+ * The import role (`createImportRole`: the run behind its rows credit) in this isolate, as a
+ * Worker would run it. `starved` is a page that never says `rowsTaken`: the Worker is left
+ * holding every `rows` batch past the credit.
+ */
 class RealWorker implements WorkerLike {
+  starved = false;
   onmessage: ((event: MessageEvent<FromImport>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: ((event: MessageEvent) => void) | null = null;
   terminated = false;
   /** `>type` to the Worker, `<type` from it, in order. */
   readonly log: string[] = [];
-  private readonly handle = createImportRun({
-    post: (message) => {
-      if (this.terminated) return;
-      this.log.push(`<${message.type}`);
-      later(() => this.onmessage?.({ data: message } as MessageEvent<FromImport>));
-    },
+  private readonly handle = createImportRole((message) => {
+    if (this.terminated) return;
+    this.log.push(`<${message.type}`);
+    later(() => this.onmessage?.({ data: message } as MessageEvent<FromImport>));
   });
 
-  postMessage(message: ToImport, transfer?: Transferable[]): void {
+  postMessage(message: ToImport | RowsTaken, transfer?: Transferable[]): void {
     this.log.push(`>${message.type}`);
+    if (this.starved && message.type === 'rowsTaken') return;
     later(() => {
       if (!this.terminated) this.handle(message, message.type === 'start' ? (transfer ?? []) as unknown as MessagePort[] : []);
     });
@@ -224,13 +230,15 @@ const ids = (outcome: ImportOutcome) => (outcome.ok ? outcome.packets.map((p) =>
     && r.keys.store.stats().secrets > 0,
     { added: r.keys.counts.added, stats: r.keys.store.stats() });
 
-  // 6. the rows arrive as they are built, and the page answers none of them
+  // 6. the rows arrive as they are built, and the page answers each with `rowsTaken` (the credit)
   const sentToWorker = [...new Set(posted.filter((t) => t.startsWith('>')))].sort();
-  check('the Worker sent its rows batch by batch before `done`, and the page answered only the key log, start, secrets and storeOpen',
-    posted.filter((t) => t === '<rows').length >= 1 && posted.lastIndexOf('<rows') < posted.indexOf('<done')
+  const rowsIn = posted.filter((t) => t === '<rows').length;
+  check('the Worker sent its rows batch by batch before `done`, and the page answered only the key log, start, secrets, storeOpen and one rowsTaken per batch',
+    rowsIn >= 1 && posted.lastIndexOf('<rows') < posted.indexOf('<done')
     && !posted.includes('<tail')
-    && sentToWorker.every((t) => ['>keylog-shared', '>start', '>secretsTaken', '>storeOpen'].includes(t)),
-    { sentToWorker, rows: posted.filter((t) => t === '<rows').length });
+    && sentToWorker.every((t) => ['>keylog-shared', '>start', '>secretsTaken', '>storeOpen', '>rowsTaken'].includes(t))
+    && posted.filter((t) => t === '>rowsTaken').length === rowsIn,
+    { sentToWorker, rows: rowsIn });
   check('the store was sent every row packed (appendPacked): the Worker keeps no copy of its own',
     r.store.state.appended === 10, r.store.state);
 
@@ -621,8 +629,8 @@ async function stalledRun(name: string) {
     early.outcome.ok === true && early.outcome.packets.length === TOTAL
     && early.outcome.packets.every((p) => p.rawBytes.length > 0),
     early.outcome.ok ? { n: early.outcome.packets.length } : early.outcome);
-  check('...and the Worker is sent only the key log and the start, never a storedThrough',
-    early.worker.posted.map((m) => m.type).every((t) => t === 'keylog-shared' || t === 'start'),
+  check('...and the Worker is sent only the key log, the start and a rowsTaken per batch, never a storedThrough',
+    early.worker.posted.map((m) => m.type).every((t) => t === 'keylog-shared' || t === 'start' || t === 'rowsTaken'),
     early.worker.posted.map((m) => m.type));
 
   // After it: bytes go below storedThrough, never the newest BYTES_RESIDENT_FRAMES.
@@ -635,7 +643,7 @@ async function stalledRun(name: string) {
       && high.outcome.packets.slice(-BYTES_RESIDENT_FRAMES).every((p) => p.rawBytes.length > 0),
       { released: releasedIds.length });
     check('...no message is posted to the Worker in answer to a progress',
-      high.answered === 0 && high.worker.posted.map((m) => m.type).every((t) => ['keylog-shared', 'start', 'storeOpen'].includes(t)),
+      high.answered === 0 && high.worker.posted.map((m) => m.type).every((t) => ['keylog-shared', 'start', 'storeOpen', 'rowsTaken'].includes(t)),
       { answered: high.answered, types: high.worker.posted.map((m) => m.type) });
   } else {
     check('after storeOpen the oldest rows let go of their bytes', false, high.outcome);
@@ -653,6 +661,170 @@ async function stalledRun(name: string) {
     && trimmed.outcome.estimates?.length === TOTAL - 50 && trimmed.outcome.estimates.every((e) => e === 100)
     && trimmed.outcome.packets.every((p) => estimateSummaryBytes(p) !== 100),
     trimmed.outcome.ok ? { n: trimmed.outcome.packets.length, first: trimmed.outcome.packets[0]?.id } : trimmed.outcome);
+}
+
+// --- 10. the Worker's rows credit (1.3) ----------------------------------------------------
+//
+// The Worker used to post every `rows` batch as it was built; a Worker faster than the page
+// piled them in the page's message queue. Now at most IMPORT_ROWS_IN_FLIGHT are on their way
+// unanswered, and the page's `rowsTaken` (after each decode) releases one.
+
+{
+  type Out = { type: 'rows' | 'progress' | 'done'; n?: number };
+  const posted: Out[] = [];
+  const credit = createRowsCredit<Out>((message) => { posted.push(message); });
+  const rowsOut = () => posted.filter((m) => m.type === 'rows').length;
+  for (let n = 0; n < 20; n++) credit.send({ type: 'rows', n });
+  check('with a page that answers nothing, the Worker posts exactly the credit and waits',
+    rowsOut() === IMPORT_ROWS_IN_FLIGHT && IMPORT_ROWS_IN_FLIGHT === 8, rowsOut());
+  credit.taken();
+  check('one rowsTaken releases exactly one more, in order',
+    rowsOut() === 9 && posted[8].n === 8, { rows: rowsOut(), last: posted.at(-1) });
+  credit.send({ type: 'progress' });
+  credit.send({ type: 'progress' });
+  credit.send({ type: 'progress' });
+  credit.send({ type: 'done' });
+  check('progress and done wait behind the rows still held, so done cannot overtake a row',
+    !posted.some((m) => m.type === 'progress' || m.type === 'done'));
+  for (let i = 0; i < 11; i++) credit.taken();
+  const order = posted.map((m) => m.type === 'rows' ? 'r' : m.type === 'progress' ? 'p' : 'd').join('');
+  check('...and go out in order once the rows are through, the held progress reports as one',
+    order === 'r'.repeat(20) + 'pd', order);
+  for (let i = 0; i < 30; i++) credit.taken();
+  const fresh: Out[] = [];
+  const again = createRowsCredit<Out>((message) => { fresh.push(message); });
+  for (let i = 0; i < 5; i++) again.taken();
+  for (let n = 0; n < 20; n++) again.send({ type: 'rows', n });
+  check('spurious acknowledgements do not raise the credit above the bound', fresh.length === IMPORT_ROWS_IN_FLIGHT, fresh.length);
+}
+
+async function starvedRun(name: string) {
+  const frames: Uint8Array[] = [];
+  for (let i = 0; i < 6_000; i++) frames.push(udpFrame(5000 + (i % 100), 9999, Uint8Array.of(i & 0xff, (i >> 8) & 0xff)));
+  const r = rig(() => { const w = new RealWorker(); w.starved = true; return w; }, {
+    ...OPTIONS, maxFrames: 6_100, batchFrames: 500, windowBytes: 32 * 1024,
+  });
+  const run = runWorkerImport(fileOf(pcapOf(frames), name), r.deps);
+  // The walk waits for the page too: settled once the store has taken nothing new for 300 ms
+  // (or everything - the walk reading on regardless, which the check below fails).
+  for (let waited = 0, still = 0, last = -1; r.store.state.appended < 6_000 && still < 30 && waited < 400; waited++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    still = r.store.state.appended === last ? still + 1 : 0;
+    last = r.store.state.appended;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return { r, run, worker: r.worker as RealWorker };
+}
+
+{
+  // The same file, a page that answers: every batch gets through (12 of them).
+  const frames: Uint8Array[] = [];
+  for (let i = 0; i < 6_000; i++) frames.push(udpFrame(5000 + (i % 100), 9999, Uint8Array.of(i & 0xff, (i >> 8) & 0xff)));
+  const r = rig(() => new RealWorker(), { ...OPTIONS, maxFrames: 6_100, batchFrames: 500, windowBytes: 32 * 1024 });
+  const outcome = await withTimeout(runWorkerImport(fileOf(pcapOf(frames), 'acked.pcap'), r.deps).result, 'acked');
+  const log = (r.worker as RealWorker).log;
+  const rowsIn = log.filter((t) => t === '<rows').length;
+  check('a page that answers gets every batch: all rows, one rowsTaken each',
+    outcome.ok === true && outcome.packets.length === 6_000 && rowsIn > IMPORT_ROWS_IN_FLIGHT
+    && log.filter((t) => t === '>rowsTaken').length === rowsIn && log.indexOf('<done') > log.lastIndexOf('<rows'),
+    { ok: outcome.ok, rowsIn, acks: log.filter((t) => t === '>rowsTaken').length });
+  r.store.close();
+}
+{
+  const { r, run, worker } = await starvedRun('starved-cancel.pcap');
+  const rowsPosted = worker.log.filter((t) => t === '<rows').length;
+  check('a page that never answers is sent exactly the credit, and not the done behind it',
+    rowsPosted === IMPORT_ROWS_IN_FLIGHT && !worker.log.includes('<done') && !worker.terminated, { rowsPosted, log: worker.log.length });
+  // Held rows are memory in the renderer process as surely as the page's queue was (#19):
+  // the walk itself waits while any are held, so a slow page holds the file's reading too.
+  check('...and the walk waits with them: the store has been sent no more than the credit and a batch or two',
+    r.store.state.appended > 0 && r.store.state.appended <= (IMPORT_ROWS_IN_FLIGHT + 2) * 500, r.store.state.appended);
+  run.cancel();
+  let outcome: ImportOutcome | null = null;
+  try { outcome = await withTimeout(run.result, 'cancel while credit-blocked', 3_000); } catch { /* hung: checked below */ }
+  check('Cancel ends the import while the Worker is blocked on a rowsTaken: no new hang',
+    outcome !== null && outcome.ok === false && outcome.failure.kind === 'cancelled' && worker.terminated
+    && r.lost.size === 0 && r.keys.counts.live === 0, { settled: outcome !== null });
+  r.store.close();
+}
+{
+  const { r, run, worker } = await starvedRun('starved-lost.pcap');
+  const blocked = worker.log.filter((t) => t === '<rows').length === IMPORT_ROWS_IN_FLIGHT && !worker.log.includes('<done');
+  r.storeLost('the capture store stopped');
+  let outcome: ImportOutcome | null = null;
+  try { outcome = await withTimeout(run.result, 'store failure while credit-blocked', 3_000); } catch { /* hung: checked below */ }
+  check('a store failure ends the import while the Worker is blocked on a rowsTaken: no new hang',
+    blocked && outcome !== null && outcome.ok === false && outcome.failure.kind === 'unreadable'
+    && outcome.failure.message === 'the capture store stopped' && worker.terminated && r.lost.size === 0,
+    { blocked, settled: outcome !== null });
+  if (outcome === null) run.cancel();
+  r.store.close();
+}
+
+// --- 9. the live pipeline's pack that cannot be read still clears its flow debt (1.7) -------
+//
+// `PipelineClient.receive` reads each `frames` message's pack; the Worker counts those rows
+// as owed until the page says `rowsTaken` (`flow.rowsPosted`). A pack that throws (one the
+// Worker never sent) must still be acknowledged, or the debt never clears and the live
+// flow stalls for good. The reader is kept as it is: the Worker counts the packs it holds as
+// delivered, and later flushes read their rows from them.
+
+{
+  const batchOf = (from: number, count: number): Packet[] => {
+    const batch: Packet[] = [];
+    for (let id = from; id < from + count; id++) {
+      batch.push({
+        id, source: '10.0.0.4', destination: '93.184.216.34', protocol: 'TCP', info: `frame ${id}`, status: 'ok',
+        length: 60, tsUs: 1_788_000_000_000_000 + id, relativeTime: 0, timeDelta: 0, interfaceName: 'eth0', layers: [],
+        rawBytes: new Uint8Array([id & 0xff, 0, 0, 0]), frameProtocols: ['frame', 'eth', 'ip', 'tcp'],
+        sourcePort: 50000, destPort: 443, fields: { 'tcp.seq': id },
+      } as Packet);
+    }
+    return batch;
+  };
+  const mk = (from: number, count: number): PackedRows => {
+    const batch = batchOf(from, count);
+    const pack = packRows(from, batch, batch.map((p) => p.rawBytes.length));
+    const flush = new PackedFlush();
+    batch.forEach((p, i) => flush.packed(pack, i, p.rawBytes, null));
+    return flush.seal(new Map());
+  };
+  const good = mk(1, 4);
+  // A batch whose rows name a pack this reader was never sent: it throws on its first row.
+  const bad = mk(100, 3);
+  bad.packs = [];
+  const reader = new PackReader();
+  const acked: number[] = [];
+  const first = readPackedBatch(reader, bad, (count) => { acked.push(count); });
+  const second = readPackedBatch(reader, good, (count) => { acked.push(count); });
+  check('a pack that cannot be read is a failure with the reader\'s own message',
+    !first.ok && /no pack 100/.test(first.message), first);
+  check('...and its rows are acknowledged, so the Worker\'s debt for them clears',
+    acked[0] === 3, acked);
+  check('...and the next good batch decodes, and is left for its own acknowledgement (the buffer\'s)',
+    second.ok && second.packets.length === 4 && second.packets[3].id === 4 && acked.length === 1, { second: second.ok, acked });
+
+  // A window pack spans flushes: the Worker's sender sends it once, with its first rows, and
+  // counts it delivered (`PackSender`). A flush that cannot be read between two of its flushes
+  // must not cost the reader that pack, or every good flush after it fails until the packs in
+  // flight drain - the Worker is never told to send them again.
+  const spanning = batchOf(300, 2);
+  const pack = packRows(300, spanning, spanning.map((row) => row.rawBytes.length));
+  const sent = new Map<number, number>();
+  const flushOf = (index: number): PackedRows => {
+    const flush = new PackedFlush();
+    flush.packed(pack, index, spanning[index].rawBytes, null);
+    return flush.seal(sent);
+  };
+  const live = new PackReader();
+  const a = readPackedBatch(live, flushOf(0), () => {});
+  const unsent = mk(400, 2);
+  unsent.packs = []; // names pack 400, never sent: unreadable
+  const b = readPackedBatch(live, unsent, () => {});
+  const c = readPackedBatch(live, flushOf(1), () => {});
+  check('...and a pack sent before the bad flush still reads its rows after it',
+    a.ok && !b.ok && c.ok && c.packets.length === 1 && c.packets[0].id === 301 && live.held === 0,
+    { a: a.ok, b: b.ok, c: c.ok ? c.packets.map((row) => row.id) : c.message, held: live.held });
 }
 
 console.log();

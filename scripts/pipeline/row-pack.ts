@@ -34,6 +34,11 @@ import { fieldEntries, fieldValue } from '../../src/services/dissect/fieldAccess
 import type { Packet } from '../../src/types/packet';
 import { FIXTURES } from './arrival';
 import { evictionCapture } from './evictionCapture';
+import { tcpFrame } from '../parity/synthetic';
+import { Coordinator, coordinatorSequencer, type CoordFrame, type Merged } from '../../src/services/pipeline/coordinator';
+import { Shard, shardEnv } from '../../src/services/pipeline/shard';
+import type { FromShard, ToShard } from '../../src/services/pipeline/shardProtocol';
+import { FIXED_ENV, trackers } from './virtualShards';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -368,6 +373,104 @@ function slots(rows: Packet[]): void {
   check('...and an object with bytes is given them', got[3] === read[3] && same8(read[3].rawBytes, bytesAt(8, 12)));
 }
 
+/**
+ * The real coordinator over two real shards, its rows carried the way the
+ * Worker carries them: into a `PackedFlush` per flush, sealed by a `PackSender`
+ * and read by a `PackReader`. Each shard answers when told (`settle`), so a
+ * test can fail one with its answer still on the way.
+ */
+function coordinatorRig(options: { firstPackKey?: number; decodeRows?: boolean } = {}) {
+  const toShard: ToShard[][] = [[], []];
+  const outbox: FromShard[][] = [[], []];
+  const shards = [0, 1].map((s) => new Shard((message, transfer) => {
+    outbox[s].push(structuredClone(message, { transfer: transfer as ArrayBuffer[] }));
+  }, { shards: 2, env: FIXED_ENV, withTrees: false }));
+  const merged: Merged[] = [];
+  const sequencer = coordinatorSequencer();
+  const coordinator = new Coordinator({
+    shards: 2, route: 'connection', trackers: trackers(sequencer), sequencer, env: shardEnv(FIXED_ENV, 2),
+    ifaceOf: () => undefined,
+    send: (s, message, transfer) => { toShard[s].push(structuredClone(message, { transfer: transfer as ArrayBuffer[] })); },
+    emit: (m) => { merged.push(m); },
+    ...(options.firstPackKey === undefined ? {} : { firstPackKey: options.firstPackKey }),
+  });
+  coordinator.decodeRows = options.decodeRows ?? false;
+  /** The shard handles what it was sent; its answers wait in its outbox. */
+  const work = (s: number): void => { while (toShard[s].length > 0) shards[s].handle(toShard[s].shift()!); };
+  /** The shard's answers reach the coordinator. */
+  const deliver = (s: number): void => { while (outbox[s].length > 0) coordinator.receive(s, outbox[s].shift()!); };
+  const settle = (s: number): void => {
+    for (;;) {
+      work(s);
+      if (outbox[s].length === 0) return;
+      deliver(s);
+    }
+  };
+  /** Every merged row that travelled as a pack, as one flush to a receiver. */
+  const flushTo = (reader: PackReader, sender: PackSender, from: number): Packet[] => {
+    const flush = new PackedFlush();
+    for (const m of merged.slice(from)) {
+      if (m.packed !== undefined) flush.packed(m.packed.pack, m.packed.index, m.bytes ?? null, null);
+    }
+    return reader.read(cross(sender.seal(flush)));
+  };
+  return { coordinator, merged, work, deliver, settle, flushTo };
+}
+
+/** A frame of connection `conn` (one shard's), `id` as its sequence number. */
+function connFrame(id: number, conn: number): CoordFrame {
+  const bytes = tcpFrame(40000 + conn, 443, id, 1, new Uint8Array(20));
+  return {
+    id, bytes, tsUs: 1_000_000 + id, relativeTime: id / 1e6, timeDelta: 1e-6, origLen: bytes.length, linktype: 1, facts: {},
+  };
+}
+
+/** The pack key rides in an Int32Array, so it must stay a non-negative int32, and `-1` marks an object row. */
+function keyWrap(): void {
+  const edge = 2 ** 31 - 2;
+  const { coordinator, merged, settle, flushTo } = coordinatorRig({ firstPackKey: edge });
+  // One answer a frame, so each frame's row is a pack of its own with the next key.
+  for (let id = 1; id <= 3; id++) {
+    coordinator.dispatch([connFrame(id, 0)]);
+    settle(0);
+  }
+  const keys = merged.map((m) => m.packed?.pack.key);
+  check('three packs past 2^31 - 2 are keyed 2^31 - 2, 2^31 - 1, then 0',
+    keys[0] === edge && keys[1] === 2 ** 31 - 1 && keys[2] === 0, `${keys.join(', ')}`);
+  check('...and never a negative key', keys.every((k) => k !== undefined && k >= 0));
+  let rows: Packet[] = [];
+  let failure = '';
+  const reader = new PackReader();
+  try { rows = flushTo(reader, new PackSender(), 0); } catch (error) { failure = String(error); }
+  check('...and the three rows decode to their frames, in order, whatever the key',
+    rows.length === 3 && rows.every((row, i) => row.id === i + 1) && reader.held === 0,
+    failure === '' ? `ids ${rows.map((r) => r.id).join(',')}, held ${reader.held}` : failure);
+}
+
+/** A shard that fails with its answer still on the way: nothing of that answer may linger in a receiver. */
+function shardFailure(): void {
+  const { coordinator, merged, work, deliver, settle, flushTo } = coordinatorRig({ decodeRows: true });
+  // The first connection goes to shard 0 and the second to shard 1. Frames 2, 4
+  // and 5 are shard 1's, and they wait undrained behind frame 1, which shard 0
+  // has not answered when shard 1 fails with its own answer still on the way.
+  coordinator.dispatch([connFrame(1, 1), connFrame(2, 0), connFrame(3, 1), connFrame(4, 0), connFrame(5, 0)]);
+  work(1);
+  coordinator.shardFailed(1, 'test');
+  const decodedBefore = coordinator.packsDecoded;
+  deliver(1); // the answer it made before it died, arriving after
+  check('a dead shard\'s late answer decodes no pack', coordinator.packsDecoded === decodedBefore,
+    `${coordinator.packsDecoded - decodedBefore} packs decoded after the failure`);
+  settle(0);
+  const reader = new PackReader();
+  const sender = new PackSender();
+  const rows = flushTo(reader, sender, 0);
+  check('every frame of the dead shard failed, and only the live shard\'s rows travelled',
+    merged.length === 5 && merged.filter((m) => m.error !== undefined).length === 3 && rows.length === 2,
+    `${merged.length} merged, ${merged.filter((m) => m.error !== undefined).length} failed, ${rows.length} rows`);
+  check('...nothing is held by the receiver, and the sender tracks no pack with rows still to send',
+    reader.held === 0 && sender.tracked === 0, `held ${reader.held}, tracked ${sender.tracked}`);
+}
+
 async function main(): Promise<void> {
   const sample = await roundTrips();
   interleaving(sample);
@@ -379,6 +482,8 @@ async function main(): Promise<void> {
   slab(sample);
   twoFlushes(sample);
   slots(sample);
+  keyWrap();
+  shardFailure();
   console.log(failures === 0 ? '\nAll row-pack checks passed.' : `\n${failures} check(s) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

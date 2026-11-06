@@ -75,6 +75,13 @@ export class PcapngTail {
    * written yet, read again later. Past `STALL_LIMIT` the file is corrupt.
    */
   stalled = 0;
+  /**
+   * Forget the reads of the block at the read position that did not close:
+   * a seek's landing reading zeros is judged by its own clock (`LANDING_MS`).
+   */
+  resetStall(): void {
+    this.stalled = 0;
+  }
   /** File offset of the block `next` last gave back. */
   blockAt = 0;
 

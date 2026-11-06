@@ -262,7 +262,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
             {job.status === 'running' && job.cancellable && (
               <button
                 type="button"
-                aria-label="Cancel import"
+                aria-label={job.cancelRequested ? 'Cancelling import…' : 'Cancel import'}
                 onClick={() => cancelImportJob()}
                 disabled={job.cancelRequested}
                 className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground

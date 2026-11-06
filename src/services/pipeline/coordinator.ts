@@ -63,7 +63,7 @@ import { QuicFlowTracker, quicLimits } from '../quicFlowTracker';
 import { DnsTracker } from '../dnsTracker';
 import { L3Tracker } from '../l3Tracker';
 import { OpWriter, type FromShard, type OpBatch, type ShardResult, type ToShard, type WireFrame } from './shardProtocol';
-import { unpackRows, type RowPack } from './rowPack';
+import { PackKeys, unpackRows, type RowPack } from './rowPack';
 import { overlayMark, type OverlayMark, type RowOverlay } from './rowOverlay';
 import type { RowSide } from './rowSteps';
 import type { InfoPatch } from '../dissect/types';
@@ -145,6 +145,8 @@ export interface CoordinatorOptions {
   maxInFlight?: number;
   /** The shards send each frame's tree back (`ShardOptions.withTrees`) - the equality test; the coordinator does not read it. */
   withTrees?: boolean;
+  /** The first pack key; 0 unless a test starts the counter near its edge (`PackKeys`). */
+  firstPackKey?: number;
 }
 
 /**
@@ -171,6 +173,17 @@ export const PARALLEL_BACKLOG_FRAMES = 163_840;
  * frames a second (ADR 0053, "Shard skew"). 160 MiB is the smallest multiple
  * of 16 MiB that admits 131,072 frames of that burst's mean size (1,114 bytes
  * captured, plus `IN_FLIGHT_FRAME_OVERHEAD`).
+ *
+ * **The bound is on one copy of the bytes; the coordinator holds about two.**
+ * A shard frame's own bytes stay on its entry (`Entry.bytes`, a view into the
+ * agent's batch, which keeps that whole batch alive) and a second copy sits in
+ * the batch slab built for its shard (`OpWriter`), until the batch is sent and
+ * transferred. `inFlightCost` counts the first only, so what the coordinator
+ * holds of captured bytes in flight is up to about twice this bound, 320 MiB,
+ * plus about 260 bytes of op row a frame. Counting both would halve the
+ * frames admitted and undo the throughput this constant was chosen for (ADR
+ * 0053, "Shard skew"), so the bound is recorded here and not tightened; a
+ * single accounting site cannot fix it, only a change to who holds the bytes.
  */
 export const PARALLEL_BACKLOG_BYTES = 160 * 1024 * 1024;
 
@@ -412,7 +425,16 @@ export class Coordinator {
   private epoch = 0;
   /** Frames not yet routed, and the messages that go to the shards between them (`broadcast`). */
   private held: (CoordFrame | { marker: ToShard })[] = [];
+  /**
+   * Each `held` item's `inFlightCost`, taken at dispatch (a marker's is 0) and
+   * kept in step with `held`. The cost is not read again from `frame.bytes`
+   * when the frame is routed: a frame waiting behind a barrier can have had its
+   * buffer transferred away by then, and `heldCost` would never return to zero.
+   */
+  private heldCosts: number[] = [];
   private heldFrom = 0;
+  /** The cost of the frame `advance` is routing, for the entry it makes. */
+  private routingCost = 0;
   private barrier: { id: number; shard: number; hint: BarrierHint } | null = null;
   private readonly entries = new Map<number, Entry>();
   private nextEmit: number | null = null;
@@ -451,8 +473,8 @@ export class Coordinator {
   /** Placeholder to real `tls.stream`, per shard lane. */
   private tlsMaps: Map<number, number>[];
   private nextTls = 0;
-  /** The next pack's key; never reset, so no two packs of one coordinator share one. */
-  private nextPackKey = 0;
+  /** The packs' keys: never reset, so no two live packs of one coordinator share one. */
+  private readonly packKeys: PackKeys;
   private idleWaiters: (() => void)[] = [];
   private waitingCost = 0;
   /** `inFlightCost` summed over frames dispatched and not yet merged. */
@@ -477,6 +499,7 @@ export class Coordinator {
 
   constructor(private readonly options: CoordinatorOptions) {
     this.shards = options.shards;
+    this.packKeys = new PackKeys(options.firstPackKey);
     this.route = options.route ?? 'pair';
     this.assign = options.assign ?? (this.route === 'pair' ? hashShard : null);
     this.recent = new Array(options.shards).fill(0);
@@ -543,8 +566,10 @@ export class Coordinator {
   /** Hands frames over, in ascending contiguous id order. */
   dispatch(frames: readonly CoordFrame[]): void {
     for (const frame of frames) {
+      const cost = inFlightCost(frame.bytes.length);
       this.held.push(frame);
-      this.heldCost += inFlightCost(frame.bytes.length);
+      this.heldCosts.push(cost);
+      this.heldCost += cost;
     }
     this.advance();
     this.pump();
@@ -554,6 +579,10 @@ export class Coordinator {
   receive(shard: number, message: FromShard): void {
     if (message.type !== 'results') return;
     if (message.epoch !== this.epoch) return;
+    // A dead shard's answer that was already on its way: its frames failed in
+    // `shardFailed`, and nothing of it is used. Past this line it would take a
+    // pack key and decode a pack no row of which is ever read.
+    if (this.dead.has(shard)) return;
     this.inFlight[shard] = Math.max(0, this.inFlight[shard] - 1);
     let barrierCleared = false;
     // Decoded once for the whole message, and only when the merge has to read
@@ -566,7 +595,7 @@ export class Coordinator {
     let pack: RowPack | null = null;
     if (message.pack !== null) {
       pack = message.pack;
-      pack.key = this.nextPackKey++;
+      pack.key = this.packKeys.take();
       if (this.decodeRows || message.results.some((result) => result.side?.needsRow)) {
         rows = unpackRows(pack);
         this.decoded += 1;
@@ -643,6 +672,7 @@ export class Coordinator {
     this.lane0Tls.reset();
     [this.sequencer, this.order, this.quicOrder, this.lane0] = this.adopt(lane0.trackers, lane0.sequencer);
     this.held = [];
+    this.heldCosts = [];
     this.heldFrom = 0;
     this.barrier = null;
     this.entries.clear();
@@ -683,8 +713,10 @@ export class Coordinator {
     // frame dispatched before it without it, and one dispatched after with it,
     // as the single Worker does. So it waits behind the frames not yet routed,
     // and then behind every batch already queued for a shard.
-    if (this.heldFrom < this.held.length) this.held.push({ marker: message });
-    else this.sendOrdered(message);
+    if (this.heldFrom < this.held.length) {
+      this.held.push({ marker: message });
+      this.heldCosts.push(0);
+    } else this.sendOrdered(message);
     this.pump();
   }
 
@@ -707,6 +739,7 @@ export class Coordinator {
 
   private advance(): void {
     while (this.barrier === null && this.heldFrom < this.held.length) {
+      this.routingCost = this.heldCosts[this.heldFrom];
       const frame = this.held[this.heldFrom++];
       if ('marker' in frame) {
         this.sendOrdered(frame.marker);
@@ -721,9 +754,11 @@ export class Coordinator {
     }
     if (this.heldFrom === this.held.length) {
       this.held = [];
+      this.heldCosts = [];
       this.heldFrom = 0;
     } else if (this.heldFrom > 4096) {
       this.held = this.held.slice(this.heldFrom);
+      this.heldCosts = this.heldCosts.slice(this.heldFrom);
       this.heldFrom = 0;
     }
   }
@@ -764,7 +799,7 @@ export class Coordinator {
 
   /** The entry for a frame routed to `shard`, waiting for its answer. */
   private shardEntry(frame: CoordFrame, shard: number): Entry {
-    return { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes, held: inFlightCost(frame.bytes.length) };
+    return { lane: shard + 1, meta: frame.meta, done: false, bytes: frame.bytes, held: this.routingCost };
   }
 
   private routeSegment(frame: CoordFrame, lane: TcpLane): void {
@@ -990,7 +1025,7 @@ export class Coordinator {
   private dissectHere(frame: CoordFrame): void {
     const lane0 = this.lane0;
     const entry: Entry = {
-      lane: 0, meta: frame.meta, done: true, cost: laneZeroCost(frame.bytes.length), held: inFlightCost(frame.bytes.length),
+      lane: 0, meta: frame.meta, done: true, cost: laneZeroCost(frame.bytes.length), held: this.routingCost,
     };
     try {
       entry.d = lane0.dissect({

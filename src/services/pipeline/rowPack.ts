@@ -35,6 +35,26 @@ export interface RowPack {
   count: number;
 }
 
+/** The largest pack key: a flush's `order` is an Int32Array, and `-1` there marks an object row. */
+export const MAX_PACK_KEY = 0x7fffffff;
+
+/**
+ * The keys a coordinator gives its packs, one per pack for the whole run: every
+ * key is a non-negative int32. Past `MAX_PACK_KEY` it starts again at 0, where
+ * a plain increment would wrap negative in the `order` array and be read as an
+ * object row. Two packs alive at once never share a key: it would take 2^31
+ * packs between them.
+ */
+export class PackKeys {
+  constructor(private next = 0) {}
+
+  take(): number {
+    const key = this.next;
+    this.next = key === MAX_PACK_KEY ? 0 : key + 1;
+    return key;
+  }
+}
+
 /**
  * Packs rows as a shard has them when it is done: `layers` empty (the tree
  * stays in the shard's cache) and `rawBytes` empty (the bytes travel beside

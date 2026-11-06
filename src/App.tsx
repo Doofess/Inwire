@@ -81,8 +81,7 @@ import { inferHostIdentity } from './services/hostIdentity';
 import { rederiveDirections } from './services/redirect';
 import { emptyNetworkFacts, NetworkFactsCollector, type NetworkFacts } from './services/networkFacts';
 import { watchLinkChanges, type LinkChange } from './services/linkContext';
-import { processForPacket, sendingProcessName, writeProcessFields } from './services/dissect/processFields';
-import { fieldValue } from './services/dissect/fieldAccess';
+import { sendingProcessName } from './services/dissect/processFields';
 import { LINKTYPE } from './services/dissect/types';
 import { filterIncrementally, type FilterCache } from "./services/incrementalFilter";
 import { PATCH_LOG } from "./services/patchLog";
@@ -149,7 +148,9 @@ import { cancelExportForChange, cancelExportJob } from './services/export/export
 import { getImportJob, IMPORT_RUNNING_REASON, IMPORT_RUNNING_START, useImportJob } from './services/importJob';
 import { beginCaptureStart, CAPTURE_STARTING_REASON, endCaptureStart, useCaptureStarting } from './services/captureStarting';
 import { createImportLifecycle, type ImportEffects } from './services/importLifecycle';
-import { ADOPT_SLICE_ROWS, adoptInSlices } from './lib/adoptSlices';
+import { ADOPT_SLICE_ROWS } from './lib/adoptSlices';
+import { AnnotationReach, adoptImportedRows, annotateProcesses } from './lib/processAnnotations';
+import { awaitImportOpen } from './services/importOpen';
 import { FilterEngine } from './services/filterEngine';
 import { pushRecentFilter, recentFiltersStore } from './services/recentFilters';
 
@@ -721,6 +722,8 @@ export default function App() {
   const rederiveRef = useRef<(() => void) | null>(null);
   /** Bumped by each import's adoption, so an older one's remaining slices stop (`adoptSlices.ts`). */
   const adoptRunRef = useRef(0);
+  /** How far back socket tables reached since the adoption began (`processAnnotations.ts`). */
+  const [annotationReach] = useState(() => new AnnotationReach());
   /** An import's slices are still going in: the minimap strip waits for the last (`PacketListMinimap`'s `hold`). */
   const [adopting, setAdopting] = useState(false);
   /** What the capture itself revealed, derived in the Worker and only read here. */
@@ -872,32 +875,12 @@ export default function App() {
       const horizonUs = message.full
         ? -Infinity
         : Date.now() * 1000 - SOCKET_RETRO_WINDOW_US;
-      setPackets((prev) => {
-        let changed = false;
-        const next = prev.map((packet) => {
-          if (packet.tsUs < horizonUs) return packet;
-          if (fieldValue(packet, 'inwire.process.name') !== undefined) return packet;
-          const process = processForPacket(packet, flowAnnotations);
-          if (!process) return packet;
-          changed = true;
-          // A copy, because a packet already handed to React is not ours to
-          // mutate - a row that changed in place would not re-render.
-          //
-          // The spread carries `cols` and `row` across, which is what we
-          // want: the copy shares the original's block and its row, and a row
-          // is written only before the frame joins the buffer (as its pack
-          // decodes and its overlay applies, or in `absorb`) and never after,
-          // so two packets reading it see the same values. What is written
-          // HERE goes to the bag, because the process fields are declared
-          // post-dissection and so are never dense (`dissect/denseFields.ts`,
-          // asserted in `scripts/dissect/dense-fields.ts`).
-          const copy: typeof packet = { ...packet, fields: { ...packet.fields } };
-          writeProcessFields(copy, process);
-          return copy;
-        });
-        return changed ? next : prev;
-      });
-  }, []);
+      // Noted for an import's adoption: its slices replace the buffer with prefixes of
+      // the imported rows, and the annotator runs again after the last one if a table
+      // landed in between (`adoptImportedRows`).
+      annotationReach.note(horizonUs);
+      setPackets((prev) => annotateProcesses(prev, horizonUs, flowAnnotations));
+  }, [annotationReach]);
 
   /* **The flush handler was here, and the sentence describing it was left
      truncated mid-clause by the edit that moved it** - "A flush of dissected
@@ -2809,7 +2792,6 @@ export default function App() {
    * lifecycle, its `openStore` effect awaits the store's answer (`beginAwaited`)
    * rather than posting and moving on, and leaves the pending answer here.
    */
-  const awaitedOpenRef = useRef(false);
   const openedStoreRef = useRef<Promise<void> | null>(null);
 
   /**
@@ -2858,8 +2840,9 @@ export default function App() {
       cancelExportJob('an import started');
       // An import is a new capture with no marks of its own.
       adoptMarks(EMPTY_MARKS);
-      if (awaitedOpenRef.current) openedStoreRef.current = captureStore.beginAwaited(captureId);
-      else captureStore.begin(captureId);
+      // Always awaited: the only caller is the import's `onBatch`, from
+      // `handleImportOpening`, which waits for the store's answer.
+      openedStoreRef.current = captureStore.beginAwaited(captureId);
     },
     discardStore: (captureId) => {
       captureStore.discard(captureId);
@@ -2900,21 +2883,22 @@ export default function App() {
    * which capture is open, so each is tagged with it.
    */
   const handleImportOpening = async (): Promise<string> => {
-    awaitedOpenRef.current = true;
     openedStoreRef.current = null;
-    try {
-      importLifecycle.onBatch();
-    } finally {
-      awaitedOpenRef.current = false;
-    }
+    importLifecycle.onBatch();
     const captureId = importLifecycle.storeId();
     // Widened by hand: `onBatch` sets the ref, which TypeScript's narrowing from
     // the `null` above cannot see, so it would type this `null` and the await a no-op.
     const opened = openedStoreRef.current as Promise<void> | null;
     openedStoreRef.current = null;
-    if (captureId === null || opened === null) throw new Error('The import could not open its capture.');
-    await opened;
-    return captureId;
+    // A Cancel while the open is pending ends the import and discards its id;
+    // an answer that still arrives after it discards the capture it opened
+    // (`importOpen.ts`). `captureIdRef` is the previous capture's and stays so.
+    return awaitImportOpen({
+      captureId,
+      opened,
+      owns: (id) => importLifecycle.storeId() === id,
+      discard: (id) => captureStore.discard(id),
+    });
   };
 
   /**
@@ -2987,11 +2971,15 @@ export default function App() {
     // import's adoption bumps the run and ends this one's remaining slices.
     const run = ++adoptRunRef.current;
     setAdopting(true);
-    const sliced = adoptInSlices(imported, ADOPT_SLICE_ROWS, (prefix, first) => {
-      if (adoptRunRef.current !== run) return false;
-      if (first) adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId), info?.estimates, prefix);
-      else setPackets(prefix);
-      return true;
+    // A socket table applied between two slices is on the copies of an earlier slice's
+    // rows, which the next slice replaces; the annotator runs again after the last slice.
+    annotationReach.begin();
+    const sliced = adoptImportedRows(imported, ADOPT_SLICE_ROWS, {
+      current: () => adoptRunRef.current === run,
+      adoptFirst: (prefix) => adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId), info?.estimates, prefix),
+      showPrefix: (prefix) => setPackets(prefix),
+      annotatedReach: () => annotationReach.reach(),
+      reannotate: (horizonUs) => setPackets((prev) => annotateProcesses(prev, horizonUs, flowAnnotations)),
     }, () => new Promise<void>((resolve) => { setTimeout(resolve, 0); }));
     pipeline.reset(Math.floor(lastId) + 1);
     // The import's decrypted answers (ADR 0049), from the Worker's `done`: handed

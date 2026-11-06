@@ -60,6 +60,11 @@ import {
 
 export interface ImportIo {
   post(message: FromImport, transfer?: Transferable[]): void;
+  /**
+   * Whether the walk must wait before its next batch for the page's end, as it
+   * waits for the store's credit: a promise to wait on, or undefined to read on.
+   */
+  pace?(): Promise<void> | undefined;
 }
 
 /**
@@ -213,9 +218,11 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
           io.post({ type: 'secrets', seq, text });
         });
       },
+      // The store's credit first, then the page's (`importCredit.ts`); a batch
+      // that waits on one meets the other again at the next.
       pace: () => (overCredit()
         ? new Promise<void>((resolve) => { resume = resolve; })
-        : undefined),
+        : io.pace?.()),
     });
 
     // The barrier: everything before it on the port has been taken. With no

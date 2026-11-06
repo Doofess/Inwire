@@ -559,6 +559,52 @@ if (!FOLLOW_ONLY) phases.push({
     await page.keyboard.press('End').catch(() => {});
   },
 });
+// Clicking the newest frame while the burst runs. A shard keeps no tree
+// (ADR 0072), so the click waits on the store - up to 5 s, then a replay - and
+// this is the one place that is driven live: every few seconds, click the
+// newest row and time until the inspection pane shows that frame's tree.
+// Runs in --follow-only too, since it is the frame path's own question.
+phases.push({
+  label: `${mid.toLocaleString()} f/s, clicking the newest frame`, rate: mid,
+  during: async () => {
+    const until = Date.now() + SECONDS * 1000;
+    const times: number[] = [];
+    let missed = 0;
+    let unselected = 0;
+    while (Date.now() < until) {
+      const newest = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('[role="row"][aria-rowindex]')]
+          .filter((r) => Number(r.getAttribute('aria-rowindex')) > 1);
+        const last = rows.sort((a, b) => Number(b.getAttribute('aria-rowindex')) - Number(a.getAttribute('aria-rowindex')))[0];
+        // The No. column: the first cell that is only a number (`PacketList`'s `<td>`s carry no role).
+        const n = Number([...(last?.querySelectorAll('td') ?? [])].map((td) => (td.textContent ?? '').trim()).find((t) => /^\d+$/.test(t)) ?? 0);
+        return last ? { index: last.getAttribute('aria-rowindex'), n } : null;
+      });
+      if (newest && newest.n > 0) {
+        const t0 = Date.now();
+        await page.locator(`[role="row"][aria-rowindex="${newest.index}"]`).first().click({ timeout: 2000 }).catch(() => {});
+        // Following, the list moves between the read and the click: wait on the
+        // frame the click selected, not the one that was newest a moment ago.
+        const selected = await page.evaluate(() => {
+          const row = document.querySelector('[role="row"][aria-selected="true"]');
+          return Number([...(row?.querySelectorAll('td') ?? [])].map((td) => (td.textContent ?? '').trim()).find((t) => /^\d+$/.test(t)) ?? 0);
+        });
+        if (selected === 0) { unselected++; await sleep(3000); continue; }
+        const shown = await page.waitForFunction((n) => {
+          const header = [...document.querySelectorAll('span, div')].find((e) => e.textContent === `#Frame ${n}`);
+          let pane = header?.parentElement ?? null;
+          while (pane && !pane.querySelector('.custom-scrollbar')) pane = pane.parentElement;
+          return ((pane?.querySelector('.custom-scrollbar')?.textContent ?? '').length > 20);
+        }, selected, { timeout: 8000 }).then(() => true, () => false);
+        if (shown) times.push(Date.now() - t0); else missed++;
+      }
+      await sleep(3000);
+    }
+    const slow = times.filter((ms) => ms > 6000).length;
+    say(`  newest-frame clicks: ${times.length + missed + unselected} (${unselected} selected nothing); tree shown ${times.length}, missed (8 s) ${missed}; over 6 s ${slow}; slowest ${times.length ? Math.max(...times) : 0} ms`);
+    if (missed > 0 || slow > 0) say('  CHECK: a click on the newest frame took longer than the store wait plus replay');
+  },
+});
 if (top !== null) {
   phases.push({
     label: `${top.toLocaleString()} f/s, list following`, rate: top,

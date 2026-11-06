@@ -12,7 +12,7 @@
  * the row by the shard. `scripts/pipeline/row-steps.ts` holds the split to the
  * single Worker's output.
  */
-import type { Packet, ProtocolField, ProtocolLayer } from '../../types/packet';
+import type { Packet } from '../../types/packet';
 import type { FlowAnnotationStore } from '../flowAnnotations';
 import type { HostIdentity } from '../direction';
 import { annotatePacket } from '../dissect/processFields';
@@ -91,27 +91,23 @@ export interface MergeContext {
  * `ingest`'s last two steps, from a side record and in merged order.
  *
  * The match a fingerprint gains goes into `overlay` (made when it was null,
- * extended in place otherwise) and its tree row comes back as `frameRows`, for
- * the shard's cached tree. `tls.stream` is not touched: the coordinator settles
- * it, since it numbers streams in capture order.
+ * extended in place otherwise). No tree row comes back: a shard caches no tree
+ * (ADR 0072), so a click rebuilds the row from the record and the overlay.
+ * `tls.stream` is not touched: the coordinator settles it, since it numbers
+ * streams in capture order.
  */
 export function mergeRowSide(
   side: RowSide | undefined, ctx: MergeContext, overlay: RowOverlay | null,
-): { overlay: RowOverlay | null; frameRows: ProtocolField[] } {
-  if (side === undefined) return { overlay, frameRows: [] };
-  let frameRows: ProtocolField[] = [];
+): { overlay: RowOverlay | null } {
+  if (side === undefined) return { overlay };
   if (side.ja4 !== undefined) {
     const fields: Record<string, string | number> = { 'tls.handshake.ja4': side.ja4 };
     if (side.process !== undefined) fields['inwire.process.name'] = side.process;
-    const stub: ProtocolLayer = { name: 'Frame', summary: '', fields: [] };
-    learnOrLabelFingerprint(fields, ctx.fingerprints, [stub]);
+    learnOrLabelFingerprint(fields, ctx.fingerprints);
     const match = fields['inwire.process.ja4_match'];
-    if (match !== undefined) {
-      ((overlay ??= {}).fields ??= {})['inwire.process.ja4_match'] = match;
-      frameRows = stub.fields;
-    }
+    if (match !== undefined) ((overlay ??= {}).fields ??= {})['inwire.process.ja4_match'] = match;
   }
   if (side.forwardTo !== undefined) ctx.facts.observeForwardedTo(side.forwardTo, ctx.host);
   if (side.tls !== undefined) ctx.facts.observeTlsFacts(side.tls);
-  return { overlay, frameRows };
+  return { overlay };
 }
