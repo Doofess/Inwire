@@ -316,6 +316,10 @@ class CaptureClient {
   private receive(message: FromCapture): void {
     switch (message.type) {
       case 'ready': {
+        // The answer to an open nobody waits for any more: a discard or a newer
+        // open settled it with nothing (`settleAll`). The store has, or will
+        // have, let that capture go, so it is not the one open.
+        if (message.requestId !== undefined && !this.pendingOpen.has(message.requestId)) break;
         this.update({
           captureId: message.captureId,
           freeBytes: message.freeBytes,

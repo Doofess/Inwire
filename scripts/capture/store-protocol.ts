@@ -1353,6 +1353,30 @@ console.log('\n--- tagged appends and an awaited open (import Worker) ---\n');
     { sent: open?.captureId, hasRequest: typeof open?.requestId === 'number', beforeReady, afterOther, settled },
     { sent: 'cap-20260912-200000-00c3', hasRequest: true, beforeReady: 'pending', afterOther: 'pending', settled: 'resolved' });
 
+  // A cancelled import: the open is discarded while the store is still opening it. The
+  // store's `ready` for that request arrives after the discard and must not name the
+  // discarded capture as the one open (it did, until the next begin or discard).
+  {
+    const states: (string | null)[] = [];
+    const before = captureStore.onState;
+    captureStore.onState = (state) => { states.push(state.captureId); };
+    posted.length = 0;
+    const abandoned = captureStore.beginAwaited('cap-20260912-200000-00e5').catch(() => 'rejected');
+    for (let i = 0; i < 50 && openOf() === undefined; i++) await sleep(5);
+    const stale = openOf();
+    captureStore.discard('cap-20260912-200000-00e5');
+    port.onmessage?.({ data: ready('cap-20260912-200000-00e5', stale?.requestId) });
+    await sleep(10);
+    check('a ready for an open discarded before it landed leaves the storage state without that capture',
+      { answer: await abandoned, last: states.at(-1) ?? null, named: states.includes('cap-20260912-200000-00e5') },
+      { answer: 'rejected', last: null, named: false });
+    // A plain begin's ready (no request) still sets the capture, as before.
+    captureStore.begin('cap-20260912-200000-00e6');
+    port.onmessage?.({ data: ready('cap-20260912-200000-00e6') });
+    check('...while a begin\'s own ready still names its capture', states.at(-1), 'cap-20260912-200000-00e6');
+    captureStore.onState = before;
+  }
+
   // A fatal failure settles the open with nothing, which rejects.
   let outcome = 'pending';
   const failing = captureStore.beginAwaited('cap-20260912-200000-00d4').then(

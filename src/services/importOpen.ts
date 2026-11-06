@@ -19,11 +19,14 @@ export async function awaitImportOpen(wait: ImportOpenWait): Promise<string> {
   if (captureId === null || opened === null) throw new Error('The import could not open its capture.');
   await opened;
   // A Cancel (or any failure) that ran while the open was pending has already
-  // taken the import's store from the lifecycle and discarded the id - but a
-  // `ready` already on its way can still settle this open successfully, and the
-  // store would then hold a capture nobody owns, open under the import's id while
-  // the session still names the previous one. Discard it again (idempotent) and
-  // fail the wait, so a Worker that is somehow still listening gets no `storeOpen`.
+  // taken the import's store from the lifecycle and discarded the id. With the
+  // real client this line is not reached then: the discard settles the pending
+  // open with nothing (`CaptureClient.settleAll`), so `opened` rejects, and the
+  // late `ready` is ignored. What keeps the store from holding a capture nobody
+  // owns is the host's order - the `open` and then the `discard` on one port,
+  // taken in turn (`serialQueue.ts`), so the discard closes what the open made.
+  // This is the fallback for a client that settles an abandoned open as opened:
+  // discard again (idempotent) and fail the wait, so no Worker gets `storeOpen`.
   if (!wait.owns(captureId)) {
     wait.discard(captureId);
     throw new Error('The import was stopped while its capture opened.');
