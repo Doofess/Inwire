@@ -207,6 +207,30 @@ check('export controls are disabled while the job runs',
   between(transfer, 'const canExport =', 'const start = async').includes('importing'));
 check('export rows say why', between(transfer, 'const formatRow =', 'return (').includes('IMPORT_RUNNING_REASON'));
 
+// App hands a finished import to the list a slice a task (`adoptSlices.ts`).
+// The job must stay running until the last slice is in, or a Start or a second
+// import pressed between two slices would find a half-adopted buffer.
+check('the panel awaits the adoption before the job ends',
+  /await onImportPackets\(/.test(between(panel, 'const handleFile = async', 'endImportJob(result)')));
+check('App adopts an import in slices and derives after the last',
+  /adoptInSlices\(/.test(between(app, 'const handleImportPackets = ', 'const deriveForBuffer'))
+  && /if \(whole\) deriveForBuffer\(imported\)/.test(app));
+// The strip waits for the last slice: a repaint per slice decided up to 50,000
+// colours inside the slice's task (~160 ms, profiled on the burst).
+const handler = between(app, 'const handleImportPackets = ', 'const deriveForBuffer');
+const minimap = readFileSync('src/components/packet-list/PacketListMinimap.tsx', 'utf8');
+const list = readFileSync('src/components/packet-list/PacketList.tsx', 'utf8');
+check('App holds the minimap strip while the slices go in, and lets go only for its own run',
+  handler.indexOf('setAdopting(true)') !== -1
+  && handler.indexOf('setAdopting(true)') < handler.indexOf('adoptInSlices(')
+  && /const whole = await sliced;\s*if \(adoptRunRef\.current === run\) setAdopting\(false\);/.test(handler)
+  && /holdStrip=\{adopting\}/.test(app) && /hold=\{holdStrip\}/.test(list)
+  && /if \(!hold\) heldRef\.current = packets;\s*const paintedPackets = useThrottledValue\(heldRef\.current,/.test(minimap));
+// The list mounts with an import's first slice (the welcome stood in before it),
+// so a ref seeded from `packets` painted that slice anyway.
+check('a strip mounted held starts empty, not on the first slice',
+  /useRef<Packet\[\]>\(hold \? NO_PACKETS : packets\)/.test(minimap));
+
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed.`);
   process.exit(1);

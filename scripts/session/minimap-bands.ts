@@ -104,5 +104,40 @@ check('once they are decided, the rebuild succeeds', bands.sync(replaced, colour
 const twin = replaced.map((p) => ({ ...p }));
 check('a same-length replacement is rebuilt, not extended', bands.sync(twin, colourOf) && agrees(bands, twin) === null && bands.length === 300);
 
+// A finished import grows the buffer by more than the budget a step
+// (`adoptSlices.ts`). What a refused sync decided is kept, and the next resumes
+// where it stopped rather than walking and deciding the same frames again.
+const big = Array.from({ length: 3 * REBUILD_DECIDE }, frame);
+for (const p of big) undecided.add(p.id);
+const bigStart = decidedOnTheWay;
+check('a buffer grown past the budget refuses', bands.sync(big.slice(0, 2 * REBUILD_DECIDE), colourOf) === false);
+check('...and keeps the prefix it decided', bands.length === REBUILD_DECIDE, `length ${bands.length}`);
+// The fill decides some more, the way the strip's progressive pass does.
+for (let i = REBUILD_DECIDE; i < 1.5 * REBUILD_DECIDE; i++) colourOf(big[i], true);
+const beforeResume = decidedOnTheWay;
+check('the next step resumes, and refuses again', bands.sync(big, colourOf) === false);
+check('...having indexed the fill\'s frames and one budget more', bands.length === 2.5 * REBUILD_DECIDE, `length ${bands.length}`);
+check('...deciding no more than its budget', decidedOnTheWay - beforeResume === REBUILD_DECIDE);
+check('the step after completes it', bands.sync(big, colourOf) && agrees(bands, big) === null && bands.length === big.length);
+check('...every frame decided once', decidedOnTheWay - bigStart === big.length, `${decidedOnTheWay - bigStart} of ${big.length}`);
+// A live buffer appended to a complete index still decides all it meets.
+const grown = big.concat(Array.from({ length: 2 * REBUILD_DECIDE }, frame));
+for (let i = big.length; i < grown.length; i++) undecided.add(grown[i].id);
+check('an append to a complete index decides past the budget', bands.sync(grown, colourOf) && agrees(bands, grown) === null);
+
+// Trimmed while partial: within what was indexed, and past it.
+const partial = Array.from({ length: 2 * REBUILD_DECIDE }, frame);
+for (const p of partial) undecided.add(p.id);
+check('a partial index again', bands.sync(partial, colourOf) === false && bands.length === REBUILD_DECIDE);
+for (const p of partial) undecided.delete(p.id);
+const inside = partial.slice(REBUILD_DECIDE / 2);
+check('a trim inside the indexed prefix resumes from what is left', bands.sync(inside, colourOf) && agrees(bands, inside) === null && bands.length === inside.length);
+const partial2 = Array.from({ length: 2 * REBUILD_DECIDE }, frame);
+for (const p of partial2) undecided.add(p.id);
+check('and a partial index once more', bands.sync(partial2, colourOf) === false && bands.length === REBUILD_DECIDE);
+for (const p of partial2) undecided.delete(p.id);
+const past = partial2.slice(REBUILD_DECIDE + 10);
+check('a trim past the indexed prefix starts again and sums right', bands.sync(past, colourOf) && agrees(bands, past) === null && bands.length === past.length);
+
 console.log(failures === 0 ? '\nAll minimap-bands checks passed.' : `\n${failures} check(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

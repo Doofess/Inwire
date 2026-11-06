@@ -8,8 +8,8 @@
  * message after the run was cancelled). A *real* one runs `createImportRun`, the
  * import Worker's whole behaviour, in this isolate, its messages delivered a task
  * later as a Worker's are, against a fake capture store on a real `MessageChannel`
- * - so the tail it hands back, the secrets round trip, the one-chunk-at-a-time
- * handover and the release of the tail's bytes are the real ones. (Node threads
+ * - so the tail it hands back (built on the page from the Worker's `rows`), the
+ * secrets round trip and the release of the tail's bytes are the real ones. (Node threads
  * with the byte-for-byte comparison to the in-process route are
  * `import-worker-equivalence.ts`'s.)
  *
@@ -27,6 +27,8 @@ import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from '../../src/services/
 import type { ImportOutcome } from '../../src/services/tabularImport';
 import { dnsTcpInput, tlsWithDsbInput } from './importEquivalenceRig';
 import { pcapOf, udpFrame } from '../parity/synthetic';
+import { PackReader, PackedFlush, packRows, type PackedRows } from '../../src/services/pipeline/rowPack';
+import type { Packet } from '../../src/types/packet';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -88,11 +90,14 @@ class RealWorker implements WorkerLike {
 function fakeStore() {
   const { port1, port2 } = new MessageChannel();
   const state = { lastId: 0, appended: 0, closed: false };
-  port1.onmessage = (event: MessageEvent<{ type: string; ack?: number; packets?: { id: number }[] }>) => {
+  // The store's own reader: the Worker sends `appendPacked`, never `append`.
+  const reader = new PackReader();
+  port1.onmessage = (event: MessageEvent<{ type: string; ack?: number; rows?: PackedRows }>) => {
     const m = event.data;
-    if (m.type === 'append' && m.packets !== undefined && m.packets.length > 0) {
-      state.appended += m.packets.length;
-      state.lastId = Math.max(state.lastId, m.packets[m.packets.length - 1].id);
+    if (m.type === 'appendPacked' && m.rows !== undefined) {
+      const rows = reader.read(m.rows);
+      state.appended += rows.length;
+      if (rows.length > 0) state.lastId = Math.max(state.lastId, rows[rows.length - 1].id);
     }
     if (m.type === 'appendBytes' && m.ack !== undefined) port1.postMessage({ type: 'bytesTaken', ack: m.ack });
   };
@@ -121,7 +126,7 @@ function trackedKeyLog() {
 
 const OPTIONS: ImportRunOptions = {
   record: true, residentBytes: 256 * 1024 * 1024, maxFrames: 40, derivedBudget: 64 * 1024 * 1024,
-  patchWindow: 64, batchFrames: 50, windowBytes: 64 * 1024, tailChunkRows: 15,
+  patchWindow: 64, batchFrames: 50, windowBytes: 64 * 1024,
 };
 
 interface Rig {
@@ -164,7 +169,7 @@ const ids = (outcome: ImportOutcome) => (outcome.ok ? outcome.packets.map((p) =>
 
 {
   const input = tlsWithDsbInput();
-  const r = rig(() => new RealWorker(), { ...OPTIONS, maxFrames: input.maxFrames, tailChunkRows: input.tailChunkRows });
+  const r = rig(() => new RealWorker(), { ...OPTIONS, maxFrames: input.maxFrames });
   const run = runWorkerImport(fileOf(input.bytes), r.deps);
   const outcome = await withTimeout(run.result, 'success');
   const worker = r.worker as RealWorker;
@@ -192,11 +197,15 @@ const ids = (outcome: ImportOutcome) => (outcome.ok ? outcome.packets.map((p) =>
     && r.keys.store.stats().secrets > 0,
     { added: r.keys.counts.added, stats: r.keys.store.stats() });
 
-  // 6. one chunk in flight
-  const tailEvents = posted.filter((t) => t === '<tail' || t === '>tailTaken' || t === '<done');
-  check('one tail chunk is in flight at a time',
-    JSON.stringify(tailEvents) === JSON.stringify(['<tail', '>tailTaken', '<tail', '>tailTaken', '<tail', '>tailTaken', '<done']),
-    tailEvents);
+  // 6. the rows arrive as they are built, and the page answers none of them
+  const sentToWorker = [...new Set(posted.filter((t) => t.startsWith('>')))].sort();
+  check('the Worker sent its rows batch by batch before `done`, and the page answered only the key log, start, secrets and storeOpen',
+    posted.filter((t) => t === '<rows').length >= 1 && posted.lastIndexOf('<rows') < posted.indexOf('<done')
+    && !posted.includes('<tail')
+    && sentToWorker.every((t) => ['>keylog-shared', '>start', '>secretsTaken', '>storeOpen'].includes(t)),
+    { sentToWorker, rows: posted.filter((t) => t === '<rows').length });
+  check('the store was sent every row packed (appendPacked): the Worker keeps no copy of its own',
+    r.store.state.appended === 10, r.store.state);
 
   // 5. snapshot subscription
   check('the snapshot subscription ends with the run (success)',
@@ -365,7 +374,7 @@ const ids = (outcome: ImportOutcome) => (outcome.ok ? outcome.packets.map((p) =>
   for (let i = 0; i < TOTAL; i++) frames.push(udpFrame(5000 + (i % 100), 9999, Uint8Array.of(i & 0xff, (i >> 8) & 0xff)));
   const bytes = pcapOf(frames);
   const options: ImportRunOptions = {
-    ...OPTIONS, maxFrames: TOTAL + 10, batchFrames: 500, windowBytes: 32 * 1024, tailChunkRows: 10_000,
+    ...OPTIONS, maxFrames: TOTAL + 10, batchFrames: 500, windowBytes: 32 * 1024,
     // The walk would otherwise finish before the store has said a word, and
     // there would be nothing stored to release against: held to the store's pace,
     // `progress` and `storedThrough` interleave as they do on a file that takes
@@ -406,36 +415,108 @@ const ids = (outcome: ImportOutcome) => (outcome.ok ? outcome.packets.map((p) =>
     nothing.outcome.ok === true && nothing.outcome.packets.every((p) => p.rawBytes.length > 0));
 }
 
-// --- 8. a stale storedThrough from the previous capture is never forwarded --------------
+// --- 8. a scripted Worker sends `rows`; the page keeps the tail and releases its bytes ---
 
 {
-  // `progress` is posted at each window load, the first before the capture is open;
-  // the page's `storedRange` is then the PREVIOUS capture's. The Worker keeps the
-  // highest id it is told, so that must not be forwarded until the open resolved.
-  const frames: Uint8Array[] = [];
-  for (let i = 0; i < 3_000; i++) frames.push(udpFrame(5000 + (i % 100), 9999, Uint8Array.of(i & 0xff, (i >> 8) & 0xff)));
-  const bytes = pcapOf(frames);
-  const options: ImportRunOptions = { ...OPTIONS, maxFrames: 3_100, batchFrames: 500, windowBytes: 8 * 1024, tailChunkRows: 1_000 };
-  let open = false;
-  let progressBeforeOpen = 0;
-  const r = rig(() => new RealWorker(), options);
-  r.deps.storedThrough = () => (open ? r.store.state.lastId : 1_000_000_000);
-  r.deps.onOpening = async () => {
-    progressBeforeOpen = r.progress.length;
-    await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
-    open = true;
-    return 'capture-under-test';
+  // The Worker says opening, rows (packed with the real `packRows` and
+  // `PackedFlush`, a fresh map each, as `importRun` does), progress and done, and
+  // the page builds the tail. What it must do: keep the tail by the sizes the
+  // Worker gave; let go of the bytes below `storedThrough()` only once the capture
+  // is open (before that `storedRange` is the PREVIOUS capture's, and a stale high
+  // answer would release bytes this store never got); and send the Worker nothing
+  // in answer to a `progress`.
+  const TOTAL = BYTES_RESIDENT_FRAMES + 500;
+  const BATCH = 500;
+  const row = (id: number): Packet => ({
+    id, source: '10.0.0.4', destination: '93.184.216.34', protocol: 'TCP', info: `frame ${id}`, status: 'ok',
+    length: 100, tsUs: 1_788_000_000_000_000 + id * 1000, relativeTime: id / 1000, timeDelta: 0.001,
+    interfaceName: 'eth0', layers: [], rawBytes: new Uint8Array([id & 0xff, (id >> 8) & 0xff, 0, 0, 0, 0, 0, 0]),
+    frameProtocols: ['frame', 'eth', 'ip', 'tcp'], sourcePort: 50000, destPort: 443, fields: { 'tcp.seq': id },
+  } as Packet);
+  /** The message for rows `from`..`to` (ids): one pack of its own, sizes of `size` each. */
+  const rowsMessage = (from: number, to: number, size: number): FromImport => {
+    const batch: Packet[] = [];
+    for (let id = from; id <= to; id++) batch.push(row(id));
+    const pack = packRows(from, batch, batch.map((p) => p.rawBytes.length));
+    const flush = new PackedFlush();
+    batch.forEach((p, i) => flush.packed(pack, i, p.rawBytes, null));
+    return { type: 'rows', pack: flush.seal(new Map()), sizes: batch.map(() => size) };
   };
-  const outcome = await withTimeout(runWorkerImport(fileOf(bytes, 'stale.pcap'), r.deps).result, 'stale storedThrough');
-  const log = (r.worker as RealWorker).log;
-  const firstThrough = log.indexOf('>storedThrough');
-  const staleSent = log.some((t, i) => t === '>storedThrough' && i < log.indexOf('>storeOpen'));
-  check('a window load is reported before the capture is open (the case under test exists)', progressBeforeOpen > 0, progressBeforeOpen);
-  check('no storedThrough reaches the Worker before storeOpen, whatever the page last held',
-    !staleSent && (firstThrough === -1 || firstThrough > log.indexOf('>storeOpen')), log.slice(0, 12));
-  check('...and the import is whole: every row keeps its bytes',
-    outcome.ok === true && outcome.packets.length === 3_000 && outcome.packets.every((p) => p.rawBytes.length > 0));
-  r.store.close();
+  const tick = () => new Promise<void>((resolve) => { setTimeout(resolve, 5); });
+  const progress: FromImport = { type: 'progress', readBytes: 1, totalBytes: 2 };
+  const done: FromImport = {
+    type: 'done', totalFrames: TOTAL, built: TOTAL, missedPatches: 0, facts: {} as never, derived: [],
+  };
+
+  /**
+   * One run: `openFirst` has the capture open before any row; otherwise the rows
+   * and two progress reports come first and the open is never answered.
+   */
+  const play = async (options: ImportRunOptions, storedThrough: number, openFirst: boolean, size = 100) => {
+    const r = rig(() => new ScriptedWorker(), options);
+    let release: (id: string) => void = () => {};
+    r.deps.storedThrough = () => storedThrough;
+    r.deps.onOpening = () => new Promise<string>((resolve) => { release = resolve; });
+    const run = runWorkerImport(fileOf(new Uint8Array(8), 'scripted.pcap'), r.deps);
+    await tick();
+    const worker = r.worker as ScriptedWorker;
+    worker.say({ type: 'opening' });
+    if (openFirst) {
+      release('capture-under-test');
+      await tick();
+    }
+    for (let from = 1; from <= TOTAL; from += BATCH) {
+      worker.say(rowsMessage(from, Math.min(TOTAL, from + BATCH - 1), size));
+      worker.say(progress);
+    }
+    const postedBeforeProgress = worker.posted.length;
+    worker.say(progress);
+    const answered = worker.posted.length - postedBeforeProgress;
+    worker.say(done);
+    const outcome = await withTimeout(run.result, 'scripted');
+    r.store.close();
+    return { outcome, worker, answered };
+  };
+  const base: ImportRunOptions = { ...OPTIONS, maxFrames: TOTAL + 10, residentBytes: Number.MAX_SAFE_INTEGER };
+
+  // Before the open: a store that answers high must release nothing.
+  const early = await play(base, 1_000_000_000, false);
+  check('a progress before storeOpen releases nothing, even when storedThrough() answers high',
+    early.outcome.ok === true && early.outcome.packets.length === TOTAL
+    && early.outcome.packets.every((p) => p.rawBytes.length > 0),
+    early.outcome.ok ? { n: early.outcome.packets.length } : early.outcome);
+  check('...and the Worker is sent only the key log and the start, never a storedThrough',
+    early.worker.posted.map((m) => m.type).every((t) => t === 'keylog-shared' || t === 'start'),
+    early.worker.posted.map((m) => m.type));
+
+  // After it: bytes go below storedThrough, never the newest BYTES_RESIDENT_FRAMES.
+  const high = await play(base, 1_000_000_000, true);
+  if (high.outcome.ok) {
+    const releasedIds = high.outcome.packets.filter((p) => p.rawBytes.length === 0).map((p) => p.id);
+    check('after storeOpen the oldest rows let go of their bytes, and the newest BYTES_RESIDENT_FRAMES keep theirs',
+      releasedIds.length === TOTAL - BYTES_RESIDENT_FRAMES && releasedIds[0] === 1
+      && releasedIds[releasedIds.length - 1] === TOTAL - BYTES_RESIDENT_FRAMES
+      && high.outcome.packets.slice(-BYTES_RESIDENT_FRAMES).every((p) => p.rawBytes.length > 0),
+      { released: releasedIds.length });
+    check('...no message is posted to the Worker in answer to a progress',
+      high.answered === 0 && high.worker.posted.map((m) => m.type).every((t) => ['keylog-shared', 'start', 'storeOpen'].includes(t)),
+      { answered: high.answered, types: high.worker.posted.map((m) => m.type) });
+  } else {
+    check('after storeOpen the oldest rows let go of their bytes', false, high.outcome);
+  }
+  const low = await play(base, 100, true);
+  check('...and only as far as storedThrough() says (ids 1-100)',
+    low.outcome.ok === true
+    && low.outcome.packets.filter((p) => p.rawBytes.length === 0).map((p) => p.id).join() === Array.from({ length: 100 }, (_, i) => i + 1).join());
+
+  // The tail is trimmed by the sizes the Worker gave, not by the page's own estimate.
+  const trimmed = await play({ ...base, residentBytes: 100 * (TOTAL - 50) }, 0, true, 100);
+  check('the tail is the newest rows the Worker\'s sizes allow, and its estimates are those sizes',
+    trimmed.outcome.ok === true && trimmed.outcome.packets.length === TOTAL - 50
+    && trimmed.outcome.packets[0].id === 51 && trimmed.outcome.packets.at(-1)?.id === TOTAL
+    && trimmed.outcome.estimates?.length === TOTAL - 50 && trimmed.outcome.estimates.every((e) => e === 100)
+    && trimmed.outcome.packets.every((p) => estimateSummaryBytes(p) !== 100),
+    trimmed.outcome.ok ? { n: trimmed.outcome.packets.length, first: trimmed.outcome.packets[0]?.id } : trimmed.outcome);
 }
 
 console.log();

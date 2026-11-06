@@ -37,11 +37,15 @@ export class ImportTail {
    * Adds a batch and trims. Trimmed as it goes, not at the end: holding the
    * whole capture to slice the last slab off it is the memory this route exists
    * to avoid. Both bounds hold, one frame always stays, and the head goes in one
-   * splice.
+   * splice. `sizes`, when given, is one entry per row and is used instead of
+   * estimating.
    */
-  push(batch: Packet[]): void {
-    for (const packet of batch) {
-      const size = estimateSummaryBytes(packet);
+  push(batch: Packet[], sizes?: readonly number[]): void {
+    for (let i = 0; i < batch.length; i++) {
+      const packet = batch[i];
+      // `sizes`: what the sender measured where the row was dissected (an import
+      // Worker's); the page holds the decoded row, which is not measured again.
+      const size = sizes === undefined ? estimateSummaryBytes(packet) : sizes[i];
       this.tail.push(packet);
       this.sizes.push(size);
       this.tailBytes += size;
@@ -85,19 +89,6 @@ export class ImportTail {
 
   /** How many rows the tail holds. */
   get length(): number { return this.tail.length; }
-
-  /**
-   * Hands over the oldest `count` rows and forgets them: the tail no longer
-   * holds a reference, so a Worker that has posted them can let them be
-   * collected while the page decodes. The one-shot `rows()` and `estimates()`
-   * are for a tail that is read whole.
-   */
-  take(count: number): Packet[] {
-    const rows = this.tail.splice(0, count);
-    for (const size of this.sizes.splice(0, count)) this.tailBytes -= size;
-    this.released = Math.max(0, this.released - rows.length);
-    return rows;
-  }
 
   /** Each row's `estimateSummaryBytes`, parallel to `rows()`. */
   estimates(): number[] { return this.sizes; }

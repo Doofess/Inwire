@@ -38,7 +38,7 @@ interface ImportPanelProps {
    * The frames to put in the buffer: everything for a small file, the newest
    * `maxFrames` when the import streamed to disk.
    */
-  onImportPackets: (packets: Packet[], info: ImportedInfo) => void;
+  onImportPackets: (packets: Packet[], info: ImportedInfo) => void | Promise<void>;
   /**
    * How a capture file is imported: in a Worker, which writes every frame to the
    * store and hands back the newest ones for the buffer (`importClient.ts`).
@@ -139,7 +139,9 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
       }
       // The name travels with the frames: it is the capture's source in
       // everything exported from them.
-      onImportPackets(outcome.packets, {
+      // Awaited: App hands the rows to the list a slice a task, and the job stays
+      // running (every capture-changing action refused) until the last is in.
+      await onImportPackets(outcome.packets, {
         filename: file.name, facts: outcome.facts, estimates: outcome.estimates, derived: outcome.derived,
       });
       result = {

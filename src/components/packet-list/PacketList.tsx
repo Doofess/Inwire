@@ -164,6 +164,8 @@ interface PacketListProps {
   currentFilter: string;
   /** Frame ids marked in this capture (`App` owns the set, ADR 0067). */
   marks: ReadonlySet<number>;
+  /** A finished import is still being handed to the list: the strip waits for the whole (`PacketListMinimap`'s `hold`). */
+  holdStrip?: boolean;
   onToggleMark: (id: number) => void;
   /** Next, previous and Unmark all: App's own handler, the one the keys and the palette run. */
   onMarkCommand: (id: 'mark.next' | 'mark.prev' | 'mark.clearAll') => void;
@@ -338,6 +340,7 @@ export const PacketList: React.FC<PacketListProps> = ({
   onFieldFilter,
   currentFilter,
   marks,
+  holdStrip = false,
   onToggleMark,
   onMarkCommand,
   droppedBuffer = 0,
@@ -1924,6 +1927,7 @@ export const PacketList: React.FC<PacketListProps> = ({
         selectedPacket={selectedPacket}
         marks={marks}
         idOrdered={!effectiveSortField || (effectiveSortField === 'id' && sortOrder === 'asc')}
+        hold={holdStrip}
         colorEngine={colorEngine}
         packetTheme={packetTheme}
         themeKey={themeKey}

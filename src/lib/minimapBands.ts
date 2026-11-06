@@ -43,6 +43,8 @@ export class MinimapBands {
   /** Index in `colours` of the buffer's first frame: a trim moves it forward. */
   private offset = 0;
   private count = 0;
+  /** The last sync stopped early: the index covers only a prefix of `source`. */
+  private partial = false;
   private colours = new Uint32Array(1024);
   /** Running RGBA totals at each block boundary: entry b covers frames [0, b * BLOCK). */
   private totals = new Float64Array(4 * (1024 / BLOCK + 1));
@@ -52,6 +54,7 @@ export class MinimapBands {
     this.source = [];
     this.offset = 0;
     this.count = 0;
+    this.partial = false;
   }
 
   /**
@@ -59,20 +62,26 @@ export class MinimapBands {
    * deciding frames nobody has asked about yet.
    */
   sync(packets: Packet[], colourOf: ColourOf): boolean {
-    const shift = this.count > 0 ? prefixShift(packets, this.source) : null;
+    let shift = this.count > 0 ? prefixShift(packets, this.source) : null;
+    // A trim past what a partial index holds leaves nothing of it to keep.
+    if (shift !== null && shift > this.count - this.offset) shift = null;
     let from: number;
     if (shift === null) {
       this.offset = 0;
       this.count = 0;
+      this.partial = false;
       from = 0;
     } else {
       this.offset += shift;
-      from = this.source.length - shift;
+      // The frames indexed so far, which is all of `source` unless the last
+      // sync stopped early.
+      from = this.count - this.offset;
     }
     // An append decides what it meets, because it is only the new; a rebuild
-    // decides at most its budget.
-    let budget = shift !== null ? Number.POSITIVE_INFINITY : REBUILD_DECIDE;
+    // decides at most its budget, and so does a sync resuming one that stopped.
+    let budget = shift !== null && !this.partial ? Number.POSITIVE_INFINITY : REBUILD_DECIDE;
     if (this.offset > 0 && this.offset > this.count - this.offset) this.compact();
+    this.source = packets;
     for (let i = from; i < packets.length; i++) {
       let colour = colourOf(packets[i], false);
       if (colour === undefined && budget > 0) {
@@ -80,12 +89,15 @@ export class MinimapBands {
         colour = colourOf(packets[i], true);
       }
       if (colour === undefined) {
-        this.reset();
+        // Kept: the prefix indexed so far stays, and the next sync resumes
+        // after it instead of walking it again (a finished import grows the
+        // buffer by more than the budget a step, `adoptSlices.ts`).
+        this.partial = true;
         return false;
       }
       this.push(colour);
     }
-    this.source = packets;
+    this.partial = false;
     return true;
   }
 

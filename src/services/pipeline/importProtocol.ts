@@ -4,26 +4,22 @@
  * 2026-11-05-import-worker-design.md`).
  *
  * The Worker is spawned per import and never outlives it. The capture store's
- * ingest port arrives with `start` (`event.ports[0]`); rows and records go
- * straight to the store on it, and only what the page must act on comes back
- * here.
+ * ingest port arrives with `start` (`event.ports[0]`); each batch is packed once
+ * and the pack goes to the store on it and, transferred, to the page as `rows`
+ * (the page keeps the RAM tail).
  */
 import type { CaptureFileFacts } from '../captureFileFacts';
 import type { KeyLogShared } from '../tls/keyLog';
 import type { PackedRows } from './rowPack';
 
 /**
- * How many tail rows go back in one message. The page decodes a chunk in one
- * task, so this is the length of the longest main-thread task the handover
- * makes, and only one chunk is in flight at a time.
- *
- * Measured under tsx on this machine (2026-11-05): `PackReader(new
- * FieldBlockWriter()).read` takes 1.5-1.9 us per row on 40,000 synthetic DNS and
- * TCP rows (5,000-row chunks 9.6 ms, 20,000-row chunks 30 ms, worst 33 ms). A
- * row of a TLS or QUIC capture carries more fields, so the figure is sized for
- * ~50 ms on these rows and the real ones stay well under the 200 ms gate.
+ * The first key of the packs an import Worker makes (one per batch, counting up).
+ * The store host has ONE `PackReader`, shared with the live pipeline Worker, whose
+ * keys count up from zero: starting an import's far above them means a pack of the
+ * live Worker that is still held can never be replaced by an import's. Kept below
+ * 2^31 and above zero: `PackedRows.order` uses -1 for an object row.
  */
-export const TAIL_CHUNK_ROWS = 30_000;
+export const IMPORT_PACK_KEY_BASE = 0x40000000;
 
 /** The name the page gives an import Worker. Not a shard's or the reader's. */
 export const IMPORT_NAME = 'inwire-import';
@@ -34,7 +30,10 @@ export const IMPORT_CREDIT_FRAMES = 50_000;
 export interface ImportRunOptions {
   /** Whether to keep each frame's record, which the store is handed ahead of the rows. */
   record: boolean;
-  /** The RAM tail's bounds (`ImportTail`). */
+  /**
+   * The RAM tail's bounds (`ImportTail`). The page keeps the tail, so the Worker
+   * does not read these; they ride with the rest of the import's options.
+   */
   residentBytes: number;
   maxFrames: number;
   /** The decrypted-answer store's budget, as the live Worker's (`derivedBudgetFor`). */
@@ -43,8 +42,6 @@ export interface ImportRunOptions {
   patchWindow?: number;
   batchFrames?: number;
   windowBytes?: number;
-  /** Rows per `tail` message; default `TAIL_CHUNK_ROWS`. */
-  tailChunkRows?: number;
   /** Test seam: the unanswered-frames bound; default `IMPORT_CREDIT_FRAMES`. */
   creditFrames?: number;
 }
@@ -57,15 +54,7 @@ export type ToImport =
   /** The page has added `secrets` message `seq` to its key log; the walk may read on. */
   | { type: 'secretsTaken'; seq: number; snapshot?: KeyLogShared }
   /** The page has opened the capture (`opening` was the request). */
-  | { type: 'storeOpen'; captureId: string }
-  /** The store has these frames' bytes through `id`: the tail may let go of its own. */
-  | { type: 'storedThrough'; id: number }
-  /**
-   * The page has decoded the `tail` chunk it was sent. The Worker posts one chunk
-   * and waits for this before it packs the next, so at the handover the process
-   * holds at most one chunk's bytes twice (the Worker's and the page's).
-   */
-  | { type: 'tailTaken' };
+  | { type: 'storeOpen'; captureId: string };
 
 export type FromImport =
   | { type: 'progress'; readBytes: number; totalBytes: number }
@@ -74,11 +63,14 @@ export type FromImport =
   /** The first batch is built: open the capture, then say `storeOpen`. Sent once. */
   | { type: 'opening' }
   /**
-   * A chunk of the tail, oldest first. The slab behind `pack` is transferred. One
-   * is in flight at a time: the next follows the page's `tailTaken`, and `done`
-   * follows the last one's.
+   * One batch's rows, final (the batcher drains a frame only after its patch
+   * window closed), packed once: the store was sent this same pack first, so the
+   * buffers behind `pack` are transferred here. `sizes` is each row's
+   * `estimateSummaryBytes`, taken where the row was dissected; the page's
+   * `ImportTail` trims by them. Every pack is read whole within its message, so
+   * the page keeps no pack state and `packsReset` is never set.
    */
-  | { type: 'tail'; pack: PackedRows; estimates: number[] }
+  | { type: 'rows'; pack: PackedRows; sizes: number[] }
   | {
       type: 'done';
       totalFrames: number;

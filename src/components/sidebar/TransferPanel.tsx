@@ -103,7 +103,7 @@ export interface TransferPanelProps {
   agentInterfaces: AgentInterface[];
   /** Where these frames came from, for the metadata every format prints. */
   captureSource: CaptureSource;
-  onImportPackets: (packets: Packet[], info: ImportedInfo) => void;
+  onImportPackets: (packets: Packet[], info: ImportedInfo) => void | Promise<void>;
   onImportWorker?: WorkerImportRoute;
   /** The import lifecycle's ends, handed to the Import panel (`importLifecycle.ts`). */
   onImportBegin?: () => Promise<void>;

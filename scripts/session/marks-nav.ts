@@ -78,7 +78,7 @@ check('the display filter compiles with the marks', /filterIncrementally\([^)]*m
 // Review Focus 3: the first batch clears the set, but a Ctrl+M on an old row
 // while the file is still loading adds to it, and the finished import - a new
 // capture with no marks - would inherit that id. The finish clears it again.
-const importStart = app.indexOf('const handleImportPackets = (');
+const importStart = app.indexOf('const handleImportPackets = ');
 const importBody = importStart < 0 ? '' : app.slice(importStart, app.indexOf('\n  };\n', importStart));
 check('a finished import starts with no marks', importBody.includes('adoptMarks(EMPTY_MARKS)'), true);
 

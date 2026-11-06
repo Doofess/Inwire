@@ -6,14 +6,30 @@
  *
  * What it does is what `readStreamedCapture` and App's import sinks did on the
  * page, moved: the walk (`streamCaptureFile`), the store messages of each batch
- * on the ingest port, the RAM tail, and the decrypted answers (`DerivedStore`).
- * What comes back is the little the page must act on (`importProtocol.ts`).
+ * on the ingest port, and the decrypted answers (`DerivedStore`). What comes back
+ * is the little the page must act on (`importProtocol.ts`): each batch's rows,
+ * for the tail the page keeps.
  *
+ * - **Packed once.** Each batch is packed once (`packRows`, a `PackedFlush` that
+ *   carries every row's bytes in its slab) and that one pack goes to both
+ *   receivers: to the store as `appendPacked` (cloned, `sent` all 0: the rows
+ *   bring their bytes), then to the page as `rows` (transferred). Packing every
+ *   batch costs a fraction of what `plainForStore` copies, their clone and the
+ *   tail's repacking after the walk did. The flush is sealed with a map of its own
+ *   and no `PackSender`: every pack is read whole inside its message, so neither
+ *   receiver keeps pack state and no `packsReset` is ever sent (the store host's one
+ *   `PackReader` is shared with the live Worker, and a reset would clear its
+ *   packs). Pack keys start at `IMPORT_PACK_KEY_BASE`, clear of the live Worker's.
+ *   Batches are final where they are packed: the batcher drains a frame only after
+ *   its patch window closed (`pcapParser.ts`).
  * - **The store is written to directly, and only when it is open.** The first
  *   batch asks the page to open the capture (`opening`); messages queue until
  *   `storeOpen` names it, and every one is tagged with it, so a straggler that
  *   outlives a cancelled import is dropped by the host rather than written into
- *   the next capture. Nothing posted to the store carries a transfer list.
+ *   the next capture. Nothing posted to the store carries a transfer list (a
+ *   transfer list into the store's process drops the message), so a message that
+ *   waits in the queue is a copy of its own: the page's `rows` transfers the
+ *   same buffers right after.
  * - **Credit.** Each batch is followed by an empty acked `appendBytes`; the walk
  *   pauses while more than `IMPORT_CREDIT_FRAMES` are unanswered. It is queued
  *   behind the batch's messages, so frames waiting for the open count too. Only
@@ -23,22 +39,19 @@
  *   another frame; frames after the block decrypt, as they do in-process.
  * - **The end.** A final empty acked `appendBytes` is the barrier: `done` is
  *   posted only after the store has taken everything before it, so the page's
- *   seal cannot overtake a row. The tail goes back first, in chunks, one in
- *   flight (`tailTaken`), each chunk's rows dropped as it is posted.
+ *   seal cannot overtake a row. Every `rows` message was posted before it.
  */
 import { PcapService } from '../pcapParser';
-import { ImportTail } from '../importTail';
-import { storeMessagesFor } from '../capture/storePacket';
+import { recordsMessageFor } from '../capture/storePacket';
 import type { ToCapture } from '../capture/captureProtocol';
 import { packFrames } from '../capture/frameSlab';
-import { CHUNK_FRAMES } from '../capture/chunkCodec';
 import { estimateSummaryBytes } from '../bufferBudget';
 import { keyLog, type KeyLogShared } from '../tls/keyLog';
 import type { Packet } from '../../types/packet';
 import { DerivedStore } from './derivedStore';
-import { PackSender, PackedFlush, packRows, type PackedRows } from './rowPack';
+import { PackedFlush, packRows, type PackedRows } from './rowPack';
 import {
-  IMPORT_CREDIT_FRAMES, TAIL_CHUNK_ROWS,
+  IMPORT_CREDIT_FRAMES, IMPORT_PACK_KEY_BASE,
   type FromImport, type ImportRunOptions, type ToImport,
 } from './importProtocol';
 
@@ -68,24 +81,6 @@ function packedRowsViews(rows: PackedRows): ArrayBufferView[] {
   return views;
 }
 
-/**
- * One tail chunk as it goes to the page: the rows packed (a pack is at most
- * `CHUNK_FRAMES` rows, the codec's bound, so a message is several of them and one
- * flush). `firstKey` numbers the packs; the next free key is returned.
- */
-export function packTailChunk(
-  sender: PackSender, chunk: readonly Packet[], firstKey: number,
-): { packed: PackedRows; nextKey: number } {
-  const flush = new PackedFlush();
-  let key = firstKey;
-  for (let from = 0; from < chunk.length; from += CHUNK_FRAMES) {
-    const part = chunk.slice(from, from + CHUNK_FRAMES);
-    const pack = packRows(key++, part, part.map((row) => row.rawBytes.length));
-    part.forEach((row, i) => flush.packed(pack, i, row.rawBytes, null));
-  }
-  return { packed: sender.seal(flush), nextKey: key };
-}
-
 export function createImportRun(io: ImportIo): (message: ToImport, ports: readonly MessagePort[]) => void {
   let started = false;
   let storePort: MessagePort | null = null;
@@ -103,14 +98,13 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
   let barrierAck = -1;
   let secretSeq = 0;
   const waitingSecrets = new Map<number, () => void>();
-  let storedThrough = 0;
-  // Set while a posted tail chunk waits for the page's `tailTaken`.
-  let tailAck: (() => void) | null = null;
   let derived: DerivedStore | null = null;
-  let tail: ImportTail | null = null;
+  let packKey = IMPORT_PACK_KEY_BASE;
 
   const toStore = (message: ToCapture): void => {
-    if (queue !== null) queue.push(message);
+    // A queued rows message outlives this call, and the page's `rows` transfers
+    // the buffers it shares with it: it holds a copy of its own.
+    if (queue !== null) queue.push(message.type === 'appendPacked' ? structuredClone(message) : message);
     else storePort?.postMessage(message);
   };
 
@@ -155,8 +149,6 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
   const run = async (file: Blob, options: ImportRunOptions): Promise<void> => {
     creditFrames = options.creditFrames ?? IMPORT_CREDIT_FRAMES;
     derived = new DerivedStore(options.derivedBudget);
-    const importTail = new ImportTail({ residentBytes: options.residentBytes, maxFrames: options.maxFrames });
-    tail = importTail;
     // `streamCaptureFile` reads only `size` and `slice`, which a Blob has; the
     // file's name is the page's to report, not the walk's.
     const outcome = await PcapService.streamCaptureFile(file as File, (batch: Packet[], records) => {
@@ -165,14 +157,31 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
         io.post({ type: 'opening' });
       }
       // Until the page has opened the capture the messages wait, untagged; the
-      // open tags them. Rows are copies (`plainForStore`), as the client posts.
-      for (const message of storeMessagesFor(batch, records, captureId ?? undefined)) toStore(message);
-      owe(batch.length);
+      // open tags them.
+      const tag = captureId ?? undefined;
+      const recordsMessage = recordsMessageFor(records, tag);
+      if (recordsMessage !== null) toStore(recordsMessage);
+      if (batch.length > 0) {
+        // Measured now, on the final rows: what `ImportTail.push` would estimate.
+        const sizes = batch.map(estimateSummaryBytes);
+        const pack = packRows(packKey++, batch, batch.map((row) => row.rawBytes.length));
+        const flush = new PackedFlush();
+        batch.forEach((row, i) => flush.packed(pack, i, row.rawBytes, null));
+        const rows = flush.seal(new Map());
+        // The store first, the page after: the store's post is a clone, which a
+        // transfer would leave detached.
+        toStore({
+          type: 'appendPacked', rows, sent: new Uint8Array(batch.length),
+          ...(tag === undefined ? {} : { captureId: tag }),
+        });
+        owe(batch.length);
+        io.post({ type: 'rows', pack: rows, sizes }, transferListOf(packedRowsViews(rows)));
+      } else {
+        owe(0);
+      }
       if (records !== undefined) {
         for (const { id, derived: answers } of records) if (answers) derived?.set(id, answers);
       }
-      importTail.push(batch);
-      importTail.releaseBytesThrough(storedThrough);
     }, {
       record: options.record,
       ...(options.patchWindow === undefined ? {} : { patchWindow: options.patchWindow }),
@@ -183,7 +192,8 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
         const seq = ++secretSeq;
         return new Promise<void>((resolve) => {
           waitingSecrets.set(seq, resolve);
-          io.post({ type: 'secrets', seq, text });        });
+          io.post({ type: 'secrets', seq, text });
+        });
       },
       pace: () => (owedFrames > creditFrames
         ? new Promise<void>((resolve) => { resume = resolve; })
@@ -196,25 +206,6 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
     const ack = owe(0);
     barrierAck = ack;
     if (owed.has(ack)) await new Promise<void>((resolve) => { barrier = resolve; });
-
-    // The tail, oldest first, one chunk in flight: the page decodes a chunk in a
-    // task of its own and says `tailTaken`, and only then is the next packed. A
-    // chunk's rows leave the tail as it is posted, so the Worker never holds the
-    // whole tail while the page is building its own copy of it.
-    const chunkRows = options.tailChunkRows ?? TAIL_CHUNK_ROWS;
-    const sender = new PackSender();
-    let key = 0;
-    while (importTail.length > 0) {
-      const chunk = importTail.take(chunkRows);
-      // Estimated now, on the finished rows: a late patch can change a row's size
-      // after it was pushed, and the page's accounting has always been taken from
-      // the rows as they end up (`adoptAccounting`).
-      const estimates = chunk.map(estimateSummaryBytes);
-      const { packed, nextKey } = packTailChunk(sender, chunk, key);
-      key = nextKey;
-      io.post({ type: 'tail', pack: packed, estimates }, transferListOf(packedRowsViews(packed)));
-      await new Promise<void>((resolve) => { tailAck = resolve; });
-    }
 
     const entries = derived.entries();
     io.post({
@@ -263,19 +254,11 @@ export function createImportRun(io: ImportIo): (message: ToImport, ports: readon
         const waiting = queue;
         queue = null;
         for (const queued of waiting ?? []) {
-          if (queued.type === 'append' || queued.type === 'appendRecords') queued.captureId = captureId;
+          if (queued.type === 'append' || queued.type === 'appendRecords' || queued.type === 'appendPacked') {
+            queued.captureId = captureId;
+          }
           storePort?.postMessage(queued);
         }
-        return;
-      }
-      case 'storedThrough':
-        storedThrough = Math.max(storedThrough, message.id);
-        tail?.releaseBytesThrough(storedThrough);
-        return;
-      case 'tailTaken': {
-        const ack = tailAck;
-        tailAck = null;
-        ack?.();
         return;
       }
     }

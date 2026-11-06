@@ -735,6 +735,132 @@ console.log('\n--- packed rows from the Worker (appendPacked) ---\n');
   packed.store.close();
 }
 
+console.log('\n--- an import Worker\'s packed rows (appendPacked with a tag and their own bytes) ---\n');
+
+{
+  // The import Worker packs each batch once and sends it whole: every pack in its
+  // own message, the rows' bytes in the flush's slab (`sent` all 0), the message
+  // tagged with the capture the page opened. Written, it must be what an `append`
+  // of the same rows writes; tagged for another capture, or while none is open,
+  // it is dropped silently - after its packs were read, because the host has one
+  // `PackReader` shared with the live Worker and a skipped message would leave a
+  // half-read pack held for ever.
+  const IMPORT_KEY = 0x40000000;
+  const TAG = 'cap-20261106-010000-0001';
+  const OTHER = 'cap-20261106-010000-0002';
+  const rows = traffic(1200);
+  const reference = host();
+  await fill(reference, 'cap-20261106-010000-0003', rows);
+
+  const batchMessage = (key: number, batch: Packet[], captureId?: string): ToCapture => {
+    const pack = packRows(key, batch, batch.map((p) => p.rawBytes.length));
+    const flush = new PackedFlush();
+    batch.forEach((p, i) => flush.packed(pack, i, p.rawBytes, null));
+    const packedRows = deserialize(serialize(flush.seal(new Map()))) as PackedRows;
+    return {
+      type: 'appendPacked', rows: packedRows, sent: new Uint8Array(batch.length),
+      ...(captureId === undefined ? {} : { captureId }),
+    };
+  };
+  const heldPacks = (h: ReturnType<typeof host>) => (h.store as unknown as { packs: { held: number } }).packs.held;
+  const BATCH = 300;
+
+  // Tagged for the open capture, and untagged: both written.
+  const written = host();
+  written.send({ type: 'open', captureId: TAG });
+  const messages: ToCapture[] = [];
+  for (let i = 0; i < rows.length; i += BATCH) {
+    messages.push(batchMessage(IMPORT_KEY + i / BATCH, rows.slice(i, i + BATCH), i === 600 ? undefined : TAG));
+  }
+  checkTrue('the import-style messages carry their bytes and say none was sent ahead',
+    messages.every((m) => m.type === 'appendPacked' && m.sent.every((s) => s === 0)
+      && m.rows.bytes.byteLength > 0 && m.rows.packs.length === 1 && m.rows.packsReset === undefined));
+  // A message for another capture, between the others: dropped, nothing said.
+  written.send(messages[0]);
+  // Other frames (ids 5001 on), so a write of it would show in the count and the rows.
+  const stray = Array.from({ length: BATCH }, (_, i) => frame(5001 + i));
+  written.send(batchMessage(IMPORT_KEY + 99, stray, OTHER));
+  for (const m of messages.slice(1)) written.send(m);
+  written.send({ type: 'finish' });
+  await written.store.drain();
+  for (const h of [reference, written]) {
+    h.send({ type: 'chunk', requestId: 1, chunk: 0 });
+    h.send({ type: 'read', requestId: 2, ids: [1, 300, 301, 601, 1200] });
+    h.send({ type: 'stats' });
+  }
+  await reference.store.drain();
+  await written.store.drain();
+  const rowsOfHost = (h: ReturnType<typeof host>) => h.of('rows').flatMap((m) => m.packets);
+  check('tagged and untagged packed rows with their own bytes write what an append writes',
+    JSON.stringify(rowsOfHost(written)), JSON.stringify(rowsOfHost(reference)));
+  check('...the bytes are the bytes',
+    written.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]),
+    reference.of('bytes')[0]?.frames.map(([id, b]) => [id, [...b]]));
+  checkTrue('...none of them empty', (written.of('bytes')[0]?.frames ?? []).length === 5
+    && (written.of('bytes')[0]?.frames ?? []).every(([, b]) => b.length === 8));
+  check('...every frame written once (the other capture\'s copy was not)',
+    written.of('stats').at(-1)?.stats.framesWritten, reference.of('stats').at(-1)?.stats.framesWritten);
+  check('...1,200 frames', written.of('stats').at(-1)?.stats.framesWritten, 1200);
+  check('...nothing failed, and no pack is held', [written.of('failure').length, heldPacks(written)], [0, 0]);
+
+  // A tag naming another capture: nothing written, no failure.
+  const wrong = host();
+  wrong.send({ type: 'open', captureId: TAG });
+  wrong.send(batchMessage(IMPORT_KEY, rows.slice(0, BATCH), OTHER));
+  wrong.send({ type: 'finish' });
+  wrong.send({ type: 'stats' });
+  await wrong.store.drain();
+  check('a message tagged for another capture is dropped: nothing written, nothing said',
+    [wrong.of('stats').at(-1)?.stats.framesWritten, wrong.of('failure').length, heldPacks(wrong)], [0, 0, 0]);
+
+  // A tag while no capture is open: dropped, where an untagged one is the orphan failure.
+  const closed = host();
+  closed.send(batchMessage(IMPORT_KEY, rows.slice(0, BATCH), TAG));
+  await closed.store.drain();
+  check('a tagged message while no capture is open is dropped silently',
+    [closed.of('failure').length, heldPacks(closed)], [0, 0]);
+  closed.send(batchMessage(IMPORT_KEY, rows.slice(0, BATCH)));
+  await closed.store.drain();
+  check('...and an untagged one is the orphan failure, as before', closed.of('failure').length, 1);
+
+  // The packs are read BEFORE the drop. A live-style flush splits one pack over two
+  // messages; the second, naming the pack by key, is the one that is dropped (as if
+  // it were tagged for a capture that is gone): had it been skipped unread, the
+  // pack's last rows would never be counted and it would stay held for ever.
+  const split = host();
+  split.send({ type: 'open', captureId: TAG });
+  const live = rows.slice(0, 8).map((p) => ({ ...p, rawBytes: new Uint8Array(0) }));
+  const livePack = packRows(7, live, live.map(() => 8));
+  const liveSent = new Map<number, number>();
+  const first = new PackedFlush();
+  for (let i = 0; i < 4; i++) first.packed(livePack, i, null, null);
+  const second = new PackedFlush();
+  for (let i = 4; i < 8; i++) second.packed(livePack, i, null, null);
+  const firstRows = deserialize(serialize(first.seal(liveSent))) as PackedRows;
+  const secondRows = deserialize(serialize(second.seal(liveSent))) as PackedRows;
+  split.send({ type: 'appendBytes', slab: packFrames(rows.slice(0, 8).map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }))) });
+  split.send({ type: 'appendPacked', rows: firstRows, sent: new Uint8Array(4).fill(1) });
+  await split.store.drain();
+  check('a half-read live pack is held (the case under test exists)', heldPacks(split), 1);
+  split.send({ type: 'appendPacked', rows: secondRows, sent: new Uint8Array(4).fill(1), captureId: OTHER });
+  await split.store.drain();
+  check('...and a dropped message that names it still counts its rows: no pack is held', heldPacks(split), 0);
+
+  // The dropped messages left the shared reader clean: a later untagged live-style
+  // flush with a pack of its own still decodes and is written.
+  const later = new PackedFlush();
+  const laterPack = packRows(IMPORT_KEY, rows.slice(8, 16).map((p) => ({ ...p, rawBytes: new Uint8Array(0) })), Array(8).fill(8));
+  for (let i = 0; i < 8; i++) later.packed(laterPack, i, null, null);
+  split.send({ type: 'appendBytes', slab: packFrames(rows.slice(8, 16).map((p) => ({ id: p.id, tsUs: p.tsUs, bytes: p.rawBytes }))) });
+  split.send({ type: 'appendPacked', rows: deserialize(serialize(later.seal(new Map()))) as PackedRows, sent: new Uint8Array(8).fill(1) });
+  split.send({ type: 'finish' });
+  split.send({ type: 'locate', requestId: 1, id: 12 });
+  await split.store.drain();
+  checkTrue('a later untagged live-style appendPacked still decodes and is written',
+    (split.of('located')[0]?.ordinal ?? -1) >= 0 && split.of('failure').length === 0 && heldPacks(split) === 0);
+  for (const h of [reference, written, wrong, closed, split]) h.store.close();
+}
+
 console.log('\n--- packed rows kept in their packs, and decoded (packNative) ---\n');
 
 {

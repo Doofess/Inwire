@@ -149,6 +149,7 @@ import { cancelExportForChange, cancelExportJob } from './services/export/export
 import { getImportJob, IMPORT_RUNNING_REASON, IMPORT_RUNNING_START, useImportJob } from './services/importJob';
 import { beginCaptureStart, CAPTURE_STARTING_REASON, endCaptureStart, useCaptureStarting } from './services/captureStarting';
 import { createImportLifecycle, type ImportEffects } from './services/importLifecycle';
+import { ADOPT_SLICE_ROWS, adoptInSlices } from './lib/adoptSlices';
 import { FilterEngine } from './services/filterEngine';
 import { pushRecentFilter, recentFiltersStore } from './services/recentFilters';
 
@@ -718,6 +719,10 @@ export default function App() {
    * them writing different identities into the same frames.
    */
   const rederiveRef = useRef<(() => void) | null>(null);
+  /** Bumped by each import's adoption, so an older one's remaining slices stop (`adoptSlices.ts`). */
+  const adoptRunRef = useRef(0);
+  /** An import's slices are still going in: the minimap strip waits for the last (`PacketListMinimap`'s `hold`). */
+  const [adopting, setAdopting] = useState(false);
   /** What the capture itself revealed, derived in the Worker and only read here. */
   const [networkFacts, setNetworkFacts] = useState<NetworkFacts>(() => emptyNetworkFacts());
 
@@ -2936,7 +2941,13 @@ export default function App() {
     });
   };
 
-  const handleImportPackets = (imported: Packet[], info?: ImportedInfo) => {
+  /**
+   * Resolves once the list holds every imported row: they are handed over a
+   * slice a task (`adoptSlices.ts`), and the panel awaits this, so the import
+   * job stays running - and every capture-changing action refused - until the
+   * last slice is in. The direction pass starts after it, over the whole buffer.
+   */
+  const handleImportPackets = async (imported: Packet[], info?: ImportedInfo): Promise<void> => {
     setIsCapturing(false);
     setCaptureSource(info
       ? { kind: 'import', fileName: info.filename, ...(info.facts === undefined ? {} : { facts: info.facts }) }
@@ -2970,7 +2981,17 @@ export default function App() {
     // `null` keeps `persistedThroughId` where it was, which is right when the
     // import went nowhere; when it went to disk, everything up to `lastId` is
     // there and a later flush must not write it a second time.
-    adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId), info?.estimates);
+    // The list gets the rows a slice a task (`adoptSlices.ts`): the first here,
+    // with the adoption, the rest after this handler's synchronous part. A newer
+    // import's adoption bumps the run and ends this one's remaining slices.
+    const run = ++adoptRunRef.current;
+    setAdopting(true);
+    const sliced = adoptInSlices(imported, ADOPT_SLICE_ROWS, (prefix, first) => {
+      if (adoptRunRef.current !== run) return false;
+      if (first) adoptBuffer(imported, storedImport === null ? null : Math.floor(lastId), info?.estimates, prefix);
+      else setPackets(prefix);
+      return true;
+    }, () => new Promise<void>((resolve) => { setTimeout(resolve, 0); }));
     pipeline.reset(Math.floor(lastId) + 1);
     // The import's decrypted answers (ADR 0049), from the Worker's `done`: handed
     // to the pipeline only after its reset has emptied its own. Memory only, and
@@ -2991,7 +3012,11 @@ export default function App() {
     // is not in the list any more.
     setSelectedPacket(imported.length > 0 ? imported[0] : null);
 
-    deriveForBuffer(imported);
+    // Over the whole buffer, once the list holds all of it. A newer adoption owns
+    // the strip's hold from here.
+    const whole = await sliced;
+    if (adoptRunRef.current === run) setAdopting(false);
+    if (whole) deriveForBuffer(imported);
   };
 
   /**
@@ -3645,6 +3670,7 @@ export default function App() {
                   resolveNames={nameResolution.network}
                   sourceProcess={sourceProcessFor}
                   packets={filteredPackets}
+                  holdStrip={adopting}
                   // Both arrays, because they mean different things to the row
                   // space: `packets` is what `belowWindow` was measured against
                   // and therefore indexes the capture, `filteredPackets` is what

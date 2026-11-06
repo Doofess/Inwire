@@ -3,19 +3,20 @@
  * 2026-11-05-import-worker-design.md`; the Worker's end is
  * `pipeline/importRun.ts`).
  *
- * The Worker dissects, writes the rows to the capture store over a port of its
- * own and keeps the RAM tail; what it sends the page is what only the page can
- * act on, and this answers each:
+ * The Worker dissects and writes the rows to the capture store over a port of its
+ * own; each batch is packed once and the same pack goes to the store and here, so
+ * the page keeps the RAM tail (`ImportTail`) and the Worker none. What the Worker
+ * sends the page is what only the page can act on, and this answers each:
  *
  * - `secrets`: the page is the one writer of the key log. Add, then ack with the
  *   seq and a fresh snapshot (a page without shared memory has no other way to
  *   hand the keys over); the Worker reads no further until it has.
  * - `opening`: open the capture (awaited, by `deps.onOpening`), then `storeOpen`.
- * - `progress`: report it, and tell the Worker how far the store can supply bytes
- *   (`deps.storedThrough`), so its tail lets go of the rows' own.
- * - `tail`: decode the chunk in this task, yield a task, then `tailTaken`. The
- *   Worker posts the next chunk only after that, so the renderer holds at most
- *   one chunk's bytes twice at the handover, and no task decodes more than one.
+ * - `rows`: decode the batch, push it on the tail with the Worker's sizes. A
+ *   batch is a few hundred rows, so the decode is a short task, and nothing is
+ *   said back.
+ * - `progress`: report it. The tail lets go of the bytes the store can supply
+ *   (`deps.storedThrough`) here and after each `rows`, once the capture is open.
  * - `done` / `failed` / the Worker's `onerror`: the run is over.
  *
  * Every exit - success, failure, a Worker that dies, Cancel - settles `result`
@@ -26,7 +27,7 @@
  * Everything the run touches arrives in `deps`, so a script can drive it with a
  * scripted Worker and no browser.
  */
-import type { Packet } from '../types/packet';
+import { ImportTail } from './importTail';
 import { FieldBlockWriter } from './dissect/fieldSplit';
 import { PackReader } from './pipeline/rowPack';
 import { IMPORT_NAME, type FromImport, type ImportRunOptions, type ToImport } from './pipeline/importProtocol';
@@ -60,13 +61,6 @@ export interface ImportClientDeps {
 const unreadable = (message: string): ImportOutcome => ({ ok: false, failure: { kind: 'unreadable', message } });
 
 /**
- * A task of its own for whatever comes next, so the page can paint and answer
- * input between two tail chunks. A message event is already a task; this is the
- * one after the decode.
- */
-const nextTask = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0); });
-
-/**
  * The decrypted answers as the page will hand them on (`keepDerived` transfers
  * each entry's buffer): every entry its own whole buffer. A view into a shared
  * one, or a repeat of a buffer, would make that transfer list invalid.
@@ -90,11 +84,16 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
   let over = false;
   let worker: WorkerLike | null = null;
   let unsubscribe: (() => void) | null = null;
-  let sentStoredThrough = 0;
   let storeOpened = false;
+  // Not before the capture is open: until then `storedRange` is the PREVIOUS
+  // capture's (this one's `ready` has not arrived), so a stale high answer would
+  // release bytes the store never got. Rows are in id order and the tail releases
+  // only the ones the answer covers, so it is safe to ask again at any time.
+  const release = (): void => {
+    if (storeOpened) tail.releaseBytesThrough(deps.storedThrough());
+  };
   const reader = new PackReader(new FieldBlockWriter());
-  const packets: Packet[] = [];
-  const estimates: number[] = [];
+  const tail = new ImportTail({ residentBytes: deps.options.residentBytes, maxFrames: deps.options.maxFrames });
 
   const finish = (outcome: ImportOutcome): void => {
     if (over) return;
@@ -119,15 +118,7 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
     switch (message.type) {
       case 'progress': {
         deps.onProgress(message.readBytes, message.totalBytes);
-        // Not before the capture is open: until then `storedRange` is the PREVIOUS
-        // capture's (this one's `ready` has not arrived), and the Worker keeps the
-        // highest it is told, so a stale 2M would release bytes the store never got.
-        if (!storeOpened) return;
-        const through = deps.storedThrough();
-        if (through > sentStoredThrough) {
-          sentStoredThrough = through;
-          post({ type: 'storedThrough', id: through });
-        }
+        release();
         return;
       }
       case 'secrets':
@@ -143,20 +134,18 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
           (error: unknown) => finish(unreadable(error instanceof Error ? error.message : String(error))),
         );
         return;
-      case 'tail': {
+      case 'rows':
         try {
-          for (const row of reader.read(message.pack)) packets.push(row);
-          for (const estimate of message.estimates) estimates.push(estimate);
+          tail.push(reader.read(message.pack), message.sizes);
         } catch (error) {
           finish(unreadable(error instanceof Error ? error.message : String(error)));
           return;
         }
-        void nextTask().then(() => post({ type: 'tailTaken' }));
+        release();
         return;
-      }
       case 'done':
         finish({
-          ok: true, packets, notes: [], facts: message.facts, estimates,
+          ok: true, packets: tail.rows(), notes: [], facts: message.facts, estimates: tail.estimates(),
           derived: ownBuffers(message.derived), totalFrames: message.totalFrames, stored: message.built,
         });
         return;

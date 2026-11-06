@@ -33,6 +33,10 @@
  * drops that chunk and reports it, and every earlier row reads back as the
  * other host's.
  *
+ * Two runs per capture are an import Worker's messages instead (`ownBytes`): no
+ * bytes ahead, each row carrying its own in the flush's slab (`sent` 0). They
+ * must read back as the same rows sent as an `append`.
+ *
  * Captures: the `inwire`, `bulk` and `keyLog` fixtures (untracked,
  * `test/fixtures/README.md`; each skipped when absent) and a synthetic one with
  * several TCP streams, TLS with a server name, DNS and ICMP echo, which produce
@@ -58,7 +62,7 @@ import { CaptureIndex, recoverCapture, type ChunkRecord } from '../../src/servic
 import { dataFilesOf, type RawFrame } from '../../src/services/capture/captureWriter';
 import { readExact, type BlockFile } from '../../src/services/capture/blockFile';
 import { decodeDigest } from '../../src/services/conversation/digestCodec';
-import { PackSender, PackedFlush, type RowPack } from '../../src/services/pipeline/rowPack';
+import { PackReader, PackSender, PackedFlush, type RowPack } from '../../src/services/pipeline/rowPack';
 import { overlayOf, type RowOverlay } from '../../src/services/pipeline/rowOverlay';
 import { mergeRowSide } from '../../src/services/pipeline/rowSteps';
 import { RingFiling } from '../../src/services/pipeline/ringFiling';
@@ -150,7 +154,7 @@ interface Log {
  * row is an object. Bytes travel ahead on their own message, so every row goes
  * without them (`sent`).
  */
-function storeLog(capture: Capture, config: Config, decodeRows: boolean): Log {
+function storeLog(capture: Capture, config: Config, decodeRows: boolean, ownBytes = false): Log {
   const merged: Merged[] = [];
   drive(capture, config, { withTrees: false, decodeRows, emit: (m) => { merged.push(m); } });
   if (merged.some((m, i) => m.id !== i + 1)) throw new Error(`${capture.name}: the merge did not emit every id in order`);
@@ -172,7 +176,10 @@ function storeLog(capture: Capture, config: Config, decodeRows: boolean): Log {
         ? { id: m.id, tsUs: input.tsUs, bytes: input.bytes.slice() }
         : { id: m.id, tsUs: input.tsUs, bytes: input.bytes.slice(), ring: part };
     });
-    log.messages.push({ type: 'appendBytes', slab: packFrames(frames) });
+    // `ownBytes`: an import's rows, each carrying its frame's bytes in the flush's
+    // slab, with no bytes ahead of them (`sent` 0), as the import Worker sends them.
+    if (!ownBytes) log.messages.push({ type: 'appendBytes', slab: packFrames(frames) });
+    const bytesOf = (m: Merged): Uint8Array | null => (ownBytes ? capture.inputs[m.id - 1].bytes.slice() : null);
 
     const records = group.filter((m) => m.record !== undefined).map((m) => ({ id: m.id, record: m.record! }));
     if (records.length > 0) log.messages.push({ type: 'appendRecords', frames: records });
@@ -187,7 +194,7 @@ function storeLog(capture: Capture, config: Config, decodeRows: boolean): Log {
       const known = seen.get(ref.pack.key);
       if (known !== undefined && known !== ref.pack) throw new Error(`two packs share key ${ref.pack.key}`);
       if (known === undefined) seen.set(ref.pack.key, ref.pack);
-      flush.packed(ref.pack, ref.index, null, overlay);
+      flush.packed(ref.pack, ref.index, bytesOf(m), overlay);
       anyPacked = true;
       log.packedRows++;
     };
@@ -209,12 +216,14 @@ function storeLog(capture: Capture, config: Config, decodeRows: boolean): Log {
           usePack(m, m.packed.mark === undefined ? null : overlayOf(packet, m.packed.mark));
         } else {
           const whole: Packet = { ...packet, rawBytes: NO_BYTES };
-          flush.object(whole, null);
+          const own = bytesOf(m);
+          if (own !== null) whole.rawBytes = own;
+          flush.object(whole, own);
           objects.push(whole);
           log.objectRows++;
         }
       }
-      flags.push(1);
+      flags.push(ownBytes ? 0 : 1);
       if (m.infoPatches) patches.push(...m.infoPatches);
     }
     if (flags.length > 0) {
@@ -223,7 +232,9 @@ function storeLog(capture: Capture, config: Config, decodeRows: boolean): Log {
         log.packs += rows.packs.length;
         log.messages.push({ type: 'appendPacked', rows, sent: Uint8Array.from(flags) });
       } else {
-        log.messages.push({ type: 'append', packets: objects, bytesSent: true });
+        log.messages.push(ownBytes
+          ? { type: 'append', packets: objects }
+          : { type: 'append', packets: objects, bytesSent: true });
       }
     }
     if (patches.length > 0) {
@@ -348,9 +359,16 @@ type Collected = Awaited<ReturnType<typeof collect>>;
 
 // --- one capture, one configuration ----------------------------------------------------
 
-async function equalityRun(capture: Capture, config: Config, decodeRows: boolean, deep: boolean): Promise<void> {
-  const label = `${capture.name}, ${config.label}${decodeRows ? ', decodeRows' : ''}`;
-  const log = storeLog(capture, config, decodeRows);
+/**
+ * `ownBytes`: the rows carry their own bytes and none went ahead (`sent` 0, an
+ * import Worker's messages); what is read back must also be what the same rows
+ * sent as an `append` write.
+ */
+async function equalityRun(
+  capture: Capture, config: Config, decodeRows: boolean, deep: boolean, ownBytes = false,
+): Promise<void> {
+  const label = `${capture.name}, ${config.label}${decodeRows ? ', decodeRows' : ''}${ownBytes ? ', own bytes' : ''}`;
+  const log = storeLog(capture, config, decodeRows, ownBytes);
   const nativeHost = await replay(log, true);
   const plainHost = await replay(log, false);
   const native = await collect(nativeHost);
@@ -395,6 +413,33 @@ async function equalityRun(capture: Capture, config: Config, decodeRows: boolean
   if (capture.name === 'synthetic') {
     check(`${label}: patches were applied and some were missed (${native.stats.patchesApplied}/${native.stats.patchesMissed})`,
       native.stats.patchesApplied > 0 && log.patches > 0, 'no patch was applied');
+  }
+
+  if (ownBytes) {
+    // The same rows as an `append` carries them: each `appendPacked` read whole
+    // (`PackReader`, overlays and the flush's bytes applied) and sent as the
+    // decoded rows. Same messages in the same order, so the same chunks and patches.
+    const reader = new PackReader();
+    const appended = await replay({
+      ...log,
+      messages: log.messages.map((m): ToCapture => (m.type === 'appendPacked'
+        ? { type: 'append', packets: reader.read(m.rows) }
+        : m)),
+    }, true);
+    const asAppend = await collect(appended);
+    const appendDiff = firstRowDiff(native.rows.flat(), asAppend.rows.flat());
+    check(`${label}: every row reads back as the same rows sent as an append`,
+      appendDiff === '' && native.rows.flat().length === log.frames, appendDiff);
+    let bytesDiffer = asAppend.bytes.size !== native.bytes.size ? 1 : 0;
+    for (const [id, got] of native.bytes) {
+      const other = asAppend.bytes.get(id);
+      if (other === undefined || !sameBytes(got, other)) bytesDiffer++;
+    }
+    check(`${label}: every frame's bytes are those the append wrote`, bytesDiffer === 0, `${bytesDiffer} differ`);
+    check(`${label}: the digest snapshot and the writer's counters are the append's`,
+      same(native.files.digest, asAppend.files.digest) && same(native.stats, asAppend.stats),
+      'the digest or the counters differ');
+    appended.store.close();
   }
 
   if (deep) await reopenRuns(label, nativeHost, plainHost, native, plain);
@@ -626,7 +671,10 @@ async function main(): Promise<void> {
       await equalityRun(capture, CONNECTION(7), false, true);
       await equalityRun(capture, CONNECTION(7, 'N=7, each connection to the next shard', scatter), false, false);
       await equalityRun(capture, CONNECTION(2, 'N=2, all but the first connection on one shard', lopsided), false, false);
-      await equalityRun(capture, CONNECTION(7), true, false);
+      // An import's messages: each row brings its own bytes. Written and read back
+      // as the same rows sent as an append are.
+      await equalityRun(capture, CONNECTION(7), true, false, true);
+      await equalityRun(capture, CONNECTION(2), false, false, true);
     } finally {
       keyLog.clear();
     }

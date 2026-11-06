@@ -99,9 +99,24 @@ export function storeMessagesFor(
 ): ToCapture[] {
   const messages: ToCapture[] = [];
   const tag = captureId === undefined ? {} : { captureId };
-  if (records !== undefined && records.length > 0) {
-    messages.push({ type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })), ...tag });
-  }
+  const recordsMessage = recordsMessageFor(records, captureId);
+  if (recordsMessage !== null) messages.push(recordsMessage);
   if (batch.length > 0) messages.push({ type: 'append', packets: batch.map(plainForStore), ...tag });
   return messages;
+}
+
+/**
+ * The records half of `storeMessagesFor`, alone: an import Worker sends its rows
+ * packed rather than as an `append`, and the records ahead of them are the same
+ * message. `null` when there are none.
+ */
+export function recordsMessageFor(
+  records: readonly { id: number; record: Uint8Array }[] | undefined,
+  captureId?: string,
+): ToCapture | null {
+  if (records === undefined || records.length === 0) return null;
+  return {
+    type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })),
+    ...(captureId === undefined ? {} : { captureId }),
+  };
 }

@@ -91,8 +91,12 @@ export type ToCapture =
    * because an agent's metadata-only frame has none either and was never sent
    * ahead. The host reads every message, even with no capture open, because
    * its cache of half-read packs must count every row it was sent.
+   *
+   * `captureId` is `append`'s rule: an import Worker tags its messages (its port
+   * can outlive its capture), and a tagged message for another capture, or with
+   * none open, is dropped silently after it is read. The live Worker sends none.
    */
-  | { type: 'appendPacked'; rows: PackedRows; sent: Uint8Array }
+  | { type: 'appendPacked'; rows: PackedRows; sent: Uint8Array; captureId?: string }
   /**
    * Frames as they arrived, before anything dissected them, as one columnar
    * `FrameSlab` (#17): five buffers cross the port, not an object a frame.

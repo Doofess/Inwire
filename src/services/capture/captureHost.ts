@@ -611,12 +611,15 @@ export class CaptureHost {
   /**
    * The Worker's rows, shard rows still packed. Read before anything else, with
    * no capture open too: the reader counts the rows left in each pack, and a
-   * message it skipped would leave one held for ever.
+   * message it skipped would leave one held for ever. A message tagged for a
+   * capture that is not the open one (an import Worker's, outliving its capture
+   * by a cancel) is dropped only after that read, as `append` drops it.
    */
   private onAppendPacked(message: Extract<ToCapture, { type: 'appendPacked' }>): void {
     // `rows` feed the digest, decoded; `slots` are what the writer stages - a
     // shard's row stays in its pack there, and is decoded only if it must be.
     const { rows, slots } = this.packs.readSlots(message.rows);
+    if (this.isForAnotherCapture(message.captureId)) return;
     const sent: RowIn[] = [];
     const carrying: RowIn[] = [];
     for (let i = 0; i < slots.length; i++) (message.sent[i] === 1 ? sent : carrying).push(slots[i]);

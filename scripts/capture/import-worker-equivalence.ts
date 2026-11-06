@@ -4,10 +4,11 @@
  *   npx tsx scripts/capture/import-worker-equivalence.ts
  *
  * The import Worker (`importRole.ts`, all of it in `pipeline/importRun.ts`) moves
- * the walk, the batcher, the store writes and the RAM tail off the page. What must
- * not change is anything a person or the store can see: the messages the store is
- * sent, the rows the buffer is left holding, the totals, and the decrypted
- * answers. So each input goes through both routes and they are compared.
+ * the walk, the batcher and the store writes off the page, and packs each batch
+ * once for the store and the page. What must not change is anything a person or
+ * the store can see: the rows and records the store is sent, the rows the buffer
+ * is left holding, the totals, and the decrypted answers. So each input goes
+ * through both routes and they are compared.
  *
  * ## Spike (Task 4, step 1): worker_threads with tsx works
  *
@@ -28,15 +29,18 @@
  *   recorded and the derived answers set from the records.
  * - Worker: `createImportRun` in the thread, this process playing the page (the
  *   one writer of a fresh key log, acking each secrets message with a snapshot;
- *   `storeOpen` after `opening`; `storedThrough` as the store takes rows) and the
- *   store (answering every `bytesTaken`, recording every message).
+ *   `storeOpen` after `opening`; the `rows` messages decoded into an `ImportTail`
+ *   with the Worker's sizes, its bytes released through what the store holds once
+ *   the capture is open) and the store (answering every `bytesTaken`, decoding every
+ *   `appendPacked` with the store's own `PackReader`, recording the records).
  *
- * Compared: the store messages after a structured clone (the store's process
- * boundary), as `canonical` text (every key, prototype names, typed arrays with
+ * Compared: the rows the store is sent, decoded, against the in-process route's
+ * `append` rows, id by id with every scalar, field and byte (`canonicalRow`); the
+ * records, as `canonical` text (every key, prototype names, typed arrays with
  * their buffer's size; `v8.serialize` itself tells an integral double from an
- * integer after a trip through a port, which no one can see), without `captureId`
- * or the empty `appendBytes` only the Worker sends; the tail's rows (every scalar and field; the bytes where
- * both routes still hold them); totals, facts, missed patches; the derived entries.
+ * integer after a trip through a port, which no one can see), without `captureId`;
+ * the page's tail (every scalar and field; the bytes where both routes still
+ * hold them) and its estimates; totals, facts, missed patches; the derived entries.
  * Small `patchWindow`, `batchFrames` and `windowBytes` put the edges in reach of
  * a small file.
  */
@@ -45,7 +49,8 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PackReader } from '../../src/services/pipeline/rowPack';
+import { PackReader, type PackedRows } from '../../src/services/pipeline/rowPack';
+import { ImportTail } from '../../src/services/importTail';
 import { FieldBlockWriter } from '../../src/services/dissect/fieldSplit';
 import { SCORING_FRAMES } from '../../src/services/hostIdentity';
 import { keyLog, KeyLogStore } from '../../src/services/tls/keyLog';
@@ -92,18 +97,24 @@ async function inProcessRoute(blob: Blob, options: ImportRunOptions): Promise<Ro
 }
 
 interface WorkerRouteResult extends RouteResult {
-  /** Appends received untagged or for another capture: none is allowed. */
+  /** Row and record messages received untagged or for another capture: none is allowed. */
   untagged: number;
+  /** `append` messages: the Worker packs, so none is allowed. */
+  plainAppends: number;
+  /** `appendPacked` messages with a `sent` flag set, or with a pack reset: none is allowed. */
+  badPacked: number;
   /** Slabs with frames in them: only empty ones may go to the store. */
   nonEmptySlabs: number;
   appendBytesSeen: number;
   secretsSeen: number;
   /** The most frames the store held received and unanswered at once. */
   peakOutstanding: number;
-  /** The most tail chunks the page held un-acked at once: one is the rule. */
-  tailPeak: number;
-  /** `done` arrivals while a tail chunk was still un-acked. */
-  doneBeforeLastTailTaken: number;
+  /** Every type of message the page sent the Worker. */
+  sentTypes: string[];
+  /** `rows` messages that reached the page. */
+  rowsMessages: number;
+  /** Rows the store had been sent when `done` arrived: all of them, or the barrier is broken. */
+  storeRowsAtDone: number;
 }
 
 /** `ackDelayMs`: how long the fake store sits on each answer, to let a pause show. */
@@ -117,22 +128,47 @@ async function workerRoute(
   // SharedArrayBuffer), whose every snapshot is a copy the Worker must adopt.
   const page = copyMode ? new KeyLogStore({ shared: false }) : keyLog;
   if (!copyMode) keyLog.clear();
-  const send = (msg: ThreadCommand, transfer: TransferListItem[] = []) => thread.postMessage(msg, transfer);
+  const sentTypes = new Set<string>();
+  const send = (msg: ThreadCommand, transfer: TransferListItem[] = []) => {
+    if (msg.kind === 'msg') sentTypes.add(msg.msg.type);
+    thread.postMessage(msg, transfer);
+  };
   const unsubscribe = page.onSnapshot((snapshot) => send({ kind: 'msg', msg: { type: 'keylog-shared', snapshot } }));
 
   const stored: string[] = [];
+  const storeRows: CanonicalRow[] = [];
   const out = {
-    untagged: 0, nonEmptySlabs: 0, appendBytesSeen: 0, secretsSeen: 0, peakOutstanding: 0,
-    tailPeak: 0, doneBeforeLastTailTaken: 0,
+    untagged: 0, plainAppends: 0, badPacked: 0, nonEmptySlabs: 0, appendBytesSeen: 0, secretsSeen: 0,
+    peakOutstanding: 0, rowsMessages: 0,
   };
   const CAPTURE = 'capture-under-test';
-  let tailOpen = 0;
   let outstanding = 0;
   let sinceAnswer = 0;
-  port1.on('message', (m: { type: string; ack?: number; packets?: { id: number }[]; slab?: { ids: Float64Array }; captureId?: string }) => {
+  // The store's one `PackReader`, with no split: its rows are never buffered.
+  const storeReader = new PackReader();
+  // What the store has taken, as the page learns it (`deps.storedThrough`).
+  let storedThrough = 0;
+  let storeOpened = false;
+  let storeRowsAtDone = -1;
+  // The page's end: the rows as the client decodes them, into the tail.
+  const reader = new PackReader(new FieldBlockWriter());
+  const pageTail = new ImportTail({ residentBytes: options.residentBytes, maxFrames: options.maxFrames });
+  port1.on('message', (m: {
+    type: string; ack?: number; rows?: PackedRows; sent?: Uint8Array; slab?: { ids: Float64Array }; captureId?: string;
+  }) => {
     const normal = normalizeStoreMessage(m);
     if (normal !== null) stored.push(normal);
-    if ((m.type === 'append' || m.type === 'appendRecords') && m.captureId !== CAPTURE) out.untagged++;
+    if ((m.type === 'append' || m.type === 'appendPacked' || m.type === 'appendRecords') && m.captureId !== CAPTURE) out.untagged++;
+    if (m.type === 'append') out.plainAppends++;
+    if (m.type === 'appendPacked' && m.rows !== undefined && m.sent !== undefined) {
+      if (m.sent.some((flag) => flag !== 0) || m.rows.packsReset !== undefined) out.badPacked++;
+      const decoded = storeReader.read(m.rows);
+      for (const row of decoded) storeRows.push(canonicalRow(row));
+      outstanding += decoded.length;
+      sinceAnswer += decoded.length;
+      out.peakOutstanding = Math.max(out.peakOutstanding, outstanding);
+      storedThrough = Math.max(storedThrough, decoded[decoded.length - 1].id);
+    }
     if (m.type === 'appendBytes') {
       out.appendBytesSeen++;
       if (m.slab !== undefined && m.slab.ids.length > 0) out.nonEmptySlabs++;
@@ -146,17 +182,8 @@ async function workerRoute(
         }, ackDelayMs);
       }
     }
-    if (m.type === 'append' && m.packets !== undefined && m.packets.length > 0) {
-      outstanding += m.packets.length;
-      sinceAnswer += m.packets.length;
-      out.peakOutstanding = Math.max(out.peakOutstanding, outstanding);
-      send({ kind: 'msg', msg: { type: 'storedThrough', id: m.packets[m.packets.length - 1].id } });
-    }
   });
 
-  const reader = new PackReader(new FieldBlockWriter());
-  const rows: CanonicalRow[] = [];
-  const estimates: number[] = [];
   try {
     const done = await withTimeout(new Promise<Extract<FromImport, { type: 'done' }>>((resolve, reject) => {
       thread.on('error', reject);
@@ -175,35 +202,34 @@ async function workerRoute(
             }, 50);
             return;
           case 'opening':
+            storeOpened = true;
             send({ kind: 'msg', msg: { type: 'storeOpen', captureId: CAPTURE } });
             return;
-          case 'tail':
-            tailOpen++;
-            out.tailPeak = Math.max(out.tailPeak, tailOpen);
-            for (const row of reader.read(msg.pack)) rows.push(canonicalRow(row));
-            estimates.push(...msg.estimates);
-            // The page is a little slow to take it: a Worker that posts the next
-            // chunk without waiting would have two in flight by now.
-            setTimeout(() => {
-              tailOpen--;
-              send({ kind: 'msg', msg: { type: 'tailTaken' } });
-            }, 5);
+          case 'rows':
+            // The client's own steps: decode, push with the Worker's sizes, and let
+            // go of the bytes the store holds - only once the capture is open.
+            out.rowsMessages++;
+            pageTail.push(reader.read(msg.pack), msg.sizes);
+            if (storeOpened) pageTail.releaseBytesThrough(storedThrough);
+            return;
+          case 'progress':
+            if (storeOpened) pageTail.releaseBytesThrough(storedThrough);
             return;
           case 'done':
-            if (tailOpen > 0) out.doneBeforeLastTailTaken++;
+            storeRowsAtDone = storeRows.length;
             resolve(msg);
             return;
           case 'failed': reject(new Error(`the Worker failed: ${msg.message}`)); return;
-          case 'progress': return;
         }
       });
       send({ kind: 'msg', msg: { type: 'keylog-shared', snapshot: page.share() } });
       send({ kind: 'msg', msg: { type: 'start', file: blob, fileName: 'input', options }, port: port2 }, [port2]);
     }), 'Worker route');
     return {
-      messages: stored, rows, estimates,
+      messages: stored, storeRows, rows: pageTail.rows().map(canonicalRow), estimates: [...pageTail.estimates()],
       totalFrames: done.totalFrames, built: done.built, missedPatches: done.missedPatches,
       facts: JSON.stringify(done.facts), derived: derivedHex(done.derived),
+      storeRowsAtDone, sentTypes: [...sentTypes].sort(),
       ...out,
     };
   } finally {
@@ -213,9 +239,39 @@ async function workerRoute(
   }
 }
 
+/**
+ * Two lists of rows, row by row. With `strictBytes` both must hold each row's
+ * bytes (the store's rows); without, bytes are compared only where both still do
+ * (a tail lets go of old rows' bytes as the store takes them).
+ */
+function sameRows(a: CanonicalRow[], b: CanonicalRow[], strictBytes: boolean) {
+  let equal = a.length === b.length;
+  let firstDifference: unknown;
+  let bytesCompared = 0;
+  for (let i = 0; equal && i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    const both = x.raw.length > 0 && y.raw.length > 0;
+    if (both) bytesCompared++;
+    if (x.scalars !== y.scalars || x.fields !== y.fields || ((both || strictBytes) && x.raw !== y.raw)) {
+      equal = false;
+      // Names of the keys that differ, never values: a private capture's rows hold addresses.
+      const keysOf = (json: string) => JSON.parse(json) as Record<string, unknown>;
+      const [sx, sy] = [keysOf(x.scalars), keysOf(y.scalars)];
+      firstDifference = {
+        row: i, raw: x.raw === y.raw,
+        scalarKeys: [...new Set([...Object.keys(sx), ...Object.keys(sy)])]
+          .filter((k) => JSON.stringify(sx[k]) !== JSON.stringify(sy[k])),
+        fieldsEqual: x.fields === y.fields,
+      };
+    }
+  }
+  return { equal, firstDifference, bytesCompared };
+}
+
 /** Both routes on one file, compared. */
 async function compare(
-  label: string, file: string, shape: Pick<SyntheticInput, 'maxFrames' | 'tailChunkRows' | 'opaqueId' | 'decryptedId'>,
+  label: string, file: string, shape: Pick<SyntheticInput, 'maxFrames' | 'opaqueId' | 'decryptedId'>,
   requireDerived: boolean, copyMode = false,
 ): Promise<void> {
   const blob = new Blob([readFileSync(file)]);
@@ -227,7 +283,6 @@ async function compare(
     patchWindow: 64,
     batchFrames: 50,
     windowBytes: 64 * 1024,
-    tailChunkRows: shape.tailChunkRows,
   };
   const base = await inProcessRoute(blob, options);
   if (requireDerived) {
@@ -247,46 +302,42 @@ async function compare(
   }
   const worker = await workerRoute(blob, options, 0, copyMode);
 
+  // The store is sent the same records, and the same rows: the Worker packs them
+  // (`appendPacked`), the in-process route sends `append`, so the Worker's are
+  // decoded here with the store's own reader and compared id by id, bytes included.
   const firstMessageDifference = base.messages.findIndex((m, i) => m !== worker.messages[i]);
-  pass(`${label}: store messages equal (${base.messages.length})`,
+  pass(`${label}: store records equal (${base.messages.length} messages)`,
     base.messages.length === worker.messages.length && firstMessageDifference === -1,
     { inProcess: base.messages.length, worker: worker.messages.length, firstDifference: firstMessageDifference });
-  pass(`${label}: every append is tagged with the open capture, and only empty slabs are sent`,
-    worker.untagged === 0 && worker.nonEmptySlabs === 0 && worker.appendBytesSeen > 0,
-    { untagged: worker.untagged, nonEmptySlabs: worker.nonEmptySlabs, appendBytesSeen: worker.appendBytesSeen });
+  pass(`${label}: every row and record message is tagged, rows are packed with their own bytes, and only empty slabs are sent`,
+    worker.untagged === 0 && worker.plainAppends === 0 && worker.badPacked === 0
+    && worker.nonEmptySlabs === 0 && worker.appendBytesSeen > 0,
+    {
+      untagged: worker.untagged, plainAppends: worker.plainAppends, badPacked: worker.badPacked,
+      nonEmptySlabs: worker.nonEmptySlabs, appendBytesSeen: worker.appendBytesSeen,
+    });
+  const stored = sameRows(base.storeRows, worker.storeRows, true);
+  pass(`${label}: the rows the store is sent are equal, id by id, bytes included (${base.storeRows.length} rows)`,
+    stored.equal && base.storeRows.length > 0 && stored.bytesCompared === base.storeRows.length,
+    stored.firstDifference ?? { inProcess: base.storeRows.length, worker: worker.storeRows.length });
+  pass(`${label}: every row was at the store when \`done\` arrived (the barrier)`,
+    worker.storeRowsAtDone === base.totalFrames, { atDone: worker.storeRowsAtDone, total: base.totalFrames });
 
-  let rowsEqual = base.rows.length === worker.rows.length && base.rows.length > 0;
-  let firstDifference: unknown;
-  let bothHeldBytes = 0;
-  for (let i = 0; rowsEqual && i < base.rows.length; i++) {
-    const a = base.rows[i];
-    const b = worker.rows[i];
-    const bytesCompared = a.raw.length > 0 && b.raw.length > 0;
-    if (bytesCompared) bothHeldBytes++;
-    if (a.scalars !== b.scalars || a.fields !== b.fields || (bytesCompared && a.raw !== b.raw)) {
-      rowsEqual = false;
-      // Names of the keys that differ, never values: a private capture's rows hold addresses.
-      const keysOf = (json: string) => JSON.parse(json) as Record<string, unknown>;
-      const [sa, sb] = [keysOf(a.scalars), keysOf(b.scalars)];
-      firstDifference = {
-        row: i, raw: a.raw === b.raw,
-        scalarKeys: [...new Set([...Object.keys(sa), ...Object.keys(sb)])]
-          .filter((k) => JSON.stringify(sa[k]) !== JSON.stringify(sb[k])),
-        fieldsEqual: a.fields === b.fields,
-      };
-    }
-  }
-  pass(`${label}: tail rows equal (${base.rows.length} rows, bytes compared on ${bothHeldBytes})`, rowsEqual && bothHeldBytes > 0,
-    firstDifference ?? { inProcess: base.rows.length, worker: worker.rows.length });
+  // The page's tail, built from the `rows` messages as the client builds it.
+  const tail = sameRows(base.rows, worker.rows, false);
+  pass(`${label}: tail rows equal (${base.rows.length} rows, bytes compared on ${tail.bytesCompared})`,
+    tail.equal && base.rows.length > 0 && tail.bytesCompared > 0,
+    tail.firstDifference ?? { inProcess: base.rows.length, worker: worker.rows.length });
   pass(`${label}: tail estimates equal`,
     JSON.stringify(base.estimates) === JSON.stringify(worker.estimates));
   pass(`${label}: totals/facts/missedPatches equal (${base.totalFrames} frames, ${base.missedPatches} missed)`,
     base.totalFrames === worker.totalFrames && base.built === worker.built
     && base.missedPatches === worker.missedPatches && base.facts === worker.facts && base.totalFrames > 0,
     { base: [base.totalFrames, base.built, base.missedPatches], worker: [worker.totalFrames, worker.built, worker.missedPatches] });
-  pass(`${label}: one tail chunk in flight at a time, and done after the last is taken`,
-    worker.tailPeak === 1 && worker.doneBeforeLastTailTaken === 0,
-    { tailPeak: worker.tailPeak, doneBeforeLastTailTaken: worker.doneBeforeLastTailTaken });
+  pass(`${label}: the page sent the Worker only the key log, the start, secrets acks and storeOpen`,
+    worker.sentTypes.every((type) => ['keylog-shared', 'start', 'secretsTaken', 'storeOpen'].includes(type))
+    && worker.sentTypes.includes('storeOpen') && worker.rowsMessages > 0,
+    worker.sentTypes);
   pass(`${label}: derived equal (${base.derived.length} entries)`,
     JSON.stringify(base.derived) === JSON.stringify(worker.derived));
   if (label.startsWith('tls')) {
@@ -336,7 +387,7 @@ try {
   const found = existsSync(dir) ? readdirSync(dir).filter(wanted).sort() : [];
   if (found.length === 0) console.log('SKIP  private fixtures: none under test/fixtures/');
   for (const [i, name] of found.entries()) {
-    await compare(`fixture ${i + 1}`, join(dir, name), { maxFrames: 30_000, tailChunkRows: 7_000 }, false);
+    await compare(`fixture ${i + 1}`, join(dir, name), { maxFrames: 30_000 }, false);
   }
 } finally {
   rmSync(scratch, { recursive: true, force: true });

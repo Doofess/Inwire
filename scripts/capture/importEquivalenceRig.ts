@@ -83,17 +83,23 @@ export function canonical(value: unknown): string {
 /**
  * A store message minus what is allowed to differ between the routes: the tag, and
  * the credit/barrier slabs, which only the Worker route sends. `null` for a message
- * that is not part of the comparison.
+ * that is not part of the comparison. The rows are not compared here: the in-process
+ * route sends them as `append` and the Worker route as `appendPacked`, so each is
+ * decoded to rows (`canonicalRow`) and compared id by id.
  */
 export function normalizeStoreMessage(message: unknown): string | null {
   const copy = structuredClone(message) as { type: string; captureId?: string };
-  if (copy.type === 'appendBytes') return null;
+  if (copy.type === 'appendBytes' || copy.type === 'append' || copy.type === 'appendPacked') return null;
   delete copy.captureId;
   return canonical(copy);
 }
 
 export interface RouteResult {
+  /** The store messages that are not rows (the records), normalized, in order. */
   messages: string[];
+  /** Every row the store was sent, in order, bytes included. */
+  storeRows: CanonicalRow[];
+  /** The page's tail at the end. */
   rows: CanonicalRow[];
   estimates: number[];
   totalFrames: number;
@@ -119,10 +125,12 @@ export type ThreadCommand =
  */
 async function inProcess(blob: Blob, options: ImportRunOptions): Promise<RouteResult> {
   const messages: string[] = [];
+  const storeRows: CanonicalRow[] = [];
   const tail = new ImportTail({ residentBytes: options.residentBytes, maxFrames: options.maxFrames });
   const derived = new DerivedStore(options.derivedBudget);
   const outcome = await PcapService.streamCaptureFile(blob as File, (batch, records) => {
     for (const message of storeMessagesFor(batch, records)) {
+      if (message.type === 'append') for (const row of message.packets) storeRows.push(canonicalRow(row));
       const normal = normalizeStoreMessage(message);
       if (normal !== null) messages.push(normal);
     }
@@ -137,6 +145,7 @@ async function inProcess(blob: Blob, options: ImportRunOptions): Promise<RouteRe
   });
   return {
     messages,
+    storeRows,
     rows: tail.rows().map(canonicalRow),
     // As `adoptAccounting` takes them: the finished rows' own estimates.
     estimates: tail.rows().map(estimateSummaryBytes),
@@ -307,7 +316,6 @@ export interface SyntheticInput {
   bytes: Uint8Array;
   /** Rows a tail of this input should be trimmed to, so the trimming is exercised. */
   maxFrames: number;
-  tailChunkRows: number;
   /** Frame ids (1-based) of a TLS record before the secrets block, and of one after it. */
   opaqueId?: number;
   decryptedId?: number;
@@ -356,9 +364,8 @@ export function tlsWithDsbInput(fillerFrames = 0): SyntheticInput {
       ? 'a pcapng with TLS 1.3 and a DSB the main pass reaches, past host inference\'s prefix'
       : 'a pcapng with TLS 1.3 and a DSB inside host inference\'s prefix',
     bytes: concat(parts),
-    // The tail keeps every TLS frame (twelve rows), in chunks of four.
+    // The tail keeps every TLS frame (twelve rows).
     maxFrames: 12,
-    tailChunkRows: 4,
     // Only when the main pass reaches the block. Inside the prefix the block is
     // handed over before any frame is dissected (as it is today), so a record
     // "before" it decrypts too, in both routes.
@@ -403,5 +410,5 @@ export function dnsTcpInput(): SyntheticInput {
     if (i % 25 === 24) ack += 1; // a duplicate and an out-of-step ack for the analysis
   }
   frames.push(icmpEcho(0, 7, 1));
-  return { name: 'a classic pcap with DNS, TCP and a late ICMP reply', bytes: pcapOf(frames), maxFrames: 40, tailChunkRows: 15 };
+  return { name: 'a classic pcap with DNS, TCP and a late ICMP reply', bytes: pcapOf(frames), maxFrames: 40 };
 }
