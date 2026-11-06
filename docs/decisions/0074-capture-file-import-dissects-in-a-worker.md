@@ -56,13 +56,20 @@ about 4 GB. The pause is checked between batches, so a batch larger than the
 byte credit still goes. Before `done` it sends one empty acked
 `appendBytes`: the ingest port's replies are ordered, so the ack means every
 earlier append has landed. Stop's rule (drain, await writes, then seal) is kept.
+*Amended 2026-11-06:* the page has a credit too. The Worker keeps at most
+`IMPORT_ROWS_IN_FLIGHT` (8) `rows` messages unanswered, the page answers each
+with `rowsTaken` once it has decoded it, and everything after a held `rows`
+waits behind it in order (`src/services/importCredit.ts`). The walk's pause
+checks the store's credit, then the page's: held rows are renderer-process
+memory as the page's port queue was (#19), so an import goes no faster than
+the page decodes.
 
 **Pack once.** Each batch is packed once (`packRows` into a self-sealed
 `PackedFlush`). The same pack goes to the store as a tagged `appendPacked`
 (cloned, with the sent bytes all 0: the rows carry their own) and to the page
 (transferred) with that batch's push-time size estimates. The page keeps the
-`ImportTail`, trimmed by the buffer budget as before. Nothing comes back after
-the walk; `done` carries totals, facts, missed patches and the decrypted
+`ImportTail`, trimmed by the buffer budget as before. Apart from each batch's
+`rowsTaken`, nothing comes back after the walk; `done` carries totals, facts, missed patches and the decrypted
 answers. The first design returned the tail from the Worker after the walk:
 about 14 s serial, held twice, and failed the gate.
 
@@ -163,7 +170,9 @@ matched the in-process import on all 2,410,416 frames: rows, bytes and records.
   `KeyLogStore.add` for a large Decryption Secrets Block, and the adoption
   slices (a task each, measured 148-193 ms at 250,000 rows, so 150,000).
 - Two copies of a batch exist briefly: the clone in the store's queue and the
-  page's tail. The Worker keeps neither.
+  page's tail. The Worker keeps neither, past the page's credit of eight.
+- A page that decodes slower than the Worker dissects sets the import's pace
+  (amended 2026-11-06); the Worker no longer runs ahead of it.
 - The Worker lives in the renderer process, so its heap counts against the Tab's
   private bytes, which the gate measures, not the page heap alone.
 - A cancelled import leaves its secrets in the key log, as before.
