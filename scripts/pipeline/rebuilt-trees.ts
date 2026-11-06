@@ -131,6 +131,14 @@ const tree = (): ProtocolLayer[] => [{ name: 'Frame', summary: '', fields: [] }]
     /rebuiltTrees\.begin\(/.test(worker) && /rebuiltTrees\.keep\(/.test(worker));
   check('the Worker\'s rebuild adds the fingerprint row', /addMatchRow\(/.test(worker));
   check('...and keeps no rebuilt-tree map of its own', !/revisitedTrees/.test(worker));
+  // A new buffer from the page is not always new keys: a reserve moves the
+  // same content to a bigger buffer and keeps the generation. The trees go
+  // only when the generation moved (or on a Clear, which also moves it).
+  const shared = worker.slice(worker.indexOf("case 'keylog-shared':"));
+  const sharedCase = shared.slice(0, shared.indexOf('break;'));
+  check('a keylog-shared snapshot syncs the rebuilt trees by generation...',
+    /syncRebuiltTrees\(\)/.test(sharedCase) && sharedCase.indexOf('keyLog.adopt(') < sharedCase.indexOf('syncRebuiltTrees()'));
+  check('...rather than dropping them on every new buffer', !/clearRebuiltTrees\(\)/.test(sharedCase));
 }
 
 console.log(failures === 0 ? '\nAll rebuilt-trees checks passed.' : `\n${failures} check(s) FAILED`);

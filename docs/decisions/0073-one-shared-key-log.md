@@ -214,13 +214,23 @@ of doubling at every overflow. `KeyLogTable#reserve(textBytes)` moves to one
 buffer whose regions are at least `capacityFor(textBytes)`; it never shrinks,
 never bumps the generation, and on a reservation too big to allocate keeps the
 current table and returns false. `KeyLogStore#reserve` posts the new buffer as
-a growth does. Every writer learns the length first:
+a growth does. Every writer learns the length first, and a file the user
+picked reserves only once it has proven to be a key log: the first piece of
+its text added unsized, the reserve made when that piece yielded a secret. A
+file that is not a key log (a pcap picked through "All files") then costs
+nothing, where reserving up front held up to ~280 MB until Clear; a real log
+pays one small growth of the empty table before its one move.
 
 - **Following.** Before each read from the top, main pushes one status with
-  `incomingBytes` (`electron/keyLogFollower.ts`); the page reserves before it
-  notifies. A tail read announces nothing: it is a browser's few new lines.
-- **The panel's Load.** `loadKeyLogFile` reserves `min(file size, cap)`.
-- **A Decryption Secrets Block.** `addKeyLogText` reserves the text's length,
+  `incomingBytes` (`electron/keyLogFollower.ts`). The page keeps it as
+  pending and reserves at the first text of that read that adds a secret; the
+  plain status main pushes at the end of every read drops what is pending. A
+  tail read announces nothing: it is a browser's few new lines.
+- **The panel's Load.** `loadKeyLogFile` reserves `min(file size, cap)` after
+  the first chunk that adds a secret. A Load of the file already followed adds
+  none, and the table already has the room.
+- **A Decryption Secrets Block.** A key log by declaration, so `addKeyLogText`
+  reserves the text's length up front,
   then adds newline-aligned pieces of at most 8 MiB. It runs on the page, both
   for the import Worker's `secrets` message (0074) and for the in-process
   walk's default; the import protocol is unchanged.

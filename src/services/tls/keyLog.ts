@@ -156,8 +156,9 @@ export class KeyLogStore {
    * Makes room for a key log of `textBytes` before its text arrives, so the
    * buffer moves once instead of at every overflow: each move leaves the old
    * buffer in every reader until that reader next collects, and an idle shard
-   * does not. Called with what main is about to send (`keyLogFollow`), a
-   * file's size (`loadKeyLogFile`), and a Decryption Secrets Block's length.
+   * does not. Called with what main is about to send (`keyLogFollow`) and a
+   * file's size (`loadKeyLogFile`), each once text has added a secret, and with
+   * a Decryption Secrets Block's length.
    * Absolute, so a second call for the same length does nothing.
    */
   public reserve(textBytes: number): void {

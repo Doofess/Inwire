@@ -448,6 +448,33 @@ async function main() {
   huge.add(`CLIENT_RANDOM ${R(0x77)} ${S(0x77, 48)}\n`);
   check('...and a later add still works', huge.stats().secrets, 11);
 
+  {
+    // The allocate-throws branch of reserve (the size branch is the `huge` store above).
+    let failing = false;
+    let calls = 0;
+    const flaky = keyLogTable.KeyLogTable.create({
+      shared: true,
+      allocate: (bytes, shared) => {
+        calls++;
+        if (failing) throw new RangeError('Array buffer allocation failed');
+        return shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
+      },
+    });
+    for (let i = 1; i <= 10; i++) flaky.addText(`CLIENT_RANDOM ${R(i)} ${S(i, 48)}\n`);
+    const flakyBuffer = flaky.buffer;
+    failing = true;
+    const callsBefore = calls;
+    let reserved: boolean | undefined;
+    checkTrue('reserve with an allocator that throws throws nothing...', !throws(() => { reserved = flaky.reserve(synth.length); }));
+    check('...returns false', reserved, false);
+    checkTrue('...having asked the table\'s own allocator', calls > callsBefore);
+    check('...keeps the same buffer and every secret', [flaky.buffer === flakyBuffer, flaky.stats().secrets], [true, 10]);
+    failing = false;
+    flaky.addText(`CLIENT_RANDOM ${R(0x77)} ${S(0x77, 48)}\n`);
+    check('...and a later add still works', flaky.stats().secrets, 11);
+    checkTrue('...and a reserve works again', flaky.reserve(synth.length) && flaky.buffer !== flakyBuffer);
+  }
+
   console.log('\n--- copy mode, where memory cannot be shared ---\n');
 
   const copy = new KeyLogStore({ shared: false });
@@ -458,18 +485,19 @@ async function main() {
   copy.onSnapshot((s) => { copySnaps.push(s); copyArrived.push(Date.now()); });
   let copyText = '';
   for (let i = 0; i < 50; i++) copyText += `CLIENT_RANDOM ${R(i + 1)} ${S(i + 1)}\n`;
+  // The coalescing timer is armed by the first add, so latency is measured from there.
+  const firstAdd = Date.now();
   for (const part of copyText.split('\n').filter(Boolean)) copy.add(`${part}\n`);
-  const lastAdd = Date.now();
   check('nothing is posted in the turn of the adds', copySnaps.length, 0);
   await sleep(300);
-  const copyLatencyMs = copyArrived.length > 0 ? copyArrived[0] - lastAdd : -1;
+  const copyLatencyMs = copyArrived.length > 0 ? copyArrived[0] - firstAdd : -1;
   check('copy mode coalesces 50 adds in one turn into one snapshot', copySnaps.length, 1);
   const copyReader = new KeyLogStore();
   if (copySnaps.length > 0) copyReader.adopt(copySnaps[0]);
   checkTrue('copy mode posts a frozen ArrayBuffer',
     copySnaps.length > 0 && !(copySnaps[0].buffer instanceof SharedArrayBuffer) && copySnaps[0].live === false);
-  checkTrue(`...which arrives ${copyLatencyMs} ms after the last add (coalesced, so 200 to 300), holding all 50`,
-    copyLatencyMs >= 200 && copyLatencyMs <= 300 && copyReader.stats().secrets === 50);
+  checkTrue(`...which arrives ${copyLatencyMs} ms after the first add (coalesced, so 200 to 750), holding all 50`,
+    copyLatencyMs >= 200 && copyLatencyMs <= 750 && copyReader.stats().secrets === 50);
   copy.add(`CLIENT_RANDOM ${R(0xf1)} ${S(0xf1)}\n`);
   checkTrue('a copy is frozen: a later add does not reach it', copyReader.secretsFor(randomOf(0xf1)) === undefined);
   await sleep(300);

@@ -1796,8 +1796,11 @@ function handleCommand(event: MessageEvent<ToPipeline>): void {
         derivedStore.clear();
       }
       // A rebuilt tree read the key log as it was; with more keys, the same
-      // frame may now decrypt. Arrival's cache stays, as ADR 0045 records.
-      clearRebuiltTrees();
+      // frame may now decrypt. A new buffer is not always new keys: a
+      // `reserve` moves the same content and keeps the generation, while an
+      // add or a Clear moves it, so the generation decides. Arrival's cache
+      // stays, as ADR 0045 records.
+      syncRebuiltTrees();
       // Every shard adopts it too (it keeps no trees).
       parallel?.coordinator.broadcast({ type: 'keylogShared', snapshot: command.snapshot });
       break;

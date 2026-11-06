@@ -32,7 +32,11 @@ export interface KeyLogFollowStatus {
   capBytes: number;
   suggested: string | null;
   error?: string;
-  /** Bytes main is about to send; 0 when the status does not announce a read. */
+  /**
+   * Bytes main is about to send; 0 when the status does not announce a read.
+   * Kept pending, not reserved: the table is sized once the read's first text
+   * has added a secret.
+   */
   incomingBytes: number;
 }
 
@@ -84,17 +88,27 @@ export function startKeyLogFollow(): void {
 
   // Subscribed BEFORE attaching, because attaching is what makes main send the
   // whole file from the top - a listener registered after would miss it.
+  // What the last status announced, until text has proven it a key log.
+  let pendingReserve = 0;
   bridge.onKeyLogText((text) => {
     // The page is the store's only writer; the Worker and its shards read the
     // same buffer, so there is nothing more to send.
+    const before = keyLog.stats().secrets;
     keyLog.add(text);
+    // Size the table once text has proven a key log, so it moves once and a
+    // file that is not one sets nothing aside.
+    if (pendingReserve > 0 && keyLog.stats().secrets > before) {
+      keyLog.reserve(pendingReserve);
+      pendingReserve = 0;
+    }
     notify();
   });
   bridge.onKeyLogStatus((value) => {
     const next = narrowStatus(value);
     if (next !== null) {
-      // Size the table before the text it is for, so it moves once.
-      if (next.incomingBytes > 0) keyLog.reserve(next.incomingBytes);
+      // Pending belongs to the one read it announced: main pushes a plain
+      // status at the end of every read, which replaces it.
+      pendingReserve = next.incomingBytes;
       status = next;
       notify();
     }

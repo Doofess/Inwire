@@ -142,6 +142,8 @@ export interface KeyLogTableOptions {
   maxSecrets?: number;
   /** The generation the new table starts at; a clear carries the old one over, plus one. */
   generation?: number;
+  /** A test seam: makes the table's buffers, and so can fail the way a real allocation does. Defaults to `allocate`. */
+  allocate?: (bytes: number, shared: boolean) => ArrayBuffer | SharedArrayBuffer;
 }
 
 const HEX_VALUE = new Int8Array(128).fill(-1);
@@ -243,17 +245,23 @@ export class KeyLogTable {
   private readonly rnd = new Uint8Array(RANDOM_BYTES);
   private readonly sec = new Uint8Array(MAX_SECRET_BYTES);
 
-  private constructor(readOnly: boolean, shared: boolean, maxSecrets: number) {
+  private readonly allocate: (bytes: number, shared: boolean) => ArrayBuffer | SharedArrayBuffer;
+
+  private constructor(
+    readOnly: boolean, shared: boolean, maxSecrets: number,
+    allocator: (bytes: number, shared: boolean) => ArrayBuffer | SharedArrayBuffer = allocate,
+  ) {
     this.readOnly = readOnly;
     this.shared = shared;
     this.maxSecrets = maxSecrets;
+    this.allocate = allocator;
   }
 
   /** A new, empty, writable table. */
   public static create(options: KeyLogTableOptions): KeyLogTable {
-    const table = new KeyLogTable(false, options.shared, options.maxSecrets ?? MAX_KEYLOG_SECRETS);
+    const table = new KeyLogTable(false, options.shared, options.maxSecrets ?? MAX_KEYLOG_SECRETS, options.allocate);
     const l = layoutFor(INITIAL_CONNS, INITIAL_RECS, INITIAL_ARENA);
-    const buffer = allocate(l.total, options.shared);
+    const buffer = table.allocate(l.total, options.shared);
     const hdr = new Int32Array(buffer, 0, HEADER_INTS);
     hdr[H.MAGIC] = MAGIC;
     hdr[H.VERSION] = VERSION;
@@ -548,7 +556,7 @@ export class KeyLogTable {
     const l = layoutFor(cc, rc, ac);
     if (l.total > MAX_BUFFER_BYTES) return false;
     let buffer: ArrayBuffer | SharedArrayBuffer;
-    try { buffer = allocate(l.total, this.shared); } catch { return false; }
+    try { buffer = this.allocate(l.total, this.shared); } catch { return false; }
 
     const nu8 = new Uint8Array(buffer);
     const oldSlotCap = old[H.SLOT_CAP];

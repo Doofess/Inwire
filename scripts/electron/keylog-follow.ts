@@ -25,7 +25,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { narrowStatus, startKeyLogFollow } from '../../src/lib/keyLogFollow';
-import { keyLog } from '../../src/services/tls/keyLog';
+import { keyLog, KeyLogStore } from '../../src/services/tls/keyLog';
 import { KEYLOG_CAP_BYTES } from '../../src/services/tls/keyLogLimits';
 import { writeSyntheticKeyLog } from './syntheticKeyLog';
 
@@ -169,6 +169,11 @@ check('...absent, negative, NaN, infinite or not a number is 0',
   const push = readNew.indexOf('this.incoming = ');
   const spans = readNew.indexOf('readSpans(');
   checkTrue('the follower pushes incomingBytes before reading spans', push >= 0 && spans >= 0 && push < spans);
+  const following = readNew.indexOf("this.state = 'following'");
+  checkTrue('...after setting state following, so the announcing status never shows a stale state',
+    following >= 0 && following < push);
+  const errorCleared = readNew.indexOf('this.error = undefined');
+  checkTrue('...and after clearing the error', errorCleared >= 0 && errorCleared < push);
   checkTrue('...and takes skipped from planFromTop', /this\.skipped = top\.skipped/.test(src));
   checkTrue('...and spreads incomingBytes into status only while set', /incomingBytes/.test(src.slice(0, src.indexOf('attach(contents'))));
 }
@@ -244,15 +249,23 @@ checkTrue('...and it is `{ path }` and nothing else',
   writes[0] !== undefined && /JSON\.stringify\(\{\s*path:\s*this\.file\s*\}\)/.test(writes[0]));
 
 async function pageSide(): Promise<void> {
-  console.log('\n--- the page reserves before the first piece arrives ---\n');
+  console.log('\n--- the page reserves once the first piece has proven a key log ---\n');
   const dir = mkdtempSync(join(tmpdir(), 'inwire-keylog-presize-'));
   const file = join(dir, 'synthetic.txt');
   const handlers: { text?: (text: string) => void; status?: (value: unknown) => void } = {};
   const g = globalThis as { window?: unknown };
   const previous = g.window;
   try {
-    await writeSyntheticKeyLog(file, 8_000);
+    const written = await writeSyntheticKeyLog(file, 8_000);
     const text = readFileSync(file, 'latin1');
+    // Whole lines only, as main sends them (`LineAssembler`).
+    const pieces: string[] = [];
+    for (let at = 0; at < text.length;) {
+      let end = Math.min(text.length, at + (1 << 20));
+      if (end < text.length) end = text.lastIndexOf('\n', end - 1) + 1;
+      pieces.push(text.slice(at, end));
+      at = end;
+    }
     g.window = {
       inwire: {
         attachKeyLog: () => new Promise(() => { /* never answers: the handlers are what is under test */ }),
@@ -266,12 +279,37 @@ async function pageSide(): Promise<void> {
     let snapshots = 0;
     const off = keyLog.onSnapshot(() => { snapshots++; });
     handlers.status!({ state: 'following', incomingBytes: text.length });
-    check('a status with incomingBytes posts one snapshot', snapshots, 1);
-    const before = snapshots;
-    for (let at = 0; at < text.length; at += 1 << 20) handlers.text!(text.slice(at, at + (1 << 20)));
-    check('...and the pieces post none', snapshots - before, 0);
-    checkTrue('...and the secrets all arrived', keyLog.stats().secrets > 40_000);
+    check('a status with incomingBytes posts nothing: it is only pending', snapshots, 0);
+    checkTrue('the log is several pieces', pieces.length > 1);
+    handlers.text!(pieces[0]);
+    checkTrue('the first piece proves a key log: the table grows and is then reserved', snapshots >= 1);
+    const afterFirst = snapshots;
+    for (let i = 1; i < pieces.length; i++) handlers.text!(pieces[i]);
+    check('...and the pieces after it post none', snapshots - afterFirst, 0);
+    check('...and every secret arrived', keyLog.stats().secrets, written.lines);
+    const reservedSize = keyLog.share().buffer.byteLength;
+    const sized = new KeyLogStore();
+    sized.reserve(text.length);
+    const upFront = sized.share().buffer.byteLength;
+    check('...in a table the size an up-front reserve for the log makes', reservedSize, upFront);
     off();
+
+    // A status announcing a large read followed by text that is not a key log.
+    keyLog.clear();
+    handlers.status!({ state: 'following', incomingBytes: 300 * (1 << 20) });
+    const junk = 'not a key log line, just words\n'.repeat(30_000);
+    handlers.text!(junk);
+    handlers.text!(junk);
+    checkTrue('a large announced read of junk text leaves the buffer small (under 1 MiB)',
+      keyLog.share().buffer.byteLength < (1 << 20));
+    // Pending belongs to the one read it announced: a plain status drops it.
+    handlers.status!({ state: 'following', incomingBytes: text.length });
+    handlers.status!({ state: 'following' });
+    keyLog.clear();
+    const smallBefore = keyLog.share().buffer.byteLength;
+    handlers.text!(pieces[0]);
+    checkTrue('a plain status after the announcement cancels it: a lone piece reserves nothing for the whole log',
+      keyLog.share().buffer.byteLength < reservedSize && smallBefore < reservedSize);
   } finally {
     g.window = previous;
     rmSync(dir, { recursive: true, force: true });
