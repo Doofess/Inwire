@@ -24,7 +24,7 @@
  */
 import {
   BUDGET_SLACK, estimateSummaryBytes, framesForBudget, planBufferTrim,
-  DISK_RESERVE_BYTES, shouldStopForDisk,
+  DISK_RESERVE_BYTES, shouldStopForDisk, bufferUsage,
 } from '../../src/services/bufferBudget';
 import type { Packet } from '../../src/types/packet';
 
@@ -173,6 +173,25 @@ console.log('\n--- when a capture stops itself ---\n');
   // 35,000 frames a second, the reserve is the warning time it buys.
   check('the reserve is about fifty seconds at full rate',
     Math.round(DISK_RESERVE_BYTES / (1156 * 35000)), 53);
+}
+
+// --- What Settings shows: the budget's own figure, frame bytes beside it ----------------
+//
+// "Used" added the raw-byte slabs the rows pin to the summaries, against a budget that
+// counts summaries only, so a full buffer read "1,300 / 1,024 MB". The bytes are bounded
+// by frame count (BYTES_RESIDENT_FRAMES), not by the budget: they get a line of their own.
+{
+  const MiB = 1024 * 1024;
+  check('Used is the summaries against the budget, frame bytes apart',
+    bufferUsage(512 * MiB, 300 * MiB, 1024 * MiB),
+    { usedMb: 512, budgetMb: 1024, percent: 50, frameBytesMb: 300 });
+  check('a buffer at its budget with its bytes pinned reads 100%, never more',
+    bufferUsage(1024 * MiB, 400 * MiB, 1024 * MiB).usedMb <= 1024
+    && bufferUsage(1024 * MiB, 400 * MiB, 1024 * MiB).percent === 100, true);
+  // The trim lets the summaries run BUDGET_SLACK over before it acts; a full buffer reads full.
+  check('over the budget by the slack it reads full: the budget of the budget, at 100%',
+    bufferUsage(1060 * MiB, 0, 1024 * MiB), { usedMb: 1024, budgetMb: 1024, percent: 100, frameBytesMb: 0 });
+  check('no budget yet: 0%', bufferUsage(10 * MiB, 0, 0).percent, 0);
 }
 
 console.log();

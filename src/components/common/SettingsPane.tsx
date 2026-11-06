@@ -30,6 +30,7 @@ import { DecryptionSettingsPanel } from './DecryptionSettingsPanel';
 import type { AgentLogEntry } from '../../services/agentProtocol';
 import type { FilterPresetLibrary } from '../../types/packet';
 import { formatBytes } from '../../lib/formatBytes';
+import { BYTES_RESIDENT_FRAMES, bufferUsage } from '../../services/bufferBudget';
 import type { CaptureStorageState } from '../../services/capture/captureProtocol';
 
 // Read from the constant capture actually stops at, not restated: this number
@@ -101,7 +102,10 @@ interface SettingsPaneProps {
   totalPacketsCount: number;
   totalBytes: number;
   packetBufferBytes: number;
+  /** The summaries the buffer holds: the budget's own total. */
   bufferResidentBytes: number;
+  /** The slabs the resident rows' raw bytes pin, bounded by frame count rather than the budget. */
+  bufferFrameBytes: number;
   bufferAutoPaused: boolean;
   onClearPackets: () => void;
   /** What the capture store holds. The capture on disk IS this now. */
@@ -146,6 +150,7 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
   totalBytes,
   packetBufferBytes,
   bufferResidentBytes,
+  bufferFrameBytes,
   bufferAutoPaused,
   onClearPackets,
   captureStorage,
@@ -210,9 +215,9 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
     return () => cancelAnimationFrame(frame);
   }, [reveal, searching]);
 
-  const bufferPercent = packetBufferBytes > 0
-    ? Math.min(100, (bufferResidentBytes / packetBufferBytes) * 100)
-    : 0;
+  // The budget's figure against the budget; the pinned frame bytes are a line of their own.
+  const usage = bufferUsage(bufferResidentBytes, bufferFrameBytes, packetBufferBytes);
+  const bufferPercent = usage.percent;
 
   return (
     /* **A pane, not a modal, and this is the last one that was a place.**
@@ -385,8 +390,13 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs mt-3">
                         <dt className="text-muted-foreground">Used</dt>
                         <dd className="font-mono">
-                          {totalPacketsCount.toLocaleString()} packets, {(bufferResidentBytes / 1024 / 1024).toFixed(0)} / {(packetBufferBytes / 1024 / 1024).toFixed(0)} MB
+                          {totalPacketsCount.toLocaleString()} packets, {usage.usedMb} / {usage.budgetMb} MB
                           <span className="text-muted-foreground"> ({bufferPercent.toFixed(1)}%)</span>
+                        </dd>
+                        <dt className="text-muted-foreground">Frame bytes</dt>
+                        <dd className="font-mono">
+                          {usage.frameBytesMb} MB
+                          <span className="text-muted-foreground"> (newest {BYTES_RESIDENT_FRAMES.toLocaleString()} frames, not in the budget)</span>
                         </dd>
                         <dt className="text-muted-foreground">Captured</dt>
                         <dd className="font-mono">{formatBytes(totalBytes)}</dd>

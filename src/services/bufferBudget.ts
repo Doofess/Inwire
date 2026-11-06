@@ -37,6 +37,34 @@ import type { Packet } from '../types/packet';
  */
 export const BYTES_RESIDENT_FRAMES = 25000;
 
+/** The capture buffer as Settings shows it, in whole megabytes. */
+export interface BufferUsage {
+  /** The summaries the budget counts, at most the budget. */
+  usedMb: number;
+  budgetMb: number;
+  /** `usedMb` of `budgetMb`, at most 100: the trim allows `BUDGET_SLACK` over. */
+  percent: number;
+  /** The slabs the rows' raw bytes pin (`slabLedger.ts`), bounded by frame count, not the budget. */
+  frameBytesMb: number;
+}
+
+/**
+ * What Settings' capture buffer reads. The budget's figure is the budget's own
+ * total; adding the pinned frame bytes to it read past 100% of a budget that
+ * never counted them, so they are a line of their own.
+ */
+export function bufferUsage(summaryBytes: number, frameBytes: number, budgetBytes: number): BufferUsage {
+  const mb = (bytes: number) => Math.round(bytes / 1024 / 1024);
+  return {
+    // The trim lets the total run `BUDGET_SLACK` over before it acts, and a full
+    // buffer reads as full: "133 / 128 MB (100%)" is two figures that disagree.
+    usedMb: budgetBytes > 0 ? mb(Math.min(summaryBytes, budgetBytes)) : mb(summaryBytes),
+    budgetMb: mb(budgetBytes),
+    percent: budgetBytes > 0 ? Math.min(100, (summaryBytes / budgetBytes) * 100) : 0,
+    frameBytesMb: mb(frameBytes),
+  };
+}
+
 /**
  * The fallback when the machine cannot be measured. Not the usual answer.
  *

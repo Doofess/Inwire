@@ -66,6 +66,7 @@ import { OpWriter, type FromShard, type OpBatch, type ShardResult, type ToShard,
 import { PackKeys, unpackRows, type RowPack } from './rowPack';
 import { overlayMark, type OverlayMark, type RowOverlay } from './rowOverlay';
 import type { RowSide } from './rowSteps';
+import { HeldQueue } from './heldQueue';
 import type { InfoPatch } from '../dissect/types';
 import type { Packet, ProtocolLayer } from '../../types/packet';
 
@@ -423,16 +424,12 @@ export class Coordinator {
   lane0: FrameDissector;
 
   private epoch = 0;
-  /** Frames not yet routed, and the messages that go to the shards between them (`broadcast`). */
-  private held: (CoordFrame | { marker: ToShard })[] = [];
   /**
-   * Each `held` item's `inFlightCost`, taken at dispatch (a marker's is 0) and
-   * kept in step with `held`. The cost is not read again from `frame.bytes`
-   * when the frame is routed: a frame waiting behind a barrier can have had its
-   * buffer transferred away by then, and `heldCost` would never return to zero.
+   * Frames not yet routed, and the messages that go to the shards between them
+   * (`broadcast`), each with its `inFlightCost` taken at dispatch (a marker's
+   * is 0; `heldQueue.ts` says why it is kept).
    */
-  private heldCosts: number[] = [];
-  private heldFrom = 0;
+  private readonly held = new HeldQueue<CoordFrame | { marker: ToShard }>();
   /** The cost of the frame `advance` is routing, for the entry it makes. */
   private routingCost = 0;
   private barrier: { id: number; shard: number; hint: BarrierHint } | null = null;
@@ -542,7 +539,7 @@ export class Coordinator {
 
   /** Frames dispatched, or waiting to be, that have not been merged. */
   get backlog(): number {
-    return this.held.length - this.heldFrom + this.entries.size;
+    return this.held.size + this.entries.size;
   }
 
   /**
@@ -567,8 +564,7 @@ export class Coordinator {
   dispatch(frames: readonly CoordFrame[]): void {
     for (const frame of frames) {
       const cost = inFlightCost(frame.bytes.length);
-      this.held.push(frame);
-      this.heldCosts.push(cost);
+      this.held.push(frame, cost);
       this.heldCost += cost;
     }
     this.advance();
@@ -671,9 +667,7 @@ export class Coordinator {
     this.epoch += 1;
     this.lane0Tls.reset();
     [this.sequencer, this.order, this.quicOrder, this.lane0] = this.adopt(lane0.trackers, lane0.sequencer);
-    this.held = [];
-    this.heldCosts = [];
-    this.heldFrom = 0;
+    this.held.clear();
     this.barrier = null;
     this.entries.clear();
     this.waitingCost = 0;
@@ -713,10 +707,8 @@ export class Coordinator {
     // frame dispatched before it without it, and one dispatched after with it,
     // as the single Worker does. So it waits behind the frames not yet routed,
     // and then behind every batch already queued for a shard.
-    if (this.heldFrom < this.held.length) {
-      this.held.push({ marker: message });
-      this.heldCosts.push(0);
-    } else this.sendOrdered(message);
+    if (this.held.size > 0) this.held.push({ marker: message }, 0);
+    else this.sendOrdered(message);
     this.pump();
   }
 
@@ -738,9 +730,9 @@ export class Coordinator {
   // --- dispatch -------------------------------------------------------------
 
   private advance(): void {
-    while (this.barrier === null && this.heldFrom < this.held.length) {
-      this.routingCost = this.heldCosts[this.heldFrom];
-      const frame = this.held[this.heldFrom++];
+    while (this.barrier === null && this.held.size > 0) {
+      const frame = this.held.shift()!;
+      this.routingCost = this.held.shiftedCost;
       if ('marker' in frame) {
         this.sendOrdered(frame.marker);
         continue;
@@ -752,15 +744,7 @@ export class Coordinator {
       else if (isTcpFragment(lane)) this.routeFragment(frame, lane);
       else this.dissectHere(frame);
     }
-    if (this.heldFrom === this.held.length) {
-      this.held = [];
-      this.heldCosts = [];
-      this.heldFrom = 0;
-    } else if (this.heldFrom > 4096) {
-      this.held = this.held.slice(this.heldFrom);
-      this.heldCosts = this.heldCosts.slice(this.heldFrom);
-      this.heldFrom = 0;
-    }
+    this.held.compact();
   }
 
   /**
@@ -962,9 +946,9 @@ export class Coordinator {
 
   /** A fragment that arrived before its first one: the first one's connection, if it is close behind. */
   private lookAhead(datagram: string): string | undefined {
-    const end = Math.min(this.held.length, this.heldFrom + LOOKAHEAD_FRAMES);
-    for (let i = this.heldFrom; i < end; i++) {
-      const frame = this.held[i];
+    const end = Math.min(this.held.size, LOOKAHEAD_FRAMES);
+    for (let i = 0; i < end; i++) {
+      const frame = this.held.peek(i)!;
       if ('marker' in frame) continue;
       const lane = frameLane(frame.bytes, frame.linktype);
       if (isTcpFragment(lane) && lane.datagram === datagram && lane.key !== undefined) return lane.key;
