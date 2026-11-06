@@ -191,3 +191,11 @@ peak share is +576 MB and it holds +151 MB after a GC; the page heap is 32 MB.
   length main is about to send would remove most of them; it was not done.
 - A renderer minidump would now hold the log once rather than eight times.
   Crash reporting stays off (0008).
+
+## Amendment 2026-11-06
+
+The capture-file import Worker (0074) is a third reader context beside the
+pipeline Worker and its shards: it adopts the page's `keylog-shared` snapshots
+and never loads a key log. A Decryption Secrets Block found in its walk goes to
+the page, which adds it and acks with a fresh snapshot; the walk waits for that
+ack. The page is still the one writer.

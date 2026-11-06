@@ -299,13 +299,17 @@ See [ADR 0051](decisions/0051-the-version-is-0x-in-development.md).
 
 ## Import, dissection and revisit
 
-Live capture dissects in the Worker. File import currently runs
-`PcapService.streamCaptureFile` in the renderer, streams batches to the store
-and keeps a bounded newest window. It reads the file in windows of
+Live capture dissects in the Worker. A capture-file import (pcap/pcapng) runs
+`PcapService.streamCaptureFile` in its own Worker, the pipeline script's import
+role (ADR 0074, `importRun.ts`, `importClient.ts`): the Worker writes batches to the
+store over an ingest port of its own (tagged appends, credit, a closing barrier),
+packs each batch once for the store and the page, and the page keeps a bounded
+newest window. CSV, JSON, xlsx and a zip stay in-process. The walk reads the file in windows of
 `READ_WINDOW_BYTES` (64 MiB, `byteWindow.ts`), so a file of any size imports
-with about one window resident (#20). Dissection stays synchronous per frame;
-the pass awaits only a file read between frames, so the renderer runs between
-windows. Because it does, an import is a job (`importJob.ts`): a second import
+with about one window resident (#20). Dissection stays synchronous per frame.
+The page stays the key log's one writer: a Decryption Secrets Block goes to it
+and the walk waits for the ack. Cancel terminates the Worker and discards the
+import (`importFlow.ts`). An import is a job (`importJob.ts`): a second import
 is refused, the panel shows a progress line that survives the side bar being
 closed, and Start, a scheduled capture, Reopen, Clear View, Discard and export
 wait for it with a reason. `IMPORT_PATCH_WINDOW` preserves earlier frames long
