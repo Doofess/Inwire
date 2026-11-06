@@ -61,6 +61,28 @@ const WHOLE = { first: 1, last: 1_000_000 };
   check('a row with no bytes pins nothing', ledger.pinnedBytes, 0);
 }
 
+// --- A row released twice, or through a copy (React re-running an updater) --------------
+//
+// An updater React re-applies on a rebased state can trim a row it already trimmed, and
+// a patched row is a copy that shares the original's `rawBytes`. Counting per buffer
+// alone let one row's second release stand in for another row, so the slab left the
+// ledger while rows still held it.
+{
+  const ledger = new SlabLedger();
+  const rows = flushOf(4, 100);
+  rows.forEach((row) => ledger.pin(row));
+  ledger.release(rows[0]);
+  check('a row released twice while others remain frees nothing the second time', ledger.release(rows[0]), 0);
+  check('...and the slab is still counted while three rows hold it', ledger.pinnedBytes, 400);
+  const copy = { ...rows[1] } as Packet;
+  ledger.release(rows[1]);
+  check('a patched copy of a released row frees nothing', ledger.release(copy), 0);
+  ledger.pin(rows[2]);
+  check('a row pinned twice counts once', [ledger.release(rows[2]), ledger.pinnedBytes], [0, 400]);
+  check('the slab frees with its real last row', ledger.release(rows[3]), 400);
+  check('...and is no longer counted', ledger.pinnedBytes, 0);
+}
+
 // --- Eviction, half a flush and then the rest -----------------------------------------
 {
   const ledger = new SlabLedger();

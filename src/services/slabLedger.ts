@@ -14,6 +14,12 @@ import type { Packet } from '../types/packet';
  * back when its last row's bytes go. Pure and keyed by the `ArrayBuffer`, so
  * a row with a buffer of its own is a slab of one.
  *
+ * Each row counts once, by its `rawBytes` view: a pin or release repeated for the
+ * same row - an updater React re-applies on a rebased state, or a patched row,
+ * which is a copy sharing the original's view - changes nothing. Counting per
+ * buffer alone let a copy's release stand in for another row's, and the slab
+ * left the ledger while rows still held it.
+ *
  * It is not part of the budget's running total: `estimateSummaryBytes` sums
  * stay what `scripts/session/ingest.ts` recomputes (`bufferBudget.ts` says why
  * raw bytes are not in it). A gauge beside it, for the figure the user sees.
@@ -21,6 +27,8 @@ import type { Packet } from '../types/packet';
 export class SlabLedger {
   /** Rows of each buffer that still hold their bytes. Weak: a freed slab leaves no entry. */
   private readonly rows = new WeakMap<ArrayBufferLike, number>();
+  /** The views counted in `rows`: a row pins and releases once. */
+  private readonly views = new WeakSet<Uint8Array>();
   private pinned = 0;
 
   /** Bytes of every slab with at least one row still holding it. */
@@ -31,7 +39,8 @@ export class SlabLedger {
   /** A row joined the buffer with its bytes. Once per row: the flush's `prepareBatch`. */
   pin(packet: Pick<Packet, 'rawBytes'>): void {
     const bytes = packet.rawBytes;
-    if (bytes.byteLength === 0) return;
+    if (bytes.byteLength === 0 || this.views.has(bytes)) return;
+    this.views.add(bytes);
     const held = this.rows.get(bytes.buffer);
     this.rows.set(bytes.buffer, (held ?? 0) + 1);
     if (held === undefined) this.pinned += bytes.buffer.byteLength;
@@ -44,7 +53,7 @@ export class SlabLedger {
    */
   release(packet: Pick<Packet, 'rawBytes'>): number {
     const bytes = packet.rawBytes;
-    if (bytes.byteLength === 0) return 0;
+    if (bytes.byteLength === 0 || !this.views.delete(bytes)) return 0;
     const held = this.rows.get(bytes.buffer);
     if (held === undefined) return 0;
     if (held > 1) {
