@@ -4001,8 +4001,6 @@ export default function App() {
         agentHealth={agentHealth}
         interfaces={agentInterfaces}
         selectedInterfaces={selectedInterfaces}
-        isCapturing={isCapturing}
-        captureStartedAt={captureStartedAtRef.current}
         captureStats={captureStats}
         droppedBuffer={droppedBuffer}
         bufferAutoPaused={bufferAutoPaused}

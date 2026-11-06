@@ -33,7 +33,7 @@ case.
 │ │    │ │ detail | statistics | geo | stream           │ │
 │ │    │ │ settings - the sheet, INSTEAD of the stack   │ │
 │ ╰────╯ ╰──────────────────────────────────────────────╯ │
-│ ● Capturing 04:12  Ethernet     0x42 'B'  44/178,200 ◍  │
+│ Connected  Ethernet             0x42 'B'  44/178,200 ◍  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -50,7 +50,7 @@ to supply. `<main>` keeps its own four borders and simply gets narrower.
 │ │    │ Ethernet ▁▃▅ │╷│   └─ INSPECTION │ HEX         │ │
 │ │    │ Wi-Fi    ▁▁▂ │╷│                               │ │
 │ ╰────┴──────────────╯╵╰───────────────────────────────╯ │
-│ ● Capturing 04:12  Ethernet     0x42 'B'  44/178,200 ◍  │
+│ Connected  Ethernet             0x42 'B'  44/178,200 ◍  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -107,8 +107,9 @@ filter would shift 18px on every view change that gained or lost one.
 
 **While a capture runs, a live pill sits left of the panes toggle**
 (`common/CaptureLivePill.tsx`): the pulsing dot, elapsed time, packets a second
-and Stop, so "is it recording?" is answered where the eye already is, not only
-in the status bar's corner. It hangs from a **zero-width anchor** and is placed
+and Stop, so "is it recording?" is answered where the eye already is. It is
+the only clock: the status bar's capture item went (owner, 2026-11-06), because
+two timers were the same fact twice. It hangs from a **zero-width anchor** and is placed
 absolutely, so it takes no width from the centre and the filter does not move
 when a capture starts; at 1024 it can overlap the filter's right edge instead.
 It subscribes to `packetCounts` itself, so App does not re-render for it, and
@@ -625,8 +626,8 @@ is a **C**: the title row across the top, the rail down the left, the bar across
 the bottom, all one `--secondary` ground.
 
 **The left group is the session and the right group is the frame.** Left: the
-agent link, the adapter, capture state with elapsed time, dropped frames, and
-the restore readout — in the order they fail in. Right: the byte readout, the
+agent link, the adapter, dropped frames, and the restore readout (no capture
+clock; that is the title row's live pill) — in the order they fail in. Right: the byte readout, the
 outbound-lookups indicator, then the packet counter at the edge, which is what
 makes the numbers findable without reading the bar. The counter brings no cell
 padding, being `PacketCountsReadout` moved here whole rather than a

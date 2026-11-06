@@ -18,9 +18,11 @@ import {
 /**
  * The status bar's left group: is this thing working?
  *
- * Four items, in the order a capture fails in - the link before the adapter
- * before the capture before its losses - so the leftmost thing on screen is the
- * first thing to fix. Every one of them is a click into the Settings tab that
+ * Three items, in the order a capture fails in - the link before the adapter
+ * before the capture's losses - so the leftmost thing on screen is the first
+ * thing to fix. Whether a capture is running, and for how long, is the title
+ * row's live pill (`common/CaptureLivePill.tsx`), which borrows `LIVE_DOT`,
+ * `useElapsed` and `elapsedLabel` from here. Every one of them is a click into the Settings tab that
  * fixes it, which is the other half of the point: two of these states were
  * previously reachable only through a hover tooltip or a tab nobody had open,
  * and `DriverInfoPanel` exists because of exactly that gap.
@@ -104,9 +106,6 @@ export interface SessionStatusProps {
   agentHealth: AgentHealth;
   interfaces: AgentInterface[];
   selectedInterfaces: string[];
-  isCapturing: boolean;
-  /** Epoch milliseconds, or null when nothing is running. */
-  captureStartedAt: number | null;
   captureStats: CaptureDropStats | null;
   droppedBuffer: number;
   bufferAutoPaused: boolean;
@@ -125,14 +124,11 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
   agentHealth,
   interfaces,
   selectedInterfaces,
-  isCapturing,
-  captureStartedAt,
   captureStats,
   droppedBuffer,
   bufferAutoPaused,
   restoreProgress,
 }) => {
-  const elapsed = useElapsed(isCapturing ? captureStartedAt : null);
   const attention = agentNeedsAttention(agentHealth);
   const { total: dropped, unknown: someUncounted } = droppedTotal(captureStats, droppedBuffer);
 
@@ -190,18 +186,9 @@ export const SessionStatus: React.FC<SessionStatusProps> = ({
         <span className="truncate">{adapterLabel}</span>
       </StatusItem>
 
-      {/* The capture. Absent until one has been started, which is the honest
-          state on a fresh launch: the left group is then the link and the
-          adapter, which are the two things that need attention anyway. */}
-      {isCapturing && (
-        <StatusItem
-          tone="accent"
-          title={`Capturing for ${elapsedLabel(elapsed)}`}
-        >
-          <span className={LIVE_DOT} aria-hidden />
-          <span className="tabular-nums">{elapsedLabel(elapsed)}</span>
-        </StatusItem>
-      )}
+      {/* No capture item: the title row's live pill (`CaptureLivePill`) is
+          the one place that says a capture is running and for how long. A
+          second clock here was the same fact twice (owner, 2026-11-06). */}
 
       {/* Restoring, which is transient and comes first while it lasts: until
           it finishes there is no capture for anything to the right of it to

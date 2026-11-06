@@ -43,6 +43,10 @@ const titleRow = readFileSync('src/components/common/TitleRow.tsx', 'utf8');
 check('TitleRow renders {live}', titleRow.includes('{live}'));
 const status = readFileSync('src/components/status/SessionStatus.tsx', 'utf8');
 check('SessionStatus exports useElapsed', /export function useElapsed\b/.test(status));
+// The pill is the one clock (owner, 2026-11-06): the status bar shows no
+// second elapsed time, so nothing in it calls the clock it exports.
+check('the status bar draws no second capture clock',
+  !/\buseElapsed\(|\belapsedLabel\(/.test(status.replace(/export function \w+\([^)]*\)/g, '')));
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) FAILED`);
