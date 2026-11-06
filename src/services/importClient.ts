@@ -12,9 +12,11 @@
  *   seq and a fresh snapshot (a page without shared memory has no other way to
  *   hand the keys over); the Worker reads no further until it has.
  * - `opening`: open the capture (awaited, by `deps.onOpening`), then `storeOpen`.
- * - `rows`: decode the batch, push it on the tail with the Worker's sizes. A
- *   batch is a few hundred rows, so the decode is a short task, and nothing is
- *   said back.
+ * - `rows`: decode the batch, push it on the tail with the Worker's sizes, then
+ *   say `rowsTaken`. A batch is a few hundred rows, so the decode is a short
+ *   task; the answer is the Worker's credit (`importCredit.ts`): it holds back
+ *   its `rows` past `IMPORT_ROWS_IN_FLIGHT` unanswered, so a Worker that outruns
+ *   the page does not pile its batches up in the page's message queue.
  * - `progress`: report it. The tail lets go of the bytes the store can supply
  *   (`deps.storedThrough`) here and after each `rows`, once the capture is open.
  * - `done` / `failed` / the Worker's `onerror`: the run is over.
@@ -36,12 +38,13 @@ import { PackReader } from './pipeline/rowPack';
 import { IMPORT_NAME, type FromImport, type ImportRunOptions, type ToImport } from './pipeline/importProtocol';
 import { addKeyLogText, type KeyLogStore } from './tls/keyLog';
 import type { ImportOutcome, ImportRunHandle } from './tabularImport';
+import type { RowsTaken } from './importCredit';
 
 export { IMPORT_NAME };
 
 /** The part of a `Worker` the client uses; a scripted one stands in under test. */
 export interface WorkerLike {
-  postMessage(message: ToImport, transfer?: Transferable[]): void;
+  postMessage(message: ToImport | RowsTaken, transfer?: Transferable[]): void;
   terminate(): void;
   onmessage: ((event: MessageEvent<FromImport>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
@@ -122,7 +125,7 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
     settle(outcome);
   };
 
-  const post = (message: ToImport): void => {
+  const post = (message: ToImport | RowsTaken): void => {
     if (!over) worker?.postMessage(message);
   };
 
@@ -155,6 +158,8 @@ export function runWorkerImport(file: File, deps: ImportClientDeps): ImportRunHa
           return;
         }
         release();
+        // After the decode, never before: the credit is for rows the page has taken.
+        post({ type: 'rowsTaken' });
         return;
       case 'done':
         finish({

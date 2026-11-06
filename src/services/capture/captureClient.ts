@@ -233,6 +233,15 @@ class CaptureClient {
     return () => { this.lostListeners.delete(listener); };
   }
 
+  /**
+   * True once the store is gone or has failed for good (`die`, a fatal failure):
+   * nothing is coming from it, so a request that would wait on main for a port to
+   * it can be refused at once (`requestCaptureIngestPort`).
+   */
+  get lost(): boolean {
+    return this.disabled;
+  }
+
   private announceLost(message: string): void {
     // Copied: a listener ends its run, which unsubscribes it.
     for (const listener of [...this.lostListeners]) {

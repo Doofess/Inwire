@@ -114,19 +114,23 @@ const flowSource = earlyFlow;
 check('the flow maps a cancelled outcome, or a requested cancel, to `cancelled`, never to a failure',
   /kind === 'cancelled' \|\| deps\.cancelRequested\(\)/.test(flowSource)
   && /status: 'cancelled'/.test(flowSource));
+const CANCEL_LABEL = "aria-label={job.cancelRequested ? 'Cancelling import…' : 'Cancel import'}";
 check('the Cancel button is outside the drop zone\'s label, which would open the file picker',
-  panel.indexOf('aria-label="Cancel import"') > panel.indexOf('</label>')
+  panel.indexOf(CANCEL_LABEL) > panel.indexOf('</label>')
   && !zone.includes('Cancel import') && !zone.includes('cancelImportJob'));
 const cancelButton = between(panel, '<button', '</button>');
 check('...it is a plain button named for what it does, calling the job\'s cancel',
-  cancelButton.includes('type="button"') && cancelButton.includes('aria-label="Cancel import"')
+  cancelButton.includes('type="button"') && cancelButton.includes(CANCEL_LABEL)
   && cancelButton.includes('onClick={() => cancelImportJob()}'));
 // The request waits behind a live capture's seal (up to a 3 s drain) or a CSV
 // parse, so the press must show at once: the job publishes it, the button says so.
+// The accessible name says it too (WCAG label-in-name: the visible text is the
+// label's first word), so a screen reader hears "Cancelling import…", not a name
+// that still offers a Cancel the disabled button will not take.
 check('a requested Cancel reads Cancelling… and is disabled',
   /disabled=\{job\.cancelRequested\}/.test(cancelButton)
   && /job\.cancelRequested \? 'Cancelling…' : 'Cancel'/.test(cancelButton)
-  && cancelButton.includes('aria-label="Cancel import"')
+  && cancelButton.includes(CANCEL_LABEL)
   && cancelButton.includes('disabled:opacity-40 disabled:cursor-not-allowed'));
 check('...shown only while the job is running and can still be cancelled; its row is kept while busy so the cards do not move',
   /\{busy && \(/.test(panel) && /\{job\.status === 'running' && job\.cancellable && \(/.test(panel));
@@ -206,9 +210,12 @@ check('a failure discards the import\'s directory',
   lifecycleBegin.includes('captureStore.discard(captureId)') && !lifecycleBegin.includes('importDerivedRef'));
 const batch = between(app, 'const handleImportOpening', 'const importWorkerRoute');
 check('the Worker\'s first batch opens the store through the lifecycle - awaited - and no longer stops the capture itself',
-  batch.includes('importLifecycle.onBatch()') && batch.includes('await opened') && !batch.includes('stopCaptureForImportRef'));
-check('the open is awaited from the lifecycle\'s own effect, not a second open',
-  lifecycleBegin.includes('captureStore.beginAwaited(captureId)') && lifecycleBegin.includes('captureStore.begin(captureId)'));
+  batch.includes('importLifecycle.onBatch()') && batch.includes('awaitImportOpen(') && !batch.includes('stopCaptureForImportRef'));
+// `openStore` runs only from the import's `onBatch`, so it always awaits the open:
+// a plain `captureStore.begin` beside it was a branch nothing reached.
+check('the open is awaited from the lifecycle\'s own effect, with no un-awaited branch beside it',
+  lifecycleBegin.includes('captureStore.beginAwaited(captureId)') && !/captureStore\.begin\(/.test(lifecycleBegin)
+  && !app.includes('awaitedOpenRef'));
 check('the Worker route is given what the store holds (for the tail\'s byte release) and the pipeline\'s derived budget',
   between(app, 'const importWorkerRoute', 'const handleImportPackets').includes('storedThrough: bytesStoredThrough')
   && between(app, 'const importWorkerRoute', 'const handleImportPackets').includes('derivedBudget: derivedBudgetRef.current'));
@@ -256,8 +263,17 @@ check('export rows say why', between(transfer, 'const formatRow =', 'return (').
 check('the panel awaits the adoption before the job ends',
   /await onImportPackets\(/.test(between(panel, 'const handleFile = async', 'endImportJob(result)')));
 check('App adopts an import in slices and derives after the last',
-  /adoptInSlices\(/.test(between(app, 'const handleImportPackets = ', 'const deriveForBuffer'))
+  /adoptImportedRows\(/.test(between(app, 'const handleImportPackets = ', 'const deriveForBuffer'))
   && /if \(whole\) deriveForBuffer\(imported\)/.test(app));
+// A socket table applied between two slices sits on copies the next slice replaces
+// (`scripts/session/adopt-slices.ts` runs the decision; this holds App to using it): the
+// reach of every table is noted where it is applied, and the adoption re-runs the annotator.
+const applyTable = between(app, 'const applySocketTable = useCallback', '/* **The flush handler');
+check('a socket table notes how far back it reached, and an import re-annotates after its last slice',
+  applyTable.includes('annotationReach.note(horizonUs)')
+  && applyTable.includes('annotateProcesses(prev, horizonUs, flowAnnotations)')
+  && /annotationReach\.begin\(\);\s+const sliced = adoptImportedRows\(/.test(app)
+  && /annotatedReach: \(\) => annotationReach\.reach\(\),\s+reannotate: \(horizonUs\) => setPackets\(\(prev\) => annotateProcesses\(prev, horizonUs, flowAnnotations\)\)/.test(app));
 // The strip waits for the last slice: a repaint per slice decided up to 50,000
 // colours inside the slice's task (~160 ms, profiled on the burst).
 const handler = between(app, 'const handleImportPackets = ', 'const deriveForBuffer');
@@ -265,7 +281,7 @@ const minimap = readFileSync('src/components/packet-list/PacketListMinimap.tsx',
 const list = readFileSync('src/components/packet-list/PacketList.tsx', 'utf8');
 check('App holds the minimap strip while the slices go in, and lets go only for its own run',
   handler.indexOf('setAdopting(true)') !== -1
-  && handler.indexOf('setAdopting(true)') < handler.indexOf('adoptInSlices(')
+  && handler.indexOf('setAdopting(true)') < handler.indexOf('adoptImportedRows(')
   && /const whole = await sliced;\s*if \(adoptRunRef\.current === run\) setAdopting\(false\);/.test(handler)
   && /holdStrip=\{adopting\}/.test(app) && /hold=\{holdStrip\}/.test(list)
   && /if \(!hold\) heldRef\.current = packets;\s*const paintedPackets = useThrottledValue\(heldRef\.current,/.test(minimap));

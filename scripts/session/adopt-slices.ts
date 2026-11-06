@@ -10,6 +10,8 @@
  */
 import { adoptInSlices, adoptSliceEnds } from '../../src/lib/adoptSlices';
 import { prefixShift } from '../../src/services/packetPrefix';
+import { AnnotationReach, adoptImportedRows, annotateProcesses } from '../../src/lib/processAnnotations';
+import type { FlowAnnotationStore } from '../../src/services/flowAnnotations';
 import type { Packet } from '../../src/types/packet';
 
 let failed = 0;
@@ -57,6 +59,68 @@ const rows = Array.from({ length: 10 }, (_, i) => ({ id: i + 1 }) as unknown as 
     return prefix.length < 8;
   }, async () => {});
   check('a show that answers false stops the slices there', same(shown, [4, 8]) && done === false, JSON.stringify(shown));
+}
+
+// --- a socket table that lands between two slices is not lost (1.4) ---------------------------
+//
+// Each later slice sets the buffer to a prefix of the imported rows, and the copies the
+// annotator made of the earlier slice's rows go with it. `adoptImportedRows` runs the
+// annotator once more after the last slice when a table was applied meanwhile.
+{
+  const process = { pid: 7, name: 'curl.exe', exe: 'C:\\curl.exe' };
+  const store = { isEmpty: false, forEndpoints: () => process } as unknown as FlowAnnotationStore;
+  const NOW_US = 1_800_000_000_000_000;
+  const rowsOf = (n: number, tsUs: (i: number) => number) => Array.from({ length: n }, (_, i) => ({
+    id: i + 1, tsUs: tsUs(i), source: '10.0.0.4', destination: '93.184.216.34', frameProtocols: ['frame', 'eth', 'ip', 'tcp'],
+    sourcePort: 50000 + i, destPort: 443, fields: {},
+  }) as unknown as Packet);
+  const named = (buffer: Packet[]) => buffer.filter((p) => p.fields?.['inwire.process.name'] === 'curl.exe').length;
+
+  /** App's side, as the slices go in: `buffer` is `setPackets`'s state. */
+  const run = async (imported: Packet[], plan: { betweenSlices?: number; horizon?: number; current?: () => boolean }) => {
+    let buffer: Packet[] = [];
+    const reach = new AnnotationReach();
+    reach.begin();
+    let reannotated: number[] = [];
+    let slice = 0;
+    const done = await adoptImportedRows(imported, 4, {
+      current: plan.current ?? (() => true),
+      adoptFirst: (prefix) => { buffer = prefix; },
+      showPrefix: (prefix) => { buffer = prefix; },
+      annotatedReach: () => reach.reach(),
+      reannotate: (horizonUs) => { reannotated.push(horizonUs); buffer = annotateProcesses(buffer, horizonUs, store); },
+    }, async () => {
+      slice++;
+      // A socket table arrives between slices: applied to the buffer as it stands.
+      if (slice === plan.betweenSlices) {
+        const horizon = plan.horizon ?? -Infinity;
+        reach.note(horizon);
+        buffer = annotateProcesses(buffer, horizon, store);
+      }
+    });
+    return { buffer, done, reannotated };
+  };
+
+  const imported = rowsOf(10, (i) => NOW_US + i);
+  const lost = await run(imported, { betweenSlices: 1 });
+  check('a table applied between slices is still on every row after the last slice',
+    lost.done === true && lost.buffer.length === 10 && named(lost.buffer) === 10 && lost.reannotated.length === 1,
+    JSON.stringify({ named: named(lost.buffer), reannotated: lost.reannotated }));
+
+  const quiet = await run(rowsOf(10, (i) => NOW_US + i), {});
+  check('with no table meanwhile the annotator is not run again, and nothing is named',
+    quiet.reannotated.length === 0 && named(quiet.buffer) === 0 && quiet.buffer.length === 10);
+
+  const single = await run(rowsOf(3, (i) => NOW_US + i), { betweenSlices: 1 });
+  check('a single slice has no gap to cover', single.reannotated.length === 0 && single.done === true);
+
+  const delta = await run(rowsOf(10, (i) => NOW_US + i * 10_000_000), { betweenSlices: 1, horizon: NOW_US + 50_000_000 });
+  check('a delta\'s horizon is kept: only the rows it reaches are named, as the table itself would have',
+    named(delta.buffer) === 5 && delta.reannotated[0] === NOW_US + 50_000_000, JSON.stringify({ named: named(delta.buffer), reannotated: delta.reannotated }));
+
+  let live = 2;
+  const replaced = await run(rowsOf(10, (i) => NOW_US + i), { betweenSlices: 1, current: () => live-- > 0 });
+  check('a replaced adoption stops, and re-annotates nothing', replaced.done === false && replaced.reannotated.length === 0);
 }
 
 if (failed > 0) {

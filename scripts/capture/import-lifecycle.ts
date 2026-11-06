@@ -20,6 +20,7 @@
  */
 import { createImportLifecycle, type ImportEffects } from '../../src/services/importLifecycle';
 import { runImportFlow } from '../../src/services/importFlow';
+import { awaitImportOpen } from '../../src/services/importOpen';
 import {
   beginImportJob, cancelImportJob, endImportJob, getImportJob, importCancelRequested, lockImportCancel,
   setImportJobCancel,
@@ -322,6 +323,64 @@ async function main(): Promise<void> {
       && !r.events.some((e) => e.startsWith('discardStore') || e === 'offer previous'),
       { flow, cancellableInAdopt, events: r.events });
     endImportJob();
+  }
+
+  // --- Cancel that lands while the store's open is still pending ------------------------------
+  //
+  // The lifecycle has opened the store (`onBatch`) and the page awaits the store's answer
+  // (`awaitImportOpen`). Cancel runs `fail()`, which discards the id - but a store whose
+  // `ready` was already on its way can answer after that, and the open then settles
+  // successfully for a capture nobody owns. It must be discarded, not left open under the
+  // import's id with the session still naming the previous capture.
+  {
+    const r = rig({ capturing: false, offer: 'previous' });
+    await r.lifecycle.begin();
+    r.lifecycle.onBatch();
+    const id = r.lifecycle.storeId();
+    let answer: () => void = () => {};
+    const opened = new Promise<void>((resolve) => { answer = resolve; });
+    const waiting = awaitImportOpen({
+      captureId: id, opened,
+      owns: (captured) => r.lifecycle.storeId() === captured,
+      discard: (captured) => { r.events.push(`discardOpened ${captured}`); },
+    }).then((value) => `resolved ${value}`, (error: Error) => `rejected ${error.message}`);
+    r.lifecycle.fail();
+    answer();
+    const settled = await waiting;
+    ok('a cancel during the awaited open discards the capture the store then opens, and the wait fails',
+      settled.startsWith('rejected') && r.events.includes('discardOpened import-1')
+      && !r.events.some((e) => e.startsWith('sealStore') || e.startsWith('pruneOthers')),
+      { settled, events: r.events });
+  }
+  {
+    const r = rig({ capturing: false, offer: null });
+    await r.lifecycle.begin();
+    r.lifecycle.onBatch();
+    const settled = await awaitImportOpen({
+      captureId: r.lifecycle.storeId(), opened: Promise.resolve(),
+      owns: (captured) => r.lifecycle.storeId() === captured,
+      discard: (captured) => { r.events.push(`discardOpened ${captured}`); },
+    });
+    ok('an open nobody cancelled answers its id and discards nothing',
+      settled === 'import-1' && !r.events.some((e) => e.startsWith('discard')), { settled, events: r.events });
+  }
+  {
+    const r = rig({ capturing: false, offer: null });
+    await r.lifecycle.begin();
+    r.lifecycle.onBatch();
+    const failure = await awaitImportOpen({
+      captureId: r.lifecycle.storeId(), opened: Promise.reject(new Error('the store would not open')),
+      owns: (captured) => r.lifecycle.storeId() === captured,
+      discard: (captured) => { r.events.push(`discardOpened ${captured}`); },
+    }).then(() => 'resolved', (error: Error) => error.message);
+    ok('an open the store refuses fails with the store\'s own reason, and the lifecycle\'s fail owns the discard',
+      failure === 'the store would not open' && !r.events.some((e) => e.startsWith('discard')), { failure, events: r.events });
+  }
+  {
+    const failure = await awaitImportOpen({
+      captureId: null, opened: null, owns: () => false, discard: () => {},
+    }).then(() => 'resolved', (error: Error) => error.message);
+    ok('no store opened is the old message', failure === 'The import could not open its capture.', failure);
   }
 
   if (failures > 0) {
