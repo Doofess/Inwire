@@ -30,7 +30,10 @@ function check(name: string, ok: boolean, detail?: unknown): void {
   for (let id = 0; id < 4_500; id++) {
     const item = queue.shift();
     if (item?.id !== id || queue.shiftedCost !== id * 3) { aligned = false; break; }
+    if (id === 2_000) queue.compact();   // too early: nothing moves
   }
+  check('...a compact before 4,096 taken leaves the front where it was', queue.peek(0)?.id === 4_500);
+  queue.compact();
   check('each item comes out with its own cost, through compaction', aligned);
   check('...and peek counts from the front after it', queue.size === 500 && queue.peek(0)?.id === 4_500);
   for (let id = 5_000; id < 5_010; id++) queue.push({ id }, id * 3);

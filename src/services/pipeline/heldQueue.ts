@@ -36,12 +36,19 @@ export class HeldQueue<T> {
     this.shiftedCost = this.costs[this.from];
     this.from++;
     if (this.from === this.items.length) this.clear();
-    else if (this.from > COMPACT_AFTER) {
-      this.items = this.items.slice(this.from);
-      this.costs = this.costs.slice(this.from);
-      this.from = 0;
-    }
     return item;
+  }
+
+  /**
+   * Cuts the arrays down to what is still held once enough has been taken. Called
+   * after a run of `shift`s rather than inside one: a long backlog drained in one
+   * pass would otherwise copy what remains every `COMPACT_AFTER` items.
+   */
+  compact(): void {
+    if (this.from <= COMPACT_AFTER) return;
+    this.items = this.items.slice(this.from);
+    this.costs = this.costs.slice(this.from);
+    this.from = 0;
   }
 
   /** The item `offset` places behind the front, left where it is. */

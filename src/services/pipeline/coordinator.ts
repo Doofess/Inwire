@@ -744,6 +744,7 @@ export class Coordinator {
       else if (isTcpFragment(lane)) this.routeFragment(frame, lane);
       else this.dissectHere(frame);
     }
+    this.held.compact();
   }
 
   /**
