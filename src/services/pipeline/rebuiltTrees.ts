@@ -16,6 +16,9 @@ export class RebuiltTrees {
   /** Rebuilds under way, and whether a link has landed on each since it began. */
   private readonly building = new Map<number, boolean>();
 
+  /** The key-log generation at the last clear. */
+  private generation = 0;
+
   constructor(private readonly limit: number) {}
 
   get(id: number): ProtocolLayer[] | undefined {
@@ -51,8 +54,19 @@ export class RebuiltTrees {
    * A key log or capture went away: no kept tree stands, nor one still being
    * rebuilt from what was there before - it could hold plaintext.
    */
-  clear(): void {
+  clear(generation?: number): void {
     this.trees.clear();
     for (const id of this.building.keys()) this.building.set(id, true);
+    if (generation !== undefined) this.generation = generation;
+  }
+
+  /**
+   * Appends to the page's key log reach the Worker with no message, so the
+   * trees are dropped when the log's generation has moved since the last
+   * clear. Asked wherever a tree is read or kept: one rebuilt before a key
+   * arrived could not decrypt, and one rebuilt after could.
+   */
+  sync(generation: number): void {
+    if (generation !== this.generation) this.clear(generation);
   }
 }
