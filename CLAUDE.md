@@ -123,7 +123,8 @@ Live flow: agent → named pipe → main → pipeline Worker → store and UI ba
 Main may inspect fixed batch metadata for flow control; it does not dissect packets.
 The renderer transfers ports to Workers without parsing raw agent batches.
 The UI receives dissected summaries and raw bytes; full trees are requested on demand.
-File import uses the same dissection engine but currently runs on the renderer thread.
+Capture-file import (pcap/pcapng) dissects in its own Worker, the pipeline script's
+import role, and writes to the store over its own port (ADR 0074); other formats import in-process.
 The capture store and agent-written original pcapng have separate responsibilities.
 Monitoring flow: exporter → UDP in the monitoring utilityProcess (journal on disk)
 → datagrams over a port to the monitoring Worker → rollups and queries → the sheet.

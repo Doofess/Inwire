@@ -10,7 +10,8 @@
  */
 import { importProgressPercent, importProgressSizes } from '../../src/lib/importProgress';
 import {
-  beginImportJob, endImportJob, getImportJob, importJobProgress, subscribeImportJob,
+  beginImportJob, cancelImportJob, endImportJob, getImportJob, importCancelRequested, importJobProgress,
+  lockImportCancel, setImportJobCancel, subscribeImportJob,
 } from '../../src/services/importJob';
 import {
   beginCaptureStart, endCaptureStart, importRefusal, isCaptureStarting, subscribeCaptureStarting,
@@ -52,13 +53,13 @@ importJobProgress(5);
 check('progress while idle is ignored', [getImportJob(), heard], [{ status: 'idle' }, 0]);
 
 check('begin succeeds', beginImportJob('cap.pcapng', 1000), true);
-check('running state', getImportJob(), { status: 'running', fileName: 'cap.pcapng', readBytes: 0, totalBytes: 1000 });
+check('running state', getImportJob(), { status: 'running', fileName: 'cap.pcapng', readBytes: 0, totalBytes: 1000, cancellable: true, cancelRequested: false });
 check('a second begin is refused while running', beginImportJob('other.pcap', 5), false);
 check('the refused begin changed nothing', (getImportJob() as { fileName?: string }).fileName, 'cap.pcapng');
 const afterBegin = heard;
 importJobProgress(400);
 check('progress is published', [getImportJob(), heard], [
-  { status: 'running', fileName: 'cap.pcapng', readBytes: 400, totalBytes: 1000 }, afterBegin + 1,
+  { status: 'running', fileName: 'cap.pcapng', readBytes: 400, totalBytes: 1000, cancellable: true, cancelRequested: false }, afterBegin + 1,
 ]);
 endImportJob();
 check('end returns to idle', getImportJob(), { status: 'idle' });
@@ -81,7 +82,7 @@ check('progress while idle keeps the result and publishes nothing', [getImportJo
 ]);
 beginImportJob('b.pcap', 10);
 check('the next import clears the result as it begins', getImportJob(), {
-  status: 'running', fileName: 'b.pcap', readBytes: 0, totalBytes: 10,
+  status: 'running', fileName: 'b.pcap', readBytes: 0, totalBytes: 10, cancellable: true, cancelRequested: false,
 });
 endImportJob();
 check('an import that ends with no result leaves none', getImportJob(), { status: 'idle' });
@@ -91,6 +92,67 @@ const quiet = heard;
 beginImportJob('c.pcap', 1);
 endImportJob();
 check('an unsubscribed listener hears nothing', heard, quiet);
+
+// --- Cancel -----------------------------------------------------------------------
+//
+// Cancel never changes `status`: the job stays running until `handleFile`'s
+// `finally`, because every `status === 'running'` gate (Start, Reopen, export)
+// would open early under a `cancelling` state.
+
+{
+  let called = 0;
+  cancelImportJob();
+  setImportJobCancel(() => { called++; });
+  cancelImportJob();
+  check('cancel while idle is a no-op: nothing called, nothing recorded', [called, importCancelRequested()], [0, false]);
+
+  beginImportJob('cancel.pcap', 100);
+  check('a new job starts with no request', importCancelRequested(), false);
+  let rang = 0;
+  const off = subscribeImportJob(() => { rang++; });
+  setImportJobCancel(() => { called++; });
+  cancelImportJob();
+  check('cancel calls the registered cancel once and records the request', [called, importCancelRequested()], [1, true]);
+  check('a cancel request is published, once',
+    [getImportJob(), rang], [{ status: 'running', fileName: 'cancel.pcap', readBytes: 0, totalBytes: 100, cancellable: true, cancelRequested: true }, 1]);
+  cancelImportJob();
+  check('a second press calls nothing again and publishes nothing new', [called, rang], [1, 1]);
+  endImportJob();
+  check('...and the job ends only through endImportJob', getImportJob().status, 'idle');
+  check('the next job does not inherit the request', (beginImportJob('next.pcap', 1), importCancelRequested()), false);
+  endImportJob();
+
+  // A press before the handle exists (the client loads on first use): the
+  // phases with no handle see the request, and a handle registered later is
+  // cancelled at once.
+  beginImportJob('early.pcap', 1);
+  cancelImportJob();
+  let late = 0;
+  setImportJobCancel(() => { late++; });
+  check('a cancel pressed before the handle exists cancels it when it registers', [late, importCancelRequested()], [1, true]);
+  endImportJob();
+
+  // Once past the point of no return the import is sealed and the previous
+  // capture pruned: there is nothing to give back.
+  beginImportJob('late.pcap', 1);
+  let after = 0;
+  setImportJobCancel(() => { after++; });
+  lockImportCancel();
+  check('lockImportCancel makes the job not cancellable, still running',
+    [getImportJob().status, (getImportJob() as { cancellable?: boolean }).cancellable], ['running', false]);
+  cancelImportJob();
+  check('a cancel past the lock is a no-op: nothing called, nothing recorded', [after, importCancelRequested()], [0, false]);
+  setImportJobCancel(null);
+  off();
+  endImportJob();
+  lockImportCancel();
+  check('lockImportCancel while idle changes nothing', getImportJob(), { status: 'idle' });
+  setImportJobCancel(() => { called++; });
+  beginImportJob('again.pcap', 1);
+  cancelImportJob();
+  check('a handle registered while idle was not kept for the next job', called, 1);
+  endImportJob();
+}
 
 // --- an import and a Start: the first to begin wins -----------------------------
 //

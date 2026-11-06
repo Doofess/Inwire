@@ -55,12 +55,22 @@ check('handleFile refuses while the job runs', beforeAwait.includes(RUNNING));
 check('handleFile no longer keys its refusal on a local busy flag', !handleFile.includes('busy'));
 check('handleFile begins the job before its first await', beforeAwait.includes('beginImportJob(file.name, file.size)'));
 check('handleFile ends the job in finally, with the result', handleFile.slice(handleFile.indexOf('finally')).includes('endImportJob(result)'));
-check('handleFile awaits the lifecycle\'s begin before it reads the file',
-  handleFile.indexOf('await onImportBegin?.()') !== -1
-  && handleFile.indexOf('await onImportBegin?.()') < handleFile.indexOf('importAnyFile('));
-check('a refusal and a throw both undo a begun import, before the dialog',
-  (handleFile.match(/if \(begun\) onImportFailed\?\.\(\);\s+onFailure\(/g) ?? []).length === 2);
-check('the import is handed the store\'s reach for its tail', handleFile.includes('bytesStoredThrough,'));
+// The phases' order moved to `importFlow.ts` (a script can run it, which it cannot
+// do to the panel); the panel hands it the lifecycle's begin and failed.
+const earlyFlow = readFileSync('src/services/importFlow.ts', 'utf8');
+check('handleFile hands the flow the lifecycle\'s begin and failed, and the flow awaits begin before it reads the file',
+  handleFile.includes('begin: onImportBegin') && handleFile.includes('failed: onImportFailed')
+  && earlyFlow.indexOf('await deps.begin?.()') !== -1
+  && earlyFlow.indexOf('await deps.begin?.()') < earlyFlow.indexOf('await deps.read()'));
+check('a refusal and a throw both undo a begun import, before the dialog (the flow runs `failed` before it returns)',
+  (earlyFlow.match(/deps\.failed\?\.\(\);\s+return \{ status: 'failed'/g) ?? []).length === 1
+  && /if \(begun\) deps\.failed\?\.\(\);\s+return \{\s+status: 'failed'/.test(earlyFlow)
+  && handleFile.indexOf('await runImportFlow(') < handleFile.indexOf('onFailure('));
+// The tail's byte release used to be a callback handed down to the walk on this
+// thread; the Worker route writes to the store itself and learns the store's reach
+// from App's `storedThrough` (checked below), so the panel hands over the route.
+check('the import is handed the Worker route, which keeps the tail and its byte release',
+  handleFile.includes('worker: onImportWorker'));
 check('the last result is the job\'s, so a remounted panel still shows it',
   panel.includes('job.result?.message') && panel.includes('job.result?.notes') && !panel.includes('setStatus'));
 check('handleFile hands the progress callback to the import', handleFile.includes('onProgress: importJobProgress'));
@@ -87,8 +97,45 @@ check('...in one grid cell, so the zone keeps its height',
 check('the name truncates with the full name in a title',
   busyBody.includes('truncate') && busyBody.includes('title={'));
 check('the result and notes sit above the help card',
-  panel.indexOf('{status && (') !== -1 && panel.indexOf('{status && (') < panel.indexOf('Spreadsheets and tables are checked')
+  panel.indexOf('{status && !cancelled && (') !== -1
+  && panel.indexOf('{status && !cancelled && (') < panel.indexOf('Spreadsheets and tables are checked')
   && panel.indexOf('{notes.length > 0 && (') < panel.indexOf('Spreadsheets and tables are checked'));
+
+// --- Cancel -----------------------------------------------------------------
+
+// A cancelled import is the user's own act: no error dialog, on either branch of
+// handleFile (a refusal the flow reports, or a throw it catches), and no success
+// line - the quiet "Import cancelled" one.
+check('a cancelled import shows no error dialog',
+  (handleFile.match(/onFailure\(/g) ?? []).length === 1
+  && /flow\.status === 'failed'\)\s*\{?\s*onFailure\(/.test(handleFile)
+  && /flow\.status === 'cancelled'/.test(handleFile));
+const flowSource = earlyFlow;
+check('the flow maps a cancelled outcome, or a requested cancel, to `cancelled`, never to a failure',
+  /kind === 'cancelled' \|\| deps\.cancelRequested\(\)/.test(flowSource)
+  && /status: 'cancelled'/.test(flowSource));
+check('the Cancel button is outside the drop zone\'s label, which would open the file picker',
+  panel.indexOf('aria-label="Cancel import"') > panel.indexOf('</label>')
+  && !zone.includes('Cancel import') && !zone.includes('cancelImportJob'));
+const cancelButton = between(panel, '<button', '</button>');
+check('...it is a plain button named for what it does, calling the job\'s cancel',
+  cancelButton.includes('type="button"') && cancelButton.includes('aria-label="Cancel import"')
+  && cancelButton.includes('onClick={() => cancelImportJob()}'));
+// The request waits behind a live capture's seal (up to a 3 s drain) or a CSV
+// parse, so the press must show at once: the job publishes it, the button says so.
+check('a requested Cancel reads Cancelling… and is disabled',
+  /disabled=\{job\.cancelRequested\}/.test(cancelButton)
+  && /job\.cancelRequested \? 'Cancelling…' : 'Cancel'/.test(cancelButton)
+  && cancelButton.includes('aria-label="Cancel import"')
+  && cancelButton.includes('disabled:opacity-40 disabled:cursor-not-allowed'));
+check('...shown only while the job is running and can still be cancelled; its row is kept while busy so the cards do not move',
+  /\{busy && \(/.test(panel) && /\{job\.status === 'running' && job\.cancellable && \(/.test(panel));
+check('the cancelled result is a muted line, not the success one',
+  panel.includes('job.result?.cancelled === true')
+  && /\{status && cancelled && \(\s*<div className="text-muted-foreground/.test(panel));
+check('handleFile hands the run\'s cancel to the job, and locks Cancel before the adoption (in the flow)',
+  handleFile.includes('onCancelHandle: setImportJobCancel') && handleFile.includes('lockCancel: lockImportCancel')
+  && flowSource.indexOf('deps.lockCancel()') < flowSource.indexOf('await deps.adopt('));
 
 // --- App --------------------------------------------------------------------
 
@@ -143,7 +190,7 @@ check('stopCaptureAndSeal hands back the drain it started',
   app.includes('const stopCaptureAndSeal = (tellAgent: boolean): Promise<void> => {'));
 check('...resolved at once when the capture is already sealed',
   between(app, 'const stopCaptureAndSeal =', 'stopCaptureRef.current = stopCaptureAndSeal').includes('?? Promise.resolve()'));
-const lifecycleBegin = between(app, 'const importLifecycleEffects', 'const handleImportBatch');
+const lifecycleBegin = between(app, 'const importLifecycleEffects', 'const handleImportOpening');
 check('the lifecycle seals through stopCaptureAndSeal(true) and not the bare stop',
   /stopAndSeal: \(\) => \(isCapturingRef\.current\s+\? stopCaptureAndSeal\(true\)/.test(lifecycleBegin));
 check('...and empties the view with handleClearPackets, bypassing the Clear View gate',
@@ -152,11 +199,22 @@ check('...keeping the offer, so the view\'s offer stays null for the import',
   lifecycleBegin.includes('offeredCapture(sessionMetaNow())') && lifecycleBegin.includes('setLastCapture(null)'));
 check('a failure re-offers the kept capture as Clear View does',
   lifecycleBegin.includes('setLastCapture(kept)') && lifecycleBegin.includes('void saveSessionMeta(kept)'));
-check('a failure discards the import\'s directory and drops its derived answers',
-  lifecycleBegin.includes('captureStore.discard(captureId)') && lifecycleBegin.includes('importDerivedRef.current = null'));
-const batch = between(app, 'const handleImportBatch', 'const handleImportPackets');
-check('the first batch opens the store through the lifecycle, and no longer stops the capture itself',
-  batch.includes('importLifecycle.onBatch()') && !batch.includes('stopCaptureForImportRef'));
+// The decrypted answers used to wait in an App ref that a failure had to empty;
+// they now come back in the Worker's `done` and reach `handleImportPackets` only on
+// success, so a failure has nothing of them to drop.
+check('a failure discards the import\'s directory',
+  lifecycleBegin.includes('captureStore.discard(captureId)') && !lifecycleBegin.includes('importDerivedRef'));
+const batch = between(app, 'const handleImportOpening', 'const importWorkerRoute');
+check('the Worker\'s first batch opens the store through the lifecycle - awaited - and no longer stops the capture itself',
+  batch.includes('importLifecycle.onBatch()') && batch.includes('await opened') && !batch.includes('stopCaptureForImportRef'));
+check('the open is awaited from the lifecycle\'s own effect, not a second open',
+  lifecycleBegin.includes('captureStore.beginAwaited(captureId)') && lifecycleBegin.includes('captureStore.begin(captureId)'));
+check('the Worker route is given what the store holds (for the tail\'s byte release) and the pipeline\'s derived budget',
+  between(app, 'const importWorkerRoute', 'const handleImportPackets').includes('storedThrough: bytesStoredThrough')
+  && between(app, 'const importWorkerRoute', 'const handleImportPackets').includes('derivedBudget: derivedBudgetRef.current'));
+check('the import\'s derived answers come from the Worker\'s done, after the pipeline reset',
+  /pipeline\.reset\(.*\);[\s\S]*?pipeline\.keepDerived\(info\.derived\)/.test(between(app, 'const handleImportPackets', 'deriveForBuffer(imported)'))
+  && between(app, 'const handleImportPackets', 'deriveForBuffer(imported)').includes('info?.estimates'));
 check('the success path takes the capture id from the lifecycle',
   between(app, 'const handleImportPackets', 'adoptMarks(EMPTY_MARKS)').includes('importLifecycle.succeed()'));
 // The offer's "it got a frame" mark is `lastPacketMs`. An import that left it
@@ -167,9 +225,9 @@ check('a stored import records its last frame\'s time, so it can be offered agai
   /if \(storedImport !== null && imported\.length > 0\)\s*\{?\s*lastPacketTimeRef\.current = imported\[imported\.length - 1\]\.tsUs/
     .test(imported)
   && imported.lastIndexOf('lastPacketTimeRef.current = imported') > imported.lastIndexOf('lastPacketTimeRef.current = null'));
-check('App hands the panel the lifecycle and the store\'s reach',
+check('App hands the panel the lifecycle and the Worker route, and reads the store\'s reach',
   app.includes('onImportBegin={handleImportBegin}') && app.includes('onImportFailed={handleImportFailed}')
-  && app.includes('bytesStoredThrough={bytesStoredThrough}')
+  && app.includes('onImportWorker={importWorkerRoute}')
   && app.includes('captureStore.storedRange?.last ?? 0'));
 
 check('App reads the job for render-time reasons', app.includes('useImportJob()'));
@@ -191,6 +249,30 @@ check('export start refuses while the job runs', start.includes(RUNNING));
 check('export controls are disabled while the job runs',
   between(transfer, 'const canExport =', 'const start = async').includes('importing'));
 check('export rows say why', between(transfer, 'const formatRow =', 'return (').includes('IMPORT_RUNNING_REASON'));
+
+// App hands a finished import to the list a slice a task (`adoptSlices.ts`).
+// The job must stay running until the last slice is in, or a Start or a second
+// import pressed between two slices would find a half-adopted buffer.
+check('the panel awaits the adoption before the job ends',
+  /await onImportPackets\(/.test(between(panel, 'const handleFile = async', 'endImportJob(result)')));
+check('App adopts an import in slices and derives after the last',
+  /adoptInSlices\(/.test(between(app, 'const handleImportPackets = ', 'const deriveForBuffer'))
+  && /if \(whole\) deriveForBuffer\(imported\)/.test(app));
+// The strip waits for the last slice: a repaint per slice decided up to 50,000
+// colours inside the slice's task (~160 ms, profiled on the burst).
+const handler = between(app, 'const handleImportPackets = ', 'const deriveForBuffer');
+const minimap = readFileSync('src/components/packet-list/PacketListMinimap.tsx', 'utf8');
+const list = readFileSync('src/components/packet-list/PacketList.tsx', 'utf8');
+check('App holds the minimap strip while the slices go in, and lets go only for its own run',
+  handler.indexOf('setAdopting(true)') !== -1
+  && handler.indexOf('setAdopting(true)') < handler.indexOf('adoptInSlices(')
+  && /const whole = await sliced;\s*if \(adoptRunRef\.current === run\) setAdopting\(false\);/.test(handler)
+  && /holdStrip=\{adopting\}/.test(app) && /hold=\{holdStrip\}/.test(list)
+  && /if \(!hold\) heldRef\.current = packets;\s*const paintedPackets = useThrottledValue\(heldRef\.current,/.test(minimap));
+// The list mounts with an import's first slice (the welcome stood in before it),
+// so a ref seeded from `packets` painted that slice anyway.
+check('a strip mounted held starts empty, not on the first slice',
+  /useRef<Packet\[\]>\(hold \? NO_PACKETS : packets\)/.test(minimap));
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed.`);

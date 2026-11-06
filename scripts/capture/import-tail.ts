@@ -12,6 +12,7 @@
  */
 import { pcapOf } from '../parity/synthetic';
 import { importAnyFile } from '../../src/services/tabularImport';
+import { ImportTail } from '../../src/services/importTail';
 import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from '../../src/services/bufferBudget';
 import type { Packet } from '../../src/types/packet';
 
@@ -140,6 +141,32 @@ async function main() {
       (batch) => { lastSeen = batch[batch.length - 1].id; },
     ),
     idsUpTo(500));
+
+  // The Worker route sizes each row where it was dissected and the page pushes
+  // those sizes: the trim follows the sizes given, not a fresh estimate (the page
+  // holds decoded rows, whose estimate can differ from the pushed one).
+  {
+    const rows = all.slice(0, 10).map((p) => ({ ...p }));
+    const estimate = rows.map(estimateSummaryBytes);
+    const given = rows.map((_, i) => 1000 * (i + 1));
+    const total = given.reduce((a, b) => a + b, 0);
+    // Room for the newest three rows by their GIVEN sizes (8000 + 9000 + 10000).
+    const limit = given.slice(-3).reduce((a, b) => a + b, 0);
+    // With the estimates the limit would keep every row; with the given sizes only three.
+    check('the given sizes differ from the estimates (the case under test exists)',
+      given.every((g, i) => g !== estimate[i]) && limit > estimate.reduce((a, b) => a + b, 0), true);
+    const tail = new ImportTail({ residentBytes: limit, maxFrames: 1000 });
+    tail.push(rows.slice(0, 5), given.slice(0, 5));
+    tail.push(rows.slice(5), given.slice(5));
+    check('push(batch, sizes) trims by the given sizes: the newest three stay', tail.rows().map((p) => p.id), rows.slice(-3).map((p) => p.id));
+    check('... the kept sizes are the given ones', tail.estimates(), given.slice(-3));
+    const untrimmed = new ImportTail({ residentBytes: total, maxFrames: 1000 });
+    untrimmed.push(rows, given);
+    check('... a limit equal to their sum keeps all ten', untrimmed.length, 10);
+    const estimated = new ImportTail({ residentBytes: limit, maxFrames: 1000 });
+    estimated.push(rows);
+    check('... without sizes the estimate is used, as before', estimated.estimates(), estimate);
+  }
 
   if (failures > 0) {
     console.log(`\n${failures} failed`);

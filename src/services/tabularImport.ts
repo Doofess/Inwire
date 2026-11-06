@@ -1,5 +1,5 @@
 import { Packet } from '../types/packet';
-import { BYTES_RESIDENT_FRAMES, estimateSummaryBytes } from './bufferBudget';
+import { ImportTail } from './importTail';
 import { DnsTracker } from './dnsTracker';
 import { ImportFailure, rowsToFrames } from './exportSchema';
 import { PcapService, type FrameRecordEntry } from './pcapParser';
@@ -32,9 +32,40 @@ export interface ImportSuccess {
    * anything that is not a capture file.
    */
   facts?: CaptureFileFacts;
+  /**
+   * From the import Worker only: each of `packets`' `estimateSummaryBytes`, so
+   * the buffer's accounting is not computed again for rows it has just decoded.
+   */
+  estimates?: number[];
+  /** From the import Worker only: the decrypted answers its walk kept, by frame id. */
+  derived?: [number, Uint8Array][];
+  /** From the import Worker only: frames in the file, and how many reached the store. */
+  totalFrames?: number;
+  stored?: number;
 }
 
 export type ImportOutcome = ImportSuccess | { ok: false; failure: ImportFailure };
+
+/**
+ * A capture-file import running in a Worker (`importClient.ts`): its result, and
+ * the way to stop it. The tail's rows, estimates and derived answers come back in
+ * a success; a failure is a value, never a rejection.
+ */
+export interface ImportRunHandle {
+  result: Promise<ImportOutcome>;
+  cancel(): void;
+}
+
+/**
+ * Starts a capture file's import in a Worker. Supplied by the app, which owns
+ * what the import needs of the page (the store, the key log, the lifecycle); a
+ * promise because the client is loaded on first use. `limits` are the RAM tail's
+ * bounds, as the in-process route takes them.
+ */
+export type WorkerImportRoute = (
+  file: File,
+  run: { maxFrames: number; residentBytes: number; onProgress: ImportProgress },
+) => Promise<ImportRunHandle>;
 
 export const CAPTURE_EXTENSIONS = ['.pcap', '.pcapng', '.cap'];
 
@@ -251,13 +282,34 @@ async function importZip(file: File, maxFrames: number): Promise<ImportOutcome> 
 
 async function importCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch?: ImportBatchSink,
-  onProgress?: ImportProgress, bytesStoredThrough?: () => number,
+  onProgress?: ImportProgress, bytesStoredThrough?: () => number, worker?: WorkerImportRoute,
+  onCancelHandle?: (cancel: (() => void) | null) => void,
 ): Promise<ImportOutcome> {
   try {
     const notes: string[] = [];
-    const { packets, totalFrames, stored, facts } = onBatch === undefined
-      ? await readWholeCapture(file, maxFrames)
-      : await readStreamedCapture(file, maxFrames, residentBytes, onBatch, onProgress, bytesStoredThrough);
+    // The Worker route when the app supplied one: it dissects off this thread and
+    // writes to the store itself. A failure (or a Cancel) is its own value.
+    let fromWorker: Pick<ImportSuccess, 'estimates' | 'derived'> = {};
+    let read: CaptureRead;
+    if (worker !== undefined) {
+      const run = await worker(file, { maxFrames, residentBytes, onProgress: onProgress ?? (() => {}) });
+      // Handed over as soon as it exists; a Cancel pressed while the client was
+      // loading reaches it here, and settles `result` as cancelled.
+      onCancelHandle?.(run.cancel);
+      const outcome = await run.result;
+      onCancelHandle?.(null);
+      if (outcome.ok === false) return outcome;
+      read = {
+        packets: outcome.packets, totalFrames: outcome.totalFrames ?? outcome.packets.length,
+        stored: outcome.stored ?? null, facts: outcome.facts,
+      };
+      fromWorker = { estimates: outcome.estimates, derived: outcome.derived };
+    } else {
+      read = onBatch === undefined
+        ? await readWholeCapture(file, maxFrames)
+        : await readStreamedCapture(file, maxFrames, residentBytes, onBatch, onProgress, bytesStoredThrough);
+    }
+    const { packets, totalFrames, stored, facts } = read;
 
     if (stored === null && totalFrames > packets.length) {
       // Only when there is nowhere to put the rest. With a sink the frames are
@@ -285,7 +337,7 @@ async function importCapture(
         },
       };
     }
-    return { ok: true, packets, notes, facts };
+    return { ok: true, packets, notes, facts, ...fromWorker };
   } catch (err) {
     return {
       ok: false,
@@ -304,7 +356,7 @@ interface CaptureRead {
   totalFrames: number;
   /** Frames handed to the sink, or null when there was none. */
   stored: number | null;
-  facts: CaptureFileFacts;
+  facts?: CaptureFileFacts;
 }
 
 /** The old route: everything in one array, capped at the buffer's size. */
@@ -326,59 +378,17 @@ async function readStreamedCapture(
   file: File, maxFrames: number, residentBytes: number, onBatch: ImportBatchSink,
   onProgress?: ImportProgress, bytesStoredThrough?: () => number,
 ): Promise<CaptureRead> {
-  const tail: Packet[] = [];
-  // Each tail row's estimate, parallel to `tail`, so dropping a row subtracts
-  // what it added without estimating it again.
-  const sizes: number[] = [];
-  let tailBytes = 0;
-  // How many of the tail's oldest rows have let their bytes go. The budget does
-  // not count raw bytes; they stay for the newest BYTES_RESIDENT_FRAMES only, as
-  // in the live buffer, and older frames read theirs from the store. Kept on
-  // every row, a tail of full-size frames held a 2.7 GB file's bytes (#20).
-  let released = 0;
+  const tail = new ImportTail({ residentBytes, maxFrames });
   // Recorded, because every frame of a streamed import goes to the store, and
   // a frame's record there is what rebuilds its tree later (ADR 0049).
   const outcome = await PcapService.streamCaptureFile(file, (batch, records) => {
     onBatch(batch, records ?? []);
-    for (const packet of batch) {
-      const size = estimateSummaryBytes(packet);
-      tail.push(packet);
-      sizes.push(size);
-      tailBytes += size;
-    }
-    // Trimmed as it goes, not at the end: holding the whole capture to slice
-    // the last slab off it is the memory this route exists to avoid. Both
-    // bounds hold, one frame always stays, and the head goes in one splice.
-    let drop = 0;
-    while (
-      tail.length - drop > 1
-      && (tailBytes > residentBytes || tail.length - drop > maxFrames)
-    ) {
-      tailBytes -= sizes[drop];
-      drop++;
-    }
-    if (drop > 0) {
-      tail.splice(0, drop);
-      sizes.splice(0, drop);
-      released = Math.max(0, released - drop);
-    }
-    // After `onBatch`, which has handed each frame to the store: its append
-    // copies the packet object there and then, so this reaches only the tail's.
-    // Only a frame the store can supply is let go, as the live path's
-    // `evictOldBytes` does: rows are in id order, so the first one not yet
-    // stored ends the pass and the next batch tries again. With no way to ask,
-    // nothing is released - a tail that keeps every byte is safe, one that
-    // lets go of bytes held nowhere is not.
-    const storedThrough = bytesStoredThrough?.() ?? 0;
-    for (
-      ;
-      released < tail.length - BYTES_RESIDENT_FRAMES && tail[released].id <= storedThrough;
-      released++
-    ) {
-      tail[released].rawBytes = RELEASED_BYTES;
-    }
+    tail.push(batch);
+    // After `onBatch`, which has handed each frame to the store. With no way to
+    // ask what it holds, nothing is released.
+    tail.releaseBytesThrough(bytesStoredThrough?.() ?? 0);
   }, { record: true, onProgress });
-  return { packets: tail, totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
+  return { packets: tail.rows(), totalFrames: outcome.totalFrames, stored: outcome.built, facts: outcome.facts };
 }
 
 /**
@@ -389,13 +399,6 @@ export type ImportBatchSink = (packets: Packet[], records: FrameRecordEntry[]) =
 
 /** How much of the file has been read, of its size; called as each window loads. */
 type ImportProgress = (readBytes: number, totalBytes: number) => void;
-
-/**
- * What a tail row holds once its bytes have gone: empty, which is all
- * `hasBytes` in `packetBytes.ts` asks. Not imported from there, so this module
- * does not pull the store client in.
- */
-const RELEASED_BYTES = new Uint8Array(0);
 
 export interface ImportOptions {
   /**
@@ -433,6 +436,19 @@ export interface ImportOptions {
    * the sink is not known to hold what it was handed. Ignored without `onBatch`.
    */
   bytesStoredThrough?: () => number;
+  /**
+   * Imports a pcap or pcapng in a Worker instead of on this thread; it takes the
+   * place of `onBatch` and `bytesStoredThrough`, which the Worker's own store
+   * port and tail make unnecessary. A zip's capture and every other format stay
+   * where they were.
+   */
+  worker?: WorkerImportRoute;
+  /**
+   * Told the Worker run's `cancel` once it exists, and null once it is over, so
+   * the import job can stop it (`importJob.ts`). Never called for a format with
+   * no run to stop.
+   */
+  onCancelHandle?: (cancel: (() => void) | null) => void;
 }
 
 export async function importAnyFile(file: File, options: ImportOptions = {}): Promise<ImportOutcome> {
@@ -443,7 +459,7 @@ export async function importAnyFile(file: File, options: ImportOptions = {}): Pr
   if (CAPTURE_EXTENSIONS.includes(extension)) {
     return importCapture(
       file, maxFrames, options.residentBytes ?? Number.POSITIVE_INFINITY, options.onBatch,
-      options.onProgress, options.bytesStoredThrough,
+      options.onProgress, options.bytesStoredThrough, options.worker, options.onCancelHandle,
     );
   }
   if (extension === '.json') return importJson(file);

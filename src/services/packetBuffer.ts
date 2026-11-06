@@ -109,8 +109,14 @@ export function adoptAccounting(
   accounting: BufferAccounting,
   packets: readonly Packet[],
   persistedThroughId: number | null,
+  estimates?: readonly number[],
 ): void {
-  accounting.residentBytes = packets.reduce((sum, packet) => sum + estimateSummaryBytes(packet), 0);
+  // `estimates`: the import Worker's `estimateSummaryBytes` of each of these
+  // packets, taken where they were built, so a million rows are not walked again
+  // on the thread the import exists to keep free. Only when it names every one.
+  accounting.residentBytes = estimates !== undefined && estimates.length === packets.length
+    ? estimates.reduce((sum, bytes) => sum + bytes, 0)
+    : packets.reduce((sum, packet) => sum + estimateSummaryBytes(packet), 0);
   if (persistedThroughId !== null) accounting.persistedThroughId = persistedThroughId;
   // The drop count belongs to the buffer that was pushed out of, and that
   // buffer is gone. Nothing used to reset it - `reportDropped` is only ever

@@ -288,7 +288,9 @@ export type ImportFailure =
   | { kind: 'no-table'; message: string }
   | { kind: 'missing-columns'; message: string; found: string[]; missing: ColumnKey[] }
   | { kind: 'no-rows'; message: string; rejected: number }
-  | { kind: 'too-large'; message: string; rows: number };
+  | { kind: 'too-large'; message: string; rows: number }
+  /** The user stopped a capture-file import; nothing is wrong and no dialog is owed. */
+  | { kind: 'cancelled'; message: string };
 
 /**
  * Header spellings this importer accepts, by canonical key.

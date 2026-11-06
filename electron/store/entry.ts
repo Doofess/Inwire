@@ -96,6 +96,9 @@ process.parentPort.on('message', (event) => {
     // client port the app watches.
     const reply = (answer: FromCapture) => incoming.postMessage(answer);
     incoming.on('message', (message) => host.receive(message.data as ToCapture, reply));
+    // An import Worker's port is closed when its run ends, one per import; the
+    // listener (and the `reply` closure it holds) goes with it.
+    incoming.once('close', () => incoming.removeAllListeners());
     incoming.start();
     return;
   }

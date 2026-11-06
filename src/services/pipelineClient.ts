@@ -111,6 +111,41 @@ function requestPort(channel: string, ask: () => void, what: string): Promise<Me
   });
 }
 
+/**
+ * The store's ingest port requests in line, one at a time. `requestPort` matches
+ * on the channel's name alone, so two requests open at once would each take
+ * whichever port arrived first: the pipeline's and an import's would swap, or
+ * one port would go to both. The next request is asked only once the one before
+ * it has settled, whichever way.
+ */
+let ingestRequests: Promise<unknown> = Promise.resolve();
+
+/** A fresh port to the capture store's ingest side, for whoever is next in line. */
+export function requestCaptureIngestPort(): Promise<MessagePort> {
+  const next = ingestRequests.then(() => requestPort(
+    INGEST_PORT_MESSAGE,
+    () => window.inwire?.requestCaptureIngestPort?.(),
+    'the capture store',
+  ));
+  ingestRequests = next.catch(() => undefined);
+  return next;
+}
+
+/**
+ * Every Worker that runs the pipeline script - the pipeline itself and an
+ * import - is made here, so the script is bundled once and no role gets a
+ * second copy of the dissectors. A module worker, resolved through the bundler
+ * the same way maplibre's own workers are - the arrangement vite.config.ts
+ * already handles. The name is the role (`inwire-pipeline`, or `IMPORT_NAME`);
+ * Vite reads only the literal `type`, so the name may be a variable.
+ */
+export function createPipelineScriptWorker(name: string): Worker {
+  return new Worker(new URL('../workers/pipeline.worker.ts', import.meta.url), {
+    type: 'module',
+    name,
+  });
+}
+
 /** How long Stop waits for the Worker to let go of its tail before sealing without it. */
 const DRAIN_TIMEOUT_MS = 3000;
 
@@ -153,12 +188,7 @@ export class PipelineClient {
 
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
-    // A module worker, resolved through the bundler the same way maplibre's
-    // own workers are - the arrangement vite.config.ts already handles.
-    const worker = new Worker(new URL('../workers/pipeline.worker.ts', import.meta.url), {
-      type: 'module',
-      name: 'inwire-pipeline',
-    });
+    const worker = createPipelineScriptWorker('inwire-pipeline');
     worker.onmessage = (event: MessageEvent<FromPipeline>) => this.receive(event.data);
     worker.onerror = (event) => this.onFailure(event.message || 'the packet pipeline failed');
     this.worker = worker;
@@ -315,11 +345,7 @@ export class PipelineClient {
   private attachIngestPort(): Promise<void> {
     if (this.ingestPort) return this.ingestPort;
     this.ingestPort = (async () => {
-      const port = await requestPort(
-        INGEST_PORT_MESSAGE,
-        () => window.inwire?.requestCaptureIngestPort?.(),
-        'the capture store',
-      );
+      const port = await requestCaptureIngestPort();
       this.send({ type: 'storePort' }, [port]);
     })().catch((error: unknown) => {
       this.ingestPort = null;

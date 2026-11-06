@@ -79,7 +79,9 @@ export interface PacketBuffer {
    * Import passes `null` to leave it alone. That asymmetry is preserved here
    * rather than quietly settled, because settling it changes behaviour.
    */
-  adoptBuffer: (packets: Packet[], persistedThroughId: number | null) => void;
+  adoptBuffer: (
+    packets: Packet[], persistedThroughId: number | null, estimates?: readonly number[], shown?: Packet[],
+  ) => void;
   /** Summary bytes the buffer is holding, for the settings panel. */
   residentBytes: () => number;
   /** The current byte budget, for the restore path's own trimming. */
@@ -288,15 +290,22 @@ export function usePacketBuffer({
    */
   const flushNow = useCallback(() => flushRef.current(), []);
 
-  const adoptBuffer = useCallback((next: Packet[], persistedThroughId: number | null) => {
+  /**
+   * `shown`, when given, is what the list gets now: a prefix of `next` that the
+   * caller grows to `next` itself over the following tasks (`adoptSlices.ts`).
+   * The accounting is the whole of `next` from the start.
+   */
+  const adoptBuffer = useCallback((
+    next: Packet[], persistedThroughId: number | null, estimates?: readonly number[], shown?: Packet[],
+  ) => {
     // A fresh writer, because the blocks the old one handed out belong to
     // frames that are no longer here.
     fieldWriter.current = new FieldBlockWriter();
-    adoptAccounting(accountingRef.current, next, persistedThroughId);
+    adoptAccounting(accountingRef.current, next, persistedThroughId, estimates);
     // `adoptAccounting` zeroes the running total; this is the copy Driver Info
     // renders, and it has to follow or the panel keeps the old number.
     setDroppedBuffer(0);
-    setPackets(next);
+    setPackets(shown ?? next);
   }, []);
 
   const residentBytes = useCallback(() => accountingRef.current.residentBytes, []);

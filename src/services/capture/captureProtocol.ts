@@ -72,8 +72,14 @@ export type ToCapture =
    * and nothing else, and their `rawBytes` are empty rather than a second copy
    * (ADR 0053). Only a sender that wrote the bytes may say it; the app never
    * does, for the reason `appendBytes` below gives.
+   *
+   * `captureId` names the capture the rows are for (an import Worker's own
+   * port, which can outlive its capture by a cancel). A tagged message for a
+   * capture that is not the open one, or with none open, is dropped: nothing
+   * written and nothing said, not even the orphan failure an untagged append
+   * with no capture open raises. Untagged behaves as it always did.
    */
-  | { type: 'append'; packets: Packet[]; bytesSent?: true }
+  | { type: 'append'; packets: Packet[]; bytesSent?: true; captureId?: string }
   /**
    * The same rows as `append`, in the pipeline Worker's order, with a shard's
    * rows as the pack the shard encoded (`services/pipeline/rowPack.ts`).
@@ -85,8 +91,12 @@ export type ToCapture =
    * because an agent's metadata-only frame has none either and was never sent
    * ahead. The host reads every message, even with no capture open, because
    * its cache of half-read packs must count every row it was sent.
+   *
+   * `captureId` is `append`'s rule: an import Worker tags its messages (its port
+   * can outlive its capture), and a tagged message for another capture, or with
+   * none open, is dropped silently after it is read. The live Worker sends none.
    */
-  | { type: 'appendPacked'; rows: PackedRows; sent: Uint8Array }
+  | { type: 'appendPacked'; rows: PackedRows; sent: Uint8Array; captureId?: string }
   /**
    * Frames as they arrived, before anything dissected them, as one columnar
    * `FrameSlab` (#17): five buffers cross the port, not an object a frame.
@@ -122,8 +132,9 @@ export type ToCapture =
    * Frame records from the pipeline Worker, on its own port, one-way
    * (ADR 0049): what each frame's first dissection learned from the frames
    * before it. Matched to their frames by id, like rows, in either order.
+   * `captureId` is dropped on a mismatch exactly as `append`'s is.
    */
-  | { type: 'appendRecords'; frames: { id: number; record: Uint8Array }[] }
+  | { type: 'appendRecords'; frames: { id: number; record: Uint8Array }[]; captureId?: string }
   /**
    * Everything a revisit of frame `id` needs - its record, its row, its bytes
    * and the bytes of every frame its record names. Answered with `revisitKit`

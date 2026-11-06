@@ -3,14 +3,16 @@ import { Check, Info, LoaderCircle, Upload } from 'lucide-react';
 
 import { Packet } from '../../types/packet';
 import { ImportFailure } from '../../services/exportSchema';
-import { importAnyFile, IMPORT_ACCEPT, type ImportBatchSink } from '../../services/tabularImport';
+import { importAnyFile, IMPORT_ACCEPT, type WorkerImportRoute } from '../../services/tabularImport';
 import { performanceStore } from '../../services/interfacePrefs';
 import { usePreferenceValue } from '../../services/preferenceStore';
 import { AVERAGE_FRAME_BYTES, currentBufferBudget, framesForBudget } from '../../services/bufferBudget';
 import type { CaptureFileFacts } from '../../services/captureFileFacts';
 import {
-  beginImportJob, endImportJob, getImportJob, importJobProgress, useImportJob, type ImportResult,
+  beginImportJob, cancelImportJob, endImportJob, getImportJob, importCancelRequested, importJobProgress,
+  lockImportCancel, setImportJobCancel, useImportJob, type ImportResult,
 } from '../../services/importJob';
+import { runImportFlow } from '../../services/importFlow';
 import { importProgressPercent, importProgressSizes } from '../../lib/importProgress';
 import { importRefusal, isCaptureStarting } from '../../services/captureStarting';
 
@@ -23,21 +25,32 @@ import { importRefusal, isCaptureStarting } from '../../services/captureStarting
  * a success with caveats and a dialog for a refusal.
  */
 
+/** What an import hands the app beside its frames. */
+export interface ImportedInfo {
+  filename: string;
+  facts?: CaptureFileFacts;
+  /** From the import Worker: each frame's `estimateSummaryBytes`, for the buffer's accounting. */
+  estimates?: number[];
+  /** From the import Worker: the decrypted answers its walk kept, by frame id. */
+  derived?: [number, Uint8Array][];
+}
+
 interface ImportPanelProps {
   /**
    * The frames to put in the buffer: everything for a small file, the newest
    * `maxFrames` when the import streamed to disk.
    */
-  onImportPackets: (packets: Packet[], info: { filename: string; facts?: CaptureFileFacts }) => void;
+  onImportPackets: (packets: Packet[], info: ImportedInfo) => void | Promise<void>;
   /**
-   * Where every frame goes as it is dissected, if anywhere.
+   * How a capture file is imported: in a Worker, which writes every frame to the
+   * store and hands back the newest ones for the buffer (`importClient.ts`).
    *
    * With it, a capture file is imported whole and the buffer size stops being
    * a ceiling on what the file may contribute. Without it - which is what a
    * test or a caller with no store gets - the old cap applies and the note
    * below says so.
    */
-  onImportBatch?: ImportBatchSink;
+  onImportWorker?: WorkerImportRoute;
   /**
    * Called before the file is read, and awaited: a live capture is stopped and
    * sealed and the view emptied here, so nothing the renderer does between the
@@ -50,12 +63,6 @@ interface ImportPanelProps {
    * and give the previous capture back. Called before `onFailure`.
    */
   onImportFailed?: () => void;
-  /**
-   * The highest frame id the store can already supply bytes for (0 = none), so
-   * the import's RAM tail releases a row's raw bytes only when the store has
-   * them.
-   */
-  bytesStoredThrough?: () => number;
   onFailure: (filename: string, failure: ImportFailure) => void;
   /** Set when the error dialog's "Choose another file" reopens the picker. */
   retryToken: number;
@@ -70,10 +77,9 @@ interface ImportPanelProps {
 
 export const ImportPanel: React.FC<ImportPanelProps> = ({
   onImportPackets,
-  onImportBatch,
+  onImportWorker,
   onImportBegin,
   onImportFailed,
-  bytesStoredThrough,
   onFailure,
   retryToken,
   blockedBy = null,
@@ -87,6 +93,7 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
   const busy = job.status === 'running';
   const percent = job.status === 'running' ? importProgressPercent(job.readBytes, job.totalBytes) : 0;
   const status = job.status === 'idle' ? job.result?.message ?? null : null;
+  const cancelled = job.status === 'idle' && job.result?.cancelled === true;
   const notes = job.status === 'idle' ? job.result?.notes ?? [] : [];
   const [dragging, setDragging] = useState(false);
   // The import may not outgrow the buffer the app is set to hold.
@@ -110,43 +117,50 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
 
     beginImportJob(file.name, file.size);
     let result: ImportResult | undefined;
-    // Whether `onImportBegin` resolved: only then is there anything to undo.
-    let begun = false;
 
     try {
-      await onImportBegin?.();
-      begun = true;
-      // With a sink the file is imported whole and the rest is on disk, so the
-      // budget's BYTES bound what stays resident (`residentBytes`, measured per
-      // row); the frame count is only a ceiling beside it. Without a sink
-      // (other formats) the count, from the measured average, is still a cap on
-      // the import, and `importAnyFile` says so in a note.
-      const budget = currentBufferBudget(perf.packetBufferBytes);
-      const outcome = await importAnyFile(file, {
-        maxFrames: framesForBudget(budget, AVERAGE_FRAME_BYTES),
-        residentBytes: budget,
-        onBatch: onImportBatch,
-        onProgress: importJobProgress,
-        bytesStoredThrough,
+      // The order of the phases, and what Cancel does in each, is `importFlow.ts`'s.
+      const flow = await runImportFlow({
+        begin: onImportBegin,
+        failed: onImportFailed,
+        cancelRequested: importCancelRequested,
+        lockCancel: lockImportCancel,
+        // With a sink the file is imported whole and the rest is on disk, so the
+        // budget's BYTES bound what stays resident (`residentBytes`, measured per
+        // row); the frame count is only a ceiling beside it. Without a sink
+        // (other formats) the count, from the measured average, is still a cap on
+        // the import, and `importAnyFile` says so in a note.
+        read: () => {
+          const budget = currentBufferBudget(perf.packetBufferBytes);
+          return importAnyFile(file, {
+            maxFrames: framesForBudget(budget, AVERAGE_FRAME_BYTES),
+            residentBytes: budget,
+            worker: onImportWorker,
+            onProgress: importJobProgress,
+            onCancelHandle: setImportJobCancel,
+          });
+        },
+        // The name travels with the frames: it is the capture's source in
+        // everything exported from them.
+        // Awaited: App hands the rows to the list a slice a task, and the job stays
+        // running (every capture-changing action refused) until the last is in.
+        adopt: async (outcome) => {
+          await onImportPackets(outcome.packets, {
+            filename: file.name, facts: outcome.facts, estimates: outcome.estimates, derived: outcome.derived,
+          });
+        },
       });
-      if (outcome.ok === false) {
-        if (begun) onImportFailed?.();
-        onFailure(file.name, outcome.failure);
-        return;
+      if (flow.status === 'failed') {
+        onFailure(file.name, flow.failure);
+      } else if (flow.status === 'cancelled') {
+        // Pressed by the user: no dialog, and no success line either.
+        result = { message: 'Import cancelled', notes: [], cancelled: true };
+      } else {
+        result = {
+          message: `Imported ${flow.outcome.packets.length.toLocaleString()} packets from ${file.name}`,
+          notes: flow.outcome.notes,
+        };
       }
-      // The name travels with the frames: it is the capture's source in
-      // everything exported from them.
-      onImportPackets(outcome.packets, { filename: file.name, facts: outcome.facts });
-      result = {
-        message: `Imported ${outcome.packets.length.toLocaleString()} packets from ${file.name}`,
-        notes: outcome.notes,
-      };
-    } catch (err) {
-      if (begun) onImportFailed?.();
-      onFailure(file.name, {
-        kind: 'unreadable',
-        message: err instanceof Error ? err.message : 'This file could not be imported.',
-      });
     } finally {
       endImportJob(result);
     }
@@ -238,12 +252,40 @@ export const ImportPanel: React.FC<ImportPanelProps> = ({
             className="hidden"
           />
         </label>
+
+        {/* Outside the label: a button inside it would open the file picker. The
+            row is kept for as long as the import runs, with or without the
+            button, so the cards below move once when an import starts and once
+            when it ends, and not when Cancel stops being offered. */}
+        {busy && (
+          <div className="mt-2 flex h-7 items-center justify-center">
+            {job.status === 'running' && job.cancellable && (
+              <button
+                type="button"
+                aria-label="Cancel import"
+                onClick={() => cancelImportJob()}
+                disabled={job.cancelRequested}
+                className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground
+                  focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring
+                  disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {job.cancelRequested ? 'Cancelling…' : 'Cancel'}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* The outcome sits directly under the zone it came from, above the help
           card: while an import runs the zone shows the progress, and the line
-          that replaces it should not land below paragraphs of explanation. */}
-      {status && (
+          that replaces it should not land below paragraphs of explanation.
+          A cancelled import is the user's own act, so its line is quiet. */}
+      {status && cancelled && (
+        <div className="text-muted-foreground flex items-start gap-1.5">
+          <span>{status}</span>
+        </div>
+      )}
+      {status && !cancelled && (
         <div className="text-success-muted flex items-start gap-1.5 font-medium">
           <Check className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{status}</span>

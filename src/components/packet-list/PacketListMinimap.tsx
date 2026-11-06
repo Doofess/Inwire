@@ -8,7 +8,7 @@ import {
   usePreferenceSync,
 } from '../../services/preferences';
 import { minimapIndicator } from '../../lib/minimapIndicator';
-import { markTickIndices } from '../../lib/minimapMarks';
+import { markTickIndices, selectedRowIndex } from '../../lib/minimapMarks';
 import { useThemeToken } from '../../lib/themeColor';
 import { useThrottledValue } from '../../lib/useThrottledValue';
 import type { PacketTheme } from '../../services/packetThemes';
@@ -47,6 +47,14 @@ interface PacketListMinimapProps {
    * sort, where a mark's row cannot be found by its id (`markTickIndices`).
    */
   idOrdered: boolean;
+  /**
+   * Keep painting the frames the strip already has. A finished import grows the
+   * buffer a slice a task (`adoptSlices.ts`), and each repaint of a slice
+   * decides up to `REBUILD_DECIDE` colours, ~160 ms at 50,000 on the burst's
+   * chain, inside a task that already holds the slice's render. Held, the strip
+   * is painted once, from the whole buffer, after the last slice.
+   */
+  hold?: boolean;
   colorEngine: ColorRulesEngine;
   /** Colors for the bands, which are packet data. The selection marker
    *  deliberately does NOT use this - see `accent` below. */
@@ -93,6 +101,8 @@ interface PacketListMinimapProps {
  * an overview that redraws every flush is paying for detail it cannot show.
  */
 const MINIMAP_REPAINT_MS = 500;
+/** What a strip mounted held paints until it lets go: nothing. */
+const NO_PACKETS: Packet[] = [];
 
 const MINIMAP_WIDTH_STORAGE_KEY = 'inwire.packetListMinimapWidth';
 const DEFAULT_MINIMAP_WIDTH = 16;
@@ -200,6 +210,7 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   selectedPacket,
   marks,
   idOrdered,
+  hold = false,
   colorEngine,
   packetTheme,
   themeKey,
@@ -241,7 +252,11 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
   // of a pixel tall and cannot show a single packet's arrival anyway. The
   // viewport indicator and the selection marker stay live: they are the two
   // things on this strip a person actually watches move.
-  const paintedPackets = useThrottledValue(packets, MINIMAP_REPAINT_MS);
+  // Mounted held - the list appears with an import's first slice - the strip
+  // starts empty rather than painting that slice.
+  const heldRef = useRef<Packet[]>(hold ? NO_PACKETS : packets);
+  if (!hold) heldRef.current = packets;
+  const paintedPackets = useThrottledValue(heldRef.current, MINIMAP_REPAINT_MS);
   /**
    * Every buffered frame's colour, kept between repaints so a row's average
    * is lookups rather than a walk of its band (`lib/minimapBands.ts`), and
@@ -436,12 +451,9 @@ export const PacketListMinimap: React.FC<PacketListMinimapProps> = ({
         }
       }
       if (!selectedPacket) return;
-      // From the end: the selection is almost always recent, and a forward
-      // scan of the whole buffer is the one full pass left in this effect.
-      let idx = -1;
-      for (let i = paintedPackets.length - 1; i >= 0; i--) {
-        if (paintedPackets[i].id === selectedPacket.id) { idx = i; break; }
-      }
+      // Bisected in the buffer's own order: a finished import selects its
+      // first frame, and this runs on every slice of the fill below.
+      const idx = selectedRowIndex(paintedPackets, selectedPacket.id, idOrdered);
       if (idx === -1) return;
       // Offset into the strip's row space, not the buffer's: the marker sits
       // where the LIST puts that row, and the list counts from the oldest

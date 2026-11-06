@@ -20,12 +20,27 @@ import { useSyncExternalStore } from 'react';
 export interface ImportResult {
   message: string;
   notes: string[];
+  /** The import was cancelled: a quiet line, not the success one. */
+  cancelled?: boolean;
 }
 
 export type ImportJobState =
   /** `result` is the last import's, kept until the next one begins. */
   | { status: 'idle'; result?: ImportResult }
-  | { status: 'running'; fileName: string; readBytes: number; totalBytes: number };
+  | {
+    status: 'running'; fileName: string; readBytes: number; totalBytes: number;
+    /**
+     * False once the import is sealed and the previous capture pruned: there is
+     * nothing left to give back, so Cancel is not offered (`lockImportCancel`).
+     */
+    cancellable: boolean;
+    /**
+     * Cancel was pressed and the import has not yet stopped. The one record of the
+     * request (`importCancelRequested` reads it): the button shows it, because the
+     * stop can wait behind a live capture's seal or a parse.
+     */
+    cancelRequested: boolean;
+  };
 
 /** Why a control is shut while a file is being imported. */
 export const IMPORT_RUNNING_REASON = 'Not while a file is being imported.';
@@ -54,8 +69,58 @@ export function subscribeImportJob(listener: () => void): () => void {
 /** Starts the job, or answers false when one is already running. */
 export function beginImportJob(fileName: string, totalBytes: number): boolean {
   if (state.status === 'running') return false;
-  publish({ status: 'running', fileName, readBytes: 0, totalBytes });
+  cancelRun = null;
+  publish({ status: 'running', fileName, readBytes: 0, totalBytes, cancellable: true, cancelRequested: false });
   return true;
+}
+
+// Cancel is a request, not a status. The job stays `running` until the panel's
+// `finally`: every `status === 'running'` gate (Start, Reopen, export) would open
+// early under a `cancelling` one, while the discard was still going. The request
+// is a flag of the running state, published for the button.
+let cancelRun: (() => void) | null = null;
+
+/**
+ * Registers the running import's own way to stop (the Worker run's `cancel`), or
+ * clears it with null. A request already made is passed on at once: the client
+ * loads on first use, so Cancel can be pressed before there is a handle.
+ */
+export function setImportJobCancel(cancel: (() => void) | null): void {
+  if (state.status !== 'running') return;
+  cancelRun = cancel;
+  if (cancel !== null && state.cancelRequested) {
+    cancelRun = null;
+    cancel();
+  }
+}
+
+/**
+ * Asks the running import to stop. Phases with no handle (the live capture being
+ * sealed, a CSV or a zip) see the request through `importCancelRequested`. Publishes
+ * the request, once. A no-op when idle, past `lockImportCancel`, or already asked.
+ */
+export function cancelImportJob(): void {
+  if (state.status !== 'running' || !state.cancellable || state.cancelRequested) return;
+  const cancel = cancelRun;
+  cancelRun = null;
+  // Published before the handle is called: a handle that answers at once must
+  // find the request recorded.
+  publish({ ...state, cancelRequested: true });
+  cancel?.();
+}
+
+export function importCancelRequested(): boolean {
+  return state.status === 'running' && state.cancelRequested;
+}
+
+/**
+ * The import is about to be adopted: it is sealed and the previous capture is
+ * pruned, so Cancel can no longer give anything back. Publishes, for the button.
+ */
+export function lockImportCancel(): void {
+  if (state.status !== 'running' || !state.cancellable) return;
+  cancelRun = null;
+  publish({ ...state, cancellable: false });
 }
 
 /** Bytes of the file read so far. Ignored when no import is running. */
@@ -70,6 +135,7 @@ export function importJobProgress(readBytes: number): void {
  * import ran, and its own state went with it.
  */
 export function endImportJob(result?: ImportResult): void {
+  cancelRun = null;
   if (state.status === 'running') publish(result === undefined ? IDLE : { status: 'idle', result });
 }
 

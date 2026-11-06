@@ -290,12 +290,26 @@ export class PcapService {
        * reached and the file's size. Not called for the host-inference prefix.
        */
       onProgress?: (readBytes: number, totalBytes: number) => void;
+      /**
+       * Takes each Decryption Secrets Block's key log; the walk waits for what
+       * it returns before reading on. Default: this page's key log.
+       */
+      onSecrets?: (text: string) => void | Promise<void>;
+      /** The file read window, settable so a test can force several. */
+      windowBytes?: number;
+      /**
+       * Asked after every frame; a returned promise is awaited before the next
+       * frame is read. The one place the pass can be held up for the consumer of
+       * `onBatch`, which is synchronous: an import Worker pauses here while the
+       * store is owed too many frames. Nothing to await costs no await.
+       */
+      pace?: () => Promise<void> | undefined;
     } = {},
   ): Promise<{ totalFrames: number; built: number; missedPatches: number; facts: CaptureFileFacts }> {
     // No cap: the point is the frames the cap used to throw away. What bounds
     // this is the patch window above, and whatever the caller does with each
     // batch.
-    const walk = await PcapService.frameWalk(file);
+    const walk = await PcapService.frameWalk(file, options.windowBytes, options.onSecrets);
     // Host inference reads a prefix, so only that many frames are cut ahead of
     // the pass; the rest are cut as dissection pulls them.
     const prefix: ExtractedFrame[] = [];
@@ -320,7 +334,14 @@ export class PcapService {
       // records, and it is already waiting on a file read.
       options.record === true ? (await import('./dissect/frameRecord')).FrameRecorder : null,
     );
-    for await (const frame of walk.frames(undefined, options.onProgress)) batcher.push(frame);
+    const { pace } = options;
+    for await (const frame of walk.frames(undefined, options.onProgress)) {
+      batcher.push(frame);
+      if (pace !== undefined) {
+        const held = pace();
+        if (held !== undefined) await held;
+      }
+    }
     const { missedPatches } = batcher.finish();
     return { totalFrames: walk.totalFrames, built, missedPatches, facts: walk.facts };
   }
@@ -379,6 +400,11 @@ export class PcapService {
   public static async frameWalk(
     source: ArrayBuffer | BlobLike,
     windowBytes: number = READ_WINDOW_BYTES,
+    /**
+     * Where a Decryption Secrets Block's key log goes, awaited before the walk
+     * reads on. The default is this page's key log.
+     */
+    onSecrets: (text: string) => void | Promise<void> = (text) => { keyLog.add(text); },
   ): Promise<FrameWalk> {
     const size = 'size' in source ? source.size : source.byteLength;
     if (size < 8) {
@@ -403,7 +429,7 @@ export class PcapService {
       // however many passes it makes: a repeated malformed line would count twice.
       const secretsHanded = new Set<number>();
       return walkOf(windowFor, (window, limit, finish) =>
-        PcapService.walkPcapNgFrames(window, limit, secretsHanded, finish));
+        PcapService.walkPcapNgFrames(window, limit, secretsHanded, onSecrets, finish));
     }
 
     if (size < 24) {
@@ -536,6 +562,7 @@ export class PcapService {
     w: ByteWindow,
     limit: number,
     secretsHanded: Set<number>,
+    onSecrets: (text: string) => void | Promise<void>,
     finish: (totalFrames: number, facts: CaptureFileFacts) => void,
   ): AsyncGenerator<ExtractedFrame, void, undefined> {
     let totalFrames = 0;
@@ -668,7 +695,10 @@ export class PcapService {
         ) {
           secretsHanded.add(offset);
           const text = utf8Decoder.decode(w.bytes(offset + 16, secretsLength));
-          keyLog.add(text);
+          // Awaited: a frame after this block must not be dissected before the
+          // secrets are where it looks for them (an import in a Worker asks the
+          // page's key log to take them first).
+          await onSecrets(text);
         }
       } else if (blockType === 0x00000006) {
         // Enhanced Packet Block: InterfaceID(4) TsHigh(4) TsLow(4) CapLen(4) OrigLen(4), then data.

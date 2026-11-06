@@ -40,6 +40,7 @@
  */
 import { fieldEntries } from '../dissect/fieldAccess';
 import type { Packet } from '../../types/packet';
+import type { ToCapture } from './captureProtocol';
 
 /**
  * The same frame with its dense columns folded back into `fields`.
@@ -76,4 +77,46 @@ export function plainForStore(packet: Packet): Packet {
   // travelling is worse than no index at all.
   const { cols: _cols, row: _row, ...rest } = packet;
   return { ...rest, fields };
+}
+
+/**
+ * The messages a batch becomes on the store's port: its frames' records first
+ * (ADR 0049: the store must be handed them ahead of the rows), then the rows.
+ * One place, so the client's `append` and an import Worker's own port send the
+ * same thing. An empty half is left out.
+ *
+ * A record's entry is cut to its id and the record: an import's entries hold
+ * its decrypted answers too, which are never written anywhere, and a message
+ * clones every field it is given. Rows go through `plainForStore`.
+ *
+ * `captureId`, when given, tags both messages: the store drops a tagged message
+ * for a capture that is not the one it has open. Untagged output is unchanged.
+ */
+export function storeMessagesFor(
+  batch: readonly Packet[],
+  records: readonly { id: number; record: Uint8Array }[] | undefined,
+  captureId?: string,
+): ToCapture[] {
+  const messages: ToCapture[] = [];
+  const tag = captureId === undefined ? {} : { captureId };
+  const recordsMessage = recordsMessageFor(records, captureId);
+  if (recordsMessage !== null) messages.push(recordsMessage);
+  if (batch.length > 0) messages.push({ type: 'append', packets: batch.map(plainForStore), ...tag });
+  return messages;
+}
+
+/**
+ * The records half of `storeMessagesFor`, alone: an import Worker sends its rows
+ * packed rather than as an `append`, and the records ahead of them are the same
+ * message. `null` when there are none.
+ */
+export function recordsMessageFor(
+  records: readonly { id: number; record: Uint8Array }[] | undefined,
+  captureId?: string,
+): ToCapture | null {
+  if (records === undefined || records.length === 0) return null;
+  return {
+    type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })),
+    ...(captureId === undefined ? {} : { captureId }),
+  };
 }

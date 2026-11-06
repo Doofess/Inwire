@@ -19,6 +19,11 @@
  *     previous capture back.
  */
 import { createImportLifecycle, type ImportEffects } from '../../src/services/importLifecycle';
+import { runImportFlow } from '../../src/services/importFlow';
+import {
+  beginImportJob, cancelImportJob, endImportJob, getImportJob, importCancelRequested, lockImportCancel,
+  setImportJobCancel,
+} from '../../src/services/importJob';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -29,6 +34,12 @@ function check(name: string, actual: unknown, expected: unknown): void {
     console.log(`        expected ${JSON.stringify(expected)}`);
     console.log(`        actual   ${JSON.stringify(actual)}`);
   }
+}
+
+/** A condition, with what to show when it fails. */
+function ok(name: string, condition: boolean, detail?: unknown): void {
+  if (condition) check(name, true, true);
+  else check(name, detail ?? false, true);
 }
 
 interface Rig {
@@ -204,6 +215,113 @@ async function main(): Promise<void> {
     try { await lifecycle.begin(); } catch { thrown = true; }
     check('a seal that fails rejects begin and leaves the view alone', [thrown, events], [true, []]);
     check('...and releases the lifecycle', lifecycle.running(), false);
+  }
+
+  // --- Cancel -------------------------------------------------------------------------------
+  //
+  // The phase ordering is `importFlow.ts`'s (the panel calls it), driven here with the
+  // real lifecycle and the real job store; the fakes record what the effects saw. The job
+  // stays `running` until `fail()` has returned - a `cancelling` state would open every
+  // `status === 'running'` gate (Start, Reopen, export) while the discard was still going.
+  {
+    // Cancel pressed while a live capture is being sealed: no store is open yet.
+    const r = rig({ capturing: true, offer: 'live', holdSeal: true });
+    beginImportJob('a.pcap', 10);
+    let read = 0;
+    const flowing = runImportFlow({
+      begin: async () => { if (!(await r.lifecycle.begin())) throw new Error('refused'); },
+      failed: () => r.lifecycle.fail(),
+      cancelRequested: importCancelRequested,
+      lockCancel: lockImportCancel,
+      read: async () => { read++; return { ok: false, failure: { kind: 'unreadable', message: 'unreachable' } }; },
+      adopt: async () => {},
+    });
+    await Promise.resolve();
+    cancelImportJob();
+    r.releaseSeal();
+    const flow = await flowing;
+    ok('cancel before opening discards nothing and offers the previous capture',
+      flow.status === 'cancelled' && read === 0
+      && JSON.stringify(r.events) === JSON.stringify(['stopAndSeal', 'sealed', 'currentOffer', 'clearView', 'offer live']),
+      { flow, read, events: r.events });
+    ok('...and the file was never read, no store opened', r.lifecycle.storeId() === null && !r.events.some((e) => e.startsWith('openStore')));
+    endImportJob();
+  }
+  {
+    // Cancel pressed while the page awaits the capture's open: the Worker is
+    // waiting on `storeOpen`, the lifecycle's store is already open.
+    const r = rig({ capturing: false, offer: 'previous' });
+    beginImportJob('b.pcap', 10);
+    const statusDuring: string[] = [];
+    const seen = (what: string) => { statusDuring.push(`${what}:${getImportJob().status}`); };
+    const lifecycle = r.lifecycle;
+    const flow = await runImportFlow({
+      begin: async () => { if (!(await lifecycle.begin())) throw new Error('refused'); },
+      failed: () => { seen('failed'); lifecycle.fail(); seen('after'); },
+      cancelRequested: importCancelRequested,
+      lockCancel: lockImportCancel,
+      read: () => new Promise((resolve) => {
+        // What `importCapture` does: register the run's cancel, then the Worker asks to open.
+        setImportJobCancel(() => resolve({ ok: false, failure: { kind: 'cancelled', message: 'The import was cancelled.' } }));
+        lifecycle.onBatch();
+        // ...the open is awaited, and Cancel arrives.
+        cancelImportJob();
+      }),
+      adopt: async () => { throw new Error('nothing may be adopted'); },
+    });
+    ok('cancel during the awaited open discards the opened capture',
+      flow.status === 'cancelled'
+      && JSON.stringify(r.events.slice(-2)) === JSON.stringify(['discardStore import-1', 'offer previous'])
+      && lifecycle.storeId() === null && !r.events.some((e) => e.startsWith('sealStore') || e.startsWith('pruneOthers')),
+      { flow, events: r.events });
+    ok('gates stay closed until fail() returns, then open',
+      JSON.stringify(statusDuring) === JSON.stringify(['failed:running', 'after:running'])
+      && getImportJob().status === 'running' && !lifecycle.running()
+      && (endImportJob(), getImportJob().status === 'idle'),
+      { statusDuring });
+  }
+  {
+    // An in-process format has no handle: the request is seen when it returns.
+    const r = rig({ capturing: false, offer: 'previous' });
+    beginImportJob('c.csv', 10);
+    let adopted = 0;
+    const flow = await runImportFlow({
+      begin: async () => { await r.lifecycle.begin(); },
+      failed: () => r.lifecycle.fail(),
+      cancelRequested: importCancelRequested,
+      lockCancel: lockImportCancel,
+      read: async () => {
+        cancelImportJob();
+        return { ok: true, packets: [], notes: [] };
+      },
+      adopt: async () => { adopted++; },
+    });
+    ok('a cancel during an in-process import is honoured when it returns: nothing adopted, previous capture offered',
+      flow.status === 'cancelled' && adopted === 0 && r.events.at(-1) === 'offer previous', { flow, adopted, events: r.events });
+    endImportJob();
+  }
+  {
+    // Past the lock the import is sealed and the old capture pruned: Cancel cannot undo it.
+    const r = rig({ capturing: false, offer: 'previous' });
+    beginImportJob('d.pcap', 10);
+    let cancellableInAdopt: boolean | null = null;
+    const flow = await runImportFlow({
+      begin: async () => { await r.lifecycle.begin(); },
+      failed: () => r.lifecycle.fail(),
+      cancelRequested: importCancelRequested,
+      lockCancel: lockImportCancel,
+      read: async () => { r.lifecycle.onBatch(); return { ok: true, packets: [], notes: [] }; },
+      adopt: async () => {
+        r.lifecycle.succeed();
+        cancelImportJob();
+        cancellableInAdopt = (getImportJob() as { cancellable?: boolean }).cancellable ?? null;
+      },
+    });
+    ok('a cancel during adoption is a no-op: the import is kept, not discarded',
+      flow.status === 'done' && cancellableInAdopt === false
+      && !r.events.some((e) => e.startsWith('discardStore') || e === 'offer previous'),
+      { flow, cancellableInAdopt, events: r.events });
+    endImportJob();
   }
 
   if (failures > 0) {

@@ -717,6 +717,7 @@ inside App and Escape navigates the view behind the confirm.
 
 Live agent batches are parsed and dissected in `src/workers/pipeline.worker.ts`,
 which owns the ordering window and trackers. React receives batched summaries
-and bytes. File import currently runs the same parser on the renderer thread;
-see `docs/architecture.md` for that separate path.
+and bytes. A capture-file import dissects in its own Worker (ADR 0074; CSV, JSON, xlsx and
+zip stay in-process); see `docs/architecture.md`. The import panel's Cancel button
+sits under the drop zone, outside its `<label>`, and is withdrawn once the import is sealed.
 

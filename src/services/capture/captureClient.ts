@@ -34,7 +34,7 @@ import type { InfoPatch } from '../dissect/types';
 import type { ToCapture, FromCapture, CaptureStorageState } from './captureProtocol';
 import { freshCaptureStorageState } from './captureProtocol';
 import { MatchSet } from './matchSet';
-import { plainForStore } from './storePacket';
+import { storeMessagesFor } from './storePacket';
 import type { StreamSummary } from '../conversation/streamDigest';
 import type { QuicSummary, UdpSummary } from '../conversation/flowSummary';
 import type { TlsSummary } from '../conversation/tlsSummary';
@@ -220,6 +220,26 @@ class CaptureClient {
 
   onState: (state: CaptureStorageState) => void = () => {};
 
+  private readonly lostListeners = new Set<(message: string) => void>();
+
+  /**
+   * Hears when the store is gone (its process exited, or its port never came) or
+   * has failed for good. Something that is waiting on a stream the client does not
+   * see - the import Worker's own port to the store - cannot learn it any other
+   * way, and would wait for ever. Returns the way to stop listening.
+   */
+  onLost(listener: (message: string) => void): () => void {
+    this.lostListeners.add(listener);
+    return () => { this.lostListeners.delete(listener); };
+  }
+
+  private announceLost(message: string): void {
+    // Copied: a listener ends its run, which unsubscribes it.
+    for (const listener of [...this.lostListeners]) {
+      try { listener(message); } catch (error) { console.warn('a capture-store listener threw', error); }
+    }
+  }
+
   private ensurePort(): Promise<MessagePort | null> {
     if (this.connection) return this.connection;
     if (this.disabled || !captureStoreAvailable()) return Promise.resolve(null);
@@ -257,6 +277,7 @@ class CaptureClient {
     // never settles: a frame whose bytes cannot be fetched is a thing to
     // render, and the hex viewer already knows how to say so.
     this.settleAll();
+    this.announceLost(reason || 'the capture store stopped');
   }
 
   /**
@@ -443,6 +464,7 @@ class CaptureClient {
           this.settleAll();
         }
         this.update({ error: message.message });
+        if (message.fatal) this.announceLost(message.message);
         break;
     }
   }
@@ -469,6 +491,28 @@ class CaptureClient {
   }
 
   /**
+   * `begin`, answered: resolves when the store has opened the capture (its
+   * `ready` for this request), so an import Worker can be told the capture
+   * exists before it writes to it on its own port.
+   *
+   * Rejects when the open fails or never can: the store is unavailable or died,
+   * or a fatal failure settled the request with nothing. The caller treats that
+   * as a failed import; the store's own `failure` already set `state.error`.
+   */
+  async beginAwaited(captureId: string): Promise<void> {
+    this.openGeneration++;
+    if (!captureStoreAvailable()) throw new Error('the capture store is not available');
+    this.settleAll();
+    this.state = freshCaptureStorageState();
+    const opened = await this.request(
+      this.pendingOpen as never,
+      (requestId) => ({ type: 'open', captureId, requestId }),
+      null as StoredCapture | null,
+    );
+    if (opened === null) throw new Error('the capture store could not open the capture');
+  }
+
+  /**
    * Hands a flush's frames over.
    *
    * Called from `prepareBatch`'s persist effect, which runs exactly once per
@@ -481,7 +525,7 @@ class CaptureClient {
     // dense columns and the store cannot have them, because a class instance
     // does not survive a structured clone. `storePacket.ts` says what that
     // cost when it was not done.
-    this.send({ type: 'append', packets: packets.map(plainForStore) });
+    for (const message of storeMessagesFor(packets, undefined)) this.send(message);
   }
 
   /**
@@ -494,7 +538,7 @@ class CaptureClient {
     // The record and the id, and nothing else a caller's entry carries: an
     // import's entries hold its decrypted answers too, which are never
     // written anywhere (ADR 0049), and a message clones every field it is given.
-    this.send({ type: 'appendRecords', frames: records.map(({ id, record }) => ({ id, record })) });
+    for (const message of storeMessagesFor([], records)) this.send(message);
   }
 
   /**

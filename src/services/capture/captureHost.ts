@@ -386,10 +386,13 @@ export class CaptureHost {
     try {
       switch (message.type) {
         case 'open': return this.onOpen(message);
-        case 'append': return this.onAppend(message);
+        case 'append':
+          if (this.isForAnotherCapture(message.captureId)) return;
+          return this.onAppend(message);
         case 'appendPacked': return this.onAppendPacked(message);
         case 'appendBytes': return this.onAppendBytes(message, reply);
         case 'appendRecords': {
+          if (this.isForAnotherCapture(message.captureId)) return;
           this.open?.writer.attachRecords(message.frames);
           return;
         }
@@ -445,6 +448,16 @@ export class CaptureHost {
         + `${error instanceof Error ? `${error.message}\n${error.stack}` : String(error)}`);
       this.fail(describe(error), message.type === 'open');
     }
+  }
+
+  /**
+   * True for a tagged message whose capture is not the open one, or with none
+   * open. Such a message is dropped without a word: it is a late arrival from a
+   * port that outlived its capture (a cancelled import), which is not the
+   * wiring error an untagged orphan append reports. Untagged is never dropped.
+   */
+  private isForAnotherCapture(captureId: string | undefined): boolean {
+    return captureId !== undefined && this.open?.id !== captureId;
   }
 
   private onOpen(message: Extract<ToCapture, { type: 'open' }>): void {
@@ -598,12 +611,15 @@ export class CaptureHost {
   /**
    * The Worker's rows, shard rows still packed. Read before anything else, with
    * no capture open too: the reader counts the rows left in each pack, and a
-   * message it skipped would leave one held for ever.
+   * message it skipped would leave one held for ever. A message tagged for a
+   * capture that is not the open one (an import Worker's, outliving its capture
+   * by a cancel) is dropped only after that read, as `append` drops it.
    */
   private onAppendPacked(message: Extract<ToCapture, { type: 'appendPacked' }>): void {
     // `rows` feed the digest, decoded; `slots` are what the writer stages - a
     // shard's row stays in its pack there, and is decoded only if it must be.
     const { rows, slots } = this.packs.readSlots(message.rows);
+    if (this.isForAnotherCapture(message.captureId)) return;
     const sent: RowIn[] = [];
     const carrying: RowIn[] = [];
     for (let i = 0; i < slots.length; i++) (message.sent[i] === 1 ? sent : carrying).push(slots[i]);
