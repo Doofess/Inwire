@@ -31,13 +31,14 @@ export type ToImportRole = ToImport | RowsTaken;
  * import-client.ts` runs it in-process). The run posts through the rows credit:
  * at most `IMPORT_ROWS_IN_FLIGHT` `rows` batches are on their way to the page
  * unanswered, and everything after the first held one waits behind it, in order -
- * `done` and `progress` too, or `done` would overtake rows still held.
+ * `done` and `progress` too, or `done` would overtake rows still held - and the
+ * walk waits while any are held, so the held are never more than a batch or two.
  */
 export function createImportRole(
   post: (message: FromImport, transfer?: Transferable[]) => void,
 ): (message: ToImportRole, ports: readonly MessagePort[]) => void {
   const credit = createRowsCredit<FromImport>(post);
-  const handle = createImportRun({ post: credit.send });
+  const handle = createImportRun({ post: credit.send, pace: credit.clear });
   return (message, ports) => {
     if (message.type === 'rowsTaken') credit.taken();
     else handle(message, ports);

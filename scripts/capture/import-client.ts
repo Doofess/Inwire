@@ -705,9 +705,12 @@ async function starvedRun(name: string) {
     ...OPTIONS, maxFrames: 6_100, batchFrames: 500, windowBytes: 32 * 1024,
   });
   const run = runWorkerImport(fileOf(pcapOf(frames), name), r.deps);
-  // The walk is not parked by the credit, so it reads on and finishes; what is held is the page's side.
-  for (let waited = 0; r.store.state.appended < 6_000 && waited < 400; waited++) {
+  // The walk waits for the page too: settled once the store has taken nothing new for 300 ms
+  // (or everything - the walk reading on regardless, which the check below fails).
+  for (let waited = 0, still = 0, last = -1; r.store.state.appended < 6_000 && still < 30 && waited < 400; waited++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
+    still = r.store.state.appended === last ? still + 1 : 0;
+    last = r.store.state.appended;
   }
   await new Promise((resolve) => setTimeout(resolve, 100));
   return { r, run, worker: r.worker as RealWorker };
@@ -732,6 +735,10 @@ async function starvedRun(name: string) {
   const rowsPosted = worker.log.filter((t) => t === '<rows').length;
   check('a page that never answers is sent exactly the credit, and not the done behind it',
     rowsPosted === IMPORT_ROWS_IN_FLIGHT && !worker.log.includes('<done') && !worker.terminated, { rowsPosted, log: worker.log.length });
+  // Held rows are memory in the renderer process as surely as the page's queue was (#19):
+  // the walk itself waits while any are held, so a slow page holds the file's reading too.
+  check('...and the walk waits with them: the store has been sent no more than the credit and a batch or two',
+    r.store.state.appended > 0 && r.store.state.appended <= (IMPORT_ROWS_IN_FLIGHT + 2) * 500, r.store.state.appended);
   run.cancel();
   let outcome: ImportOutcome | null = null;
   try { outcome = await withTimeout(run.result, 'cancel while credit-blocked', 3_000); } catch { /* hung: checked below */ }
