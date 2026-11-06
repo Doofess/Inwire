@@ -766,11 +766,11 @@ async function starvedRun(name: string) {
 // `PipelineClient.receive` reads each `frames` message's pack; the Worker counts those rows
 // as owed until the page says `rowsTaken` (`flow.rowsPosted`). A pack that throws (one the
 // Worker never sent) must still be acknowledged, or the debt never clears and the live
-// flow stalls for good; and the reader is reset, so a half-consumed pack map does not make
-// the next batch fail too.
+// flow stalls for good. The reader is kept as it is: the Worker counts the packs it holds as
+// delivered, and later flushes read their rows from them.
 
 {
-  const mk = (from: number, count: number): PackedRows => {
+  const batchOf = (from: number, count: number): Packet[] => {
     const batch: Packet[] = [];
     for (let id = from; id < from + count; id++) {
       batch.push({
@@ -780,6 +780,10 @@ async function starvedRun(name: string) {
         sourcePort: 50000, destPort: 443, fields: { 'tcp.seq': id },
       } as Packet);
     }
+    return batch;
+  };
+  const mk = (from: number, count: number): PackedRows => {
+    const batch = batchOf(from, count);
     const pack = packRows(from, batch, batch.map((p) => p.rawBytes.length));
     const flush = new PackedFlush();
     batch.forEach((p, i) => flush.packed(pack, i, p.rawBytes, null));
@@ -800,14 +804,27 @@ async function starvedRun(name: string) {
   check('...and the next good batch decodes, and is left for its own acknowledgement (the buffer\'s)',
     second.ok && second.packets.length === 4 && second.packets[3].id === 4 && acked.length === 1, { second: second.ok, acked });
 
-  // A flush that fails part-way leaves the reader holding the pack its first row came from
-  // (two rows, one read); the reset lets go of it.
-  const half = mk(200, 2);
-  half.order = Int32Array.from([200, 0, 999, 0]);
+  // A window pack spans flushes: the Worker's sender sends it once, with its first rows, and
+  // counts it delivered (`PackSender`). A flush that cannot be read between two of its flushes
+  // must not cost the reader that pack, or every good flush after it fails until the packs in
+  // flight drain - the Worker is never told to send them again.
+  const spanning = batchOf(300, 2);
+  const pack = packRows(300, spanning, spanning.map((row) => row.rawBytes.length));
+  const sent = new Map<number, number>();
+  const flushOf = (index: number): PackedRows => {
+    const flush = new PackedFlush();
+    flush.packed(pack, index, spanning[index].rawBytes, null);
+    return flush.seal(sent);
+  };
   const live = new PackReader();
-  readPackedBatch(live, half, () => {});
-  check('...and the reader is reset: the pack a half-read flush was holding is gone',
-    live.held === 0, live.held);
+  const a = readPackedBatch(live, flushOf(0), () => {});
+  const unsent = mk(400, 2);
+  unsent.packs = []; // names pack 400, never sent: unreadable
+  const b = readPackedBatch(live, unsent, () => {});
+  const c = readPackedBatch(live, flushOf(1), () => {});
+  check('...and a pack sent before the bad flush still reads its rows after it',
+    a.ok && !b.ok && c.ok && c.packets.length === 1 && c.packets[0].id === 301 && live.held === 0,
+    { a: a.ok, b: b.ok, c: c.ok ? c.packets.map((row) => row.id) : c.message, held: live.held });
 }
 
 console.log();

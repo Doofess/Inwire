@@ -8,7 +8,7 @@ import type { PackedRows, PackReader } from './pipeline/rowPack';
 export type PackReadOutcome = { ok: true; packets: Packet[] } | { ok: false; message: string };
 
 export function readPackedBatch(
-  reader: Pick<PackReader, 'read' | 'reset'>,
+  reader: Pick<PackReader, 'read'>,
   rows: PackedRows,
   /** Tells the Worker `count` rows are taken (`PipelineClient.rowsTaken`). */
   acknowledge: (count: number) => void,
@@ -19,10 +19,11 @@ export function readPackedBatch(
     // The Worker counts these rows as owed until the page says it has taken them
     // (`flow.rowsPosted`), and a batch that cannot be shown is never committed, so
     // nothing else would say it: acknowledge them here or the flow's debt never
-    // clears. The reader may have been left holding packs for rows that were never
-    // read; forget them, so the next batch is not judged by this one's leftovers.
+    // clears. The reader is kept as it is: a pack spans flushes, the Worker counts
+    // the ones it holds as delivered and never sends them again, so forgetting them
+    // would fail every later flush that reads from one. Rows this flush did not get
+    // to leave their packs held until the next `packsReset`.
     acknowledge(rows.order.length / 2);
-    reader.reset();
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
 }
