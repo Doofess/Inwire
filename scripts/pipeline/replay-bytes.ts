@@ -83,6 +83,10 @@ function ownBytesChecks(): void {
   const body = worker.slice(start, worker.indexOf('\n}\n', start));
   check('postRows: a row posted with its bytes posts the bytes of its own, not its batch (D1)',
     /ownBytes\(/.test(body) && /withBytes/.test(body), body.slice(0, 200));
+  const swap = body.slice(body.indexOf('const views ='));
+  check('postRows: the swap to own bytes is inside the try, so a copy that throws part-way still puts every row\'s view back',
+    /try \{[\s\S]*?ownBytes\([\s\S]*?postMessage[\s\S]*?\} finally \{/.test(swap) && swap.indexOf('ownBytes(') > swap.indexOf('try {'),
+    swap.slice(0, 300));
 }
 
 async function main(): Promise<void> {
