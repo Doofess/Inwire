@@ -246,7 +246,12 @@ export class KeyLogFollower {
           this.lines.reset(top.skipPartial);
           // Tell the page how much is coming before any of it, so its table
           // is sized once rather than grown at every overflow. Only a read
-          // from the top: a tail read is a browser's few new lines.
+          // from the top: a tail read is a browser's few new lines. The page
+          // reserves only once that read's first text has added a secret.
+          // The file has been opened and stat'd, so the state this status
+          // carries is already `following`, not the one before it.
+          this.state = 'following';
+          this.error = undefined;
           this.incoming = plan.to - readFrom;
           this.pushStatus();
           this.incoming = undefined;

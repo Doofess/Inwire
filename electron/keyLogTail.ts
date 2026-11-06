@@ -197,7 +197,9 @@ export interface KeyLogFollowStatus {
   error?: string;
   /**
    * Set only on the status pushed just before a read's text: the bytes about
-   * to be sent, so the page can size its table once (`KeyLogStore#reserve`).
+   * to be sent. The page keeps it pending and sizes its table once
+   * (`KeyLogStore#reserve`) when that read's first text has added a secret,
+   * so a file that is not a key log reserves nothing.
    */
   incomingBytes?: number;
 }

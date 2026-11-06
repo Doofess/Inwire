@@ -102,14 +102,21 @@ export async function loadKeyLogFile(file: Blob, store: KeyLogStore, options: Re
   const clears = store.clears;
   const before = store.stats();
   try {
-    // The buffer moves once, here, for what will be read, instead of at every
+    // The buffer moves once for what will be read, instead of at every
     // overflow while the chunks arrive (each move strands the old buffer in
-    // every reader). Absolute, with headroom: the file already being
-    // followed, even a little longer since, finds the room and moves nothing.
-    store.reserve(Math.min(file.size, options.cap ?? KEYLOG_CAP_BYTES));
+    // every reader) - but only after the first text that adds a secret has
+    // proven this is a key log: a pcap picked through "All files" sets nothing
+    // aside. Absolute, with headroom: the file already being followed, even a
+    // little longer since, finds the room and moves nothing. A file already
+    // held adds no new secret, so it reserves nothing, the table being that big.
+    let reserved = false;
     const { skippedBytes } = await readKeyLogFile(file, (text) => {
       if (store.clears !== clears) return false;
       store.add(text);
+      if (!reserved && store.stats().secrets > before.secrets) {
+        reserved = true;
+        store.reserve(Math.min(file.size, options.cap ?? KEYLOG_CAP_BYTES));
+      }
     }, options);
     if (store.clears !== clears) return { kind: 'cleared' };
     const after = store.stats();

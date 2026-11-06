@@ -151,22 +151,56 @@ console.log('\n--- the panel\'s Load reserves once ---\n');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-  const store = new KeyLogStore();
-  let snapshots = 0;
-  store.onSnapshot(() => { snapshots++; });
+  /** A store that records which `add` (1-based) each snapshot was posted during or after. */
+  const watched = () => {
+    const store = new KeyLogStore();
+    let adds = 0;
+    const snapshotsAt: number[] = [];
+    const add = store.add.bind(store);
+    store.add = (text: string) => { adds++; return add(text); };
+    store.onSnapshot(() => { snapshotsAt.push(adds); });
+    return { store, snapshotsAt };
+  };
+  const bufferBytes = (s: KeyLogStore) => s.share().buffer.byteLength;
+
+  const { store, snapshotsAt } = watched();
   const loaded = await loadKeyLogFile(new Blob([synth]), store, { chunkBytes: 1 << 20 });
   check('a Load of an owner-shaped log (20,000 connections) is read in many chunks and keeps every secret',
     loaded.kind === 'loaded' && loaded.connections === 20_000 && loaded.secrets > 100_000
     && synth.length > 4 * (1 << 20), true);
-  check('...and posts one snapshot, the reserve, none during the chunks', snapshots, 1);
+  check('...snapshots happen only around the first chunk (its growth, then the reserve), none after',
+    snapshotsAt.length > 0 && snapshotsAt.every((n) => n <= 1), true);
+  const upFront = new KeyLogStore();
+  upFront.reserve(synth.length);
+  check('...and the table ends the size an up-front reserve for the file gives', bufferBytes(store), bufferBytes(upFront));
 
-  const over = new KeyLogStore();
-  let overSnapshots = 0;
-  over.onSnapshot(() => { overSnapshots++; });
+  const cappedWatch = watched();
   const cap = Math.floor(synth.length / 2);
-  const capped = await loadKeyLogFile(new Blob([synth]), over, { chunkBytes: 1 << 20, cap });
-  check('a Load over the cap reserves for the cap, not the file: one snapshot too', overSnapshots, 1);
+  const capped = await loadKeyLogFile(new Blob([synth]), cappedWatch.store, { chunkBytes: 1 << 20, cap });
+  check('a Load over the cap reserves for the cap, not the file: none after the first chunk',
+    cappedWatch.snapshotsAt.length > 0 && cappedWatch.snapshotsAt.every((n) => n <= 1), true);
+  const capFront = new KeyLogStore();
+  capFront.reserve(cap);
+  check('...and ends the size a reserve for the cap gives', bufferBytes(cappedWatch.store), bufferBytes(capFront));
   check('...and reports the bytes it skipped', capped.kind === 'loaded' && capped.skippedBytes === synth.length - cap, true);
+
+  // A file that is not a key log (a pcap picked through "All files") sets nothing aside.
+  const junkBytes = new Uint8Array(20 * (1 << 20));
+  for (let i = 0; i < junkBytes.length; i++) junkBytes[i] = (i * 2654435761 >>> 24) & 0xff;
+  for (let i = 0; i < junkBytes.length; i += 97) junkBytes[i] = 10;
+  const junkStore = new KeyLogStore();
+  const junk = await loadKeyLogFile(new Blob([junkBytes]), junkStore, { chunkBytes: 1 << 20 });
+  check('a Load of 20 MB that is not a key log adds nothing', junk.kind === 'loaded' && junk.secrets, 0);
+  check('...and leaves the buffer small (under 1 MiB; a reserve for 20 MB would be 11 MB)', bufferBytes(junkStore) < (1 << 20), true);
+
+  // A file already held adds no secret, so it reserves nothing more.
+  const again = watched();
+  await loadKeyLogFile(new Blob([synth]), again.store, { chunkBytes: 1 << 20 });
+  const sizeHeld = bufferBytes(again.store);
+  const snapsHeld = again.snapshotsAt.length;
+  await loadKeyLogFile(new Blob([synth]), again.store, { chunkBytes: 1 << 20 });
+  check('loading the file already held posts nothing and moves nothing',
+    [again.snapshotsAt.length, bufferBytes(again.store)], [snapsHeld, sizeHeld]);
 }
 
 console.log('\n--- addKeyLogText: sized once, added in whole lines ---\n');
