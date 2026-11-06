@@ -15,7 +15,7 @@
  * dense keys - `tcp.flags.syn == 0` is a filter people write. Any scheme that
  * encodes absence as a sentinel value fails here.
  */
-import { fieldEntries, fieldValue } from '../../src/services/dissect/fieldAccess';
+import { fieldEntries, fieldValue, forEachField } from '../../src/services/dissect/fieldAccess';
 import { FieldBlockWriter } from '../../src/services/dissect/fieldSplit';
 import type { Packet } from '../../src/types/packet';
 
@@ -80,6 +80,31 @@ function check(name: string, actual: unknown, expected: unknown) {
   check('the whole set is unchanged', fieldEntries(split).sort(), before);
   check('...and the dense keys really left the bag',
     split.fields?.['tcp.srcport'], undefined);
+}
+
+// --- forEachField visits what fieldEntries lists, in the same order ------------
+//
+// `encodeChunk` writes through `forEachField` and everything else through
+// `fieldEntries`; a visit skipped or reordered would store a different row than
+// the one the UI shows.
+{
+  const visited = (p: Packet): [string, string | number][] => {
+    const out: [string, string | number][] = [];
+    const count = forEachField(p, (k, v) => { out.push([k, v]); });
+    check('forEachField answers how many it visited', count, out.length);
+    return out;
+  };
+  const bag = { fields: { 'eth.src': 'aa:bb', 'dns.qry.name': 'x.invalid', 'tcp.srcport': 80 } } as unknown as Packet;
+  check('a bag packet: the same pairs in the same order', visited(bag), fieldEntries(bag));
+
+  const dense = {
+    fields: { 'tcp.srcport': 51000, 'tcp.flags.syn': 0, 'eth.src': 'aa:bb', 'dns.qry.name': 'x.invalid', 'http.host': 'h.invalid' },
+  } as unknown as Packet;
+  new FieldBlockWriter().absorb([dense]);
+  const entries = fieldEntries(dense);
+  check('a dense packet carries both bag and column fields', entries.length > Object.keys(dense.fields ?? {}).length, true);
+  check('a dense packet: the same pairs in the same order', visited(dense), entries);
+  check('a packet with no bag visits nothing', visited({} as Packet), []);
 }
 
 // --- Zero has to survive the move ------------------------------------------------

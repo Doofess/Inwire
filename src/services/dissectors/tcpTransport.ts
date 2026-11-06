@@ -1270,11 +1270,12 @@ function parseTcpOptions(
       // had already arrived, so the loss it reacted to was not loss: the
       // difference between a lossy path and an impatient timer.
       const [first, second] = sackBlocks;
-      const isDsack = first !== undefined && (
+      // Only the tree's D-SACK rows read it, so a tree-free shard does not test.
+      const isDsack = tree && first !== undefined && (
         seqLessOrEqual(first.rightEdge, ackNumber)
         || (second !== undefined && seqLessThan(second.leftEdge, first.rightEdge) && seqLessOrEqual(first.rightEdge, second.rightEdge))
       );
-      const dsackRows: ProtocolField[] = tree && isDsack ? [
+      const dsackRows: ProtocolField[] = isDsack ? [
         { name: 'D-SACK Left Edge', value: first.leftEdge, generated: true, abbrev: 'tcp.options.sack.dsack_le', rawBytesRange: [offset + 2, offset + 5] },
         { name: 'D-SACK Right Edge', value: first.rightEdge, generated: true, abbrev: 'tcp.options.sack.dsack_re', rawBytesRange: [offset + 6, offset + 9] },
         { name: '[D-SACK Sequence]', value: '', generated: true, abbrev: 'tcp.options.sack.dsack', rawBytesRange: [offset + 2, offset + 9] },

@@ -42,6 +42,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { decodeRawEthernetPacket } from '../../src/services/pcapParser';
 import { Sequencer, quicFlowKey } from '../../src/services/dissect/sequencer';
 import { withDissectEnv } from '../../src/services/dissect/dissectEnv';
+import { treeFreeScopes } from '../../src/services/dissect/treeMode';
 import { FrameRevisit, RecordMiss, recordEntries } from '../../src/services/dissect/frameRecord';
 import { keyLog } from '../../src/services/tls/keyLog';
 import { FrameDissector } from '../../src/services/pipeline/frameDissector';
@@ -327,8 +328,16 @@ async function equality(capture: Capture, configs: Config[]): Promise<void> {
     // answers and patches are compared (ADR 0072).
     const rowsOnly: Config = { label: 'N=7 by connection, rows only (no trees)', shards: 7, route: 'connection' };
     const wantRows = sequential(capture, undefined, false);
+    const scopesBefore = treeFreeScopes();
     const rows = parallel(capture, rowsOnly, { withTrees: false });
+    const treeFree = treeFreeScopes() - scopesBefore;
     const rowsAt = firstDiff(wantRows, rows.digests);
+    // Lane 0 builds trees beside the shards in this one process, so "no tree was
+    // built" cannot be asked of the whole run; what can is that every frame a shard
+    // dissected went through `withoutTree`, and so did nothing else.
+    const onShards = rows.lanes.slice(1).reduce((sum, n) => sum + n, 0);
+    check(`${capture.name}, ${rowsOnly.label}: every one of the ${onShards.toLocaleString()} frames the shards dissected ran tree-free`,
+      treeFree === onShards, `${treeFree} tree-free dissections for ${onShards} shard frames`);
     check(`${capture.name}, ${rowsOnly.label}: all ${wantRows.length.toLocaleString()} rows, records and patches as one core dissects them`,
       rowsAt === -1 && rows.crossLane === 0 && rows.barrierMismatch === 0 && rows.quicMismatch === 0,
       rowsAt !== -1 ? `frame ${rowsAt + 1} differs${VERBOSE ? `: ${lineDiff(wantRows[rowsAt], rows.digests[rowsAt])}` : ''}`

@@ -43,7 +43,7 @@ function arg(name: string): string | undefined {
 
 const pcap = arg('--pcap');
 if (!pcap) {
-  console.log('usage: npx tsx scripts/perf/parallel-threads.ts --pcap some.pcapng [--shards 2,4,6] [--route connection|pair] [--in-flight 2]');
+  console.log('usage: npx tsx scripts/perf/parallel-threads.ts --pcap some.pcapng [--shards 2,4,6] [--route connection|pair] [--in-flight 2] [--backlog-mb N | --backlog FRAMES]');
   process.exit(2);
 }
 const shardCounts = (arg('--shards') ?? '2,4,6').split(',').map(Number);

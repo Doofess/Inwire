@@ -1,3 +1,5 @@
+import type { ProtocolField } from '../../types/packet';
+
 /**
  * Whether the dissection under way is asked to build a frame's full tree.
  *
@@ -15,7 +17,8 @@
  */
 let wanted = true;
 
-import type { ProtocolField } from '../../types/packet';
+/** `withoutTree` scopes opened so far; see `treeFreeScopes`. */
+let treeFreeOpened = 0;
 
 /**
  * The rows of `rows` that carry a finding, flattened depth-first (a row before
@@ -46,11 +49,23 @@ export function treeWanted(): boolean {
 }
 
 /**
+ * How many dissections have run tree-free in this process - one integer
+ * incremented per `withoutTree`, which is per frame, so it costs nothing. For
+ * an assertion that a run's shards dissected with trees off
+ * (`scripts/pipeline/parallel.ts`): in one process lane 0 builds trees beside
+ * them, so what proves it is this count matching the frames the shards took.
+ */
+export function treeFreeScopes(): number {
+  return treeFreeOpened;
+}
+
+/**
  * Runs `fn` - one synchronous dissection - with no tree wanted, and puts the
  * previous answer back however `fn` ends. Dissection never awaits, so nothing
  * else can observe the swap. Scopes nest.
  */
 export function withoutTree<T>(fn: () => T): T {
+  treeFreeOpened++;
   const previous = wanted;
   wanted = false;
   try {

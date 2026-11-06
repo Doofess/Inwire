@@ -45,6 +45,7 @@
  */
 import { captureStore } from './capture/captureClient';
 import type { Packet } from '../types/packet';
+import type { SlabLedger } from './slabLedger';
 
 /** Whatever can hand back stored bytes by frame id - the store, or a test's stand-in. */
 export interface ByteSource {
@@ -141,12 +142,16 @@ export async function packetsBytes(
  *  - **Oldest first, stopping at the first frame already done**, so a flush
  *    costs the frames it newly evicts rather than a pass over the buffer.
  *
- * Returns the bytes freed, for a caller that wants to say so.
+ * Returns the bytes freed, for a caller that wants to say so. Given the
+ * buffer's `SlabLedger`, that is memory: a live row's bytes are a view into its
+ * flush's slab, which frees when the slab's last row goes and not before, so a
+ * half-evicted flush answers 0. Without one it is the sum of the rows' lengths.
  */
 export function evictOldBytes(
   packets: readonly Packet[],
   residentFrames: number,
   storedRange: { first: number; last: number } | null,
+  slabs?: SlabLedger,
 ): number {
   if (storedRange === null) return 0;
   let limit = packets.length - residentFrames;
@@ -175,7 +180,7 @@ export function evictOldBytes(
     // ever moves forward, so the first frame without bytes ends the walk.
     if (!hasBytes(packet)) break;
     if (packet.id < storedRange.first || packet.id > storedRange.last) continue;
-    freed += packet.rawBytes.byteLength;
+    freed += slabs !== undefined ? slabs.release(packet) : packet.rawBytes.byteLength;
     (packet as { rawBytes: Uint8Array }).rawBytes = NO_BYTES;
   }
   return freed;

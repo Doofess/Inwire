@@ -30,6 +30,7 @@ import type { Packet } from '../types/packet';
 import type { InfoPatch } from './dissect/types';
 import { estimateSummaryBytes, planBufferTrim, shouldStopForDisk } from './bufferBudget';
 import { evictOldBytes } from './packetBytes';
+import { SlabLedger } from './slabLedger';
 import { applyIcmpRepliesInPlace } from './sessionRestore';
 import { notePatched } from './patchLog';
 import { applyInfoPatchesInPlace } from './pcapParser';
@@ -57,10 +58,15 @@ export interface BufferAccounting {
   persistedThroughId: number;
   /** The buffer's head id after the last drop below the floor - that drop's own guard. */
   floorHeadId: number;
+  /**
+   * What the rows' raw bytes pin: a slab counts in full while any of its rows
+   * holds bytes. A gauge for the figure shown, not part of `residentBytes`.
+   */
+  slabs: SlabLedger;
 }
 
 export function freshAccounting(): BufferAccounting {
-  return { residentBytes: 0, droppedTotal: 0, droppedHeadId: -1, persistedThroughId: -1, floorHeadId: -1 };
+  return { residentBytes: 0, droppedTotal: 0, droppedHeadId: -1, persistedThroughId: -1, floorHeadId: -1, slabs: new SlabLedger() };
 }
 
 export interface PrepareEffects {
@@ -90,7 +96,10 @@ export function prepareBatch(
     }
   }
   effects.absorb(incoming);
-  for (const packet of incoming) accounting.residentBytes += estimateSummaryBytes(packet);
+  for (const packet of incoming) {
+    accounting.residentBytes += estimateSummaryBytes(packet);
+    accounting.slabs.pin(packet);
+  }
 }
 
 /**
@@ -125,6 +134,9 @@ export function adoptAccounting(
   accounting.droppedTotal = 0;
   accounting.droppedHeadId = -1;
   accounting.floorHeadId = -1;
+  // Fresh: rows adopted here were never pinned, so releasing one frees nothing
+  // and the gauge cannot go below what the live path pinned.
+  accounting.slabs = new SlabLedger();
 }
 
 /**
@@ -153,7 +165,10 @@ export function dropBelowFloor(
   const head = kept.length > 0 ? kept[0].id : -floorId - 1;
   if (head !== accounting.floorHeadId) {
     accounting.floorHeadId = head;
-    for (let i = 0; i < lo; i++) accounting.residentBytes -= estimateSummaryBytes(prev[i]);
+    for (let i = 0; i < lo; i++) {
+      accounting.residentBytes -= estimateSummaryBytes(prev[i]);
+      accounting.slabs.release(prev[i]);
+    }
   }
   return kept;
 }
@@ -252,13 +267,15 @@ export function commitBatch(
       accounting.droppedHeadId = headId;
       effects.reportDropped(accounting.droppedTotal);
       accounting.residentBytes -= plan.freedBytes;
+      // Rows trimmed with their bytes still on: the slab frees with its last row.
+      for (let i = 0; i < forgotten; i++) accounting.slabs.release(next[i]);
     }
     next = trimmed;
   }
 
   // Idempotent, so running it twice does the work once, and it changes no
   // packet's identity - which is why it is allowed inside an updater at all.
-  evictOldBytes(next, options.residentFrames, effects.storedIdRange());
+  evictOldBytes(next, options.residentFrames, effects.storedIdRange(), accounting.slabs);
 
   // Not the memory budget. A full RAM window loses nothing now - the frames
   // leaving it are on disk and still in the list - and stopping for it was
