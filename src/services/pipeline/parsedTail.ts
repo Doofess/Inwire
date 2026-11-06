@@ -146,6 +146,11 @@ export class ParsedTail {
     this.error = null;
   }
 
+  /** As `PcapngTail.resetStall`: the next read's parse counts from zero. */
+  resetStall(): void {
+    this.end.stalled = 0;
+  }
+
   /** The state the next read is parsed from. */
   nextRead(): TailState {
     return copyState(this.end);

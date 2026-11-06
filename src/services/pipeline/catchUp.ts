@@ -693,6 +693,11 @@ export class CatchUp<F extends SeqFrame> {
         const now = this.now();
         if (landing.zeroSince === null) landing.zeroSince = now;
         if (now - landing.zeroSince > LANDING_MS) return this.missed(cursor, out);
+        // The landing's clock judges zeros, not the tail's count of blocks
+        // that did not close: at `RETRY_MS` apart that count is called corrupt
+        // (`STALL_LIMIT`) sooner than `LANDING_MS`, and would end catch-up as
+        // unreadable instead of counting the file again from its start.
+        cursor.tail.resetStall();
       } else if (head === 'wrong') {
         return this.missed(cursor, out);
       }

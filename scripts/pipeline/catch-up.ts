@@ -853,6 +853,17 @@ for (const reader of [false, true]) {
       check(`...and a seek miss once the zeros have lasted longer than that ${mode}`, c.stats.seekMisses === 1, `${c.stats.seekMisses} misses`);
     }
     {
+      // A landing on zeros read at the catch-up's own pace, 150 ms apart, for
+      // longer than LANDING_MS: the landing's clock judges it, not the tail's
+      // count of blocks that did not close (STALL_LIMIT reads, ~9.6 s at that
+      // pace), which would end catch-up as unreadable instead of a seek miss.
+      const { c, read, at } = landed(reader, () => written());
+      let ended: string | null = null;
+      for (let t = 150; t <= LANDING_MS + 600 && ended === null && c.stats.seekMisses === 0; t += 150) { at(t); ended = read()?.ended?.why ?? null; }
+      check(`a landing on zeros read every 150 ms ${mode}: a seek miss, not catch-up ended unreadable`,
+        c.stats.seekMisses === 1 && ended === null, JSON.stringify({ misses: c.stats.seekMisses, ended }));
+    }
+    {
       // D10: a head with a type and no length yet is a block being written.
       let file = written({ type: 6, length: 0 });
       const { c, read, at } = landed(reader, () => file);
