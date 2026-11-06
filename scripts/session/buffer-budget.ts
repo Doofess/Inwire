@@ -188,8 +188,9 @@ console.log('\n--- when a capture stops itself ---\n');
   check('a buffer at its budget with its bytes pinned reads 100%, never more',
     bufferUsage(1024 * MiB, 400 * MiB, 1024 * MiB).usedMb <= 1024
     && bufferUsage(1024 * MiB, 400 * MiB, 1024 * MiB).percent === 100, true);
-  check('over the budget by the slack the bar stops at 100%',
-    bufferUsage(1060 * MiB, 0, 1024 * MiB).percent, 100);
+  // The trim lets the summaries run BUDGET_SLACK over before it acts; a full buffer reads full.
+  check('over the budget by the slack it reads full: the budget of the budget, at 100%',
+    bufferUsage(1060 * MiB, 0, 1024 * MiB), { usedMb: 1024, budgetMb: 1024, percent: 100, frameBytesMb: 0 });
   check('no budget yet: 0%', bufferUsage(10 * MiB, 0, 0).percent, 0);
 }
 
