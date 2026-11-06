@@ -36,6 +36,10 @@ export async function readKeyLogFile(
   const chunkBytes = options.chunkBytes ?? KEYLOG_CHUNK_BYTES;
   const maxLine = options.maxLineBytes ?? KEYLOG_MAX_LINE_BYTES;
   const from = Math.max(0, file.size - cap);
+  // Reading starts one byte early when there is a cut, so that a cut landing
+  // exactly on a line start sees the newline before it and keeps that line;
+  // the skip below then drops only the line the cut is inside of.
+  const readFrom = from > 0 ? from - 1 : 0;
   // A streaming decoder, so a character a chunk boundary splits decodes whole.
   const decoder = new TextDecoder();
   let carry = '';
@@ -70,7 +74,7 @@ export async function readKeyLogFile(
     }
   };
 
-  for (let at = from; at < file.size && !stopped; at += chunkBytes) {
+  for (let at = readFrom; at < file.size && !stopped; at += chunkBytes) {
     const bytes = new Uint8Array(await file.slice(at, Math.min(file.size, at + chunkBytes)).arrayBuffer());
     take(decoder.decode(bytes, { stream: true }), false);
   }
@@ -98,6 +102,10 @@ export async function loadKeyLogFile(file: Blob, store: KeyLogStore, options: Re
   const clears = store.clears;
   const before = store.stats();
   try {
+    // The buffer moves once, here, for what will be read, instead of at every
+    // overflow while the chunks arrive (each move strands the old buffer in
+    // every reader). Absolute: a file already being followed adds nothing.
+    store.reserve(Math.min(file.size, options.cap ?? KEYLOG_CAP_BYTES));
     const { skippedBytes } = await readKeyLogFile(file, (text) => {
       if (store.clears !== clears) return false;
       store.add(text);

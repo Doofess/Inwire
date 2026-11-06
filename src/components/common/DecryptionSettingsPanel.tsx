@@ -229,7 +229,7 @@ export const DecryptionSettingsPanel: React.FC = () => {
           <>
             <dt className="text-muted-foreground">Not loaded</dt>
             <dd className="" data-keylog-dropped={stats.dropped}>
-              {stats.dropped.toLocaleString()} secrets: the key log store is full. Restart Inwire to load the newest part of the file.
+              {stats.dropped.toLocaleString()} secrets: the key log store is full. Clear, then load or follow the file again to bring in its newest secrets.
             </dd>
           </>
         )}
